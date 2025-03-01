@@ -1,0 +1,241 @@
+Index: debian/control
+===================================================================
+--- debian/control	(revision 243)
++++ debian/control	(working copy)
+@@ -4,14 +4,14 @@
+ Maintainer: Debian Cyrus SASL Team <pkg-cyrus-sasl2-debian-devel@lists.alioth.debian.org>
+ Uploaders: Fabian Fagerholm <fabbe@debian.org>, Roberto C. Sanchez <roberto@connexer.com>
+ Standards-Version: 3.7.2
+-Build-Depends: debhelper (>= 5.0.0), dpatch, autotools-dev, automake1.9, autoconf, libtool, libdb4.2-dev (>= 4.2.52-24), libpam0g-dev (>= 0.76-22), libssl-dev (>= 0.9.7e-3), libmysqlclient15-dev (>= 5.0.20-1), libopie-dev (>= 2.32-10), libpq-dev (>= 8.1.3-4), libkrb5-dev, libsqlite0-dev (>= 2.8.16-1), libldap2-dev (>= 2.1.30-8), chrpath, groff-base, debconf (>= 0.5) | debconf-2.0, po-debconf
++Build-Depends: debhelper (>= 5.0.0), dpatch, autotools-dev, automake1.9, autoconf, libtool, libdb4.4-dev, libpam0g-dev (>= 0.76-22), libssl-dev (>= 0.9.7e-3), libmysqlclient15-dev (>= 5.0.20-1), libopie-dev (>= 2.32-10), libpq-dev (>= 8.1.3-4), libkrb5-dev, libsqlite0-dev (>= 2.8.16-1), libldap2-dev (>= 2.1.30-8), chrpath, groff-base, debconf (>= 0.5) | debconf-2.0, po-debconf
+ Build-Conflicts: heimdal-dev
+ 
+ Package: sasl2-bin
+ Section: utils
+ Priority: optional
+ Architecture: any
+-Depends: ${shlibs:Depends}, ${misc:Depends}, lsb-base (>= 3.0-6)
++Depends: libsasl2-2 (>= 2.1.22.dfsg1-13), ${shlibs:Depends}, ${misc:Depends}, lsb-base (>= 3.0-6), db4.4-util
+ Description: Administration programs for SASL users database
+  This is the Cyrus SASL API implementation, version 2.1. See package
+  libsasl2-2 and RFC 2222 for more information.
+Index: debian/sasl2-bin.templates
+===================================================================
+--- debian/sasl2-bin.templates	(revision 243)
++++ debian/sasl2-bin.templates	(working copy)
+@@ -8,3 +8,39 @@
+  .
+  If you have not stored important data in that file, it's safe to remove
+  it.
++
++Template: cyrus-sasl2/backup-sasldb2
++Type: string
++Default: /var/backups/sasldb2.bak
++_Description: Backup file name for /etc/sasldb2:
++ Cyrus SASL has stored usernames and passwords in the database file
++ /etc/sasldb2. That file has to be upgraded to a newer database
++ format. Before doing that, we will make a backup of the current file.
++ You can use that if you need to manually downgrade Cyrus SASL for
++ some reason. Note that automatic downgrade is NOT SUPPORTED.
++ .
++ Please specify the backup file name. The default is /var/backups/sasldb2.bak.
++ Make sure you have enough free space in that location, and that a file
++ with that name doesn't exist already. If it exists, it will be overwritten.
++ An empty name selects the default.
++
++Template: cyrus-sasl2/upgrade-sasldb2-backup-failed
++Type: note
++_Description: Failed to make backup of /etc/sasldb2.
++ For some reason, /etc/sasldb2 could not be backed up to the file you
++ specified. This is a fatal error and will cause the package installation
++ to fail.
++ .
++ Please eliminate all possible reasons that might lead to this failure,
++ such as exhausted disk space, and then try to configure this package again.
++
++Template: cyrus-sasl2/upgrade-sasldb2-failed
++Type: note
++_Description: Failed to upgrade /etc/sasldb2.
++ For some reason, /etc/sasldb2 could not be upgraded to the new database
++ format. This is a fatal error and will cause the package installation
++ to fail. We will attempt to restore the backup of /etc/sasldb2 to its
++ original location.
++ .
++ Please eliminate all possible reasons that might lead to this failure,
++ and then try to configure this package again.
+Index: debian/sasl2-bin.postinst
+===================================================================
+--- debian/sasl2-bin.postinst	(revision 243)
++++ debian/sasl2-bin.postinst	(working copy)
+@@ -14,6 +14,37 @@
+ 
+ case "$1" in
+ 	configure)
++		# Upgrade SASL database if needed
++		# The libdb dependency was updated in the following versions:
++		#  2.1.22.dfsg1-13 (db4.2 -> db4.4)
++		if dpkg --compare-versions "$2" "lt-nl" 2.1.22.dfsg1-13; then
++			
++			# If the database contains no users, just wipe it out,
++			# it will be recreated later in the current format
++			if [ -e $SASLDB_FILE ] && \
++				[ `sasldblistusers2 | wc -l` -eq 0 ]; then
++				rm $SASLDB_FILE
++			else
++				# The database had users, begin upgrade procedure
++
++				# Make backup and handle errors
++				db_get cyrus-sasl2/backup-sasldb2
++				if ! cp --archive $SASLDB_FILE "$RET" >/dev/null 2>&1; then
++					db_input high cyrus-sasl2/upgrade-sasldb2-backup-failed || true
++					db_go || true
++					exit 1
++				fi
++
++				# Upgrade SASL database and handle errors
++				if ! db4.4_upgrade $SASLDB_FILE >/dev/null 2>&1; then
++					db_input high cyrus-sasl2/upgrade-sasldb2-failed || true
++					db_go || true
++					cp --archive "$RET" $SASLDB_FILE >/dev/null 2>&1
++					exit 1
++				fi
++			fi
++		fi
++
+ 		# Create a statoverride for the default saslauthd run directory,
+ 		# unless one already exists
+ 		if ! dpkg-statoverride --list $FALLBACK_RUN_DIR >/dev/null 2>&1; then
+Index: debian/po/templates.pot
+===================================================================
+--- debian/po/templates.pot	(revision 243)
++++ debian/po/templates.pot	(working copy)
+@@ -15,7 +15,7 @@
+ msgstr ""
+ "Project-Id-Version: PACKAGE VERSION\n"
+ "Report-Msgid-Bugs-To: pkg-cyrus-sasl2-debian-devel@lists.alioth.debian.org\n"
+-"POT-Creation-Date: 2007-06-13 17:50+0300\n"
++"POT-Creation-Date: 2007-07-03 22:14+0300\n"
+ "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+ "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+ "Language-Team: LANGUAGE <LL@li.org>\n"
+@@ -44,3 +44,77 @@
+ msgid ""
+ "If you have not stored important data in that file, it's safe to remove it."
+ msgstr ""
++
++#. Type: string
++#. Description
++#: ../sasl2-bin.templates:2001
++msgid "Backup file name for /etc/sasldb2:"
++msgstr ""
++
++#. Type: string
++#. Description
++#: ../sasl2-bin.templates:2001
++msgid ""
++"Cyrus SASL has stored usernames and passwords in the database file /etc/"
++"sasldb2. That file has to be upgraded to a newer database format. Before "
++"doing that, we will make a backup of the current file. You can use that if "
++"you need to manually downgrade Cyrus SASL for some reason. Note that "
++"automatic downgrade is NOT SUPPORTED."
++msgstr ""
++
++#. Type: string
++#. Description
++#: ../sasl2-bin.templates:2001
++msgid ""
++"Please specify the backup file name. The default is /var/backups/sasldb2."
++"bak. Make sure you have enough free space in that location, and that a file "
++"with that name doesn't exist already. If it exists, it will be overwritten. "
++"An empty name selects the default."
++msgstr ""
++
++#. Type: note
++#. Description
++#: ../sasl2-bin.templates:3001
++msgid "Failed to make backup of /etc/sasldb2."
++msgstr ""
++
++#. Type: note
++#. Description
++#: ../sasl2-bin.templates:3001
++msgid ""
++"For some reason, /etc/sasldb2 could not be backed up to the file you "
++"specified. This is a fatal error and will cause the package installation to "
++"fail."
++msgstr ""
++
++#. Type: note
++#. Description
++#: ../sasl2-bin.templates:3001
++msgid ""
++"Please eliminate all possible reasons that might lead to this failure, such "
++"as exhausted disk space, and then try to configure this package again."
++msgstr ""
++
++#. Type: note
++#. Description
++#: ../sasl2-bin.templates:4001
++msgid "Failed to upgrade /etc/sasldb2."
++msgstr ""
++
++#. Type: note
++#. Description
++#: ../sasl2-bin.templates:4001
++msgid ""
++"For some reason, /etc/sasldb2 could not be upgraded to the new database "
++"format. This is a fatal error and will cause the package installation to "
++"fail. We will attempt to restore the backup of /etc/sasldb2 to its original "
++"location."
++msgstr ""
++
++#. Type: note
++#. Description
++#: ../sasl2-bin.templates:4001
++msgid ""
++"Please eliminate all possible reasons that might lead to this failure, and "
++"then try to configure this package again."
++msgstr ""
+Index: debian/sasl2-bin.config
+===================================================================
+--- debian/sasl2-bin.config	(revision 0)
++++ debian/sasl2-bin.config	(revision 0)
+@@ -0,0 +1,38 @@
++#!/bin/sh
++# Debconf config script for cyrus-sasl2
++# Copyright (c) 2007 by Fabian Fagerholm <fabbe@debian.org>
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 2 of the License, or
++# (at your option) any later version.
++#
++# Note that Cyrus SASL itself is published under a different license.
++
++set -e
++
++# Debconf hook.
++. /usr/share/debconf/confmodule
++
++case "$1" in
++	configure)
++		db_reset cyrus-sasl2/backup-sasldb2
++		ok=''
++		while [ ! "$ok" ]; do
++			db_input medium cyrus-sasl2/backup-sasldb2 || true
++			db_go
++
++			db_get cyrus-sasl2/backup-sasldb2
++			if [ "$RET" ]; then
++				ok=1
++			fi
++		done
++		;;
++	reconfigure)
++		;;
++	*)
++		echo "config called with unknown argument $1" >&2
++		exit 0
++esac
++
++exit 0

@@ -1,0 +1,848 @@
+From 05165c76502da686f89da2dea152577a5141af89 Mon Sep 17 00:00:00 2001
+From: Nicolas Boulenguez <nicolas.boulenguez@free.fr>
+Date: Sat, 30 Jul 2016 23:05:58 +0200
+Subject: [PATCH 07/12] Apply 4 patches picked from upstream version control
+ system.
+
+---
+ ...a-until-next-ogg-packet-is-ready-in-vorbis.diff |  20 +
+ debian/patches/fixed-issue-98.diff                 |  32 +
+ ...opus-encoder-by-christian-franke-nobody-no.diff |  56 ++
+ debian/patches/series                              |   4 +
+ .../patches/server-connection-related-fixes.diff   | 683 +++++++++++++++++++++
+ 5 files changed, 795 insertions(+)
+ create mode 100644 debian/patches/accept-data-until-next-ogg-packet-is-ready-in-vorbis.diff
+ create mode 100644 debian/patches/fixed-issue-98.diff
+ create mode 100644 debian/patches/fixes-for-opus-encoder-by-christian-franke-nobody-no.diff
+ create mode 100644 debian/patches/server-connection-related-fixes.diff
+
+diff --git a/debian/patches/accept-data-until-next-ogg-packet-is-ready-in-vorbis.diff b/debian/patches/accept-data-until-next-ogg-packet-is-ready-in-vorbis.diff
+new file mode 100644
+index 0000000..a45abd3
+--- /dev/null
++++ b/debian/patches/accept-data-until-next-ogg-packet-is-ready-in-vorbis.diff
+@@ -0,0 +1,20 @@
++Origin: upstream https://github.com/rafael2k/darkice/commit/e0cad73a683b868f05db28834afdd94401f5963d
++From: "alban.peignier@gmail.com" <alban.peignier@gmail.com@caa462fc-51d2-11de-8b28-e1b452efc53a>
++Date: Sun, 21 Jul 2013 18:42:47 +0000
++Subject: Accept data until next Ogg packet is ready in VorbisEncoder#canWrite
++
++--- a/src/VorbisLibEncoder.h
+++++ b/src/VorbisLibEncoder.h
++@@ -402,7 +402,11 @@
++                 return false;
++             }
++ 
++-            return getSink()->canWrite(sec, usec);
+++            if ( 1 == vorbis_analysis_blockout( &vorbisDspState, &vorbisBlock) ) {
+++              return getSink()->canWrite(sec, usec);
+++            } else {
+++              return true;
+++            }
++         }
++ 
++         /**
+diff --git a/debian/patches/fixed-issue-98.diff b/debian/patches/fixed-issue-98.diff
+new file mode 100644
+index 0000000..e80815c
+--- /dev/null
++++ b/debian/patches/fixed-issue-98.diff
+@@ -0,0 +1,32 @@
++Origin: upstream https://github.com/rafael2k/darkice/commit/ab48aa307122ec5da5cca733c922f8c16d3b5673
++From: rafael@riseup.net <rafael@riseup.net@caa462fc-51d2-11de-8b28-e1b452efc53a>
++Date: Wed, 11 Dec 2013 01:08:05 +0000
++Subject: fixed issue 98 (check minimum vorbis output rate)
++
++--- a/src/VorbisLibEncoder.cpp
+++++ b/src/VorbisLibEncoder.cpp
++@@ -40,7 +40,7 @@
++ #include "Exception.h"
++ #include "Util.h"
++ #include "VorbisLibEncoder.h"
++-
+++#define VORBIS_MIN_BITRATE 45
++ 
++ /* ===================================================  local data structures */
++ 
++@@ -79,6 +79,15 @@
++                          getInChannel() );
++     }
++ 
+++    if ( getOutBitrateMode() == abr || getOutBitrateMode() == cbr ) {
+++        if ( getOutBitrate() < VORBIS_MIN_BITRATE ) {
+++            throw Exception( __FILE__, __LINE__,
+++                            "output bitrate is lower than libvorbis minimum",
+++                            getOutBitrate() );
+++        }
+++        
+++    }
+++
++     if ( getOutSampleRate() == getInSampleRate() ) {
++         resampleRatio = 1;
++         converter     = 0;
+diff --git a/debian/patches/fixes-for-opus-encoder-by-christian-franke-nobody-no.diff b/debian/patches/fixes-for-opus-encoder-by-christian-franke-nobody-no.diff
+new file mode 100644
+index 0000000..0a8ceed
+--- /dev/null
++++ b/debian/patches/fixes-for-opus-encoder-by-christian-franke-nobody-no.diff
+@@ -0,0 +1,56 @@
++Origin: upstream https://github.com/rafael2k/darkice/commit/40fd8cc0cfadce396ab8f8d3b15715bfc79c5c9a
++From: "rafael@riseup.net" <rafael@riseup.net@caa462fc-51d2-11de-8b28-e1b452efc53a>
++Date: Fri, 13 Dec 2013 20:40:37 +0000
++Subject: fixes for Opus encoder by Christian Franke <nobody@nowhere.ws>
++
++--- a/configure.in
+++++ b/configure.in
++@@ -260,10 +260,11 @@
++ dnl-----------------------------------------------------------------------------
++ if test "x${LAME_LDFLAGS}" = "x" \
++      -a "x${VORBIS_LDFLAGS}" = "x" \
+++     -a "x${OPUS_LDFLAGS}" = "x" \
++      -a "x${FAAC_LDFLAGS}" = "x" \
++      -a "x${AACPLUS_LDFLAGS}" = "x" \
++      -a "x${TWOLAME_LDFLAGS}" = "x"; then
++-    AC_MSG_ERROR([neither lame, Ogg Vorbis, faac, aac+ nor twolame configured])
+++    AC_MSG_ERROR([neither lame, Ogg Vorbis, opus, faac, aac+ nor twolame configured])
++ fi
++ 
++ 
++--- a/src/OpusLibEncoder.cpp
+++++ b/src/OpusLibEncoder.cpp
++@@ -36,6 +36,9 @@
++ // compile only if configured for Ogg / Opus
++ #ifdef HAVE_OPUS_LIB
++ 
+++#include <stdio.h>
+++#include <string.h>
+++#include <unistd.h>
++ 
++ #include "Exception.h"
++ #include "Util.h"
++@@ -476,10 +479,10 @@
++ 
++     int opusBufferSize = (1275*3+7)*getOutChannel();
++     unsigned char * opusBuffer = new unsigned char[opusBufferSize];
++-    short int * shortBuffer = new short int[480];
+++    short int * shortBuffer = new short int[480*getInChannel()];
++ 
++     // Send an empty audio packet along to flush out the stream.
++-    memset( shortBuffer, 0, 480);
+++    memset( shortBuffer, 0, 480*getInChannel()*sizeof(*shortBuffer));
++     memset( opusBuffer, 0, opusBufferSize);
++     int encBytes = opus_encode( opusEncoder, shortBuffer, 480, opusBuffer, opusBufferSize);
++     if( encBytes == -1 ) {
++--- a/src/OpusLibEncoder.h
+++++ b/src/OpusLibEncoder.h
++@@ -40,6 +40,8 @@
++ #include "config.h"
++ #endif
++ 
+++#include <stdlib.h>
+++
++ #ifdef HAVE_OPUS_LIB
++ #include <opus/opus.h>
++ #include <ogg/ogg.h>
+diff --git a/debian/patches/series b/debian/patches/series
+index 65d6c9c..7f98598 100644
+--- a/debian/patches/series
++++ b/debian/patches/series
+@@ -3,3 +3,7 @@
+ 04_gcc44.diff
+ 05_fix_crlf.diff
+ 06_ftbfs_kfreebsd.patch
++accept-data-until-next-ogg-packet-is-ready-in-vorbis.diff
++fixed-issue-98.diff
++fixes-for-opus-encoder-by-christian-franke-nobody-no.diff
++server-connection-related-fixes.diff
+diff --git a/debian/patches/server-connection-related-fixes.diff b/debian/patches/server-connection-related-fixes.diff
+new file mode 100644
+index 0000000..0377c0a
+--- /dev/null
++++ b/debian/patches/server-connection-related-fixes.diff
+@@ -0,0 +1,683 @@
++Origin: upstream https://github.com/rafael2k/darkice/commit/710d2c26c4f9518d2f382673bf8b1829b9bdac3d
++From: "rafael@riseup.net" <rafael@riseup.net@caa462fc-51d2-11de-8b28-e1b452efc53a>
++Date: Wed, 26 Feb 2014 19:48:19 +0000
++Subject: Server connection related fixes.
++
++Description: Bugs related to streaming to remote servers fixed. Patch
++ by Kalle Kulonen <kulonenk@gmail.com>
++ and Mark Turner <jmarkturner@gmail.com>.
++
++--- a/src/AlsaDspSource.cpp
+++++ b/src/AlsaDspSource.cpp
++@@ -255,7 +255,7 @@
++ 
++         // Check for buffer overrun
++         if (ret == -EPIPE) {
++-            reportEvent(1, "Buffer overrun!");
+++            reportEvent(1, "AlsaDspSource :: Buffer overrun!");
++             snd_pcm_prepare(captureHandle);
++             ret = -EAGAIN;
++         }
++--- a/src/BufferedSink.cpp
+++++ b/src/BufferedSink.cpp
++@@ -99,6 +99,8 @@
++     this->bufferEnd    = buffer + bufferSize;
++     this->inp          = buffer;
++     this->outp         = buffer;
+++    this->bOpen        = true;
+++    this->openAttempts = 0; 
++ }
++ 
++ 
++@@ -112,6 +114,8 @@
++ 
++     this->peak         = buffer.peak;
++     this->misalignment = buffer.misalignment;
+++    this->bOpen        = buffer.bOpen;
+++    this->openAttempts = buffer.openAttempts; 
++     memcpy( this->buffer, buffer.buffer, this->bufferSize);
++ }
++ 
++@@ -145,6 +149,8 @@
++         
++         this->peak         = buffer.peak;
++         this->misalignment = buffer.misalignment;
+++        this->bOpen        = buffer.bOpen;
+++        this->openAttempts = buffer.openAttempts;
++         memcpy( this->buffer, buffer.buffer, this->bufferSize);
++     }
++ 
++@@ -177,6 +183,16 @@
++         return 0;
++     }
++ 
+++    unsigned int remaining = this->bufferSize - ( outp <= inp ? inp - outp : 
+++                             (bufferEnd - outp) + (inp - this->buffer) );
+++
+++    // react only to the first overrun whenever there is a series of overruns
+++    if ( remaining + chunkSize <= bufferSize && remaining > chunkSize  ) {
+++        reportEvent(3,"BufferedSink :: store, buffer overrun");
+++        throw Exception( __FILE__, __LINE__,
+++                         "buffer overrun");
+++    }
+++
++     oldInp = inp;
++     buf    = (const unsigned char *) buffer;
++     
++@@ -257,8 +273,8 @@
++ BufferedSink :: write (    const void    * buf,
++                            unsigned int    len )       throw ( Exception )
++ {
++-    unsigned int    length;
++-    unsigned int    soFar;
+++    unsigned int    length = 0;
+++    unsigned int    soFar = 0;
++     unsigned char * b = (unsigned char *) buf;
++ 
++     if ( !buf ) {
++@@ -272,6 +288,28 @@
++     if ( !align() ) {
++         return 0;
++     }
+++    
+++    if ( !sink->isOpen() && openAttempts < 10 ) {
+++        // try to reopen underlying sink, because it has closed on its own
+++        openAttempts++;
+++        try {
+++            if( sink->open() ) {
+++                // if reopening succeeds, reset open attempts
+++                openAttempts = 0;
+++            }
+++        } catch ( Exception &e ) {
+++            reportEvent( 4,"BufferedSink :: write,",
+++                         "couldn't reopen underlying sink, attempt",
+++                         openAttempts, "/ 10" );
+++        }
+++        
+++        if( openAttempts == 10 ) {
+++            // all the attempts have been used, give up
+++            close();
+++            throw Exception( __FILE__, __LINE__,
+++                             "reopen failed");
+++        }
+++    }
++ 
++     // make it a multiple of chunkSize
++     len -= len % chunkSize;
++@@ -286,12 +324,24 @@
++             // try to write the outp -> bufferEnd
++             // the rest will be written in the next if
++ 
++-            size    = bufferEnd - outp - 1;
+++            size    = bufferEnd - outp;
++             size   -= size % chunkSize;
+++            if( size > len * 2 ) {
+++                // do not try to send the content of the entire buffer at once,
+++                // but limit sending to a multiple of len
+++                // this prevents a surge of data to underlying buffer
+++                // which is important especially during a lot of packet loss
+++                size = len * 2;
+++            }
++             soFar   = 0;
++ 
++             while ( outp > inp && soFar < size && sink->canWrite( 0, 0) ) {
++-                length  = sink->write( outp + soFar, size - soFar);
+++                try {
+++                    length  = sink->write( outp + soFar, size - soFar);
+++                } catch (Exception &e) {
+++                    length = 0;
+++                    reportEvent(3,"Exception caught in BufferedSink :: write1");
+++                }
++                 outp    = slidePointer( outp, length);
++                 soFar  += length;
++             }
++@@ -305,10 +355,19 @@
++             // this part will write the rest
++ 
++             size    = inp - outp;
+++            if( size > len * 2 ) {
+++                // prevent a surge of data to underlying buffer
+++                size = len * 2;
+++            }
++             soFar   = 0;
++ 
++             while ( soFar < size && sink->canWrite( 0, 0) ) {
++-                length  = sink->write( outp + soFar, size - soFar);
+++                try {
+++                    length  = sink->write( outp + soFar, size - soFar);
+++                } catch (Exception &e) {
+++                    length = 0;
+++                    reportEvent(3,"Exception caught in BufferedSink :: write2" );
+++                }
++                 outp    = slidePointer( outp, length);
++                 soFar  += length;
++             }
++@@ -332,13 +391,12 @@
++     soFar = 0;
++     if ( inp == outp ) { 
++         while ( soFar < len && sink->canWrite( 0, 0) ) {
++-	    try {
++-	        soFar += sink->write( b + soFar, len - soFar);
++-	    } catch (Exception &e) {
++-	        reportEvent(3,"Exception caught in BufferedSink :: write3\n");
++-		throw; /* up a level */
++-	    }
++-	}
+++            try {
+++                soFar += sink->write( b + soFar, len - soFar);
+++            } catch (Exception &e) {
+++                reportEvent(3,"Exception caught in BufferedSink :: write3");
+++            }
+++        }
++     }
++     length = soFar;
++ 
++@@ -351,6 +409,8 @@
++         store( b + length, len - length);
++     }
++ 
+++    updatePeak();
+++
++     // tell them we ate everything up to chunkSize alignment
++     return len;
++ }
++@@ -369,5 +429,6 @@
++     flush();
++     sink->close();
++     inp = outp = buffer;
+++    bOpen = false;
++ }
++ 
++--- a/src/BufferedSink.h
+++++ b/src/BufferedSink.h
++@@ -109,6 +109,17 @@
++          *  The underlying Sink.
++          */
++         Ref<Sink>           sink;
+++        
+++        /**
+++         *  Is BufferedSink open.
+++         */
+++        bool               bOpen;
+++         
+++         /**
+++          * Number of attempts so far to open underlying sink after it has
+++          * closed on its own.
+++          */
+++        unsigned int       openAttempts;  
++ 
++         /**
++          *  Initialize the object.
++@@ -163,10 +174,17 @@
++             unsigned int    u;
++ 
++             u = outp <= inp ? inp - outp : (bufferEnd - outp) + (inp - buffer);
++-            if ( peak < u ) {
+++            
+++            // report new peaks if it is either significantly more severe than
+++            // the previously reported peak
+++            if ( peak * 2 < u ) {
++                 peak = u;
++-                reportEvent( 4, "BufferedSink, new peak:", peak);
++-                reportEvent( 4, "BufferedSink, remaining:", bufferSize - peak);
+++                reportEvent( 4, "BufferedSink, new peak:", peak, " / ", bufferSize);
+++            }
+++            
+++            if ( peak > 0 && u == 0 ) {
+++                peak = 0;
+++                reportEvent( 4, "BufferedSink, healed:", peak, " / ", bufferSize);
++             }
++         }
++ 
++@@ -306,7 +324,9 @@
++         inline virtual bool
++         open ( void )                                   throw ( Exception )
++         {
++-            return sink->open();
+++            bOpen = sink->open();
+++            openAttempts = 0;
+++            return bOpen;
++         }
++ 
++         /**
++@@ -317,7 +337,7 @@
++         inline virtual bool
++         isOpen ( void ) const                           throw ()
++         {
++-            return sink->isOpen();
+++            return bOpen;
++         }
++ 
++         /**
++--- a/src/DarkIce.cpp
+++++ b/src/DarkIce.cpp
++@@ -262,7 +262,7 @@
++         FileSink                  * localDumpFile   = 0;
++         bool                        fileAddDate     = false;
++         const char                * fileDateFormat  = 0;
++-        AudioEncoder              * encoder         = 0;
+++        BufferedSink              * audioOut        = 0;
++         int                         bufferSize      = 0;
++ 
++         str         = cs->get( "sampleRate");
++@@ -384,10 +384,14 @@
++                              "unsupported stream format: ", str);
++ 
++         }
+++        
+++        // augment audio outs with a buffer when used from encoder
+++        audioOut = new BufferedSink( audioOuts[u].server.get(), 
+++                                                  bufferSize, 1);
++ 
++ #ifdef HAVE_LAME_LIB
++         if ( Util::strEq( str, "mp3") ) {
++-            encoder = new LameLibEncoder( audioOuts[u].server.get(),
+++            audioOuts[u].encoder = new LameLibEncoder( audioOut,
++                                           dsp.get(),
++                                           bitrateMode,
++                                           bitrate,
++@@ -400,8 +404,8 @@
++ #endif
++ #ifdef HAVE_TWOLAME_LIB
++         if ( Util::strEq( str, "mp2") ) {
++-            encoder = new TwoLameLibEncoder(
++-                                            audioOuts[u].server.get(),
+++            audioOuts[u].encoder = new TwoLameLibEncoder(
+++                                            audioOut,
++                                             dsp.get(),
++                                             bitrateMode,
++                                             bitrate,
++@@ -410,7 +414,6 @@
++         }
++ #endif
++ 
++-        audioOuts[u].encoder = new BufferedSink(encoder, bufferSize, dsp->getSampleSize());
++         encConnector->attach( audioOuts[u].encoder.get());
++ #endif // HAVE_LAME_LIB || HAVE_TWOLAME_LIB
++     }
++@@ -467,7 +470,7 @@
++         FileSink                  * localDumpFile   = 0;
++         bool                        fileAddDate     = false;
++         const char                * fileDateFormat  = 0;
++-        AudioEncoder              * encoder         = 0;
+++        BufferedSink              * audioOut        = 0;
++         int                         bufferSize      = 0;
++ 
++         str         = cs->getForSure( "format", " missing in section ", stream);
++@@ -597,6 +600,9 @@
++                                             isPublic,
++                                             localDumpFile);
++ 
+++        audioOut = new BufferedSink( audioOuts[u].server.get(), 
+++                                     bufferSize, 1);
+++        
++         switch ( format ) {
++             case IceCast2::mp3:
++ #ifndef HAVE_LAME_LIB
++@@ -605,8 +611,8 @@
++                                  "thus can't create mp3 stream: ",
++                                  stream);
++ #else
++-                encoder = new LameLibEncoder(
++-                                             audioOuts[u].server.get(),
+++                audioOuts[u].encoder = new LameLibEncoder(
+++                                             audioOut,
++                                              dsp.get(),
++                                              bitrateMode,
++                                              bitrate,
++@@ -616,8 +622,6 @@
++                                              lowpass,
++                                              highpass );
++ 
++-                audioOuts[u].encoder = new BufferedSink(encoder, bufferSize, dsp->getSampleSize());
++-
++ #endif // HAVE_LAME_LIB
++                 break;
++ 
++@@ -630,8 +634,8 @@
++                                 stream);
++ #else
++ 
++-                encoder = new VorbisLibEncoder(
++-                                               audioOuts[u].server.get(),
+++                audioOuts[u].encoder = new VorbisLibEncoder(
+++                                               audioOut,
++                                                dsp.get(),
++                                                bitrateMode,
++                                                bitrate,
++@@ -640,7 +644,6 @@
++                                                dsp->getChannel(),
++                                                maxBitrate);
++ 
++-                audioOuts[u].encoder = new BufferedSink(encoder, bufferSize, dsp->getSampleSize());
++ #endif // HAVE_VORBIS_LIB
++                 break;
++ 
++@@ -652,8 +655,8 @@
++                                 stream);
++ #else
++ 
++-                encoder = new OpusLibEncoder(
++-                                               audioOuts[u].server.get(),
+++                audioOuts[u].encoder = new OpusLibEncoder(
+++                                               audioOut,
++                                                dsp.get(),
++                                                bitrateMode,
++                                                bitrate,
++@@ -662,7 +665,6 @@
++                                                dsp->getChannel(),
++                                                maxBitrate);
++ 
++-                audioOuts[u].encoder = new BufferedSink(encoder, bufferSize, dsp->getBitsPerSample() / 8);
++ #endif // HAVE_OPUS_LIB
++                 break;
++ 
++@@ -673,15 +675,14 @@
++                                  "thus can't create mp2 stream: ",
++                                  stream);
++ #else
++-                encoder = new TwoLameLibEncoder(
++-                                                audioOuts[u].server.get(),
+++                audioOuts[u].encoder = new TwoLameLibEncoder(
+++                                                audioOut,
++                                                 dsp.get(),
++                                                 bitrateMode,
++                                                 bitrate,
++                                                 sampleRate,
++                                                 channel );
++ 
++-                audioOuts[u].encoder = new BufferedSink(encoder, bufferSize, dsp->getSampleSize());
++ #endif // HAVE_TWOLAME_LIB
++                 break;
++ 
++@@ -693,8 +694,8 @@
++                                 "thus can't aac stream: ",
++                                 stream);
++ #else
++-                encoder = new FaacEncoder(
++-                                          audioOuts[u].server.get(),
+++                audioOuts[u].encoder = new FaacEncoder(
+++                                          audioOut,
++                                           dsp.get(),
++                                           bitrateMode,
++                                           bitrate,
++@@ -702,7 +703,6 @@
++                                           sampleRate,
++                                           dsp->getChannel());
++ 
++-                audioOuts[u].encoder = new BufferedSink(encoder, bufferSize, dsp->getSampleSize());
++ #endif // HAVE_FAAC_LIB
++                 break;
++ 
++@@ -713,8 +713,8 @@
++                                 "thus can't aacp stream: ",
++                                 stream);
++ #else
++-                encoder = new aacPlusEncoder(
++-                                             audioOuts[u].server.get(),
+++                audioOuts[u].encoder = new aacPlusEncoder(
+++                                             audioOut,
++                                              dsp.get(),
++                                              bitrateMode,
++                                              bitrate,
++@@ -722,7 +722,6 @@
++                                              sampleRate,
++                                              channel );
++ 
++-                audioOuts[u].encoder = new BufferedSink(encoder, bufferSize, dsp->getSampleSize());
++ #endif // HAVE_AACPLUS_LIB
++                 break;
++ 
++@@ -793,7 +792,7 @@
++         FileSink                  * localDumpFile   = 0;
++         bool                        fileAddDate     = false;
++         const char                * fileDateFormat  = 0;
++-        AudioEncoder              * encoder         = 0;
+++        BufferedSink              * audioOut        = 0;
++         int                         bufferSize      = 0;
++ 
++         str         = cs->get( "sampleRate");
++@@ -908,7 +907,9 @@
++                                              localDumpFile);
++ 
++ 
++-        encoder = new LameLibEncoder( audioOuts[u].server.get(),
+++        audioOut = new BufferedSink(audioOuts[u].socket.get(), bufferSize, 1);
+++        audioOuts[u].encoder = new LameLibEncoder( 
+++                                      audioOut,
++                                       dsp.get(),
++                                       bitrateMode,
++                                       bitrate,
++@@ -917,7 +918,6 @@
++                                       channel,
++                                       lowpass,
++                                       highpass );
++-        audioOuts[u].encoder = new BufferedSink(encoder, bufferSize, dsp->getSampleSize());
++ 
++         encConnector->attach( audioOuts[u].encoder.get());
++ #endif // HAVE_LAME_LIB
++--- a/src/OpusLibEncoder.h
+++++ b/src/OpusLibEncoder.h
++@@ -54,7 +54,7 @@
++ #include "Exception.h"
++ #include "Reporter.h"
++ #include "AudioEncoder.h"
++-#include "CastSink.h"
+++#include "Sink.h"
++ #ifdef HAVE_SRC_LIB
++ #include <samplerate.h>
++ #else
++@@ -315,7 +315,7 @@
++          *  @exception Exception
++          */
++         inline
++-        OpusLibEncoder (  CastSink      * sink,
+++        OpusLibEncoder (  Sink      * sink,
++                             unsigned int    inSampleRate,
++                             unsigned int    inBitsPerSample,
++                             unsigned int    inChannel,
++@@ -360,7 +360,7 @@
++          *  @exception Exception
++          */
++         inline
++-        OpusLibEncoder (  CastSink              * sink,
+++        OpusLibEncoder (    Sink                  * sink,
++                             const AudioSource     * as,
++                             BitrateMode             outBitrateMode,
++                             unsigned int            outBitrate,
++--- a/src/TcpSocket.cpp
+++++ b/src/TcpSocket.cpp
++@@ -318,9 +318,9 @@
++                 break;
++ 
++             default:
++-		::close( sockfd);
++-		sockfd = 0;
++-		throw Exception( __FILE__, __LINE__, "recv error", errno);
+++                ::close( sockfd);
+++                sockfd = 0;
+++                throw Exception( __FILE__, __LINE__, "recv error", errno);
++         }
++     }
++ 
++@@ -329,7 +329,7 @@
++ 
++ 
++ /*------------------------------------------------------------------------------
++- *  Check wether read() would return anything
+++ *  Check wether write() would send anything
++  *----------------------------------------------------------------------------*/
++ bool
++ TcpSocket :: canWrite (    unsigned int    sec,
++@@ -357,11 +357,11 @@
++     ret = pselect( sockfd + 1, NULL, &fdset, NULL, &timespec, &sigset);
++     
++     if ( ret == -1 ) {
++-	::close( sockfd);
++-	sockfd = 0;
++-        throw Exception( __FILE__, __LINE__, "select error");
+++        ::close( sockfd);
+++        sockfd = 0;
+++        reportEvent(4,"TcpSocket :: canWrite, connection lost", errno);
++     }
++-
+++  
++     return ret > 0;
++ }
++ 
++@@ -389,8 +389,9 @@
++         if ( errno == EAGAIN ) {
++             ret = 0;
++         } else {
++-	    ::close( sockfd);
++-	    sockfd = 0;
+++            ::close( sockfd);
+++            sockfd = 0;
+++            reportEvent(4,"TcpSocket :: write, send error", errno);
++             throw Exception( __FILE__, __LINE__, "send error", errno);
++         }
++     }
++--- a/src/VorbisLibEncoder.cpp
+++++ b/src/VorbisLibEncoder.cpp
++@@ -300,13 +300,13 @@
++             if ( bitsPerSample == 8 ) {
++                 char          * buf8 = (char *) buf;
++                 unsigned int    ix   = sampleSize * i;
++-		unsigned int    iix  = ix;
+++                unsigned int    iix  = ix;
++                 buf8[i] = (buf8[ix] + buf8[++iix]) / 2;
++             }
++             if ( bitsPerSample == 16 ) {
++                 short         * buf16 = (short *) buf;
++                 unsigned int    ix    = (bitsPerSample >> 3) * i;
++-		unsigned int    iix   = ix;
+++                unsigned int    iix   = ix;
++                 buf16[i] = (buf16[ix] + buf16[++iix]) / 2;
++             }
++         }
++@@ -370,6 +370,7 @@
++     }
++ 
++     delete[] shortBuffer;
+++    
++     vorbisBlocksOut();
++ 
++     return processed;
++@@ -411,7 +412,7 @@
++             ogg_stream_packetin( &oggStreamState, &oggPacket);
++ 
++             while ( ogg_stream_pageout( &oggStreamState, &oggPage) ) {
++-                int    written;
+++                int    written = 0;
++                 
++                 written  = getSink()->write(oggPage.header, oggPage.header_len);
++                 written += getSink()->write( oggPage.body, oggPage.body_len);
++--- a/src/VorbisLibEncoder.h
+++++ b/src/VorbisLibEncoder.h
++@@ -51,7 +51,7 @@
++ #include "Exception.h"
++ #include "Reporter.h"
++ #include "AudioEncoder.h"
++-#include "CastSink.h"
+++#include "Sink.h"
++ #ifdef HAVE_SRC_LIB
++ #include <samplerate.h>
++ #else
++@@ -199,7 +199,7 @@
++          *  @exception Exception
++          */
++         inline
++-        VorbisLibEncoder (  CastSink      * sink,
+++        VorbisLibEncoder (  Sink          * sink,
++                             unsigned int    inSampleRate,
++                             unsigned int    inBitsPerSample,
++                             unsigned int    inChannel,
++@@ -244,7 +244,7 @@
++          *  @exception Exception
++          */
++         inline
++-        VorbisLibEncoder (  CastSink              * sink,
+++        VorbisLibEncoder (  Sink                  * sink,
++                             const AudioSource     * as,
++                             BitrateMode             outBitrateMode,
++                             unsigned int            outBitrate,
++--- a/src/aacPlusEncoder.cpp
+++++ b/src/aacPlusEncoder.cpp
++@@ -114,7 +114,7 @@
++ #else
++         converter->initialize( resampleRatio, getInChannel());
++         //needed 2x(converted input samples) to handle offsets
++-	int outCount                 = 2 * getInChannel() * (inputSamples + 1);
+++    int outCount                 = 2 * getInChannel() * (inputSamples + 1);
++         if (resampleRatio > 1)
++         outCount = (int) (outCount * resampleRatio);
++         resampledOffset = new short int[outCount];
++@@ -152,7 +152,6 @@
++     int             processedSamples = 0;
++ 
++ 
++-
++     if ( converter ) {
++         unsigned int         converted;
++ #ifdef HAVE_SRC_LIB
++@@ -178,25 +177,29 @@
++ 
++         // encode samples (if enough)
++         while(resampledOffsetSize - processedSamples >= inputSamples/channels) {
++-            int outputBytes;
++ #ifdef HAVE_SRC_LIB
++             short *shortData = new short[inputSamples];
++             src_float_to_short_array(resampledOffset + (processedSamples * channels),
++                                      shortData, inputSamples) ;
++-            outputBytes = aacplusEncEncode(encoderHandle,
+++            int outputBytes = aacplusEncEncode(encoderHandle,
++                                        (int32_t*) shortData,
++                                         inputSamples,
++                                         aacplusBuf,
++                                         maxOutputBytes);
++             delete [] shortData;
++ #else
++-            outputBytes = aacplusEncEncode(encoderHandle,
+++            int outputBytes = aacplusEncEncode(encoderHandle,
++                                        (int32_t*) &resampledOffset[processedSamples*channels],
++                                         inputSamples,
++                                         aacplusBuf,
++                                         maxOutputBytes);
++ #endif
++-            getSink()->write(aacplusBuf, outputBytes);
+++            unsigned int wrote = getSink()->write(aacplusBuf, outputBytes);
+++            
+++            if (wrote < outputBytes) {
+++                reportEvent(3, "aacPlusEncoder :: write, couldn't write full data to underlying sink");
+++            }
+++
++             processedSamples+=inputSamples/channels;
++         }
++ 
++@@ -214,18 +217,22 @@
++         }
++     } else {
++         while (processedSamples < samples) {
++-            int     outputBytes;
++             int     inSamples = samples - processedSamples < (int) inputSamples
++                               ? samples - processedSamples
++                               : inputSamples;
++ 
++-            outputBytes = aacplusEncEncode(encoderHandle,
+++            int outputBytes = aacplusEncEncode(encoderHandle,
++                                        (int32_t*) (b + processedSamples/sampleSize),
++                                         inSamples,
++                                         aacplusBuf,
++                                         maxOutputBytes);
++-            getSink()->write(aacplusBuf, outputBytes);
++-
+++            
+++            unsigned int wrote = getSink()->write(aacplusBuf, outputBytes);
+++            
+++            if (wrote < outputBytes) {
+++                reportEvent(3, "aacPlusEncoder :: write, couldn't write full data to underlying sink");
+++            }
+++            
++             processedSamples += inSamples;
++         }
++     }
+-- 
+2.8.1
+

@@ -1,0 +1,230 @@
+diff --git a/calypso/__init__.py b/calypso/__init__.py
+index ba53288..f942d0b 100644
+--- a/calypso/__init__.py
++++ b/calypso/__init__.py
+@@ -229,6 +229,24 @@ class CollectionHTTPHandler(server.BaseHTTPRequestHandler):
+             CollectionHTTPHandler.collections[path] = webdav.Collection(path)
+         return CollectionHTTPHandler.collections[path]
+ 
++    @property
++    def _collections(self):
++        """The ``webdav.Collection`` objects corresponding to the given path
++        or its children."""
++        cpaths = paths.collections_from_path(self.path)
++        if not cpaths:
++            return []
++        # This could all be done in a single list comprehension using
++        # setdefault but this would negate the benefit of caching the
++        # webdav collections as arguments to setdefault are evaluated
++        # regardless of the keys existence.
++        for path in cpaths:
++            if path not in CollectionHTTPHandler.collections:
++                CollectionHTTPHandler.collections[path] = webdav.Collection(
++                    path)
++        return [ CollectionHTTPHandler.collections[path] for path in cpaths ]
++
++
+     def _decode(self, text):
+         """Try to decode text according to various parameters."""
+         # List of charsets to try
+@@ -372,8 +390,10 @@ class CollectionHTTPHandler(server.BaseHTTPRequestHandler):
+         try:
+             xml_request = self.xml_request
+             log.debug("PROPFIND %s", xml_request)
++            is_event_or_calendar = paths.collection_from_path(self.path) is not None
++            collection_or_collections = [self._collection] if is_event_or_calendar else self._collections
+             self._answer = xmlutils.propfind(
+-                self.path, xml_request, self._collection,
++                self.path, xml_request, is_event_or_calendar, collection_or_collections,
+                 self.headers.get("depth", "infinity"))
+             log.debug("PROPFIND ANSWER %s", self._answer)
+ 
+diff --git a/calypso/paths.py b/calypso/paths.py
+index 11640aa..db5b702 100644
+--- a/calypso/paths.py
++++ b/calypso/paths.py
+@@ -59,9 +59,20 @@ def url_to_file(url):
+     file = os.path.join(data_root(), tail)
+     return file
+ 
++
++#
++# Given an absolute path name, convert it to a URL by
++# removing the storage folder name
++#
++
++def file_to_url(path):
++    head = data_root().rstrip('/')
++    assert(path.startswith(head))
++    return path[len(head) : ]
++
+ #
+-# Does the provided URL reference a collection? This
+-# is done by seeing if the resulting path is a directory
++# Does the provided URL reference a collection? This is done by seeing
++# if the resulting path is a git controlled directory
+ #
+ 
+ def is_collection(url):
+@@ -76,6 +87,24 @@ def is_collection(url):
+         urlpath, stripped = os.path.split(urlpath)
+ 
+ #
++# Does the provided URL reference a collection of collections? This is
++# done by seeing if the resulting path is a directory with git
++# controlled sub directories
++#
++
++def is_collection_collection(url):
++    urlpath = url_to_file(url)
++    if not os.path.isdir(urlpath):
++        return False
++    for childname in os.listdir(urlpath):
++        childdir = os.path.join(urlpath, childname)
++        if (os.path.isdir(childdir)
++            and os.path.isdir(os.path.join(childdir, '.git'))):
++            return True
++    return False
++
++
++#
+ # Given a URL, return the parent URL by stripping off
+ # the last path element
+ #
+@@ -86,14 +115,27 @@ def parent_url(path):
+     new_path = "/" + "/".join(path_parent)
+     return new_path
+ 
++
++#
++# Given a URL, return the children URLs by finding git controlled sub
++# directories
++#
++
++def children_urls(path):
++    urlpath = url_to_file(path)
++    return [ "/" + os.path.join(path, childdir)
++             for childdir in os.listdir(urlpath)
++             if (os.path.isdir(os.path.join(urlpath, childdir))
++                 and os.path.isdir(os.path.join(urlpath, childdir, '.git'))) ]
++
++
++
+ #
+ # If the given URL references a resource, then
+ # return the name of that resource. Otherwise,
+ # return None
+ #
+ 
+-log = logging.getLogger()
+-
+ def resource_from_path(path):
+     """Return Calypso item name from ``path``."""
+     if is_collection(path):
+@@ -124,4 +166,31 @@ def collection_from_path(path):
+ 
+     log.debug('Path %s results in collection: %s', path, collection)
+     return collection
++
++#
++# Return the collection names for the given URL. That's just the URL
++# if it refers to a collection itself, otherwise it's the children or
++# the parent of the provided URL
++#
++
++def collections_from_path(path):
++    """Returns Calypso collection names from/in ``path``."""
++
++    collections = path
++    if not is_collection(collections):
++        if is_collection_collection(collections):
++            collections = children_urls(collections)
++        else:
++            collections = parent_url(collections)
++            if not is_collection(collections):
++                log.debug("No collection found for path %s", path)
++                return None
++
++    # unquote, strip off any trailing slash, then clean up /../ and // entries
++    collections = [ "/" + urllib.unquote(collection).strip("/")
++                    for collection in collections ]
++
++    log.debug('Path %s results in collection(s): %s',
++              path, ', '.join(collections))
++    return collections
+     
+diff --git a/calypso/webdav.py b/calypso/webdav.py
+index 85b3bb9..050add5 100644
+--- a/calypso/webdav.py
++++ b/calypso/webdav.py
+@@ -461,7 +461,7 @@ class Collection(object):
+                 self.destroy_file(old_item, context=context)
+                 
+     def replace(self, name, text, context):
+-        """Replace content by ``text`` in objet named ``name`` in collection."""
++        """Replace content by ``text`` in object named ``name`` in collection."""
+ 
+         path=None
+         old_item = self.get_item(name)
+diff --git a/calypso/xmlutils.py b/calypso/xmlutils.py
+index a1e8c8c..740cc8e 100644
+--- a/calypso/xmlutils.py
++++ b/calypso/xmlutils.py
+@@ -86,16 +86,13 @@ def delete(path, collection, context):
+     return ET.tostring(multistatus, config.get("encoding", "request"))
+ 
+ 
+-def propfind(path, xml_request, collection, depth):
++def propfind(path, xml_request, is_event_or_calendar, collections, depth):
+     """Read and answer PROPFIND requests.
+ 
+     Read rfc4918-9.1 for info.
+ 
+     """
+ 
+-    item_name = paths.resource_from_path(path)
+-    collection_name = paths.collection_from_path(path)
+-
+     # Reading request
+     root = ET.fromstring(xml_request)
+ 
+@@ -119,7 +116,10 @@ def propfind(path, xml_request, collection, depth):
+     # Writing answer
+     multistatus = ET.Element(_tag("D", "multistatus"))
+ 
+-    if collection:
++    if is_event_or_calendar:
++        item_name = paths.resource_from_path(path)
++        collection_name = paths.collection_from_path(path)
++        (collection,) = collections
+         if item_name:
+             item = collection.get_item(item_name)
+             print "item_name %s item %s" % (item_name, item)
+@@ -135,7 +135,7 @@ def propfind(path, xml_request, collection, depth):
+                 # we limit ourselves to depth == 1
+                 items = [collection] + collection.items
+     else:
+-        items = []
++        items = collections[:]
+ 
+     for item in items:
+         is_collection = isinstance(item, webdav.Collection)
+@@ -144,7 +144,8 @@ def propfind(path, xml_request, collection, depth):
+         multistatus.append(response)
+ 
+         href = ET.Element(_tag("D", "href"))
+-        href.text = collection_name if is_collection else "/".join([collection_name, item.name])
++        href.text = paths.file_to_url(item.path)
++        log.debug("href text: %s", paths.file_to_url(item.path))
+         response.append(href)
+ 
+         propstat = ET.Element(_tag("D", "propstat"))
+@@ -174,7 +175,7 @@ def propfind(path, xml_request, collection, depth):
+             elif tag == _tag("D", "getetag"):
+                 element.text = item.etag
+             elif tag == _tag("D", "displayname") and is_collection:
+-                element.text = collection.name
++                element.text = item.name
+             elif tag == _tag("D", "principal-URL"):
+                 # TODO: use a real principal URL, read rfc3744-4.2 for info
+                 tag = ET.Element(_tag("D", "href"))

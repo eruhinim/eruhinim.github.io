@@ -1,0 +1,123 @@
+Index: server/Daemon.cpp
+===================================================================
+--- server/Daemon.cpp	(revision 2465)
++++ server/Daemon.cpp	(revision 2466)
+@@ -480,6 +480,13 @@
+ 		const Configuration &serverConfig(
+ 			mapConfiguration->GetSubConfiguration("Server"));
+ 
++		if(serverConfig.KeyExists("LogFacility"))
++		{
++			std::string facility =
++				serverConfig.GetKeyValue("LogFacility");
++			Logging::SetFacility(Syslog::GetNamedFacility(facility));
++		}
++
+ 		// Open PID file for writing
+ 		pidFileName = serverConfig.GetKeyValue("PidFile");
+ 		FileHandleGuard<(O_WRONLY | O_CREAT | O_TRUNC), (S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH)> pidFile(pidFileName.c_str());
+Index: server/Daemon.h
+===================================================================
+--- server/Daemon.h	(revision 2465)
++++ server/Daemon.h	(revision 2466)
+@@ -105,6 +105,7 @@
+ 
+ #define DAEMON_VERIFY_SERVER_KEYS \
+ 	ConfigurationVerifyKey("PidFile", ConfigTest_Exists), \
++	ConfigurationVerifyKey("LogFacility", 0), \
+ 	ConfigurationVerifyKey("User", ConfigTest_LastEntry)
+ 
+ #endif // DAEMON__H
+Index: common/Logging.cpp
+===================================================================
+--- common/Logging.cpp	(revision 2465)
++++ common/Logging.cpp	(revision 2466)
+@@ -216,6 +216,11 @@
+ 	}
+ }
+ 
++void Logging::SetFacility(int facility)
++{
++	spSyslog->SetFacility(facility);
++}
++
+ Logger::Logger() 
+ : mCurrentLevel(Log::EVERYTHING) 
+ {
+@@ -390,9 +395,9 @@
+ 	return true;
+ }
+ 
+-Syslog::Syslog()
++Syslog::Syslog() : mFacility(LOG_LOCAL6)
+ {
+-	::openlog("Box Backup", LOG_PID, LOG_LOCAL6);
++	::openlog("Box Backup", LOG_PID, mFacility);
+ }
+ 
+ Syslog::~Syslog()
+@@ -404,9 +409,34 @@
+ {
+ 	mName = rProgramName;
+ 	::closelog();
+-	::openlog(mName.c_str(), LOG_PID, LOG_LOCAL6);
++	::openlog(mName.c_str(), LOG_PID, mFacility);
+ }
+ 
++void Syslog::SetFacility(int facility)
++{
++	mFacility = facility;
++	::closelog();
++	::openlog(mName.c_str(), LOG_PID, mFacility);
++}
++
++int Syslog::GetNamedFacility(const std::string& rFacility)
++{
++	#define CASE_RETURN(x) if (rFacility == #x) { return LOG_ ## x; }
++	CASE_RETURN(LOCAL0)
++	CASE_RETURN(LOCAL1)
++	CASE_RETURN(LOCAL2)
++	CASE_RETURN(LOCAL3)
++	CASE_RETURN(LOCAL4)
++	CASE_RETURN(LOCAL5)
++	CASE_RETURN(LOCAL6)
++	CASE_RETURN(DAEMON)
++	#undef CASE_RETURN
++
++	BOX_ERROR("Unknown log facility '" << rFacility << "', "
++		"using default LOCAL6");
++	return LOG_LOCAL6;
++}
++
+ bool FileLogger::Log(Log::Level Level, const std::string& rFile, 
+ 	int line, std::string& rMessage)
+ {
+Index: common/Logging.h
+===================================================================
+--- common/Logging.h	(revision 2465)
++++ common/Logging.h	(revision 2466)
+@@ -202,6 +202,7 @@
+ {
+ 	private:
+ 	std::string mName;
++	int mFacility;
+ 
+ 	public:
+ 	Syslog();
+@@ -211,6 +212,8 @@
+ 		int line, std::string& rMessage);
+ 	virtual const char* GetType() { return "Syslog"; }
+ 	virtual void SetProgramName(const std::string& rProgramName);
++	virtual void SetFacility(int facility);
++	static int GetNamedFacility(const std::string& rFacility);
+ };
+ 
+ // --------------------------------------------------------------------------
+@@ -260,6 +263,7 @@
+ 	}
+ 	static void SetProgramName(const std::string& rProgramName);
+ 	static std::string GetProgramName() { return sProgramName; }
++	static void SetFacility(int facility);
+ 
+ 	class Guard
+ 	{

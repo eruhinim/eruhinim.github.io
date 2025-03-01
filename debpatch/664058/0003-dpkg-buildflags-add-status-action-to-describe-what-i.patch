@@ -1,0 +1,123 @@
+From ba7a4d3f95c26d24beaf4a5d5ad8fef50c6a0948 Mon Sep 17 00:00:00 2001
+From: "Bernhard R. Link" <brlink@debian.org>
+Date: Thu, 15 Mar 2012 11:25:39 +0100
+Subject: [PATCH 3/4] dpkg-buildflags: add --status action to describe what is
+ happening
+
+It's hard to see from a build log file what values should have been
+used and why. The new --status action added by this tries to output
+all meaningful information in way useful for human consumption
+and for automatic log parsers.
+
+Signed-off-by: Bernhard R. Link <brlink@debian.org>
+---
+ man/dpkg-buildflags.1      |   10 +++++++++
+ scripts/dpkg-buildflags.pl |   49 +++++++++++++++++++++++++++++++++++++------
+ 2 files changed, 52 insertions(+), 7 deletions(-)
+
+diff --git a/man/dpkg-buildflags.1 b/man/dpkg-buildflags.1
+index 4244b82..234d1cf 100644
+--- a/man/dpkg-buildflags.1
++++ b/man/dpkg-buildflags.1
+@@ -72,6 +72,16 @@ Print the list of flags supported by the current vendor
+ (one per line). See the \fBSUPPORTED FLAGS\fP section for more
+ information about them.
+ .TP
++.BI \-\-status
++Display any information that can be useful to explain the behaviour
++of dpkg-buildflags:
++relevant environment variables, current vendor, state of all feature flags.
++Also print the resulting compiler flags with their origin.
++
++This is intended to be run from \fBdebian/rules\fP, so that the
++build log keeps a clear trace of the build flags used. This can
++be useful to diagnose problems related to them.
++.TP
+ .BI \-\-export= format
+ Print to standard output shell (if \fIformat\fP is \fBsh\fP) or make
+ (if \fIformat\fP is \fBmake\fP) commands that can be used to export
+diff --git a/scripts/dpkg-buildflags.pl b/scripts/dpkg-buildflags.pl
+index d0f9fa8..6a70c56 100755
+--- a/scripts/dpkg-buildflags.pl
++++ b/scripts/dpkg-buildflags.pl
+@@ -24,6 +24,7 @@ use Dpkg;
+ use Dpkg::Gettext;
+ use Dpkg::ErrorHandling;
+ use Dpkg::BuildFlags;
++use Dpkg::Vendor qw(get_current_vendor);
+ 
+ textdomain("dpkg-dev");
+ 
+@@ -52,6 +53,9 @@ Actions:
+                      compilation flags in a shell script, in make,
+                      or on a ./configure command line.
+   --dump             output all compilation flags with their values
++  --status           print a synopsis with all parameters affecting
++                     the behaviour of dpkg-buildflags and the resulting
++                     flags and their origin.
+   --help             show this help message.
+   --version          show the version.
+ "), $progname;
+@@ -72,14 +76,10 @@ while (@ARGV) {
+             if defined($action);
+         my $type = $1 || "sh";
+         $action = "export-$type";
+-    } elsif (m/^--dump$/) {
+-        usageerr(_g("two commands specified: --%s and --%s"), "dump", $action)
+-            if defined($action);
+-        $action = "dump";
+-    } elsif (m/^--list$/) {
+-        usageerr(_g("two commands specified: --%s and --%s"), "list", $action)
++    } elsif (m/^--(list|status|dump)$/) {
++        usageerr(_g("two commands specified: --%s and --%s"), $1, $action)
+             if defined($action);
+-        $action = "list";
++        $action = $1;
+     } elsif (m/^-(h|-help)$/) {
+         usage();
+         exit 0;
+@@ -147,6 +147,41 @@ if ($action eq "get") {
+ 	print "$flag=$value\n";
+     }
+     exit(0);
++} elsif ($action eq "status") {
++    # prefix everything with "dpkg-buildflags: " to allow easy extraction
++    # from a buildd log. Thus also using hardcoded, non-translated strings
++    # instead of Dpkg:ErrorHandling functions.
++
++    # First print all environment variables that might have changed the
++    # results (only existing ones, might make sense to add a option to
++    # also show which could have set to modify it).
++    my @envvars = $build_flags->list_used_envvars();
++    for my $envvar (@envvars) {
++	if (exists $ENV{$envvar}) {
++	    printf "dpkg-buildflags: environment variable %s=%s\n",
++				$envvar, $ENV{$envvar};
++	}
++    }
++    my $vendor = Dpkg::Vendor::get_current_vendor();
++    $vendor = "undefined" unless defined($vendor);
++    print "dpkg-buildflags: vendor is $vendor\n";
++    # Then the resulting features:
++    foreach my $area (sort $build_flags->get_feature_areas()) {
++	print "dpkg-buildflags: $area features:";
++	my %features = $build_flags->get_features($area);
++	foreach my $feature (sort keys %features) {
++	    printf " %s=%s", $feature, $features{$feature} ? "yes" : "no";
++	}
++	print "\n";
++    }
++    # Then the resulting values (with their origin):
++    foreach my $flag ($build_flags->list()) {
++	my $value = $build_flags->get($flag);
++	my $origin = $build_flags->get_origin($flag);
++	# Note that DEB_*_MAINT_* does not effect $origin.
++	print "dpkg-buildflags: $flag [$origin]: $value\n";
++    }
++    exit(0);
+ }
+ 
+ exit(1);
+-- 
+1.7.9.1
+

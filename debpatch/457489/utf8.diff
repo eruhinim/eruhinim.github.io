@@ -1,0 +1,120 @@
+diff -ur apt-0.7.9/apt-pkg/contrib/strutl.cc apt-0.7.9+utf8/apt-pkg/contrib/strutl.cc
+--- apt-0.7.9/apt-pkg/contrib/strutl.cc	2007-07-24 14:33:28.000000000 +0200
++++ apt-0.7.9+utf8/apt-pkg/contrib/strutl.cc	2007-12-22 18:14:19.000000000 +0100
+@@ -67,7 +67,11 @@
+   outbuf = new char[insize+1];
+   outptr = outbuf;
+ 
+-  iconv(cd, &inptr, &insize, &outptr, &outsize);
++  bool result = true;
++  if (iconv(cd, &inptr, &insize, &outptr, &outsize) == (size_t)(-1))
++  {
++     result = false;
++  }
+   *outptr = '\0';
+ 
+   *dest = outbuf;
+@@ -75,7 +79,7 @@
+   
+   iconv_close(cd);
+ 
+-  return true;
++  return result;
+ }
+ 									/*}}}*/
+ // strstrip - Remove white space from the front and back of a string	/*{{{*/
+Only in apt-0.7.9+utf8: build
+diff -ur apt-0.7.9/cmdline/apt-cache.cc apt-0.7.9+utf8/cmdline/apt-cache.cc
+--- apt-0.7.9/cmdline/apt-cache.cc	2007-08-02 00:48:14.000000000 +0200
++++ apt-0.7.9+utf8/cmdline/apt-cache.cc	2007-12-22 20:08:27.000000000 +0100
+@@ -1222,7 +1222,7 @@
+       return false;
+    
+    // Read the record
+-   unsigned char *Buffer = new unsigned char[GCache->HeaderP->MaxVerFileSize+1];
++   char *Buffer = new char[GCache->HeaderP->MaxVerFileSize+1];
+    Buffer[V.FileList()->Size] = '\n';
+    if (PkgF.Seek(V.FileList()->Offset) == false ||
+        PkgF.Read(Buffer,V.FileList()->Size) == false)
+@@ -1232,10 +1232,18 @@
+    }
+ 
+    // Get a pointer to start of Description field
+-   const unsigned char *DescP = (unsigned char*)strstr((char*)Buffer, "Description:");
++   const char *DescP = strstr(Buffer, "Description:");
+ 
+    // Write all but Description
+-   if (fwrite(Buffer,1,DescP - Buffer,stdout) < (size_t)(DescP - Buffer))
++   char *codeset = nl_langinfo(CODESET);
++
++   string orig, dest;
++   orig = string(Buffer, 0, DescP - Buffer);
++   if (UTF8ToCodeset(codeset, orig, &dest))
++   {
++       orig = dest;
++   }
++   if (fwrite(orig.data(),1,DescP - Buffer,stdout) < (size_t)(DescP - Buffer))
+    {
+       delete [] Buffer;
+       return false;
+@@ -1245,7 +1253,7 @@
+    pkgRecords Recs(*GCache);
+    pkgCache::DescIterator Desc = V.TranslatedDescription();
+    pkgRecords::Parser &P = Recs.Lookup(Desc.FileList());
+-   cout << "Description" << ( (strcmp(Desc.LanguageCode(),"") != 0) ? "-" : "" ) << Desc.LanguageCode() << ": " << P.LongDesc();
++   cout << "Description" << ( (strcmp(Desc.LanguageCode(),"") != 0) ? "-" : "" ) << Desc.LanguageCode() << ": " << P.LongDesc();;
+ 
+    // Find the first field after the description (if there is any)
+    for(DescP++;DescP != &Buffer[V.FileList()->Size];DescP++) 
+@@ -1253,7 +1261,7 @@
+       if(*DescP == '\n' && *(DescP+1) != ' ') 
+       {
+ 	 // write the rest of the buffer
+-	 const unsigned char *end=&Buffer[V.FileList()->Size];
++	 const char *end=&Buffer[V.FileList()->Size];
+ 	 if (fwrite(DescP,1,end-DescP,stdout) < (size_t)(end-DescP)) 
+ 	 {
+ 	    delete [] Buffer;
+@@ -1489,6 +1497,8 @@
+    pkgSourceList List;
+    List.ReadMainList();
+    
++   char *codeset = nl_langinfo(CODESET);
++
+    // Create the text record parsers
+    pkgSrcRecords SrcRecs(List);
+    if (_error->PendingError() == true)
+@@ -1500,7 +1510,15 @@
+       
+       pkgSrcRecords::Parser *Parse;
+       while ((Parse = SrcRecs.Find(*I,false)) != 0)
+-	 cout << Parse->AsStr() << endl;;
++      {
++	 string orig, dest;
++	 orig = Parse->AsStr();
++   	 if (UTF8ToCodeset(codeset, orig, &dest))
++	 {
++	    orig = dest;
++	 }
++	 cout << orig << endl;;
++      }
+    }      
+    return true;
+ }
+diff -ur apt-0.7.9/apt-pkg/deb/debrecords.cc apt-0.7.9+utf8/apt-pkg/deb/debrecords.cc
+--- apt-0.7.9/apt-pkg/deb/debrecords.cc	2007-10-25 13:59:06.000000000 +0200
++++ apt-0.7.9+utf8/apt-pkg/deb/debrecords.cc	2007-12-22 20:09:52.000000000 +0100
+@@ -116,10 +116,10 @@
+   else 
+      orig = Section.FindS(("Description-" + pkgIndexFile::LanguageCode()).c_str()).c_str();
+ 
+-  if (strcmp(codeset,"UTF-8") != 0) {
+-     UTF8ToCodeset(codeset, orig, &dest);
++  if (UTF8ToCodeset(codeset, orig, &dest))
++  {
+      orig = dest;
+-   }    
++  }    
+   
+    return orig;
+ }

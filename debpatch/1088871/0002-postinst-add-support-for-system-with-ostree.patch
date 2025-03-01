@@ -1,0 +1,77 @@
+From 01a20100740f2fcf7358e5de4fdc984c3fac02d3 Mon Sep 17 00:00:00 2001
+From: Wenlin Kang <wenlin.kang@windriver.com>
+Date: Sun, 1 Dec 2024 23:13:46 -0800
+Subject: [PATCH 2/3] postinst: add support for system with ostree
+
+In gerenal, dracut work is good, but on the system with ostree, it
+cannot correctly find the location of the initramfs and regenerate
+it, the patch gives it a chance to find the location on the system
+with ostree.
+
+Meanwhile, also replace linux-version with ls, the cause is linux-version
+only find kernel image from /boot, but on the system with ostree, the
+kernel image usually is in /boot/ostree/${osname}-${bootcsum}.
+
+Signed-off-by: Wenlin Kang <wenlin.kang@windriver.com>
+---
+ debian/dracut.postinst          | 19 ++++++++++++++-----
+ debian/kernel/postinst.d/dracut | 12 +++++++++---
+ 2 files changed, 23 insertions(+), 8 deletions(-)
+
+diff --git a/debian/dracut.postinst b/debian/dracut.postinst
+index c435bc58..3662fb8a 100644
+--- a/debian/dracut.postinst
++++ b/debian/dracut.postinst
+@@ -4,11 +4,20 @@ set -e
+ 
+ 
+ mk_initrd() {
+-    local latest_version
+-    latest_version=$(linux-version list | linux-version sort | tail -n 1)
+-    linux-version list | while read -r kversion; do
+-        if test "$kversion" = "$latest_version" || ! test -e "/boot/initrd.img-$kversion"; then
+-            /etc/kernel/postinst.d/dracut "$kversion"
++    local bootdir=/boot
++    local ostree="$(cat /proc/cmdline | grep -o 'ostree=[^ ]*' | cut -d'=' -f2)"
++    if [ -n "${ostree}" ]; then
++        osname="$(echo ${ostree} | awk -F/ '{print $4}')"
++        bootcsum="$(echo ${ostree} | awk -F/ '{print $5}')"
++        bootdir=${bootdir}/ostree/${osname}-${bootcsum}
++    fi
++
++    local version_list="`ls ${bootdir}/vmlinu[zx]-* 2>/dev/null | sed -e "s#${bootdir}/vmlinu.-##"`"
++    local latest_version="`ls ${bootdir}/vmlinu[zx]-* 2>/dev/null | sed -e "s#${bootdir}/vmlinu.-##" | sort -V | tail -n 1`"
++    echo ${version_list} | while read -r kversion; do
++        local initrd="${bootdir}/initrd.img-$kversion"
++        if test "$kversion" = "$latest_version" || ! test -e "${initrd}"; then
++            /etc/kernel/postinst.d/dracut $kversion ${initrd}
+         fi
+     done
+ }
+diff --git a/debian/kernel/postinst.d/dracut b/debian/kernel/postinst.d/dracut
+index b202df4d..126bcad1 100755
+--- a/debian/kernel/postinst.d/dracut
++++ b/debian/kernel/postinst.d/dracut
+@@ -27,10 +27,16 @@ fi
+ 
+ # check if modules.dep already exists. If not create it
+ # maybe this problem could also be solved via Debian triggers
+-if [ ! -f $bootdir/../lib/modules/$version/modules.dep ]; then
++if [ ! -f $bootdir/../lib/modules/$version/modules.dep ] &&
++   [ ! -f /lib/modules/$version/modules.dep ]; then
+     depmod -a -F $bootdir/System.map-$version $version
+ fi
+ 
+ # we're good - create initramfs
+-echo "dracut: Generating $bootdir/initrd.img-${version}"
+-dracut -q --force $bootdir/initrd.img-${version} "${version}" >&2
++# keep original name if it exists
++initrd="$(ls ${bootdir}/initr*-${version}* 2>/dev/null)"
++if [ -z "${initrd}" ]; then
++    initrd=$bootdir/initrd.img-${version}
++fi
++echo "dracut: Generating ${initrd}"
++dracut -q --force ${initrd} "${version}" >&2
+-- 
+2.42.0
+

@@ -1,0 +1,86 @@
+From f50d1f95c32854520a5652e77576661b4781e3b2 Mon Sep 17 00:00:00 2001
+From: Johannes Schauer Marin Rodrigues <josch@mister-muffin.de>
+Date: Tue, 1 Feb 2022 16:02:32 +0100
+Subject: [PATCH] utils/update-alternatives.c: respect SOURCE_DATE_EPOCH when
+ u-a is used in the context of building a reproducible chroot
+
+---
+ utils/update-alternatives.c | 55 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 55 insertions(+)
+
+diff --git a/utils/update-alternatives.c b/utils/update-alternatives.c
+index 15aab25ec..b2638faf1 100644
+--- a/utils/update-alternatives.c
++++ b/utils/update-alternatives.c
+@@ -540,6 +540,59 @@ log_msg(const char *fmt, ...)
+  * Filesystem access for alernative handling.
+  */
+ 
++static void
++fsys_lutimes(const char *filename)
++{
++#ifndef HAVE_LUTIMES
++	return;
++#else
++	/*
++	 * If SOURCE_DATE_EPOCH is set, then this means that update-alternatives
++	 * is run in the context of building a reproducible system image. During
++	 * normal operation, the variable must not be set because otherwise
++	 * modification times might be set to a lower value than the current one
++	 * which will confuse backup software.
++	 *
++	 * We use the SOURCE_DATE_EPOCH environment variable to distinguish
++	 * between update-alternatives being used in a reproducible chroot
++	 * bootstrap build (the variable is set) and it being used normally (the
++	 * variable is unset).
++	 *
++	 * Reproducible symlink timestamps are necessary for reproducible man-db
++	 * index.db which stores manual page mtimes. See #1004557 for context.
++	 */
++	const char *sde = getenv("SOURCE_DATE_EPOCH");
++	if (!sde) {
++		return;
++	}
++	unsigned long long epoch;
++	char *endptr;
++	errno = 0;
++	epoch = strtoull(sde, &endptr, 10);
++	if ((errno == ERANGE && (epoch == ULLONG_MAX || epoch == 0))
++			|| (errno != 0 && epoch == 0)) {
++		syserr(_("Environment variable $SOURCE_DATE_EPOCH: strtoull: %s"), strerror(errno));
++	}
++	if (endptr == sde) {
++		syserr(_("Environment variable $SOURCE_DATE_EPOCH: No digits were found: %s"), endptr);
++	}
++	if (*endptr != '\0') {
++		syserr(_("Environment variable $SOURCE_DATE_EPOCH: Trailing garbage: %s"), endptr);
++	}
++	if (epoch > ULONG_MAX) {
++		syserr(_("Environment variable $SOURCE_DATE_EPOCH: value must be smaller than or equal to: %lu but was found to be: %llu"), ULONG_MAX, epoch);
++	}
++	struct timeval tv[2];
++	tv[0].tv_sec = epoch;
++	tv[0].tv_usec = 0;
++	tv[1].tv_sec = epoch;
++	tv[1].tv_usec = 0;
++	if (lutimes(filename, tv)) {
++		syserr(_("Error setting timestamp of %s"), filename);
++	}
++#endif
++}
++
+ static char *
+ fsys_get_path(const char *pathpart)
+ {
+@@ -641,6 +694,8 @@ fsys_symlink(const char *filename, const char *linkname)
+ 	if (symlink(filename, root_linkname))
+ 		syserr(_("error creating symbolic link '%.255s'"), root_linkname);
+ 
++	fsys_lutimes(root_linkname);
++
+ 	free(root_linkname);
+ }
+ 
+-- 
+2.33.0
+

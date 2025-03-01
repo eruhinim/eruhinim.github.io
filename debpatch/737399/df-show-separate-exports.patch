@@ -1,0 +1,81 @@
+From b391963bc9e392ced266ef5f91e9c329d460af55 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?P=C3=A1draig=20Brady?= <P@draigBrady.com>
+Date: Wed, 29 Oct 2014 02:49:17 +0000
+Subject: [PATCH] df: avoid suppressing remote mounts of separate exports
+
+* src/df.c (filter_mount_list): Separate remote locations may
+have different ACLs etc. so list each even if they share
+the same remote device and thus storage.
+* NEWS: Mention the change in behavior.
+
+Reported in http://bugs.debian.org/737399
+Reported in http://bugzilla.redhat.com/920806
+---
+ NEWS     |    6 ++++++
+ src/df.c |   33 +++++++++++++++++++++------------
+ 2 files changed, 27 insertions(+), 12 deletions(-)
+
+diff --git a/NEWS b/NEWS
+index 5fbdc6a..6dda9f5 100644
+--- a/NEWS
++++ b/NEWS
+@@ -30,6 +30,12 @@ GNU coreutils NEWS                                    -*- outline -*-
+   dd accepts a new status=progress level to print data transfer statistics
+   on stderr approximately every second.
+ 
++** Changes in behavior
++
++  df no longer suppresses separate exports of the same remote device,
++  as these are probably explicitly mounted and may have separate ACLs etc.
++  [suppression was introduced in coreutils-8.21]
++
+ ** Improvements
+ 
+   cp,install,mv will convert smaller runs of NULs in the input to holes,
+diff --git a/src/df.c b/src/df.c
+index a52afc4..cf0d433 100644
+--- a/src/df.c
++++ b/src/df.c
+@@ -640,18 +640,27 @@ filter_mount_list (bool devices_only)
+ 
+           if (devlist)
+             {
+-                  /* let "real" devices with '/' in the name win.  */
+-              if ((strchr (me->me_devname, '/')
+-                   && ! strchr (devlist->me->me_devname, '/'))
+-                  /* let a shorter mountdir win.  */
+-                  || (strlen (devlist->me->me_mountdir)
+-                      > strlen (me->me_mountdir))
+-                  /* let an entry overmounted on a different device win...  */
+-                  || (! STREQ (devlist->me->me_devname, me->me_devname)
+-                      /* ... but only when matching an existing mount point, to
+-                      avoid problematic replacement when given inaccurate mount
+-                      lists, seen with some chroot environments for example.  */
+-                      && STREQ (me->me_mountdir, devlist->me->me_mountdir)))
++              if (me->me_remote && devlist->me->me_remote
++                  && ! STREQ (devlist->me->me_devname, me->me_devname))
++                {
++                  /* Don't discard remote entries with different locations,
++                     as there may be differing ACLs etc. per remote path, and
++                     also these are more likely to be explicitly mounted.  */
++                }
++              else if ((strchr (me->me_devname, '/')
++                       /* let "real" devices with '/' in the name win.  */
++                        && ! strchr (devlist->me->me_devname, '/'))
++                       /* let a shorter mountdir win.  */
++                       || (strlen (devlist->me->me_mountdir)
++                           > strlen (me->me_mountdir))
++                       /* let an entry overmounted on a new device win...  */
++                       || (! STREQ (devlist->me->me_devname, me->me_devname)
++                           /* ... but only when matching an existing mnt point,
++                              to avoid problematic replacement when given
++                              inaccurate mount lists, seen with some chroot
++                              environments for example.  */
++                           && STREQ (me->me_mountdir,
++                                     devlist->me->me_mountdir)))
+                 {
+                   /* Discard mount entry for existing device.  */
+                   discard_me = devlist->me;
+-- 
+1.7.7.6
+

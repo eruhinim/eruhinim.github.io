@@ -1,0 +1,452 @@
+--- console-setup.orig/Keyboard/Makefile	2006-09-28 08:00:03.000000000 +0100
++++ console-setup/Keyboard/Makefile	2007-03-06 12:09:30.000000000 +0000
+@@ -6,7 +6,7 @@
+ 
+ gziped_ekmaps =  $(addsuffix .ekmap.gz, $(models))
+ 
+-build-mini : $(gziped_ekmaps)
++build-mini : $(gziped_ekmaps) pc105.tree
+ 
+ %.gz : %
+ 	gzip -9 <$< >$@
+@@ -14,6 +14,9 @@
+ %.ekmap : 
+ 	./kbdcompiler $(@:%.ekmap=%) MyKeyboardNames.pl $(xkbdir) >$@
+ 
++%.tree : %.ekmap.gz keymaptree.use MyKeyboardNames.pl
++	./keymaptree -output $@ -useonly "$$(< keymaptree.use grep -v '^#' | xargs | sed 's/ /,/g')" -names MyKeyboardNames.pl $(@:%.tree=%)
++
+ acmfiles = $(wildcard acm/*.acm)
+ 
+ gziped_acmfiles = $(addsuffix .gz, $(acmfiles))
+@@ -52,9 +55,10 @@
+ 	-rm -f *~
+ 	-rm -f acm/*.acm.gz
+ 	-rm -rf compose $(compose_files)
+-	-rm -rf keymaps
++	-rm -rf keymaps tree-keymaps
+ 	-rm -f keymaps.dir names.list
+ 	-rm -f $(gziped_ekmaps)
++	-rm -f *.tree
+ 	-rm -f MyKeyboardNames.pl
+ 
+ .PHONY: maintainer-clean
+--- console-setup.orig/Keyboard/kbdcompiler	2006-09-28 08:00:03.000000000 +0100
++++ console-setup/Keyboard/kbdcompiler	2007-03-17 00:16:58.000000000 +0000
+@@ -125,6 +125,9 @@
+ 	    if (! defined $kmap2->[$k] || $kmap1->[$k] ne $kmap2->[$k]) {
+ 		$result++;
+ 	    }
++	} elsif (defined $kmap2->[$k]) {
++	    # kmap1 not a superset of kmap2, so not eligible for reduction
++	    return 10000000;
+ 	}
+     }
+     return $result;
+--- console-setup.orig/Keyboard/keymaptree	1970-01-01 01:00:00.000000000 +0100
++++ console-setup/Keyboard/keymaptree	2007-03-06 12:06:03.000000000 +0000
+@@ -0,0 +1,126 @@
++#!/bin/sh
++set -e
++
++#     keymaptree -- build decision trees covering every keymap we can think of
++#     Copyright (C) 2006, 2007 Canonical Ltd.; written by Colin Watson.
++
++#     This program is free software; you can redistribute it and/or modify
++#     it under the terms of the GNU General Public License as published by
++#     the Free Software Foundation; either version 2 of the License, or
++#     (at your option) any later version.
++
++#     This program is distributed in the hope that it will be useful,
++#     but WITHOUT ANY WARRANTY; without even the implied warranty of
++#     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++#     GNU General Public License for more details.
++
++#     If you have not received a copy of the GNU General Public License
++#     along with this program, write to the Free Software Foundation, Inc.,
++#     59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++
++# Default values:
++output=''
++models=''
++useonly="$(< keymaptree.use grep -v '^#' | xargs | sed 's/ /,/g')"
++skip=''
++names='KeyboardNames.pl'
++
++while [ "$1" ]; do
++    case "$1" in
++	-output)
++	    shift
++	    output="$1"
++	    ;;
++	-useonly)
++	    shift
++	    useonly="$1"
++	    ;;
++	-skip)
++	    shift
++	    skip="$1"
++	    ;;
++	-names)
++	    shift
++	    names="$1"
++	    ;;
++	-\?|-help|--help)
++	    cat >&2 <<EOF
++Usage: keymaptree [options] <model> [...]
++Legal options are:
++-?,-help,--help     Print this message
++-output             Write decision tree to file (default: stdout)
++-useonly            Include only these keymaps in the decision tree
++                    (comma-separated)
++-skip               Exclude these keymaps from the decision tree
++                    (comma-separated)
++-names              Use this file instead of KeyboardNames.pl
++EOF
++	    exit 0
++	    ;;
++	-*)
++	    echo "keymaptree: Unrecognised option $1" >&2
++	    exit 1
++	    ;;
++	*)
++	    models="${models:+$models }$1"
++	    ;;
++    esac
++    shift
++done
++
++if [ -z "$models" ]; then
++    echo "keymaptree: Need at least one model" >&2
++    exit 1
++fi
++
++for model in $models; do
++    case $model in
++	amiga|ataritt|macintosh_old|pc105|sun4|sun5)
++	    ;;
++	*)
++	    echo "keymaptree: Unrecognised model $model" >&2
++	    exit 1
++	    ;;
++    esac
++done
++
++variantpairs="$(./kbdnames-maker "$names" | grep 'variant\*' | sort -t '*' | \
++    cut -d'*' --output-delimiter=: -f2,3 | sed 's/:$//' | \
++    egrep -v '^(nec|nec_vndr)/jp')"
++
++rm -rf tree-keymaps
++gkincludeopts=''
++gkfiles=''
++
++for model in $models; do
++    mkdir -p "tree-keymaps/$model"
++    for variantpair in $variantpairs; do
++	case $variantpair in
++	    *:*)
++		layout="${variantpair%%:*}"
++		variant="${variantpair#*:}"
++		;;
++	    *)
++		layout="$variantpair"
++		variant=''
++		;;
++	esac
++	./ckbcomp-mini -I. -model "$model" -layout "$layout" ${variant:+-variant "$variant"} | \
++	    perl -ne '
++		if (/^keycode ([0-9]+)/) {
++		    $keycodes{$1} = $_;
++		} else {
++		    for $code (sort { $a <=> $b } keys %keycodes) {
++			print $keycodes{$code};
++		    }
++		    %keycodes = ();
++		    print;
++		}' \
++	    > "tree-keymaps/$model/$layout${variant:+:$variant}"
++    done
++    gkincludeopts="${gkincludeopts:+$gkincludeopts }-I tree-keymaps/$model"
++    echo "$variantpairs" > "tree-keymaps/$model.list"
++    gkfiles="${gkfiles:+$gkfiles }tree-keymaps/$model.list"
++done
++gen_keymap ${output:+-o $output} -v $gkincludeopts \
++    ${useonly:+-u $useonly} ${skip:+-s $skip} $gkfiles
+--- console-setup.orig/Keyboard/keymaptree.use	1970-01-01 01:00:00.000000000 +0100
++++ console-setup/Keyboard/keymaptree.use	2007-03-17 09:35:37.000000000 +0000
+@@ -0,0 +1,48 @@
++# This list was generated by taking the list of i386 and powerpc keymaps
++# offered by console-keymaps-tree from console-data and converting them to X
++# keymap layouts and variants. Feel free to add more keymaps to this list,
++# as long as gen_keymap (called from keymaptree) still thinks they're
++# distinguishable.
++
++be
++bg
++br
++by
++ca
++ch
++cs
++cz
++de:nodeadkeys
++dk
++ee
++es
++fi
++fr
++fr:latin9
++fr:oss
++gb
++gr
++hr
++hu
++il
++is
++it
++latam
++lt
++lv
++mk
++no
++pl
++pt
++ro
++ro:std
++ru
++se
++sk:qwerty
++th:tis
++tr
++tr:f
++ua
++us
++us:dvorak
++us:intl
+--- console-setup.orig/debian/config.proto	2006-11-13 16:55:11.000000000 +0000
++++ console-setup/debian/config.proto	2007-04-13 08:42:16.000000000 +0100
+@@ -118,6 +118,13 @@
+ Uni3*. Combined - Latin; Slavic and non-Slavic Cyrillic'
+ 
+ db_capb backup
++CAPB="$RET"
++detect_keyboard=false
++case $CAPB in
++    *plugin-detect-keyboard*)
++	detect_keyboard=:
++	;;
++esac
+ 
+ # Set default value for a question only if it is not seen by the user
+ db_default () {
+@@ -1249,7 +1256,61 @@
+ 	    fi
+ 	    ;;
+ 	2)
+-	    if [ "$unsupported_layout" = yes ]; then
++	    db_get console-setup/modelcode
++	    if \
++		$detect_keyboard \
++		&& [ -e "/usr/share/console-setup-mini/$RET.tree" ]
++	    then
++		db_input high console-setup/ask_detect || true
++		if db_go; then
++		    STATE=$(($STATE + 1))
++		else
++		    STATE=$(($STATE - 1))
++		fi
++	    else
++		STATE=$(($STATE + $STATE - $old_state))
++	    fi
++	    ;;
++	3)
++	    db_get console-setup/modelcode
++	    model="$RET"
++	    if \
++		[ "$STATE" -ge "$old_state" ] \
++		&& $detect_keyboard \
++		&& [ -e "/usr/share/console-setup-mini/$model.tree" ] \
++		&& db_get console-setup/ask_detect \
++		&& [ "$RET" = true ]
++	    then
++		db_subst console-setup/detect FILENAME \
++		    "/usr/share/console-setup-mini/$model.tree"
++		if db_input critical console-setup/detect && db_go; then
++		    db_get console-setup/detect
++		    detected_keyboard="$RET"
++		    # TODO: produce human-readable layout name
++		    db_subst console-setup/detected LAYOUT "$detected_keyboard"
++		    db_input high console-setup/detected || true
++		    if db_go; then
++			unsupported_layout=no
++			STATE=$(($STATE + 1))
++		    else
++			detected_keyboard=
++			STATE=$(($STATE - 1))
++		    fi
++		else
++		    STATE=$(($STATE - 1))
++		fi
++	    else
++		detected_keyboard=
++		STATE=$(($STATE + $STATE - $old_state))
++	    fi
++	    ;;
++	4)
++	    if [ "$detected_keyboard" ]; then
++		layout="${detected_keyboard%%:*}"
++		db_set console-setup/layoutcode "$layout"
++		# skip the question without making Debconf loop
++		STATE=$(( $STATE + $STATE - $old_state ))
++	    elif [ "$unsupported_layout" = yes ]; then
+ 		if [ "$STATE" -ge "$old_state" ]; then
+ 		    db_input medium console-setup/dont_ask_layout || true
+ 		    db_go || true
+@@ -1268,8 +1329,22 @@
+ 		STATE=$(($STATE - 1))
+ 	    fi
+ 	    ;;
+-	3)
+-	    if [ "$unsupported_layout" = yes ]; then
++	5)
++	    adjust_layout=false
++	    if [ "$detected_keyboard" ]; then
++		case $detected_keyboard in
++		    *:*)
++			variant="${detected_keyboard#*:}"
++			;;
++		    *)
++			variant=
++			;;
++		esac
++		db_set console-setup/variantcode "$variant"
++		adjust_layout=:
++		# skip the question without making Debconf loop
++		STATE=$(( $STATE + $STATE - $old_state ))
++	    elif [ "$unsupported_layout" = yes ]; then
+ 		db_set console-setup/variantcode "$XKBVARIANT"
+ 		# skip the question without making Debconf loop
+ 		STATE=$(( $STATE + $STATE - $old_state ))
+@@ -1278,6 +1353,12 @@
+                     "variant\*${layout}" "$default_variant"
+ 	    then
+ 		variant="$RET"
++		adjust_layout=:
++		STATE=$(($STATE + 1))
++	    else
++		STATE=$(($STATE - 1))
++	    fi
++	    if $adjust_layout; then
+ 		case "$layout" in
+ 		    cs)
+ 			case "$variant" in
+@@ -1323,12 +1404,9 @@
+ 		else
+ 		    db_set console-setup/variantcode ",$variant"
+ 		fi
+-		STATE=$(($STATE + 1))
+-	    else
+-		STATE=$(($STATE - 1))
+ 	    fi
+ 	    ;;
+-	4)
++	6)
+ 	    if [ "$unsupported_layout" = yes ]; then
+ 		db_set console-setup/optionscode "$XKBOPTIONS"
+ 		# skip the questions without making Debconf loop
+@@ -1559,7 +1637,7 @@
+ 		db_set console-setup/optionscode "$options"
+ 	    fi
+ 	    ;;		    
+-	5)
++	7)
+ 	    if [ "$package" = console-setup-mini ]; then
+ 		if [ "$STATE" -ge "$old_state" ]; then
+ 		    STATE=$(($STATE + 1))
+@@ -1584,7 +1662,7 @@
+ 		charmap=$RET
+ 	    fi
+ 	    ;;
+-	6)
++	8)
+ 	    if [ "$default_codeset" ]; then
+ 		db_default console-setup/codeset "$default_codeset"
+ 	    fi
+@@ -1596,7 +1674,7 @@
+ 		STATE=$(($STATE - 1))
+ 	    fi
+ 	    ;;
+-	7)
++	9)
+ 	    fontfaces=`available_fontfaces`
+ 	    # add commas
+ 	    choices=`echo "$fontfaces" | sed -e 's/$/,/g'`
+@@ -1677,7 +1755,7 @@
+ 	    db_get console-setup/fontface
+ 	    fontface=$RET
+ 	    ;;
+-	8)
++	10)
+ 	    fontsizes=`available_fontsizes`
+ 	    # add commas
+ 	    choices=`echo "$fontsizes" | sed -e 's/$/,/g' `
+@@ -1699,7 +1777,7 @@
+ 	    fontsize=$RET
+ 	    db_set console-setup/fontsize "$fontsize"
+ 	    ;;
+-	9)
++	11)
+ 	    db_input medium console-setup/ttys || true
+ 	    if db_go; then
+ 		STATE=$(($STATE + 1))
+--- console-setup.orig/debian/console-setup.templates	2006-11-13 16:54:38.000000000 +0000
++++ console-setup/debian/console-setup.templates	2007-04-01 16:43:46.000000000 +0100
+@@ -152,6 +152,26 @@
+  in Unicode mode, regardless of what you choose here, you can always use
+  also the Alt+period combination as a Compose key.
+ 
++Template: console-setup/ask_detect
++Type: boolean
++Default: true
++_Description: Detect keyboard layout?
++ You can try to have your keyboard layout detected by pressing a series of
++ keys. If you do not want to do this, you will be able to select your
++ keyboard layout from a list.
++
++Template: console-setup/detect
++Type: detect-keyboard
++Choices: ${FILENAME}
++_Description: Detecting your keyboard layout
++
++Template: console-setup/detected
++Type: note
++_Description: Keyboard layout detection complete
++ Based on the keys you pressed, your keyboard layout appears to be
++ "${LAYOUT}". If this is not correct, you can go back and select your layout
++ from the full list instead.
++
+ Template: console-setup/modelcode
+ Type: string
+ Default: this default value is completely ignored
+--- console-setup.orig/debian/control	2006-10-23 12:21:33.000000000 +0100
++++ console-setup/debian/control	2007-02-23 15:58:04.000000000 +0000
+@@ -3,7 +3,7 @@
+ Priority: optional
+ Maintainer: Console utilities maintainers <pkg-kbd-devel@lists.alioth.debian.org>
+ Uploaders: Anton Zinoviev <zinoviev@debian.org>
+-Build-Depends-Indep: debhelper (>= 5), perl, libxml-parser-perl, xkb-data (>= 0.9)
++Build-Depends-Indep: debhelper (>= 5), perl, libxml-parser-perl, xkb-data (>= 0.9), keymapper (>= 0.5.3-7)
+ Build-Depends: debhelper (>= 5), perl, po-debconf, libxml-parser-perl
+ Standards-Version: 3.7.2
+ 
+--- console-setup.orig/debian/rules	2006-10-19 21:23:54.000000000 +0100
++++ console-setup/debian/rules	2007-02-23 15:48:19.000000000 +0000
+@@ -155,7 +155,7 @@
+ 		usr/share/console-setup-mini
+ 	dh_install -pconsole-setup-macintoshold-ekmap Keyboard/macintosh_old.ekmap.gz \
+ 		usr/share/console-setup-mini
+-	dh_install -pconsole-setup-pc-ekmap Keyboard/pc105.ekmap.gz \
++	dh_install -pconsole-setup-pc-ekmap Keyboard/pc105.ekmap.gz Keyboard/pc105.tree \
+ 		usr/share/console-setup-mini
+ 	dh_install -pconsole-setup-sun4-ekmap Keyboard/sun4.ekmap.gz \
+ 		usr/share/console-setup-mini

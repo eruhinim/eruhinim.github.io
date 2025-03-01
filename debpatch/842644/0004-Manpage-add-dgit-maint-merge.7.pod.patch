@@ -1,0 +1,385 @@
+From fdef83c4e1651315bda2fd86781cac136d148156 Mon Sep 17 00:00:00 2001
+From: Sean Whitton <spwhitton@spwhitton.name>
+Date: Tue, 18 Oct 2016 17:23:11 -0700
+Subject: [PATCH 4/4] Manpage: add dgit-maint-merge.7.pod
+
+Signed-off-by: Sean Whitton <spwhitton@spwhitton.name>
+---
+ dgit-maint-merge.7.pod | 365 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 365 insertions(+)
+ create mode 100644 dgit-maint-merge.7.pod
+
+diff --git a/dgit-maint-merge.7.pod b/dgit-maint-merge.7.pod
+new file mode 100644
+index 0000000..d9dcb51
+--- /dev/null
++++ b/dgit-maint-merge.7.pod
+@@ -0,0 +1,365 @@
++=head1 NAME
++
++dgit - tutorial for package maintainers, using a workflow centered around git-merge(1)
++
++=head1 INTRODUCTION
++
++This document describes elements of a workflow for maintaining a
++non-native Debian package using B<dgit>.  The workflow makes the
++following opinionated assumptions:
++
++=over 4
++
++=item
++
++Git histories should be the non-linear histories produced by
++git-merge(1), preserving all information about divergent development
++that was later brought together.
++
++If you prefer linear histories, see dgit-maint-rebase(7).
++
++=item
++
++Maintaining convenient and powerful git workflows takes priority over
++the usefulness of the raw Debian source package.  The Debian archive
++is thought of as an output format.
++
++For example, we don't spend time curating a series of quilt patches.
++However, the information such a series would contain is readily
++available from B<dgit-repos>.
++
++=item
++
++It is more important to have the Debian package's git history be a
++descendent of upstream's git history than to use exactly the orig.tar
++that upstream makes available for download.
++
++=back
++
++=head1 GIT CONFIGURATION
++
++Add the following to your ~/.gitconfig to teach git-archive(1) how to
++compress orig tarballs:
++
++=over 4
++
++    [tar "tar.xz"]
++    	command = xz -c
++    [tar "tar.gz"]
++    	command = gzip -c
++
++=back
++
++=head1 INITIAL DEBIANISATION
++
++=head2 When upstream tags releases in git
++
++Suppose that the latest stable upstream release is 1.2.2, and this has
++been tagged '1.2.2' by upstream.
++
++=over 4
++
++    % git clone -oupstream https://some.upstream/foo.git
++    % cd foo
++    % git verify-tag 1.2.2
++    % git reset --hard 1.2.2
++    % git branch --unset-upstream
++
++=back
++
++The final command detachs your master branch from the upstream remote,
++so that git doesn't try to push anything there, or merge unreleased
++upstream commits.  If you want to maintain a copy of your packaging
++branch on B<alioth.debian.org> in addition to B<dgit-repos>, you can
++do something like this:
++
++=over 4
++
++    % git remote add -f origin git.debian.org:/git/collab-maint/foo.git
++    % git push --follow-tags -u origin master
++
++=back
++
++Now go ahead and Debianise your package.  Just make commits on the
++master branch, adding things in the I<debian/> directory.  If you need
++to patch the upstream source, just make commits that change files
++outside of the I<debian/> directory.  It is best to separate commits
++that touch I<debian/> from commits that touch upstream source, so that
++the latter can be cherry-picked by upstream.
++
++Note that there is no need to maintain a separate 'upstream' branch,
++unless you also happen to be involved in upstream development.  We
++work with upstream tags rather than any branches, except when
++forwarding patches (see FORWARDING PATCHES UPSTREAM, below).
++
++Finally, you need an orig tarball.  Generate one with git-archive(1):
++
++=over 4
++
++    % git archive -o ../foo_1.2.2.orig.tar.xz 1.2.2
++
++=back
++
++If you are using the version 1.0 source package format, replace 'xz'
++with 'gz'.
++
++This tarball is ephemeral and easily regenerated, so we don't commit
++it anywhere (e.g. with tools like pristine-tar(1)).
++
++=head2 When upstream releases only tarballs
++
++We need a virtual upstream branch with virtual release tags.
++gbp-import-orig(1) can manage this for us.  To begin
++
++=over 4
++
++    % mkdir foo
++    % cd foo
++    % git init
++
++=back
++
++Now create I<debian/gbp.conf>:
++
++=over 4
++
++    [DEFAULT]
++    upstream-branch = upsteram
++    debian-branch = master
++    upstream-tag = %(version)s
++
++    sign-tags = True
++    pristine-tar = False
++    pristine-tar-commit = False
++
++=back
++
++Then we can import the upstream version:
++
++=over 4
++
++    % git add debian/gbp.conf && git commit -m "create gbp.conf"
++    % gbp import-orig ../foo_1.2.2.orig.tar.xz
++
++=back
++
++You are now ready to proceed as above, making commits to both the
++upstream source and the I<debian/> directory.
++
++If you want to maintain a copy of your repository on
++B<alioth.debian.org>, you should push both the origin and the upstream
++branches:
++
++=over 4
++
++    % git remote add -f origin git.debian.org:/git/collab-maint/foo.git
++    % git push --follow-tags -u origin master upstream
++
++=back
++
++=head1 SOURCE PACKAGE CONFIGURATION
++
++=head2 debian/source/options
++
++We set some source package options such that dgit can transparently
++handle the "dropping" and "refreshing" of changes to the upstream
++source:
++
++=over 4
++
++    single-debian-patch
++    auto-commit
++
++=back
++
++You don't need to create this file if you are using the version 1.0
++source package format.
++
++=head2 Sample text for README.source
++
++It is a good idea to explain how a user can obtain a break down of the
++changes to the upstream source:
++
++=over 4
++
++The Debian packaging of foo is maintained using dgit.  For the sake of
++an efficient workflow, Debian modifications to the upstream source are
++squashed into a single patch, rather than a series of quilt patches.
++To obtain a patch queue for package version 1.2.3-1:
++
++=over 4
++
++    # apt-get install dgit
++    % dgit clone foo
++    % cd foo
++    % git log --oneline 1.2.3..debian/1.2.3-1 -- . ':!debian'
++
++=back
++
++See dgit(1), dgit(7) and dgit-maint-merge(7) for more information.
++
++=back
++
++=head1 BUILDING AND UPLOADING
++
++Use B<dgit build>, B<dgit sbuild>, B<dgit build-source>, and B<dgit
++push> as detailed in dgit(1).  If any command fails, dgit will provide
++a carefully-worded error message explaining what you should do.  If
++it's not clear, file a bug against dgit.  Remember to pass I<--new>
++for the first upload.
++
++As an alternative to B<dgit build> and friends, you can use a tool
++like gitpkg(1).  This works because like dgit, gitpkg(1) enforces that
++HEAD has exactly the contents of the source package.  gitpkg(1) is
++highly configurable, and one dgit user reports using it to produce and
++test multiple source packages, from different branches corresponding
++to each of the current Debian suites.
++
++If you want to skip dgit's checks while iterating on a problem with
++the package build (for example, you don't want to commit your changes
++to git), you can just run dpkg-buildpackage(1) or debuild(1) instead.
++
++=head1 NEW UPSTREAM RELEASES
++
++=head2 When upstream tags releases in git
++
++It's a good idea to preview the merge of the new upstream release.
++First, just check for any new or deleted files that may need
++accounting for in your copyright file:
++
++=over 4
++
++    % git remote update
++    % git diff --stat master..1.2.3 -- . ':!debian'
++
++=back
++
++You can then review the full merge diff:
++
++=over 4
++
++    % git merge-tree `git merge-base master 1.2.3` master 1.2.3 | $PAGER
++
++=back
++
++Once you're satisfied with what will be merged, update your package:
++
++=over 4
++
++    % git archive ../foo_1.2.3.orig.tar.xz 1.2.3
++    % git merge 1.2.3
++    % dch -v1.2.3-1 New upstream release.
++    % git add debian/changelog && git commit -m changelog
++
++=back
++
++and you are ready to try a build.
++
++Again, if you are using the version 1.0 source package format, replace
++'xz' with 'gz'.
++
++=head2 When upstream releases only tarballs
++
++Either
++
++=over 4
++
++    % gbp import-orig ../foo_1.2.2.orig.tar.xz
++
++=back
++
++or if you have a working watch file
++
++=over 4
++
++    % gbp import-orig --uscan
++
++=back
++
++=head1 HANDLING DFSG-NON-FREE MATERIAL
++
++=head2 When upstream tags releases in git
++
++We create a DFSG-clean tag to merge to master:
++
++=over 4
++
++    % git checkout -b pre-dfsg 1.2.3
++    % git rm evil.bin
++    % git commit -m "upstream version 1.2.3 DFSG-cleaned"
++    % git tag -s 1.2.3+dfsg
++    % git checkout master
++    % git branch -D pre-dfsg
++
++=back
++
++Before merging the new 1.2.3+dfsg tag to master, you should first
++determine whether it would be legally dangerous for the non-free
++material to be publicly accessible in the git history on
++B<dgit-repos>.  If it would be, pass B<--squash> to git-merge(1).
++
++=head2 When upstream releases only tarballs
++
++The easiest way to handle this is to add a B<Files-Excluded> field to
++I<debian/copyright>, and a B<uversionmangle> setting in
++I<debian/watch>.  See uscan(1).  Alternatively, see the I<--filter>
++option detailed in gbp-import-orig(1).
++
++=head1 FORWARDING PATCHES UPSTREAM
++
++The basic steps are:
++
++=over 4
++
++=item 1.
++
++Create a new branch based off upstream's master branch.
++
++=item 2.
++
++git-cherry-pick(1) commits from your master branch onto your new
++branch.
++
++=item 3.
++
++Push the branch somewhere and ask upstream to merge it, or use
++git-format-patch(1) or git-request-pull(1).
++
++=back
++
++For example (and it is only an example):
++
++=over 4
++
++    % # fork foo.git on GitHub
++    % git remote add -f fork git@github.com:spwhitton/foo.git
++    % git checkout -b fix-error upstream/master
++    % git config branch.fix-error.pushRemote fork
++    % git cherry-pick master^2
++    % git push
++    % # submit pull request on GitHub
++
++=back
++
++Note that when you merge an upstream release containing your forwarded
++patches, git and dgit will transparently handle "dropping" the patches
++that have been forwarded, "retaining" the ones that haven't.
++
++=head1 INCORPORATING NMUS
++
++=over 4
++
++    % dgit pull
++
++=back
++
++Alternatively, you can apply the NMU diff to your repository.  The
++next push will then require I<--overwrite>.
++
++=head1 SEE ALSO
++
++dgit(1), dgit(7)
++
++=head1 AUTHOR
++
++This tutorial was written and is maintained by Sean Whitton <spwhitton@spwhitton.name>.
+-- 
+2.9.3
+

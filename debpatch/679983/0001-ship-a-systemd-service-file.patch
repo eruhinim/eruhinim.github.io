@@ -1,0 +1,144 @@
+From 097650426201bf23c8e62abed34583bc9c5d24a4 Mon Sep 17 00:00:00 2001
+From: Michael Stapelberg <michael@stapelberg.de>
+Date: Wed, 11 Jul 2012 10:15:57 +0200
+Subject: [PATCH] ship a systemd service file
+
+---
+ debian/atop.cron.d  |    2 +-
+ debian/atop.install |    3 ++-
+ debian/atop.service |   10 ++++++++++
+ debian/postinst     |    8 ++++++++
+ debian/postrm       |   28 ++++++++++++++++++++++++----
+ debian/prerm        |   23 +++++++++++++++++++++++
+ 6 files changed, 68 insertions(+), 6 deletions(-)
+ create mode 100644 debian/atop.service
+ create mode 100644 debian/prerm
+
+diff --git a/debian/atop.cron.d b/debian/atop.cron.d
+index 5106f87..4a376cb 100644
+--- a/debian/atop.cron.d
++++ b/debian/atop.cron.d
+@@ -1,4 +1,4 @@
+ PATH=/sbin:/usr/sbin:/bin:/usr/bin
+ 
+ # start atop daily at midnight
+-0 0 * * * root invoke-rc.d atop _cron
++0 0 * * * root [ -x /bin/systemctl ] && { /bin/systemctl restart atop.service >/dev/null 2>&1; find /var/log/atop -name 'atop_*' -mtime +28 -exec rm {} \; ; } || { invoke-rc.d atop _cron; }
+diff --git a/debian/atop.install b/debian/atop.install
+index 3e349b9..55b084a 100644
+--- a/debian/atop.install
++++ b/debian/atop.install
+@@ -1 +1,2 @@
+-debian/atop.wrapper usr/share/atop
+\ No newline at end of file
++debian/atop.wrapper usr/share/atop
++debian/atop.service lib/systemd/system
+diff --git a/debian/atop.service b/debian/atop.service
+new file mode 100644
+index 0000000..13fea17
+--- /dev/null
++++ b/debian/atop.service
+@@ -0,0 +1,10 @@
++[Unit]
++Description=advanced interactive monitor
++After=syslog.target
++Documentation=man:atop(1)
++
++[Service]
++ExecStart=/bin/sh -c '/usr/bin/atop -a -w /var/log/atop/atop_$(date +%Y%m%d) 600'
++
++[Install]
++WantedBy=multi-user.target
+diff --git a/debian/postinst b/debian/postinst
+index db95cb3..c5ff5d1 100644
+--- a/debian/postinst
++++ b/debian/postinst
+@@ -7,4 +7,12 @@ if dpkg-maintscript-helper supports rm_conffile; then
+ 		/etc/logrotate.d/atop 1.26-2~ -- "$@"
+ fi
+ 
++# systemd: "enable" atop. this is the equivalent of 'update-rc.d atop
++# defaults', which dh_installinit adds to this file. We don't start atop
++# because invoke-rc.d atop start (also added by dh_installinit) will take care
++# of that.
++if [ "$1" = "configure" -a -x /bin/systemctl ]; then
++	/bin/systemctl enable atop.service >/dev/null 2>&1 || true
++fi
++
+ #DEBHELPER#
+diff --git a/debian/postrm b/debian/postrm
+index 74fe19b..8e8ae3c 100644
+--- a/debian/postrm
++++ b/debian/postrm
+@@ -2,6 +2,11 @@
+ 
+ #DEBHELPER#
+ 
++# systemd: reload the daemon to pick up changes in atop.service
++if [ -x /bin/systemctl ]; then
++	/bin/systemctl daemon-reload >/dev/null 2>&1 || true
++fi
++
+ set -e
+ 
+ if dpkg-maintscript-helper supports rm_conffile; then
+@@ -9,8 +14,23 @@ if dpkg-maintscript-helper supports rm_conffile; then
+ 		/etc/logrotate.d/atop 1.26-2~ -- "$@"
+ fi
+ 
+-if [ "$1" = "purge" ]
+-then
+-	rm -rf /var/log/atop
+-fi
++case "$1" in
++	upgrade)
++		# systemd: start the new version of atop
++		if [ -x /bin/systemctl ]; then
++			/bin/systemctl restart atop.service >/dev/null 2>&1 || true
++		fi
++	;;
++
++	purge)
++		rm -rf /var/log/atop
++	;;
++
++	remove|failed-upgrade|abort-install|abort-upgrade|disappear)
++	;;
+ 
++	*)
++		echo "postrm called with unknown argument \`$1'" >&2
++		exit 1
++	;;
++esac
+diff --git a/debian/prerm b/debian/prerm
+new file mode 100644
+index 0000000..496b15c
+--- /dev/null
++++ b/debian/prerm
+@@ -0,0 +1,23 @@
++#!/bin/sh
++
++set -e
++
++case "$1" in
++	remove|upgrade|deconfigure)
++		# systemd: On uninstall (not upgrade), disable and stop atop
++		if [ -x /bin/systemctl ]; then
++			/bin/systemctl --no-reload disable atop.service >/dev/null 2>&1 || true
++			/bin/systemctl stop atop.service >/dev/null 2>&1 || true
++		fi
++	;;
++
++	failed-upgrade)
++	;;
++
++	*)
++		echo "prerm called with unknown argument \`$1'" >&2
++		exit 1
++	;;
++esac
++
++#DEBHELPER#
+-- 
+1.7.10
+

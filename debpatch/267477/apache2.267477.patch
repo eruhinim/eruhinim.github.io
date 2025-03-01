@@ -1,0 +1,259 @@
+diff -urN apache2-2.0.55-orig/debian/apache2-common.postinst apache2-2.0.55/debian/apache2-common.postinst
+--- apache2-2.0.55-orig/debian/apache2-common.postinst	2005-10-26 17:21:55.000000000 +0200
++++ apache2-2.0.55/debian/apache2-common.postinst	2005-10-26 17:54:12.000000000 +0200
+@@ -17,14 +17,14 @@
+ 	NO_PORT_80=`$NETSTAT -lnt | awk '{print $4}' | grep ':80$'` || true
+ 	if [ -n "$NO_AF_INET" -o -n "$NO_PORT_80" ]; then
+ 		echo "NO_START=1" >> /etc/default/apache2
+-		echo "Listen 80" >> /etc/apache2/ports.conf
++		cp /usr/share/apache2/ports.conf.template /etc/apache2/ports.conf
+ 		if [ -n "$NO_AF_INET" ]; then
+ 			echo "netstat is unable to query the state of your listening TCP ports.  This could be because you don't have TCP support in your kernel (unlikely), or because you do not have the /proc filesystem mounted.  To be on the safe side, we're assuming that port 80 is in use."
+ 		fi
+ 		echo "Setting Apache2 not to start, as something else appears to be using Port 80. To allow apache2 to start, set NO_START to 0 in /etc/default/apache2. Apache2 has been set to listen on port 80 by default, so please edit /etc/apache2/ports.conf as desired. Note that the Port directive no longer works."
+ 	else
+ 		echo "NO_START=0" >> /etc/default/apache2
+-		echo "Listen 80" >> /etc/apache2/ports.conf
++		cp /usr/share/apache2/ports.conf.template /etc/apache2/ports.conf
+ 		echo "Setting Apache2 to Listen on port 80. If this is not desired, please edit /etc/apache2/ports.conf as desired. Note that the Port directive no longer works."
+ 	fi
+ fi
+diff -urN apache2-2.0.55-orig/debian/config-mods/ssl.conf apache2-2.0.55/debian/config-mods/ssl.conf
+--- apache2-2.0.55-orig/debian/config-mods/ssl.conf	2005-10-26 17:21:55.000000000 +0200
++++ apache2-2.0.55/debian/config-mods/ssl.conf	2005-10-26 19:31:37.000000000 +0200
+@@ -41,7 +41,17 @@
+ #   Configure the path to the mutual exclusion semaphore the
+ #   SSL engine uses internally for inter-process synchronization. 
+ SSLMutex  file:/var/run/apache2/ssl_mutex
+-SSLCipherSuite ALL:!ADH:!EXPORT56:RC4+RSA:+HIGH:+MEDIUM:+LOW:+SSLv2:+EXP:+eNULL
++
++#   Use this instead if you want to allow cipher upgrades via SGC facility.
++#   In this case you also have to use something like 
++#        SSLRequire %{SSL_CIPHER_USEKEYSIZE} >= 128
++#   see http://httpd.apache.org/docs/2.0/ssl/ssl_howto.html.en#upgradeenc
++#SSLCipherSuite ALL:!ADH:!EXPORT56:RC4+RSA:+HIGH:+MEDIUM:+LOW:+SSLv2:+EXP:+eNULL
++SSLCipherSuite HIGH:MEDIUM
++
++# use this to disable SSLv2 
++#SSLProtocol all -SSLv2
++SSLProtocol all
+ 
+ #   SSL Protocol Adjustments:
+ #   The safe and default but still SSL/TLS standard compliant shutdown
+diff -urN apache2-2.0.55-orig/debian/default-site apache2-2.0.55/debian/default-site
+--- apache2-2.0.55-orig/debian/default-site	2005-10-26 17:21:55.000000000 +0200
++++ apache2-2.0.55/debian/default-site	2005-10-26 19:31:44.000000000 +0200
+@@ -1,46 +1,25 @@
+-NameVirtualHost *
+-<VirtualHost *>
+-	ServerAdmin webmaster@localhost
+-	
+-	DocumentRoot /var/www
+-	<Directory />
+-		Options FollowSymLinks
+-		AllowOverride None
+-	</Directory>
+-	<Directory /var/www/>
+-		Options Indexes FollowSymLinks MultiViews
+-		AllowOverride None
+-		Order allow,deny
+-		allow from all
+-		# Uncomment this directive is you want to see apache2's
+-		# default start page (in /apache2-default) when you go to /
+-                #RedirectMatch ^/$ /apache2-default/
+-	</Directory>
+-
+-	ScriptAlias /cgi-bin/ /usr/lib/cgi-bin/
+-	<Directory "/usr/lib/cgi-bin">
+-		AllowOverride None
+-		Options ExecCGI -MultiViews +SymLinksIfOwnerMatch
+-		Order allow,deny
+-		Allow from all
+-	</Directory>
+-
+-	ErrorLog /var/log/apache2/error.log
+-
+-	# Possible values include: debug, info, notice, warn, error, crit,
+-	# alert, emerg.
+-	LogLevel warn
+-
+-	CustomLog /var/log/apache2/access.log combined
+-	ServerSignature On
+-
+-    Alias /doc/ "/usr/share/doc/"
+-    <Directory "/usr/share/doc/">
+-        Options Indexes MultiViews FollowSymLinks
+-        AllowOverride None
+-        Order deny,allow
+-        Deny from all
+-        Allow from 127.0.0.0/255.0.0.0 ::1/128
+-    </Directory>
++NameVirtualHost *:80
++<VirtualHost *:80>
++
++	Include /etc/apache2/sites-available/default.common
+ 
+ </VirtualHost>
++
++
++<IfModule mod_ssl.c>
++    <VirtualHost *:443>
++	SSLEngine on
++	SSLCertificateFile /etc/apache2/ssl/apache.pem
++	# If the key is not combined with the certificate, use this directive to
++	# point at the key file.
++	#SSLCertificateKeyFile /etc/apache2/ssl/server_key_name_httpsd.key
++
++	# Use if you want to allow cipher upgrades via SGC
++	# (see ssl.conf)
++	#SSLRequire %{SSL_CIPHER_USEKEYSIZE} >= 128
++
++        Include /etc/apache2/sites-available/default.common 
++
++    </VirtualHost>
++</IfModule>
++
+diff -urN apache2-2.0.55-orig/debian/default-site.common apache2-2.0.55/debian/default-site.common
+--- apache2-2.0.55-orig/debian/default-site.common	1970-01-01 01:00:00.000000000 +0100
++++ apache2-2.0.55/debian/default-site.common	2005-10-26 17:48:02.000000000 +0200
+@@ -0,0 +1,42 @@
++ServerAdmin webmaster@localhost
++
++DocumentRoot /var/www
++<Directory />
++	Options FollowSymLinks
++	AllowOverride None
++</Directory>
++<Directory /var/www/>
++	Options Indexes FollowSymLinks MultiViews
++	AllowOverride None
++	Order allow,deny
++	allow from all
++	# Uncomment this directive is you want to see apache2's
++	# default start page (in /apache2-default) when you go to /
++        #RedirectMatch ^/$ /apache2-default/
++</Directory>
++
++ScriptAlias /cgi-bin/ /usr/lib/cgi-bin/
++<Directory "/usr/lib/cgi-bin">
++	AllowOverride None
++	Options ExecCGI -MultiViews +SymLinksIfOwnerMatch
++	Order allow,deny
++	Allow from all
++</Directory>
++
++ErrorLog /var/log/apache2/error.log
++
++# Possible values include: debug, info, notice, warn, error, crit,
++# alert, emerg.
++LogLevel warn
++
++CustomLog /var/log/apache2/access.log combined
++ServerSignature On
++
++Alias /doc/ "/usr/share/doc/"
++<Directory "/usr/share/doc/">
++Options Indexes MultiViews FollowSymLinks
++AllowOverride None
++Order deny,allow
++Deny from all
++Allow from 127.0.0.0/255.0.0.0 ::1/128
++</Directory>
+diff -urN apache2-2.0.55-orig/debian/ports.conf.template apache2-2.0.55/debian/ports.conf.template
+--- apache2-2.0.55-orig/debian/ports.conf.template	1970-01-01 01:00:00.000000000 +0100
++++ apache2-2.0.55/debian/ports.conf.template	2005-10-26 17:58:43.000000000 +0200
+@@ -0,0 +1,8 @@
++# If you change the default ports you will also have to change the VirtualHost
++# directives in /etc/apache2/sites-available/default
++
++Listen 80
++
++<IfModule mod_ssl.c>
++	Listen 443
++</IfModule>
+diff -urN apache2-2.0.55-orig/debian/README.Debian apache2-2.0.55/debian/README.Debian
+--- apache2-2.0.55-orig/debian/README.Debian	2005-10-26 17:21:55.000000000 +0200
++++ apache2-2.0.55/debian/README.Debian	2005-10-26 19:34:09.000000000 +0200
+@@ -8,6 +8,9 @@
+ 
+ -       See /etc/apache2/README for more information on the config layout.
+ 
++-	See /usr/share/doc/apache2/README.ssl for information on how to
++	enable SSL.
++
+ -       We don't ship INSTALL or README.platforms, since they don't go into 
+         any useful details post build.
+ 
+diff -urN apache2-2.0.55-orig/debian/README.etc apache2-2.0.55/debian/README.etc
+--- apache2-2.0.55-orig/debian/README.etc	2005-10-26 17:21:55.000000000 +0200
++++ apache2-2.0.55/debian/README.etc	2005-10-26 19:33:12.000000000 +0200
+@@ -61,7 +61,9 @@
+ 	Like mods-available/, except it contains configuration
+ 	directives for different virtual hosts that might be used with
+ 	apache2.  Note that the hostname doesn't have to correspond
+-	exactly with the filename.  'default' is the default host.
++	exactly with the filename.  'default' is the default host
++	includes default.common for port 80 and port 443 (if mod_ssl
++	is enabled).
+ 
+ sites-enabled/
+ 
+diff -urN apache2-2.0.55-orig/debian/README.ssl apache2-2.0.55/debian/README.ssl
+--- apache2-2.0.55-orig/debian/README.ssl	1970-01-01 01:00:00.000000000 +0100
++++ apache2-2.0.55/debian/README.ssl	2005-10-26 19:16:15.000000000 +0200
+@@ -0,0 +1,28 @@
++To enable ssl:
++
++0. Have apache working without SSL ;-)
++
++1. a) Adjust SSLCertificateFile and SSLCertificateKeyFile in your
++      /etc/apache2/sites-enabled/default to point to your
++      certificate and key file.
++
++   or
++   
++   b) Create a self-signed certificate:
++
++	/usr/sbin/apache2-ssl-certificate
++
++2. Enable mod_ssl:
++
++	a2enmod ssl
++
++3. If you have upgraded from a previous version, you may have to add the
++   "Listen 443" directive to your /etc/apache2/ports.conf by hand. You
++   can do this by copying the default file:
++
++	cp /usr/share/apache2/ports.conf.template /etc/apache2/ports.conf
++
++4. Restart apache:
++
++	/etc/init.d/apache2 restart
++
+diff -urN apache2-2.0.55-orig/debian/rules apache2-2.0.55/debian/rules
+--- apache2-2.0.55-orig/debian/rules	2005-10-26 17:21:55.000000000 +0200
++++ apache2-2.0.55/debian/rules	2005-10-26 17:58:08.000000000 +0200
+@@ -233,6 +233,7 @@
+ 	rm -r debian/apache2-common/var/www/apache2-default/manual
+ 	cp debian/robots.txt debian/apache2-common/var/www/apache2-default/
+ 	cp -R debian/config-sites/* debian/apache2-common/usr/share/apache2/config
++	cp debian/ports.conf.template debian/apache2-common/usr/share/apache2
+ 	cp -R debian/config-mods/*.load debian/apache2-common/etc/apache2/mods-available
+ 	cp -R debian/config-mods/*.conf debian/apache2-common/etc/apache2/mods-available
+ 	cp -R debian/config/* debian/apache2-common/etc/apache2/
+@@ -252,6 +253,7 @@
+ 		do install -m755 $$i debian/apache2-common/usr/sbin; \
+ 	done
+ 	cp debian/default-site debian/apache2-common/etc/apache2/sites-available/default
++	cp debian/default-site.common debian/apache2-common/etc/apache2/sites-available/default.common
+ 	cp debian/apache2-doc.conf debian/apache2-doc/etc/apache2/conf.d/apache2-doc
+ 	cp debian/ssleay.cnf debian/apache2-common/usr/share/apache2/ssleay.cnf
+ 	$(INSTALL) debian/ssl-certificate debian/apache2-common/usr/sbin/apache2-ssl-certificate 
+@@ -277,6 +279,7 @@
+ 	cp debian/logrotate debian/apache2-common/etc/logrotate.d/apache2
+ 	cp debian/README.etc debian/apache2-common/etc/apache2/README
+ 	cp debian/README.etc debian/apache2-common/usr/share/doc/apache2/README.etc
++	cp debian/README.ssl debian/apache2-common/usr/share/doc/apache2/README.ssl
+ 	touch $@
+ 
+ binary-indep: build install

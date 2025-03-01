@@ -1,0 +1,146 @@
+Description: Adds support for sfdisk 2.26 and higher
+ The usage of sfdisk has changed in util-linux >= 2.26, so this patch makes it
+ possible to use both old and newer versions.
+ .
+ This patch has been made adapting this patch from Fedora:
+ http://pkgs.fedoraproject.org/cgit/cloud-utils.git/plain/0002-Support-new-sfdisk-version-2.26.patch
+ which was attached to the below bug:
+ https://bugzilla.redhat.com/show_bug.cgi?id=1197894
+Author: Thomas Goirand <zigo@debian.org>
+Bug-Debian: https://bugs.debian.org/783826
+Forwarded: no
+Last-Update: 2015-05-04
+
+--- cloud-utils-0.27.orig/bin/growpart
++++ cloud-utils-0.27/bin/growpart
+@@ -132,8 +132,46 @@ bad_Usage() {
+ 	exit 2
+ }
+ 
++is_sfdisk_higher_than_226 () {
++	local SFDISK_VERSION MAJOR MID
++	# Do convenient caching of the result
++	# to avoid forking of sfdisk
++	if [ -n "${SFDISK_HIGHER_THAN_226}" ] ; then
++		return ${SFDISK_HIGHER_THAN_226}
++	fi
++	SFDISK_VERSION=`sfdisk -v | awk '{print $4}'`
++	# Using dpkg --compare-version if dpkg is present
++	if [ -x /usr/bin/dpkg ] ; then
++		dpkg --compare-versions ${SFDISK_VERSION} ge 2.26
++		return $?
++	# Compatibility layer for non-debian platforms
++	else
++		MAJOR=`echo $SFDISK_VERSION | cut -d. -f1`
++		MID=`echo $SFDISK_VERSION | cut -d. -f2`
++		if [ ${MAJOR} -ge 2 ] ; then
++			if [ ${MAJOR} -gt 2 ] ; then
++				SFDISK_HIGHER_THAN_226=0
++			else
++				if [ ${MID} -ge 26 ] ; then
++					SFDISK_HIGHER_THAN_226=0
++				else
++					SFDISK_HIGHER_THAN_226=1
++				fi
++			fi
++		else
++			SFDISK_HIGHER_THAN_226=1
++		fi
++	fi
++	return ${SFDISK_HIGHER_THAN_226}
++}
++
+ mbr_restore() {
+-	sfdisk --no-reread "${DISK}" ${MBR_CHS} -I "${MBR_BACKUP}"
++	if is_sfdisk_higher_than_226 ; then
++		dd if="${MBR_BACKUP}-${DISK#/dev/}-0x00000000.bak" of="${DISK}" bs=1 \
++			conv=notrunc
++	else
++		sfdisk --no-reread "${DISK}" ${MBR_CHS} -I "${MBR_BACKUP}"
++	fi
+ }
+ 
+ sfdisk_worked_but_blkrrpart_failed() {
+@@ -148,7 +186,7 @@ sfdisk_worked_but_blkrrpart_failed() {
+ 
+ mbr_resize() {
+ 	RESTORE_HUMAN="${TEMP_D}/recovery"
+-	MBR_BACKUP="${TEMP_D}/orig.save"
++	MBR_BACKUP="${TEMP_D}/backup"
+ 
+ 	local change_out=${TEMP_D}/change.out
+ 	local dump_out=${TEMP_D}/dump.out
+@@ -160,24 +198,39 @@ mbr_resize() {
+ 	local _devc cyl _w1 heads _w2 sectors _w3 tot dpart
+ 	local pt_start pt_size pt_end max_end new_size change_info
+ 
+-	# --show-pt-geometry outputs something like
+-	#     /dev/sda: 164352 cylinders, 4 heads, 32 sectors/track
+-	rqe sfd_geom sfdisk "${DISK}" --show-pt-geometry >"${tmp}" &&
+-		read _devc cyl _w1 heads _w2 sectors _w3 <"${tmp}" &&
+-		MBR_CHS="-C ${cyl} -H ${heads} -S ${sectors}" ||
+-		fail "failed to get CHS from ${DISK}"
+-
+-	tot=$((${cyl}*${heads}*${sectors}))
+-
+-	debug 1 "geometry is ${MBR_CHS}. total size=${tot}"
+-	rqe sfd_dump sfdisk ${MBR_CHS} --unit=S --dump "${DISK}" \
+-		>"${dump_out}" ||
+-		fail "failed to dump sfdisk info for ${DISK}"
+-
+-	{
+-		echo "## sfdisk ${MBR_CHS} --unit=S --dump ${DISK}"
+-		cat "${dump_out}"
+-	}  >"${RESTORE_HUMAN}"
++	if is_sfdisk_higher_than_226 ; then
++		tot=$(sfdisk --list "${DISK}" | awk '{ print $(NF-1) ; exit }') ||
++			fail "failed to get total number of sectors from ${DISK}"
++		debug 1 "total number of sectors of ${DISK} is ${tot}"
++
++		rqe sfd_dump sfdisk --dump "${DISK}" \
++			>"${dump_out}" ||
++			fail "failed to dump sfdisk info for ${DISK}"
++		{
++			echo "## sfdisk --dump ${DISK}"
++			cat "${dump_out}"
++		}  >"${RESTORE_HUMAN}"
++	else
++		# --show-pt-geometry outputs something like
++		#     /dev/sda: 164352 cylinders, 4 heads, 32 sectors/track
++		rqe sfd_geom sfdisk "${DISK}" --show-pt-geometry >"${tmp}" &&
++			read _devc cyl _w1 heads _w2 sectors _w3 <"${tmp}" &&
++			MBR_CHS="-C ${cyl} -H ${heads} -S ${sectors}" ||
++			fail "failed to get CHS from ${DISK}"
++
++		tot=$((${cyl}*${heads}*${sectors}))
++		debug 1 "geometry is ${MBR_CHS}. total size=${tot}"
++
++		rqe sfd_dump sfdisk ${MBR_CHS} --unit=S --dump "${DISK}" \
++			>"${dump_out}" ||
++			fail "failed to dump sfdisk info for ${DISK}"
++		{
++			echo "## sfdisk ${MBR_CHS} --unit=S --dump ${DISK}"
++			cat "${dump_out}"
++		}  >"${RESTORE_HUMAN}"
++	fi
++
++
+ 	[ $? -eq 0 ] || fail "failed to save sfdisk -d output"
+ 
+ 	debugcat 1 "${RESTORE_HUMAN}"
+@@ -237,8 +290,13 @@ mbr_resize() {
+ 		exit 0
+ 	fi
+ 
+-	LANG=C sfdisk --no-reread "${DISK}" ${MBR_CHS} --force \
+-		-O "${MBR_BACKUP}" <"${new_out}" >"${change_out}" 2>&1
++	if is_sfdisk_higher_than_226 ; then
++		LANG=C sfdisk --no-reread "${DISK}" --force \
++			-O "${MBR_BACKUP}" <"${new_out}" >"${change_out}" 2>&1
++	else
++		LANG=C sfdisk --no-reread "${DISK}" ${MBR_CHS} --force \
++			-O "${MBR_BACKUP}" <"${new_out}" >"${change_out}" 2>&1
++	fi
+ 	ret=$?
+ 	[ $ret -eq 0 ] || RESTORE_FUNC="mbr_restore"
+ 

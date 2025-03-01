@@ -1,0 +1,99 @@
+diff -Nru apt-0.7.14/apt-pkg/acquire-item.cc apt-0.7.14+/apt-pkg/acquire-item.cc
+--- apt-0.7.14/apt-pkg/acquire-item.cc	2008-05-28 15:22:13.000000000 +0200
++++ apt-0.7.14+/apt-pkg/acquire-item.cc	2008-12-01 00:09:21.000000000 +0100
+@@ -32,6 +32,7 @@
+ #include <string>
+ #include <sstream>
+ #include <stdio.h>
++#include <ctime>
+ 									/*}}}*/
+ 
+ using namespace std;
+@@ -1127,6 +1128,13 @@
+       Transformed = "";
+    }
+ 
++   if (_config->FindB("Acquire::Check-Valid-Until", true)) {
++      if (time(NULL) > MetaIndexParser->GetValidUntil()) {
++          _error->Warning(string("Release file expired, ignoring "+RealURI).c_str());
++         return false;
++      }
++   }
++
+    if (_config->FindB("Debug::pkgAcquire::Auth", false)) 
+    {
+       std::cerr << "Got Codename: " << MetaIndexParser->GetDist() << std::endl;
+diff -Nru apt-0.7.14/apt-pkg/indexrecords.cc apt-0.7.14+/apt-pkg/indexrecords.cc
+--- apt-0.7.14/apt-pkg/indexrecords.cc	2008-05-28 15:22:14.000000000 +0200
++++ apt-0.7.14+/apt-pkg/indexrecords.cc	2008-12-01 00:06:36.000000000 +0100
+@@ -9,6 +9,7 @@
+ #include <apt-pkg/strutl.h>
+ #include <apti18n.h>
+ #include <sys/stat.h>
++#include <clocale>
+ 
+ string indexRecords::GetDist() const
+ {
+@@ -26,6 +27,11 @@
+    return this->ExpectedDist;
+ }
+ 
++time_t indexRecords::GetValidUntil() const
++{
++   return this->ValidUntil;
++}
++
+ const indexRecords::checkSum *indexRecords::Lookup(const string MetaKey)
+ {
+    return Entries[MetaKey];
+@@ -83,6 +89,22 @@
+    }  
+ 
+    string Strdate = Section.FindS("Date"); // FIXME: verify this somehow?
++
++   string StrValidUntil = Section.FindS("Valid-Until");
++   ValidUntil = 1230764400;
++         // default 2009-01-01 should only be applied to debian.org?
++   
++   if (! StrValidUntil.empty()) {
++      struct tm atm;
++      string lctimesaved = setlocale(LC_TIME,NULL);
++      setlocale(LC_TIME,"C");
++      if (strptime(StrValidUntil.c_str(),"%a, %d %b %Y %H:%M:%S %Z",&atm) == NULL) {
++          ErrorText = _(("Invalid Valid-Until entry in Release file " + Filename).c_str());
++          return false;
++      }
++      setlocale(LC_TIME,lctimesaved.c_str());
++      ValidUntil = mktime(&atm);
++   }
+    return true;
+ }
+ 
+diff -Nru apt-0.7.14/apt-pkg/indexrecords.h apt-0.7.14+/apt-pkg/indexrecords.h
+--- apt-0.7.14/apt-pkg/indexrecords.h	2008-05-28 15:22:14.000000000 +0200
++++ apt-0.7.14+/apt-pkg/indexrecords.h	2008-09-25 18:17:13.000000000 +0200
+@@ -12,6 +12,7 @@
+ 
+ #include <map>
+ #include <vector>
++#include <ctime>
+ 
+ class indexRecords
+ {
+@@ -25,6 +26,8 @@
+    string Dist;
+    string Suite;
+    string ExpectedDist;
++   time_t ValidUntil;
++
+    std::map<string,checkSum *> Entries;
+ 
+    public:
+@@ -38,6 +41,7 @@
+ 
+    virtual bool Load(string Filename);
+    string GetDist() const;
++   time_t GetValidUntil() const;
+    virtual bool CheckDist(const string MaybeDist) const;
+    string GetExpectedDist() const;
+    virtual ~indexRecords(){};

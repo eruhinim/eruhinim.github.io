@@ -1,0 +1,278 @@
+--- cytadela-1.0.1/src/videoplayer.cpp	2010-06-29 21:28:59.000000000 +0200
++++ cytadela-1.1.0/src/videoplayer.cpp	2013-01-14 22:50:35.000000000 +0100
+@@ -1,7 +1,7 @@
+ /* libSDL and libVLC sample code
+  * Copyright © 2008 Sam Hocevar <sam@zoy.org>
+ 
+- Copyright (c) 2010 Tomasz Kazmierczak
++ Copyright (c) 2010, 2013 Tomasz Kazmierczak
+  Copyright (c) 2010 Tomasz Wisniewski
+  Modified the original code by Sam Hocevar in order to adapt to the game and
+  relicensed from Do What The Fuck You Want To Public License to GNU GPLv3
+@@ -26,6 +26,7 @@
+ #include <stdint.h>
+ #include <math.h>
+ #include <stdlib.h>
++#include <assert.h>
+ 
+ #include <SDL/SDL.h>
+ #include <SDL/SDL_mutex.h>
+@@ -37,55 +38,56 @@
+ 
+ struct ctx
+ {
+-    SDL_Surface *surf;
+-    SDL_mutex *mutex;
++	SDL_Surface *surf;
++	SDL_mutex *mutex;
+ };
+ 
+-static void lock(struct ctx *ctx, void **pp_ret)
++static void *lock(void *data, void **p_pixels)
+ {
+-    SDL_LockMutex(ctx->mutex);
+-    SDL_LockSurface(ctx->surf);
+-    *pp_ret = ctx->surf->pixels;
++	struct ctx *ctx = (struct ctx *)data;
++
++	SDL_LockMutex(ctx->mutex);
++	SDL_LockSurface(ctx->surf);
++	*p_pixels = ctx->surf->pixels;
++	return NULL; /* picture identifier, not needed here */
+ }
+ 
+-static void unlock(struct ctx *ctx)
++static void unlock(void *data, void *id, void *const *p_pixels)
+ {
+-    SDL_UnlockSurface(ctx->surf);
+-    SDL_UnlockMutex(ctx->mutex);
++	struct ctx *ctx = (struct ctx *)data;
++
++	SDL_UnlockSurface(ctx->surf);
++	SDL_UnlockMutex(ctx->mutex);
++
++	assert(id == NULL); /* picture identifier, not needed here */
++}
++
++static void display(void *data, void *id)
++{
++	/* VLC wants to display the video */
++	(void) data;
++	assert(id == NULL);
+ }
+ 
+ bool play(const char *filename, SDL_Surface *screen, bool offOnFinish, bool audio)
+ {
+-    char clock[64], cunlock[64], cdata[64];
+-    char width[32], height[32], pitch[32];
+-	char chroma[8];
+-    libvlc_instance_t *libvlc;
+-    libvlc_media_t *m;
+-    libvlc_media_player_t *mp;
+-    char const *vlc_argv[] =
+-    {
+-        "-q",
+-        //"-vvvvv",
+-        //"--plugin-path", VLC_TREE "/modules",
+-        "--ignore-config", /* Don't use VLC's config files */
+-        audio ? "" : "--noaudio",
+-        "--vout", "vmem",
+-        "--vmem-width", width,
+-        "--vmem-height", height,
+-        "--vmem-pitch", pitch,
+-        "--vmem-chroma", chroma,
+-        "--vmem-lock", clock,
+-        "--vmem-unlock", cunlock,
+-        "--vmem-data", cdata,
+-        "--no-video-title-show"
+-    };
+-    int vlc_argc = sizeof(vlc_argv) / sizeof(*vlc_argv);
+-
+-    SDL_Surface *empty;
+-    SDL_Event event;
+-    SDL_Rect rect;
++	libvlc_instance_t *libvlc;
++	libvlc_media_t *m;
++	libvlc_media_player_t *mp;
++	char const *vlc_argv[] =
++	{
++	    "--ignore-config", /* Don't use VLC's config files */
++	    audio ? "" : "--noaudio",
++	    "--no-xlib", /* tell VLC to not use Xlib */
++	    "--no-video-title-show"
++	};
++	int vlc_argc = sizeof(vlc_argv) / sizeof(*vlc_argv);
++
++	SDL_Surface *empty;
++	SDL_Event event;
++	SDL_Rect rect;
+ 
+-    struct ctx ctx;
++	struct ctx ctx;
+ 
+ 	empty = SDL_CreateRGBSurface(SDL_SWSURFACE, VIDEOWIDTH, VIDEOHEIGHT,
+ 	                             screen->format->BitsPerPixel, 0, 0, 0, 0);
+@@ -108,96 +110,89 @@
+ 		aMask = 0xFF000000;
+ #endif
+ 	ctx.surf = SDL_CreateRGBSurface(SDL_SWSURFACE, VIDEOWIDTH, VIDEOHEIGHT,
+-									screen->format->BitsPerPixel, rMask, gMask, bMask, aMask);
+-
+-    ctx.mutex = SDL_CreateMutex();
++	                                screen->format->BitsPerPixel, rMask, gMask, bMask, aMask);
+ 
+-    /*
+-     *  Initialise libVLC
+-     */
+-    sprintf(clock, "%lld", (long long int)(intptr_t)lock);
+-    sprintf(cunlock, "%lld", (long long int)(intptr_t)unlock);
+-    sprintf(cdata, "%lld", (long long int)(intptr_t)&ctx);
+-    sprintf(width, "%i", VIDEOWIDTH);
+-    sprintf(height, "%i", VIDEOHEIGHT);
+-	sprintf(pitch, "%i", VIDEOWIDTH*screen->format->BytesPerPixel);
+-	sprintf(chroma, "RV%i", screen->format->BitsPerPixel);
+-
+-    libvlc = libvlc_new(vlc_argc, vlc_argv);
+-    m = libvlc_media_new_location(libvlc, filename);
++	ctx.mutex = SDL_CreateMutex();
+ 
++	/*
++	 *  Initialise libVLC
++	 */
++	libvlc = libvlc_new(vlc_argc, vlc_argv);
++	m = libvlc_media_new_path(libvlc, filename);
+ 	mp = libvlc_media_player_new_from_media(m);
+-    libvlc_media_release(m);
++	libvlc_media_release(m);
+ 
++	libvlc_video_set_callbacks(mp, lock, unlock, display, &ctx);
++	char format[40];
++	sprintf(format, "RV%d", screen->format->BitsPerPixel);
++	libvlc_video_set_format(mp, format, VIDEOWIDTH, VIDEOHEIGHT, VIDEOWIDTH*(screen->format->BitsPerPixel / 8));
+ 	libvlc_media_player_play(mp);
+ 
+ 	/*
+-     *  Main loop
+-     */
++	 *  Main loop
++	 */
+ 	rect.w = 0;
+-    rect.h = 0;
+-    rect.x = (int)((screen->w - VIDEOWIDTH) / 2);
+-    rect.y = (int)((screen->h - VIDEOHEIGHT) / 2);
+-
+-	bool done = false;
+-    while(not done)
+-    {
+-        int action = 0;
+-
+-        /* Keys: enter, escape (quit) */
+-        while( SDL_PollEvent( &event ) ) 
+-        {
+-            switch(event.type)
+-            {
+-            case SDL_QUIT:
+-                done = true;
+-                break;
+-            case SDL_KEYDOWN:
+-                action = event.key.keysym.sym;
+-                break;
+-            }
+-        }
+-
+-        switch(action)
+-        {
+-        case SDLK_ESCAPE:
+-        case SDLK_RETURN:
++	rect.h = 0;
++	rect.x = (int)((screen->w - VIDEOWIDTH) / 2);
++	rect.y = (int)((screen->h - VIDEOHEIGHT) / 2);
++
++	while(true) {
++		int action = 0;
++		bool stop = false;
++		/* Keys: enter, escape (quit) */
++		while(SDL_PollEvent(&event))  {
++			switch(event.type) {
++			case SDL_QUIT:
++				stop = true;
++				break;
++			case SDL_KEYDOWN:
++				action = event.key.keysym.sym;
++				break;
++			}
++		}
++		if(stop)
++			break;
++
++		switch(action) {
++		case SDLK_ESCAPE:
++		case SDLK_RETURN:
+ 		case SDLK_KP_ENTER:
+-            done = true;
+-            break;
+-        case ' ':
++			stop = true;
++			break;
++		case ' ':
+ 			libvlc_media_player_pause(mp);
+ 			break;
+-        }
++		}
++		if(stop)
++			break;
+ 
+ 
+-        /* Blitting the surface does not prevent it from being locked and
+-         * written to by another thread, so we use this additional mutex. */
+-        SDL_LockMutex(ctx.mutex);
+-        SDL_BlitSurface(ctx.surf, NULL, screen, &rect);
+-        SDL_UnlockMutex(ctx.mutex);
++		/* Blitting the surface does not prevent it from being locked and
++		 * written to by another thread, so we use this additional mutex. */
++		SDL_LockMutex(ctx.mutex);
++		SDL_BlitSurface(ctx.surf, NULL, screen, &rect);
++		SDL_UnlockMutex(ctx.mutex);
+ 
+-        SDL_Flip(screen);
+-        SDL_Delay(10);
++		SDL_Flip(screen);
++		SDL_Delay(10);
+ 
+-        SDL_BlitSurface(empty, NULL, screen, &rect);
++		SDL_BlitSurface(empty, NULL, screen, &rect);
+ 
+ 		libvlc_state_t state = libvlc_media_player_get_state(mp);
+-		if(state == libvlc_Ended)
+-			done = offOnFinish;
+-    }
+-
+-    /*
+-     * Stop stream and clean up libVLC
+-     */
+-    libvlc_media_player_stop(mp);
+-
+-    libvlc_media_player_release(mp);
+-    libvlc_release(libvlc);
+-
+-    SDL_DestroyMutex(ctx.mutex);
+-    SDL_FreeSurface(ctx.surf);
+-    SDL_FreeSurface(empty);
++		if(state == libvlc_Ended and offOnFinish)
++			break;
++	}
++
++	/*
++	 * Stop stream and clean up libVLC
++	 */
++	libvlc_media_player_stop(mp);
++	libvlc_media_player_release(mp);
++	libvlc_release(libvlc);
++
++	SDL_DestroyMutex(ctx.mutex);
++	SDL_FreeSurface(ctx.surf);
++	SDL_FreeSurface(empty);
+ 
+-    return true;
++	return true;
+ }

@@ -1,0 +1,271 @@
+>From cc4221bf161ae46738eb71778fedd36e3271ea4c Mon Sep 17 00:00:00 2001
+From: Saleem Abdulrasool <compnerd@compnerd.org>
+Date: Mon, 12 Oct 2015 20:21:08 +0000
+Subject: [PATCH] Support Debug Info path remapping
+
+Add support for the `-fdebug-prefix-map=` option as in GCC.  The syntax is
+`-fdebug-prefix-map=OLD=NEW`.  When compiling files from a path beginning with
+OLD, change the debug info to indicate the path as start with NEW.  This is
+particularly helpful if you are preprocessing in one path and compiling in
+another (e.g. for a build cluster with distcc).
+
+Note that the linearity of the implementation is not as terrible as it may seem.
+This is normally done once per file with an expectation that the map will be
+small (1-2) entries, making this roughly linear in the number of input paths.
+
+Addresses PR24619.
+
+git-svn-id: https://llvm.org/svn/llvm-project/cfe/trunk@250094 91177308-0d34-0410-b5e6-96231b3b80d8
+---
+ include/clang/Basic/DiagnosticDriverKinds.td |  2 ++
+ include/clang/Driver/Options.td              |  3 +++
+ include/clang/Frontend/CodeGenOptions.h      |  3 +++
+ lib/CodeGen/CGDebugInfo.cpp                  | 28 ++++++++++++++++-------
+ lib/CodeGen/CGDebugInfo.h                    |  5 ++++
+ lib/Driver/Tools.cpp                         |  9 ++++++++
+ lib/Frontend/CompilerInvocation.cpp          |  3 +++
+ test/CodeGen/debug-prefix-map.c              | 34 ++++++++++++++++++++++++++++
+ test/Driver/debug-prefix-map.c               |  9 ++++++++
+ 9 files changed, 88 insertions(+), 8 deletions(-)
+ create mode 100644 test/CodeGen/debug-prefix-map.c
+ create mode 100644 test/Driver/debug-prefix-map.c
+
+diff --git a/include/clang/Basic/DiagnosticDriverKinds.td b/include/clang/Basic/DiagnosticDriverKinds.td
+index c54d58a..beaefde 100644
+--- a/include/clang/Basic/DiagnosticDriverKinds.td
++++ b/include/clang/Basic/DiagnosticDriverKinds.td
+@@ -81,6 +81,8 @@ def err_drv_invalid_mfloat_abi : Error<
+   "invalid float ABI '%0'">;
+ def err_drv_invalid_libcxx_deployment : Error<
+   "invalid deployment target for -stdlib=libc++ (requires %0 or later)">;
++def err_drv_invalid_argument_to_fdebug_prefix_map : Error<
++  "invalid argument '%0' to -fdebug-prefix-map">;
+ def err_drv_malformed_sanitizer_blacklist : Error<
+   "malformed sanitizer blacklist: '%0'">;
+ 
+diff --git a/include/clang/Driver/Options.td b/include/clang/Driver/Options.td
+index 4434548..4ad77f4 100644
+--- a/include/clang/Driver/Options.td
++++ b/include/clang/Driver/Options.td
+@@ -1109,6 +1109,9 @@ def fdebug_types_section: Flag <["-"], "fdebug-types-section">, Group<f_Group>,
+   Flags<[CC1Option]>, HelpText<"Place debug types in their own section (ELF Only)">;
+ def fno_debug_types_section: Flag<["-"], "fno-debug-types-section">, Group<f_Group>,
+   Flags<[CC1Option]>;
++def fdebug_prefix_map_EQ
++  : Joined<["-"], "fdebug-prefix-map=">, Group<f_Group>, Flags<[CC1Option]>,
++    HelpText<"remap file source paths in debug info">;
+ def g_Flag : Flag<["-"], "g">, Group<g_Group>,
+   HelpText<"Generate source-level debug information">;
+ def gline_tables_only : Flag<["-"], "gline-tables-only">, Group<g_Group>,
+diff --git a/include/clang/Frontend/CodeGenOptions.h b/include/clang/Frontend/CodeGenOptions.h
+index 53246bc..c359ed6 100644
+--- a/include/clang/Frontend/CodeGenOptions.h
++++ b/include/clang/Frontend/CodeGenOptions.h
+@@ -16,6 +16,7 @@
+ 
+ #include "clang/Basic/Sanitizers.h"
+ #include "llvm/Support/Regex.h"
++#include <map>
+ #include <memory>
+ #include <string>
+ #include <vector>
+@@ -120,6 +121,8 @@ class CodeGenOptions : public CodeGenOptionsBase {
+   /// non-empty.
+   std::string DwarfDebugFlags;
+ 
++  std::map<std::string, std::string> DebugPrefixMap;
++
+   /// The ABI to use for passing floating point arguments.
+   std::string FloatABI;
+ 
+diff --git a/lib/CodeGen/CGDebugInfo.cpp b/lib/CodeGen/CGDebugInfo.cpp
+index 792b1b0..0991249 100644
+--- a/lib/CodeGen/CGDebugInfo.cpp
++++ b/lib/CodeGen/CGDebugInfo.cpp
+@@ -47,6 +47,8 @@ CGDebugInfo::CGDebugInfo(CodeGenModule &CGM)
+     : CGM(CGM), DebugKind(CGM.getCodeGenOpts().getDebugInfo()),
+       DebugTypeExtRefs(CGM.getCodeGenOpts().DebugTypeExtRefs),
+       DBuilder(CGM.getModule()) {
++  for (const auto &KV : CGM.getCodeGenOpts().DebugPrefixMap)
++    DebugPrefixMap[KV.first] = KV.second;
+   CreateCompileUnit();
+ }
+ 
+@@ -255,14 +257,16 @@ StringRef CGDebugInfo::getClassName(const RecordDecl *RD) {
+ llvm::DIFile *CGDebugInfo::getOrCreateFile(SourceLocation Loc) {
+   if (!Loc.isValid())
+     // If Location is not valid then use main input file.
+-    return DBuilder.createFile(TheCU->getFilename(), TheCU->getDirectory());
++    return DBuilder.createFile(remapDIPath(TheCU->getFilename()),
++                               remapDIPath(TheCU->getDirectory()));
+ 
+   SourceManager &SM = CGM.getContext().getSourceManager();
+   PresumedLoc PLoc = SM.getPresumedLoc(Loc);
+ 
+   if (PLoc.isInvalid() || StringRef(PLoc.getFilename()).empty())
+     // If the location is not valid then use main input file.
+-    return DBuilder.createFile(TheCU->getFilename(), TheCU->getDirectory());
++    return DBuilder.createFile(remapDIPath(TheCU->getFilename()),
++                               remapDIPath(TheCU->getDirectory()));
+ 
+   // Cache the results.
+   const char *fname = PLoc.getFilename();
+@@ -274,15 +278,23 @@ llvm::DIFile *CGDebugInfo::getOrCreateFile(SourceLocation Loc) {
+       return cast<llvm::DIFile>(V);
+   }
+ 
+-  llvm::DIFile *F =
+-      DBuilder.createFile(PLoc.getFilename(), getCurrentDirname());
++  llvm::DIFile *F = DBuilder.createFile(remapDIPath(PLoc.getFilename()),
++                                        remapDIPath(getCurrentDirname()));
+ 
+   DIFileCache[fname].reset(F);
+   return F;
+ }
+ 
+ llvm::DIFile *CGDebugInfo::getOrCreateMainFile() {
+-  return DBuilder.createFile(TheCU->getFilename(), TheCU->getDirectory());
++  return DBuilder.createFile(remapDIPath(TheCU->getFilename()),
++                             remapDIPath(TheCU->getDirectory()));
++}
++
++std::string CGDebugInfo::remapDIPath(StringRef Path) const {
++  for (const auto &Entry : DebugPrefixMap)
++    if (Path.startswith(Entry.first))
++      return (Twine(Entry.second) + Path.substr(Entry.first.size())).str();
++  return Path.str();
+ }
+ 
+ unsigned CGDebugInfo::getLineNumber(SourceLocation Loc) {
+@@ -338,7 +350,7 @@ void CGDebugInfo::CreateCompileUnit() {
+   // file to determine the real absolute path for the file.
+   std::string MainFileDir;
+   if (const FileEntry *MainFile = SM.getFileEntryForID(SM.getMainFileID())) {
+-    MainFileDir = MainFile->getDir()->getName();
++    MainFileDir = remapDIPath(MainFile->getDir()->getName());
+     if (MainFileDir != ".") {
+       llvm::SmallString<1024> MainFileDirSS(MainFileDir);
+       llvm::sys::path::append(MainFileDirSS, MainFileName);
+@@ -371,8 +383,8 @@ void CGDebugInfo::CreateCompileUnit() {
+   // Create new compile unit.
+   // FIXME - Eliminate TheCU.
+   TheCU = DBuilder.createCompileUnit(
+-      LangTag, MainFileName, getCurrentDirname(), Producer, LO.Optimize,
+-      CGM.getCodeGenOpts().DwarfDebugFlags, RuntimeVers,
++      LangTag, remapDIPath(MainFileName), remapDIPath(getCurrentDirname()),
++      Producer, LO.Optimize, CGM.getCodeGenOpts().DwarfDebugFlags, RuntimeVers,
+       CGM.getCodeGenOpts().SplitDwarfFile,
+       DebugKind <= CodeGenOptions::DebugLineTablesOnly
+           ? llvm::DIBuilder::LineTablesOnly
+diff --git a/lib/CodeGen/CGDebugInfo.h b/lib/CodeGen/CGDebugInfo.h
+index 7ae547b..5d86f2f 100644
+--- a/lib/CodeGen/CGDebugInfo.h
++++ b/lib/CodeGen/CGDebugInfo.h
+@@ -83,6 +83,8 @@ class CGDebugInfo {
+   /// Cache of previously constructed Types.
+   llvm::DenseMap<const void *, llvm::TrackingMDRef> TypeCache;
+ 
++  llvm::SmallDenseMap<llvm::StringRef, llvm::StringRef> DebugPrefixMap;
++
+   struct ObjCInterfaceCacheEntry {
+     const ObjCInterfaceType *Type;
+     llvm::DIType *Decl;
+@@ -404,6 +406,9 @@ class CGDebugInfo {
+   /// Create new compile unit.
+   void CreateCompileUnit();
+ 
++  /// Remap a given path with the current debug prefix map
++  std::string remapDIPath(StringRef) const;
++
+   /// Get the file debug info descriptor for the input location.
+   llvm::DIFile *getOrCreateFile(SourceLocation Loc);
+ 
+diff --git a/lib/Driver/Tools.cpp b/lib/Driver/Tools.cpp
+index a54a60f..999231a 100644
+--- a/lib/Driver/Tools.cpp
++++ b/lib/Driver/Tools.cpp
+@@ -4125,6 +4125,15 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
+   // Add in -fdebug-compilation-dir if necessary.
+   addDebugCompDirArg(Args, CmdArgs);
+ 
++  for (const Arg *A : Args.filtered(options::OPT_fdebug_prefix_map_EQ)) {
++    StringRef Map = A->getValue();
++    if (Map.find('=') == StringRef::npos)
++      D.Diag(diag::err_drv_invalid_argument_to_fdebug_prefix_map) << Map;
++    else
++      CmdArgs.push_back(Args.MakeArgString("-fdebug-prefix-map=" + Map));
++    A->claim();
++  }
++
+   if (Arg *A = Args.getLastArg(options::OPT_ftemplate_depth_,
+                                options::OPT_ftemplate_depth_EQ)) {
+     CmdArgs.push_back("-ftemplate-depth");
+diff --git a/lib/Frontend/CompilerInvocation.cpp b/lib/Frontend/CompilerInvocation.cpp
+index 7667c10..4220487 100644
+--- a/lib/Frontend/CompilerInvocation.cpp
++++ b/lib/Frontend/CompilerInvocation.cpp
+@@ -406,6 +406,9 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
+   Opts.SplitDwarfFile = Args.getLastArgValue(OPT_split_dwarf_file);
+   Opts.DebugTypeExtRefs = Args.hasArg(OPT_dwarf_ext_refs);
+ 
++  for (const auto &Arg : Args.getAllArgValues(OPT_fdebug_prefix_map_EQ))
++    Opts.DebugPrefixMap.insert(StringRef(Arg).split('='));
++
+   if (const Arg *A =
+           Args.getLastArg(OPT_emit_llvm_uselists, OPT_no_emit_llvm_uselists))
+     Opts.EmitLLVMUseLists = A->getOption().getID() == OPT_emit_llvm_uselists;
+diff --git a/test/CodeGen/debug-prefix-map.c b/test/CodeGen/debug-prefix-map.c
+new file mode 100644
+index 0000000..9498f30
+--- /dev/null
++++ b/test/CodeGen/debug-prefix-map.c
+@@ -0,0 +1,34 @@
++// RUN: %clang_cc1 -debug-info-kind=standalone -fdebug-prefix-map=%p=/var/empty %s -emit-llvm -o - | FileCheck %s -check-prefix CHECK-NO-MAIN-FILE-NAME
++// RUN: %clang_cc1 -debug-info-kind=standalone -fdebug-prefix-map=%p=/var=empty %s -emit-llvm -o - | FileCheck %s -check-prefix CHECK-EVIL
++// RUN: %clang_cc1 -debug-info-kind=standalone -fdebug-prefix-map=%p=/var/empty %s -emit-llvm -o - -main-file-name debug-prefix-map.c | FileCheck %s
++// RUN: %clang_cc1 -debug-info-kind=standalone -fdebug-prefix-map=%p=/var/empty %s -emit-llvm -o - -fdebug-compilation-dir %p | FileCheck %s -check-prefix CHECK-COMPILATION-DIR
++
++#include "Inputs/stdio.h"
++
++int main(int argc, char **argv) {
++  (void)argc;
++  (void)argv;
++  return 0;
++}
++
++void test_rewrite_includes() {
++  __builtin_va_list argp;
++  vprintf("string", argp);
++}
++
++// CHECK-NO-MAIN-FILE-NAME: !DIFile(filename: "/var/empty/<stdin>"
++// CHECK-NO-MAIN-FILE-NAME: !DIFile(filename: "/var/empty/{{.*}}"
++// CHECK-NO-MAIN-FILE-NAME: !DIFile(filename: "/var/empty/Inputs/stdio.h"
++// CHECK-NO-MAIN-FILE-NAME-NOT: !DIFile(filename:
++
++// CHECK-EVIL: !DIFile(filename: "/var=empty/{{.*}}"
++// CHECK-EVIL: !DIFile(filename: "/var=empty/Inputs/stdio.h"
++// CHECK-EVIL-NOT: !DIFile(filename:
++
++// CHECK: !DIFile(filename: "/var/empty/{{.*}}"
++// CHECK: !DIFile(filename: "/var/empty/Inputs/stdio.h"
++// CHECK-NOT: !DIFile(filename:
++
++// CHECK-COMPILATION-DIR: !DIFile(filename: "/var/empty/{{.*}}", directory: "/var/empty")
++// CHECK-COMPILATION-DIR: !DIFile(filename: "/var/empty/Inputs/stdio.h", directory: "/var/empty")
++// CHECK-COMPILATION-DIR-NOT: !DIFile(filename:
+diff --git a/test/Driver/debug-prefix-map.c b/test/Driver/debug-prefix-map.c
+new file mode 100644
+index 0000000..b4f3859
+--- /dev/null
++++ b/test/Driver/debug-prefix-map.c
+@@ -0,0 +1,9 @@
++// RUN: %clang -### -fdebug-prefix-map=old %s 2>&1 | FileCheck %s -check-prefix CHECK-INVALID
++// RUN: %clang -### -fdebug-prefix-map=old=new %s 2>&1 | FileCheck %s -check-prefix CHECK-SIMPLE
++// RUN: %clang -### -fdebug-prefix-map=old=n=ew %s 2>&1 | FileCheck %s -check-prefix CHECK-COMPLEX
++// RUN: %clang -### -fdebug-prefix-map=old= %s 2>&1 | FileCheck %s -check-prefix CHECK-EMPTY
++
++// CHECK-INVALID: error: invalid argument 'old' to -fdebug-prefix-map
++// CHECK-SIMPLE: fdebug-prefix-map=old=new
++// CHECK-COMPLEX: fdebug-prefix-map=old=n=ew
++// CHECK-EMPTY: fdebug-prefix-map=old=

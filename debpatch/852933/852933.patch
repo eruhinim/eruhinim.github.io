@@ -1,0 +1,75 @@
+diff --git a/checkrestart b/checkrestart
+index b1ce36b..967395a 100755
+--- a/checkrestart
++++ b/checkrestart
+@@ -155,9 +155,11 @@ def main():
+         sys.exit(0)
+ 
+     programs = {}
++    programsNotFoundInPackages = {}
+     for process in toRestart:
+         programs.setdefault(process.program, [])
+         programs[process.program].append(process)
++        programsNotFoundInPackages.setdefault(process.program, False)
+ 
+     if len(programs) == 1:
+         print("(%d distinct program)" % len(programs))
+@@ -172,6 +174,7 @@ def main():
+ 
+     packages = {}
+     diverted = None
++    nonPackagedName = 'fake-package-for-non-packaged-processes'
+ 
+     dpkgQuery = ["dpkg-query", "--search"] + list(programs.keys())
+     if verbose:
+@@ -207,6 +210,7 @@ def main():
+             packages.setdefault(packagename,Package(packagename))
+             try:
+                  packages[packagename].processes.extend(programs[program])
++                 programsNotFoundInPackages.pop(program)
+                  if verbose:
+                     print("[DEBUG] Found package %s for program %s" % (packagename, program))
+             except KeyError:
+@@ -216,6 +220,12 @@ def main():
+     # Close the pipe
+     dpkgProc.stdout.close()
+ 
++    for program in programsNotFoundInPackages:
++        packages.setdefault(nonPackagedName,Package(nonPackagedName))
++        packages[nonPackagedName].processes.extend(programs[program])
++        if verbose:
++            print("[DEBUG] Program not found in any package, attaching to non-packaged fake package: %s" % (program))
++
+     # Remove the ignored packages from the list of packages
+     if ignorelist:
+         for i in ignorelist:
+@@ -235,6 +245,9 @@ def main():
+         sys.exit(0)
+ 
+     for package in list(packages.values()):
++        if (package.name == nonPackagedName):
++            continue
++
+         dpkgQuery = ["dpkg-query", "--listfiles", package.name]
+         if verbose:
+             print("[DEBUG] Running: %s" % ' '.join(dpkgQuery))
+@@ -312,7 +325,11 @@ def main():
+     # TODO - consider putting this in a --verbose option
+     print("These processes (%d) do not seem to have an associated init script to restart them:" %len(nonrestartable))
+     for package in nonrestartable:
++        if (package.name == nonPackagedName):
++            print('Non-packaged processes:')
++        else:
+         print(package.name + ':')
++
+         for process in package.processes:
+             print("\t%s\t%s" % (process.pid,process.program))
+ 
+@@ -394,6 +411,7 @@ def procfilescheck(blacklist = None, excludepidlist = None):
+             process = processes.setdefault(pid,Process(int(pid)))
+             # print pid + ': ' + ', '.join(foundfiles)
+             process.files = foundfiles
++            process.found = False
+ 
+     toRestart = [process for process in list(processes.values()) if process.needsRestart(blacklist)]
+     return toRestart

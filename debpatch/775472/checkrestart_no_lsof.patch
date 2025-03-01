@@ -1,0 +1,177 @@
+From 4657964213ac113d62a269841bd0786e2891f38f Mon Sep 17 00:00:00 2001
+From: Ian Bissett <ian.bissett@bigcommerce.com>
+Date: Fri, 16 Jan 2015 15:17:22 +1100
+Subject: [PATCH] Replace lsof check and add option to ignore specific process
+ ids
+
+---
+ checkrestart   | 78 +++++++++++++++++++++++++++++-----------------------------
+ checkrestart.1 | 16 +++++++++++-
+ debian/control |  1 -
+ 3 files changed, 54 insertions(+), 41 deletions(-)
+
+diff --git a/checkrestart b/checkrestart
+index 7f27b03..92a4a9f 100755
+--- a/checkrestart
++++ b/checkrestart
+@@ -60,7 +60,7 @@ def find_cmd(cmd):
+      return 1
+ 
+ def usage():
+-    sys.stderr.write('usage: checkrestart [-vhpa] [-bblacklist] [-iignore]\n')
++    sys.stderr.write('usage: checkrestart [-vhpa] [-bblacklist] [-iignore] [-eexcludepid]\n')
+ 
+ def main():
+     global lc_all_c_env, file_query_check
+@@ -72,7 +72,8 @@ def main():
+     file_query_check = {}
+     blacklistFiles = []
+     blacklist = []
+-    ignorelist = [ 'screen' ]
++    ignorelist = [ 'util-linux', 'screen' ]
++    excludepidlist = []
+ 
+ # Process options
+     try:
+@@ -102,6 +103,8 @@ def main():
+         elif o in ("-a", "--all"):
+             allFiles = True
+             onlyPackageFiles = False
++        elif o in ("-e", "--excludepid"):
++            excludepidlist.append(a)
+         elif o in ("-b", "--blacklist"):
+             blacklistFiles.append(a)
+             onlyPackageFiles = False
+@@ -120,18 +123,7 @@ def main():
+ 
+ # Start checking
+ 
+-    if find_cmd('lsof') == 1:
+-        sys.stderr.write('ERROR: This program needs lsof in order to run.\n')
+-        sys.stderr.write('Please install the lsof package in your system.\n')
+-        sys.exit(1)
+-# Check if we have lsof, if not, use psdel
+-#    if find_cmd('lsof'):
+-#         toRestart = lsofcheck()
+-#    else:
+-# TODO - This does not work yet:
+-#        toRestart = psdelcheck()
+-
+-    toRestart = lsofcheck(blacklist = blacklist)
++    toRestart = deletedfilescheck(blacklist = blacklist, excludepidlist = excludepidlist)
+ 
+     print "Found %d processes using old versions of upgraded files" % len(toRestart)
+ 
+@@ -277,33 +269,41 @@ def main():
+         for process in package.processes:
+             print "\t%s\t%s" % (process.pid,process.program)
+ 
+-def lsofcheck(blacklist = None):
++def deletedfilescheck(blacklist = None, excludepidlist = None):
+     processes = {}
+ 
+-    for line in os.popen('lsof +XL -F nf').readlines():
+-        field, data = line[0], line[1:-1]
+-
+-        if field == 'p':
+-            process = processes.setdefault(data,Process(int(data)))
+-        elif field == 'k':
+-            process.links.append(data)
+-        elif field == 'n':
+-            # Remove the previous entry to check if this is something we should use
+-            if data.startswith('/SYSV'):
+-                # If we find SYSV we discard the previous descriptor
+-                last = process.descriptors.pop()
+-            elif data.startswith('/'):
+-                last = process.descriptors.pop()
+-                # Add it to the list of deleted files if the previous descriptor
+-                # was DEL or lsof marks it as deleted
+-                if re.compile("DEL").search(last) or re.compile("deleted").search(data) or re.compile("\(path inode=[0-9]+\)$").search(data):
+-                    process.files.append(data)
+-            else:
+-                # We discard the previous descriptors and drop it
+-                last = process.descriptors.pop()
+-        elif field == 'f':
+-            # Save the descriptor for later comparison
+-            process.descriptors.append(data)
++    # Get a list of running processes
++    pids = [pid for pid in os.listdir('/proc') if pid.isdigit()]
++
++    for pid in pids:
++        if pid in excludepidlist:
++            continue
++        
++        # Get the list of open files for this process from /proc
++        # We can ignore failures over this block as links will
++        # disappear as we run them
++        foundfiles = []
++        try:
++            for fd in os.listdir('/proc/' + pid + '/fd'):
++                if os.path.islink('/proc/' + pid + '/fd/' + fd):
++                    fname = os.readlink('/proc/' + pid + '/fd/' + fd)
++                    if re.compile("\s\(deleted\)$").search(fname):
++                        foundfiles.append(fname)
++        except:
++            continue
++
++        # Get the list of memory mapped files using system pmap
++        for output in os.popen('pmap ' + pid).readlines():
++            data = re.split('\s+', output.strip('\n'), 3)
++            if len(data) == 4:
++                f = data[3]
++                if re.compile("\s\(deleted\)$").search(f):
++                    foundfiles.append(f)
++
++        if len(foundfiles) > 1:
++            process = processes.setdefault(pid,Process(int(pid)))
++            # print pid + ': ' + ', '.join(foundfiles)
++            process.files = foundfiles
+ 
+     toRestart = filter(lambda process: process.needsRestart(blacklist),
+                        processes.values())
+diff --git a/checkrestart.1 b/checkrestart.1
+index b7d1df8..7b69f1b 100644
+--- a/checkrestart.1
++++ b/checkrestart.1
+@@ -6,7 +6,7 @@
+ .SH NAME
+ checkrestart \- check which processes need to be restarted after an upgrade
+ .SH SYNOPSIS
+-.B checkrestart [ -hvpa ] [ -b blacklist_file ] [ -i package_name ]
++.B checkrestart [ -hvpa ] [ -b blacklist_file ] [ -i package_name ] [ -e pid ]
+ .SH DESCRIPTION
+ The
+ .B checkrestart
+@@ -67,6 +67,20 @@ Any files matching the patterns will be ignored.
+ .BI -i\ name, --ignore=name
+ Ignore services that are associated to the package name provided in
+ .I name.
++.TP
++
++.BI -e\ pid, --excludepid=pid
++Exclude processes running with
++.I pid 
++when looking for open files. This can speed up checkrestart on systems with a
++large number of open files
++.TP
++
++.TP
++.BI -e\ pid, --excludepid=pid
++Exclude process with
++.I pid
++when searching for open files
+ 
+ .SH EXIT STATUS
+ 
+diff --git a/debian/control b/debian/control
+index 60ff7b7..862f494 100644
+--- a/debian/control
++++ b/debian/control
+@@ -17,7 +17,6 @@ Depends: curl,
+          python (>= 2.4),
+          whiptail | dialog,
+          ${misc:Depends}
+-Recommends: lsof
+ Suggests: popularity-contest,
+           xdg-utils,
+           zenity

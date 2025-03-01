@@ -1,0 +1,427 @@
+>From f24a1286ae17fc1b2884255089dc3f3553d526e0 Mon Sep 17 00:00:00 2001
+From: josch <j.schauer@email.de>
+Date: Tue, 19 Aug 2014 07:57:03 +0200
+Subject: [PATCH] update restriction formula syntax
+
+ - the restriction list parsing now reflects the changes at
+   https://wiki.debian.org/BuildProfileSpec which were agreed upon
+   in the bootstrap sprint 2014 in Paris
+ - restriction lists are now restriction formulas
+ - restriction formulas are given in disjunctive normal form expression
+        foo <bar baz> <blub>
+ - removal of the prefix/namespace mechanic
+ - since there can be more than one <> block, the regex in parse_string
+   in scripts/Dpkg/Deps.pm is now greedy
+ - properly handle the absence of packages in DEBIAN/control depending
+   on build profiles - Closes: #758191
+ - construct the profiles entry of the Packages-List field by
+   converting the "<bar baz> <blub>" syntax into "bar,baz+blub"
+ - include a compatibility function with the old way to write the
+   Build-Profiles field in binary packages which can be removed once
+   all affected source packages moved to the new syntax
+ - adjusted testcases
+---
+ man/deb-src-control.5         | 17 +++++++++------
+ man/dpkg-buildpackage.1       | 14 ++++++------
+ man/dpkg-checkbuilddeps.1     |  7 +++---
+ scripts/Dpkg/BuildProfiles.pm | 35 ++++++++++++++++++++++++++++--
+ scripts/Dpkg/Deps.pm          | 46 ++++++++++-----------------------------
+ scripts/dpkg-genchanges.pl    | 15 +++++++++++--
+ scripts/dpkg-source.pl        | 19 ++++++++++++++--
+ scripts/t/Dpkg_Deps.t         | 50 +++++++++++++++++++++++++------------------
+ 8 files changed, 123 insertions(+), 80 deletions(-)
+
+diff --git a/man/deb-src-control.5 b/man/deb-src-control.5
+index 407172a..7a17d1a 100644
+--- a/man/deb-src-control.5
++++ b/man/deb-src-control.5
+@@ -187,8 +187,8 @@ of packages separated by vertical bar (or "pipe") symbols, "|". The
+ groups are separated by commas. Commas are to be read as "AND", and pipes
+ as "OR", with pipes binding more tightly. Each package name is
+ optionally followed by a version number specification in parentheses, an
+-architecture specification in square brackets, and a profile specification
+-in angle brackets.
++architecture specification in square brackets, and a restriction formula
++consisting of one or more lists of profile names in angle brackets.
+ 
+ The syntax of the
+ .BR Build\-Conflicts ,
+@@ -198,8 +198,9 @@ and
+ fields is a list of comma-separated package names, where the comma is read
+ as an "AND". Specifying alternative packages using a "pipe" is not supported.
+ Each package name is optionally followed by a version number specification in
+-parentheses, an architecture specification in square brackets, and a profile
+-specification in angle brackets.
++parentheses, an architecture specification in square brackets, and a
++restriction formula consisting of one or more lists of profile names in angle
++brackets.
+ 
+ A version number may start with a ">>", in which case any later version
+ will match, and may specify or omit the Debian packaging revision (separated
+@@ -211,9 +212,11 @@ An architecture specification consists of one or more architecture names,
+ separated by whitespace. Exclamation marks may be prepended to each of the
+ names, meaning "NOT".
+ 
+-A profile specification consists of one or more profile names, prefixed
+-with the "\fBprofile.\fP" namespace, separated by whitespace. Exclamation
+-marks may be prepended to each of the names, meaning "NOT".
++A restriction formula consists of one or more restriction lists, separated by
++whitespace. Each restriction list is enclosed in angle brackets. Items in the
++restriction list are build profile names, separated by whitespace and can be
++prefixed with an exclamation mark, meaning "NOT". A restriction formula
++represents a disjunctive normal form expression.
+ 
+ Note that dependencies on packages in the
+ .B build\-essential
+diff --git a/man/dpkg-buildpackage.1 b/man/dpkg-buildpackage.1
+index b96c25f..631ebdb 100644
+--- a/man/dpkg-buildpackage.1
++++ b/man/dpkg-buildpackage.1
+@@ -150,11 +150,11 @@ of \-a or as a complement to override the default GNU system type
+ of the target Debian architecture.
+ .TP
+ .BR \-P \fIprofile\fP[ , ...]
+-Specify the profile(s) we build, as a comma-separated list, without the
+-"\fBprofile.\fP" namespace prefix. The default behavior is to build for
+-no specific profile. Also adds them (as a space separated list) to the
+-\fBDEB_BUILD_PROFILES\fP environment variable which allows, for example,
+-\fBdebian/rules\fP files to use this information for conditional builds.
++Specify the profile(s) we build, as a comma-separated list. The default
++behavior is to build for no specific profile. Also sets them (as a space
++separated list) as the \fBDEB_BUILD_PROFILES\fP environment variable which
++allows, for example, \fBdebian/rules\fP files to use this information for
++conditional builds.
+ .TP
+ .BR \-j [\fIjobs\fP|\fBauto\fP]
+ Number of jobs allowed to be run simultaneously, number of jobs matching
+@@ -341,8 +341,8 @@ will be ignored.
+ .TP
+ .B DEB_BUILD_PROFILES
+ If set, it will be used as the active build profile(s) for the package
+-being built. It is a space separated list of profile names, without the
+-"\fBprofile.\fP" namespace prefix. Overridden by the \fB\-P\fP option.
++being built. It is a space separated list of profile names. Overridden by
++the \fB\-P\fP option.
+ 
+ .SS Reliance on exported environment flags
+ Even if \fBdpkg\-buildpackage\fP exports some variables, \fBdebian/rules\fP
+diff --git a/man/dpkg-checkbuilddeps.1 b/man/dpkg-checkbuilddeps.1
+index 51cc77e..d37482f 100644
+--- a/man/dpkg-checkbuilddeps.1
++++ b/man/dpkg-checkbuilddeps.1
+@@ -64,8 +64,7 @@ the architecture of the current system.
+ .BR "\-P " \fIprofile\fP[ , ...]
+ Check build dependencies/conflicts assuming that the package described
+ in the control file is to be built for the given build profile(s). The
+-argument is a comma-separated list of profile names, without the
+-"\fBprofile.\fP" namespace prefix.
++argument is a comma-separated list of profile names.
+ .TP
+ .BR \-? ", " \-\-help
+ Show the usage message and exit.
+@@ -77,5 +76,5 @@ Show the version and exit.
+ .TP
+ .B DEB_BUILD_PROFILES
+ If set, it will be used as the active build profile(s) for the package
+-being built. It is a space separated list of profile names, without the
+-"\fBprofile.\fP" namespace prefix. Overridden by the \fB\-P\fP option.
++being built. It is a space separated list of profile names. Overridden by the
++\fB\-P\fP option.
+diff --git a/scripts/Dpkg/BuildProfiles.pm b/scripts/Dpkg/BuildProfiles.pm
+index 98c86d3..4dc43c0 100644
+--- a/scripts/Dpkg/BuildProfiles.pm
++++ b/scripts/Dpkg/BuildProfiles.pm
+@@ -19,10 +19,10 @@ use strict;
+ use warnings;
+ 
+ our $VERSION = '0.01';
+-our @EXPORT_OK = qw(get_build_profiles set_build_profiles);
++our @EXPORT_OK = qw(get_build_profiles set_build_profiles evaluate_restriction_formula);
+ 
++use Dpkg::Util qw(:list);
+ use Exporter qw(import);
+-
+ use Dpkg::BuildEnv;
+ 
+ my $cache_profiles;
+@@ -75,6 +75,37 @@ sub set_build_profiles {
+     Dpkg::BuildEnv::set('DEB_BUILD_PROFILES', join ' ', @profiles);
+ }
+ 
++=item evaluate_restriction_formula(\@formula, \@profiles)
++
++Evaluate whether a restriction formula of the form "<foo bar> <baz>", given as
++a nested array, is true or false, given the array of enabled build profiles.
++
++=cut
++
++sub evaluate_restriction_formula {
++    my ($formula, $profiles) = @_;
++
++    # restriction formulas are in disjunctive normal form:
++    # (foo AND bar) OR (blub AND bla)
++    foreach my $restrlist (@{$formula}) {
++        my $seen_profile = 1;
++        foreach my $restriction (@$restrlist) {
++            my ($neg, $prof) = $restriction =~ m/^(!)?(.*)/;
++            my $found = any { $_ eq $prof } @{$profiles};
++            # if a negative set profile is encountered, stop processing
++            # if a positive unset profile is encountered, stop processing
++            if (not ($found xor defined $neg)) {
++                $seen_profile = 0;
++                last;
++            }
++        }
++        # this conjunction evaluated to true so we don't have to evaluate the
++        # others
++        return 1 if $seen_profile;
++    }
++    return 0;
++}
++
+ =back
+ 
+ =cut
+diff --git a/scripts/Dpkg/Deps.pm b/scripts/Dpkg/Deps.pm
+index fe25def..74fd364 100644
+--- a/scripts/Dpkg/Deps.pm
++++ b/scripts/Dpkg/Deps.pm
+@@ -53,7 +53,7 @@ our $VERSION = '1.04';
+ 
+ use Dpkg::Version;
+ use Dpkg::Arch qw(get_host_arch get_build_arch);
+-use Dpkg::BuildProfiles qw(get_build_profiles);
++use Dpkg::BuildProfiles qw(get_build_profiles evaluate_restriction_formula);
+ use Dpkg::ErrorHandling;
+ use Dpkg::Gettext;
+ 
+@@ -208,15 +208,16 @@ Define the active build profiles. By default no profile is defined.
+ =item reduce_profiles (defaults to 0)
+ 
+ If set to 1, ignore dependencies that do not concern the current build
+-profile. This implicitly strips off the profile restriction list so
++profile. This implicitly strips off the profile restriction formula so
+ that the resulting dependencies are directly applicable to the current
+ profiles.
+ 
+ =item reduce_restrictions (defaults to 0)
+ 
+ If set to 1, ignore dependencies that do not concern the current set of
+-restrictions. This implicitly strips off any restriction list so that the
+-resulting dependencies are directly applicable to the current restriction.
++restrictions. This implicitly strips off any architecture restriction list or
++restriction formula so that the resulting dependencies are directly applicable
++to the current restriction.
+ This currently implies C<reduce_arch> and C<reduce_profiles>, and overrides
+ them if set.
+ 
+@@ -567,7 +568,7 @@ sub parse_string {
+               )?                            # end of optional architecture
+               (?:                           # start of optional restriction
+                 \s* <                       # open bracket for restriction
+-                \s* (.*?)                   # don't parse restrictions now
++                \s* (.*)                    # don't parse restrictions now
+                 \s* >                       # closing bracket
+               )?                            # end of optional restriction
+               \s*$                          # trailing spaces at end
+@@ -585,7 +586,7 @@ sub parse_string {
+ 	$self->{arches} = [ split(/\s+/, $5) ];
+     }
+     if (defined($6)) {
+-	$self->{restrictions} = [ map { lc } split /\s+/, $6 ];
++	$self->{restrictions} = [ map { [ split /\s+/ ] } split />\s+</, $6 ];
+     }
+ }
+ 
+@@ -602,7 +603,9 @@ sub output {
+ 	$res .= ' [' . join(' ', @{$self->{arches}}) . ']';
+     }
+     if (defined($self->{restrictions})) {
+-	$res .= ' <' . join(' ', @{$self->{restrictions}}) . '>';
++        for my $restrlist (@{$self->{restrictions}}) {
++            $res .= ' <' . join(' ', @$restrlist) . '>';
++        }
+     }
+     if (defined($fh)) {
+ 	print { $fh } $res;
+@@ -823,34 +826,7 @@ sub profile_is_concerned {
+ 
+     return 0 if not defined $self->{package}; # Empty dep
+     return 1 if not defined $self->{restrictions}; # Dep without restrictions
+-
+-    my $seen_profile = 0;
+-    foreach my $restriction (@{$self->{restrictions}}) {
+-        # Determine if this restriction is negated, and within the "profile"
+-        # namespace, otherwise it does not concern this check.
+-        next if $restriction !~ m/^(!)?profile\.(.*)/;
+-
+-        my $negated = defined $1 && $1 eq '!';
+-        my $profile = $2;
+-
+-        # Determine if the restriction matches any of the specified profiles.
+-        my $found = any { $_ eq $profile } @{$build_profiles};
+-
+-        if ($negated) {
+-            if ($found) {
+-                $seen_profile = 0;
+-                last;
+-            } else {
+-                # "!profile.this" includes by default all other profiles
+-                # unless they also appear in a "!profile.other".
+-                $seen_profile = 1;
+-            }
+-        } elsif ($found) {
+-            $seen_profile = 1;
+-            last;
+-        }
+-    }
+-    return $seen_profile;
++    return Dpkg::BuildProfiles::evaluate_restriction_formula($self->{restrictions}, $build_profiles);
+ }
+ 
+ sub reduce_profiles {
+diff --git a/scripts/dpkg-genchanges.pl b/scripts/dpkg-genchanges.pl
+index 5f0aa24..5a46e51 100755
+--- a/scripts/dpkg-genchanges.pl
++++ b/scripts/dpkg-genchanges.pl
+@@ -289,6 +289,7 @@ foreach (keys %{$src_fields}) {
+ foreach my $pkg ($control->get_packages()) {
+     my $p = $pkg->{'Package'};
+     my $a = $pkg->{'Architecture'} // '';
++    my $bp = $pkg->{'Build-Profiles'};
+     my $d = $pkg->{'Description'} || 'no description available';
+     $d = $1 if $d =~ /^(.*)\n/;
+     my $pkg_type = $pkg->{'Package-Type'} ||
+@@ -302,11 +303,21 @@ foreach my $pkg ($control->get_packages()) {
+     $desc .= ' (udeb)' if $pkg_type eq 'udeb';
+     push @descriptions, $desc;
+ 
++    my $formula = ();
++    my $profiles = ();
++    if (defined $bp) {
++        $bp =~ s/^\s*<(.*)>\s*$/$1/;
++        $formula = [ map { [ split /\s+/, $_ ] } split />\s+</, $bp ];
++        $profiles = [ get_build_profiles() ];
++    }
++
+     if (not defined($p2f{$p})) {
+ 	# No files for this package... warn if it's unexpected
+-	if ((debarch_eq('all', $a) and ($include & BUILD_ARCH_INDEP)) ||
++	if (((debarch_eq('all', $a) and ($include & BUILD_ARCH_INDEP)) ||
+ 	    ((any { debarch_is($host_arch, $_) } split /\s+/, $a)
+-		  and ($include & BUILD_ARCH_DEP))) {
++		  and ($include & BUILD_ARCH_DEP))) and
++            (not defined $bp || (defined $bp and
++                  evaluate_restriction_formula($formula, $profiles)))) {
+ 	    warning(_g('package %s in control file but not in files list'),
+ 		    $p);
+ 	}
+diff --git a/scripts/dpkg-source.pl b/scripts/dpkg-source.pl
+index 83888f2..5b2388b 100755
+--- a/scripts/dpkg-source.pl
++++ b/scripts/dpkg-source.pl
+@@ -273,8 +273,23 @@ if ($options{opmode} =~ /^(-b|--print-format|--(before|after)-build|--commit)$/)
+         my $pkg_summary = sprintf('%s %s %s %s', $p, $type, $sect, $prio);
+ 
+         $pkg_summary .= ' arch=' . join ',', split /\s+/, $arch;
+-        $pkg_summary .= ' profile=' . join ',', split /\s+/, $profile
+-            if defined $profile;
++
++        if (defined $profile) {
++            # if the string does not contain brackets then it's using the old
++            # syntax (glibc, file, dbus and doxygen are affected)
++            # Thus we convert the old syntax to the new one. This conversion
++            # can be dropped once the old syntax is not in the archive anymore
++            # http://codesearch.debian.net/search?q=Build-Profiles%3A\s%2B[^<]+path%3Adebian%2Fcontrol
++            if ($profile !~ m/^\s*<(.*)>\s*$/) {
++                $profile =~ s/([!a-z0-9]+)/<$1>/g;
++            }
++            # instead of splitting twice and then joining twice, we just do
++            # simple string replacements
++            $profile =~ s/^\s*<(.*)>\s*$/$1/; # remove the enclosing <>
++            $profile =~ s/>\s+</+/g;          # join lists with a plus (OR)
++            $profile =~ s/\s+/,/g;            # join their elements with a comma (AND)
++            $pkg_summary .= " profile=$profile";
++        }
+ 
+         push @pkglist, $pkg_summary;
+ 	push @binarypackages, $p;
+diff --git a/scripts/t/Dpkg_Deps.t b/scripts/t/Dpkg_Deps.t
+index 0c90659..85ac072 100644
+--- a/scripts/t/Dpkg_Deps.t
++++ b/scripts/t/Dpkg_Deps.t
+@@ -69,20 +69,26 @@ is($dep_i386->output(), 'libc6 (>= 2.5)', 'Arch reduce 1/3');
+ is($dep_alpha->output(), 'libc6.1', 'Arch reduce 2/3');
+ is($dep_hurd->output(), 'libc0.1', 'Arch reduce 3/3');
+ 
+-my $field_profile = 'dep1 <!profile.stage1 !profile.notest>, ' .
+-'dep2 <profile.stage1 !profile.notest>, ' .
+-'dep3 <profile.notest !profile.stage1>, ' .
+-'dep4 <profile.stage1 profile.notest>, ' .
+-'dep5 <profile.stage1>, dep6 <!profile.stage1>, ' .
+-'dep7 <profile.stage1> | dep8 <profile.notest>';
++my $field_profile = 'dep1 <!stage1 !notest>, ' .
++'dep2 <stage1 !notest>, ' .
++'dep3 <notest !stage1>, ' .
++'dep4 <stage1 notest>, ' .
++'dep5 <stage1>, dep6 <!stage1>, ' .
++'dep7 <stage1> | dep8 <notest>, ' .
++'dep9 <!stage1> <!notest>, ' .
++'dep10 <stage1> <!notest>, ' .
++'dep11 <stage1> <notest>, '.
++'dep12 <!notest> <!stage1>, ' .
++'dep13 <notest> <!stage1>, ' .
++'dep14 <notest> <stage1>';
+ my $dep_noprof = deps_parse($field_profile, reduce_profiles => 1, build_profiles => []);
+ my $dep_stage1 = deps_parse($field_profile, reduce_profiles => 1, build_profiles => ['stage1']);
+ my $dep_notest = deps_parse($field_profile, reduce_profiles => 1, build_profiles => ['notest']);
+ my $dep_stage1notest = deps_parse($field_profile, reduce_profiles => 1, build_profiles => ['stage1', 'notest']);
+-is($dep_noprof->output(), 'dep1, dep2, dep3, dep6', 'Profile reduce 1/4');
+-is($dep_stage1->output(), 'dep2, dep4, dep5, dep7', 'Profile reduce 2/4');
+-is($dep_notest->output(), 'dep3, dep4, dep6, dep8', 'Profile reduce 3/4');
+-is($dep_stage1notest->output(), 'dep2, dep3, dep4, dep5, dep7 | dep8', 'Profile reduce 4/4');
++is($dep_noprof->output(), 'dep1, dep6, dep9, dep10, dep12, dep13', 'Profile reduce 1/4');
++is($dep_stage1->output(), 'dep2, dep5, dep7, dep9, dep10, dep11, dep12, dep14', 'Profile reduce 2/4');
++is($dep_notest->output(), 'dep3, dep6, dep8, dep9, dep11, dep12, dep13, dep14', 'Profile reduce 3/4');
++is($dep_stage1notest->output(), 'dep4, dep5, dep7 | dep8, dep10, dep11, dep13, dep14', 'Profile reduce 4/4');
+ 
+ $dep_noprof = deps_parse($field_profile);
+ $dep_noprof->reduce_profiles([]);
+@@ -92,21 +98,23 @@ $dep_notest = deps_parse($field_profile);
+ $dep_notest->reduce_profiles(['notest']);
+ $dep_stage1notest = deps_parse($field_profile);
+ $dep_stage1notest->reduce_profiles(['stage1', 'notest']);
+-is($dep_noprof->output(), 'dep1, dep2, dep3, dep6', 'Profile post-reduce 1/4');
+-is($dep_stage1->output(), 'dep2, dep4, dep5, dep7', 'Profile post-reduce 2/4');
+-is($dep_notest->output(), 'dep3, dep4, dep6, dep8', 'Profile post-reduce 3/4');
+-is($dep_stage1notest->output(), 'dep2, dep3, dep4, dep5, dep7 | dep8', 'Profile post-reduce 4/4');
+-
+-my $field_restrict = 'dep1 <!profile.bootstrap !other.restrict>, ' .
+-'dep2 <profile.bootstrap other.restrict>, ' .
+-'dep3 <!other.restrict>, ' .
+-'dep4 <other.restrict>';
++is($dep_noprof->output(), 'dep1, dep6, dep9, dep10, dep12, dep13', 'Profile post-reduce 1/4');
++is($dep_stage1->output(), 'dep2, dep5, dep7, dep9, dep10, dep11, dep12, dep14', 'Profile post-reduce 2/4');
++is($dep_notest->output(), 'dep3, dep6, dep8, dep9, dep11, dep12, dep13, dep14', 'Profile post-reduce 3/4');
++is($dep_stage1notest->output(), 'dep4, dep5, dep7 | dep8, dep10, dep11, dep13, dep14', 'Profile post-reduce 4/4');
++
++my $field_restrict = 'dep1 <!bootstrap !restrict>, ' .
++'dep2 <bootstrap restrict>, ' .
++'dep3 <!restrict>, ' .
++'dep4 <restrict>, ' .
++'dep5 <!bootstrap> <!restrict>, ' .
++'dep6 <bootstrap> <restrict>';
+ my $dep_restrict = deps_parse($field_restrict, reduce_restrictions => 1, build_profiles => []);
+-is($dep_restrict->output(), 'dep1', 'Unknown restrictions reduce');
++is($dep_restrict->output(), 'dep1, dep3, dep5', 'Unknown restrictions reduce');
+ 
+ $dep_restrict = deps_parse($field_restrict);
+ $dep_restrict->reduce_profiles([]);
+-is($dep_restrict->output(), 'dep1', 'Unknown restrictions post-reduce');
++is($dep_restrict->output(), 'dep1, dep3, dep5', 'Unknown restrictions post-reduce');
+ 
+ my $facts = Dpkg::Deps::KnownFacts->new();
+ $facts->add_installed_package('mypackage', '1.3.4-1', get_host_arch(), 'no');
+-- 
+2.0.1
+

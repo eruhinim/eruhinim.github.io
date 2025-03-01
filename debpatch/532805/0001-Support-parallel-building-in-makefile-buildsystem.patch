@@ -1,0 +1,128 @@
+From da4aafd653f6befe894cd47572fe2ecdfcf8b72c Mon Sep 17 00:00:00 2001
+From: Modestas Vainius <modestas@vainius.eu>
+Date: Sat, 8 Aug 2009 02:38:14 +0300
+Subject: [PATCH] Support parallel building in makefile buildsystem
+
+1) Add routine to Dh_Lib (used by dh and makefile.pm) which is capable of
+cleaning up MAKEFLAGS environment variable from internal jobserver /
+jobcontrol options.
+
+2) Support parallel=X in DEB_BUILD_OPTIONS for makefile buildsystem. This
+forcefully starts a new make job server. Since dpkg-buildpackage -jX exports
+DEB_BUILD_OPTIONS=parallel=X, this Closes: #532805.
+
+3) In order to avoid pointless and confusing make warnings about job control
+when using dh overrides with dpkg-buildpackage -jX, cleanup MAKEFLAGS on dh
+startup. Internal job control options are dropped from MAKEFLAGS only if job
+control FDs are not accessible.
+
+Signed-off-by: Modestas Vainius <modestas@vainius.eu>
+---
+ Debian/Debhelper/Buildsystem/makefile.pm |   19 ++++++++++++++++---
+ Debian/Debhelper/Dh_Lib.pm               |   18 +++++++++++++++++-
+ dh                                       |    3 +++
+ 3 files changed, 36 insertions(+), 4 deletions(-)
+
+diff --git a/Debian/Debhelper/Buildsystem/makefile.pm b/Debian/Debhelper/Buildsystem/makefile.pm
+index 3809d59..143ebda 100644
+--- a/Debian/Debhelper/Buildsystem/makefile.pm
++++ b/Debian/Debhelper/Buildsystem/makefile.pm
+@@ -7,7 +7,7 @@
+ package Debian::Debhelper::Buildsystem::makefile;
+ 
+ use strict;
+-use Debian::Debhelper::Dh_Lib qw(escape_shell);
++use Debian::Debhelper::Dh_Lib qw(escape_shell cleanup_makeflags);
+ use base 'Debian::Debhelper::Buildsystem';
+ 
+ sub get_makecmd_C {
+@@ -30,13 +30,26 @@ sub exists_make_target {
+ 	return length($ret);
+ }
+ 
++sub do_make {
++	my $this=shift;
++
++	# Handle parallel in DEB_BUILD_OPTIONS
++	if (exists $ENV{DEB_BUILD_OPTIONS} && $ENV{DEB_BUILD_OPTIONS} =~ /\bparallel=(\d+)\b/) {
++		unshift @_, "-j$1";
++		# Make sure a new jobserver is started.
++		cleanup_makeflags("force");
++	}
++
++	$this->doit_in_builddir($this->{makecmd}, @_);
++}
++
+ sub make_first_existing_target {
+ 	my $this=shift;
+ 	my $targets=shift;
+ 
+ 	foreach my $target (@$targets) {
+ 		if ($this->exists_make_target($target)) {
+-			$this->doit_in_builddir($this->{makecmd}, $target, @_);
++			$this->do_make($target, @_);
+ 			return $target;
+ 		}
+ 	}
+@@ -71,7 +84,7 @@ sub check_auto_buildable {
+ 
+ sub build {
+ 	my $this=shift;
+-	$this->doit_in_builddir($this->{makecmd}, @_);
++	$this->do_make(@_);
+ }
+ 
+ sub test {
+diff --git a/Debian/Debhelper/Dh_Lib.pm b/Debian/Debhelper/Dh_Lib.pm
+index 28a90f7..5ba3dd2 100644
+--- a/Debian/Debhelper/Dh_Lib.pm
++++ b/Debian/Debhelper/Dh_Lib.pm
+@@ -16,7 +16,7 @@ use vars qw(@ISA @EXPORT %dh);
+ 	    &compat &addsubstvar &delsubstvar &excludefile &package_arch
+ 	    &is_udeb &udeb_filename &debhelper_script_subst &escape_shell
+ 	    &inhibit_log &load_log &write_log &dpkg_architecture_value
+-	    &sourcepackage);
++	    &sourcepackage &cleanup_makeflags);
+ 
+ my $max_compat=7;
+ 
+@@ -205,6 +205,22 @@ sub _error_exitcode {
+ 	}
+ }
+ 
++# Cleans up MAKEFLAGS environment variable from options
++# incompatible with debhelper.
++sub cleanup_makeflags {
++	my $force=shift;
++
++	# Silently turn off job control since make invoked via dehbelper may not
++	# have access to the running job server
++	my $in;
++	if ($ENV{MAKEFLAGS} =~ /--jobserver-fds=(\d+)/ &&
++	    ($force || !open($in, "<&", "$1"))) {
++		$ENV{MAKEFLAGS} =~ s/(?:^|\s)--jobserver-fds=\S+//;
++		$ENV{MAKEFLAGS} =~ s/(?:^|\s)-j\d*\b//;
++	}
++	close $in if defined $in;
++}
++
+ # Run a command that may have a huge number of arguments, like xargs does.
+ # Pass in a reference to an array containing the arguments, and then other
+ # parameters that are the command and any parameters that should be passed to
+diff --git a/dh b/dh
+index 2a6c0a3..0ae79d0 100755
+--- a/dh
++++ b/dh
+@@ -219,6 +219,9 @@ init(options => {
+ });
+ inhibit_log();
+ 
++# Clean up MAKEFLAGS environment variable from incompatible options
++cleanup_makeflags();
++
+ # Definitions of sequences.
+ my %sequences;
+ $sequences{build} = [qw{
+-- 
+1.6.3.3
+

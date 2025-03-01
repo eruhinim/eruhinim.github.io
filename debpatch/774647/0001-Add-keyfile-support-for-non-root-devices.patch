@@ -1,0 +1,94 @@
+From 2d877465f22b608945e2544510f5ac4240508325 Mon Sep 17 00:00:00 2001
+From: Guilhem Moulin <guilhem@guilhem.org>
+Date: Sat, 12 Dec 2015 20:04:56 +0100
+Subject: [PATCH] Add keyfile support for non-root devices.
+
+---
+ debian/changelog                  |  3 +++
+ debian/initramfs/cryptroot-hook   | 24 +++++++++++++++---------
+ debian/initramfs/cryptroot-script |  3 +++
+ 3 files changed, 21 insertions(+), 9 deletions(-)
+
+diff --git a/debian/changelog b/debian/changelog
+index ea1f2c4..fa3c2c1 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -50,6 +50,9 @@ cryptsetup (2:1.7.0-1~mejo2) mejo-unstable; urgency=medium
+     storing keyfiles directly in the initrd. (closes: #786578)
+   * debian/initramfs/cryptroot-hook: display a warning for invalid source
+     devices (closes: #720515, #781955, #784435)
++  * debian/initramfs/cryptroot-{hook,script}: add keyfile support for non-root
++    devices.  A warning is printed if the keyfile itself in stored in the root
++    partition.  (closes: #774647)
+ 
+  -- Jonas Meurer <mejo@debian.org>  Thu, 10 Dec 2015 13:30:03 +0100
+ 
+diff --git a/debian/initramfs/cryptroot-hook b/debian/initramfs/cryptroot-hook
+index 4e42086..2ad66b2 100644
+--- a/debian/initramfs/cryptroot-hook
++++ b/debian/initramfs/cryptroot-hook
+@@ -232,11 +232,11 @@ get_lvm_deps() {
+ }
+ 
+ get_device_opts() {
+-	local target source link extraopts rootopts opt key
++	local target source link extraopts rootopts opt key keylink
+ 	target="$1"
+ 	extraopts="$2"
+ 	KEYSCRIPT=""
+-	KEYFILE=""
++	KEYFILE="" # key file to copy in the initramfs image
+ 	CRYPTHEADER=""
+ 	OPTIONS=""
+ 
+@@ -371,8 +371,18 @@ get_device_opts() {
+ 				key="/cryptroot-keyfiles/${target}.key"
+ 				;;
+ 			*)
+-				echo "cryptsetup: WARNING: target $target uses a key file, skipped" >&2
+-			   	return 1
++				keylink=$(readlink -e "$dev")
++				if echo "$OPTIONS" | grep -q "^(.*,)?rootdev(,.*)?$"; then
++					echo "cryptsetup: WARNING: root target $target uses a key file, skipped" >&2
++					return 1;
++				elif [ "$(stat -c %m -- "$keylink" 2>/dev/null)" != / ]; then
++					echo "cryptsetup: WARNING: $target's key file $key is not on the root FS, skipped" >&2
++					return 1;
++				else
++					OPTIONS="$OPTIONS,keyscript=cat-rootmnt" # prefix $rootmnt in local-block
++					# TODO: warn if the keyfile is not stored on an encrypted device
++				fi
++				key="$keylink"
+ 				;;
+ 		esac
+ 	fi
+@@ -466,11 +476,7 @@ add_device() {
+ 
+ 	# Flag root device
+ 	if echo "$rootdevs" | grep -q "\b$nodes\b"; then
+-		if [ -z "$opts" ]; then
+-			opts="rootdev"
+-		else
+-			opts="$opts,rootdev"
+-		fi
++		opts="${opts:+$opts,}rootdev"
+ 	fi
+ 
+ 	# Check that it is a node under /dev/mapper/
+diff --git a/debian/initramfs/cryptroot-script b/debian/initramfs/cryptroot-script
+index e450580..877161a 100644
+--- a/debian/initramfs/cryptroot-script
++++ b/debian/initramfs/cryptroot-script
+@@ -304,6 +304,9 @@ setup_mapping()
+ 				cryptkeyscript="/lib/cryptsetup/askpass"
+ 				cryptkey="Please unlock disk $diskname: "
+ 			fi
++		elif [ "$cryptkeyscript" = "cat-rootmnt" ]; then
++			cryptkeyscript=cat
++			cryptkey="${rootmnt}${cryptkey}"
+ 		fi
+ 
+ 
+-- 
+2.6.4
+

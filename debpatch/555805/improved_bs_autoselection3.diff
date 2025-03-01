@@ -1,0 +1,380 @@
+From: Modestas Vainius <modestas@vainius.eu>
+Subject: [PATCH] Improve build system auto-selection process
+
+This patch alters semantics of check_auto_buildable() a bit. Now it can
+also indicate if the source has already been partitially built with the
+build system and if so, such build system may be auto-selected over a less
+specific its parent (in the inheritance tree) even if the latter is earlier
+in the @BUILDSYSTEMS array.
+
+However, this still leaves a requirement that a derivative build system
+must not do anything that may break packages of the parent build system.
+Otherwise, introduction of a new derivative build system might break
+packages which already had that build system implemented via overrides...
+
+Signed-off-by: Modestas Vainius <modestas@vainius.eu>
+
+---
+ Debian/Debhelper/Buildsystem.pm                  |   27 +++++++----
+ Debian/Debhelper/Buildsystem/ant.pm              |    2 +-
+ Debian/Debhelper/Buildsystem/autoconf.pm         |    4 +-
+ Debian/Debhelper/Buildsystem/cmake.pm            |   10 ++--
+ Debian/Debhelper/Buildsystem/makefile.pm         |   14 ++----
+ Debian/Debhelper/Buildsystem/perl_build.pm       |    2 +-
+ Debian/Debhelper/Buildsystem/perl_makemaker.pm   |    2 +-
+ Debian/Debhelper/Buildsystem/python_distutils.pm |   12 ++--
+ Debian/Debhelper/Dh_Buildsystems.pm              |   22 +++++++--
+ t/buildsystems/buildsystem_tests                 |   55 +++++++++++++--------
+ 10 files changed, 91 insertions(+), 59 deletions(-)
+
+diff --git a/Debian/Debhelper/Buildsystem.pm b/Debian/Debhelper/Buildsystem.pm
+index 7354963..7f7465a 100644
+--- a/Debian/Debhelper/Buildsystem.pm
++++ b/Debian/Debhelper/Buildsystem.pm
+@@ -109,18 +109,27 @@ sub _set_builddir {
+ }
+ 
+ # This instance method is called to check if the build system is able
+-# to auto build a source package. Additional argument $step describes
+-# which operation the caller is going to perform (either configure,
+-# build, test, install or clean). You must override this method for the
+-# build system module to be ever picked up automatically. This method is
+-# used in conjuction with @Dh_Buildsystems::BUILDSYSTEMS.
++# to build a source package. It will be called during build
++# system auto-selection process inside the root directory of the debian
++# source package. Current build step will be passed as an additional
++# argument. The value returned must be 0 if the source is not buildable
++# or a positive integer otherwise.
+ #
+-# This method is supposed to be called inside the source root directory.
+-# Use $this->get_buildpath($path) method to get full path to the files
+-# in the build directory.
++# Generally, it is enough to look for invariant unique build system
++# files shipped with clean source to determine if the source might
++# be buildable or not. However, if the build system enhances (i.e.
++# derives) from the other auto-buildable build system, this method
++# may also check if the source has already been built with this build
++# system partitially by looking for temporary files or other common
++# results the build system produces during the build process. The
++# latter checks must be unique to the current build system and must
++# be very unlikely to be true for either its parent or other build
++# systems. If it is determined that the source has already built
++# partitially with this build system, the value returned must be
++# greater than the one of the SUPER call.
+ sub check_auto_buildable {
+ 	my $this=shift;
+-	my ($step) = @_;
++	my ($step)=@_;
+ 	return 0;
+ }
+ 
+diff --git a/Debian/Debhelper/Buildsystem/ant.pm b/Debian/Debhelper/Buildsystem/ant.pm
+index 26bee95..938fb44 100644
+--- a/Debian/Debhelper/Buildsystem/ant.pm
++++ b/Debian/Debhelper/Buildsystem/ant.pm
+@@ -14,7 +14,7 @@ sub DESCRIPTION {
+ 
+ sub check_auto_buildable {
+ 	my $this=shift;
+-	return -e $this->get_sourcepath("build.xml");
++	return $this->get_sourcepath("build.xml") ? 1 : 0;
+ }
+ 
+ sub new {
+diff --git a/Debian/Debhelper/Buildsystem/autoconf.pm b/Debian/Debhelper/Buildsystem/autoconf.pm
+index a97de9c..d7b0bed 100644
+--- a/Debian/Debhelper/Buildsystem/autoconf.pm
++++ b/Debian/Debhelper/Buildsystem/autoconf.pm
+@@ -18,9 +18,9 @@ sub check_auto_buildable {
+ 	my $this=shift;
+ 	my ($step)=@_;
+ 
+-	# Handle configure; the rest - next class
++	# Handle configure; the rest - next class (compat with 7.0.x code path)
+ 	if ($step eq "configure") {
+-		return -x $this->get_sourcepath("configure");
++		return 1 if -x $this->get_sourcepath("configure");
+ 	}
+ 	return 0;
+ }
+diff --git a/Debian/Debhelper/Buildsystem/cmake.pm b/Debian/Debhelper/Buildsystem/cmake.pm
+index 03e6ade..3eddc74 100644
+--- a/Debian/Debhelper/Buildsystem/cmake.pm
++++ b/Debian/Debhelper/Buildsystem/cmake.pm
+@@ -16,12 +16,12 @@ sub DESCRIPTION {
+ sub check_auto_buildable {
+ 	my $this=shift;
+ 	my ($step)=@_;
+-	my $ret = -e $this->get_sourcepath("CMakeLists.txt");
+-	if ($step ne "configure") {
+-		$ret &&= -e $this->get_buildpath("CMakeCache.txt") &&
+-		         $this->SUPER::check_auto_buildable(@_);
++	if (-e $this->get_sourcepath("CMakeLists.txt")) {
++		my $ret = $this->SUPER::check_auto_buildable(@_);
++		$ret++ if ($ret && -e $this->get_buildpath("CMakeCache.txt"));
++		return $ret > 0 ? $ret : 1;
+ 	}
+-	return $ret;
++	return 0;
+ }
+ 
+ sub new {
+diff --git a/Debian/Debhelper/Buildsystem/makefile.pm b/Debian/Debhelper/Buildsystem/makefile.pm
+index 704f9c9..083abc4 100644
+--- a/Debian/Debhelper/Buildsystem/makefile.pm
++++ b/Debian/Debhelper/Buildsystem/makefile.pm
+@@ -71,15 +71,11 @@ sub check_auto_buildable {
+ 	my $this=shift;
+ 	my ($step) = @_;
+ 
+-	# Handles build, test, install, clean; configure - next class
+-	if (grep /^\Q$step\E$/, qw{build test install clean}) {
+-		# This is always called in the source directory, but generally
+-		# Makefiles are created (or live) in the the build directory.
+-		return -e $this->get_buildpath("Makefile") ||
+-		       -e $this->get_buildpath("makefile") ||
+-		       -e $this->get_buildpath("GNUmakefile");
+-	}
+-	return 0;
++	# This is always called in the source directory, but generally
++	# Makefiles are created (or live) in the the build directory.
++	return (-e $this->get_buildpath("Makefile") ||
++	        -e $this->get_buildpath("makefile") ||
++	        -e $this->get_buildpath("GNUmakefile")) ? 1 : 0;
+ }
+ 
+ sub build {
+diff --git a/Debian/Debhelper/Buildsystem/perl_build.pm b/Debian/Debhelper/Buildsystem/perl_build.pm
+index 8974be2..2afa5e5 100644
+--- a/Debian/Debhelper/Buildsystem/perl_build.pm
++++ b/Debian/Debhelper/Buildsystem/perl_build.pm
+@@ -21,7 +21,7 @@ sub check_auto_buildable {
+ 	if ($step ne "configure") {
+ 		$ret &&= -e $this->get_sourcepath("Build");
+ 	}
+-	return $ret;
++	return $ret ? 1 : 0;
+ }
+ 
+ sub do_perl {
+diff --git a/Debian/Debhelper/Buildsystem/perl_makemaker.pm b/Debian/Debhelper/Buildsystem/perl_makemaker.pm
+index e109be5..473a3a7 100644
+--- a/Debian/Debhelper/Buildsystem/perl_makemaker.pm
++++ b/Debian/Debhelper/Buildsystem/perl_makemaker.pm
+@@ -19,7 +19,7 @@ sub check_auto_buildable {
+ 
+ 	# Handles everything if Makefile.PL exists. Otherwise - next class.
+ 	if (-e $this->get_sourcepath("Makefile.PL")) {
+-		if ($step eq "install" || $step eq "configure") {
++		if ($step eq "configure") {
+ 			return 1;
+ 		}
+ 		else {
+diff --git a/Debian/Debhelper/Buildsystem/python_distutils.pm b/Debian/Debhelper/Buildsystem/python_distutils.pm
+index 219c6f9..70307b0 100644
+--- a/Debian/Debhelper/Buildsystem/python_distutils.pm
++++ b/Debian/Debhelper/Buildsystem/python_distutils.pm
+@@ -31,7 +31,7 @@ sub new {
+ 
+ sub check_auto_buildable {
+ 	my $this=shift;
+-	return -e $this->get_sourcepath("setup.py");
++	return -e $this->get_sourcepath("setup.py") ? 1 : 0;
+ }
+ 
+ sub not_our_cfg {
+@@ -117,10 +117,10 @@ sub setup_py {
+ 	# Then, run setup.py with each available python, to build
+ 	# extensions for each.
+ 
+-        my $python_default = `pyversions -d`;
+-        $python_default =~ s/^\s+//;
+-        $python_default =~ s/\s+$//;
+-        my @python_requested = split ' ', `pyversions -r 2>/dev/null`;
++	my $python_default = `pyversions -d`;
++	$python_default =~ s/^\s+//;
++	$python_default =~ s/\s+$//;
++	my @python_requested = split ' ', `pyversions -r 2>/dev/null`;
+ 	if (grep /^\Q$python_default\E/, @python_requested) {
+ 		@python_requested = (
+ 			grep(!/^\Q$python_default\E/, @python_requested),
+@@ -129,7 +129,7 @@ sub setup_py {
+ 	}
+ 
+ 	my @python_dbg;
+-        my @dbg_build_needed = $this->dbg_build_needed();
++	my @dbg_build_needed = $this->dbg_build_needed();
+ 	foreach my $python (map { $_."-dbg" } @python_requested) {
+ 		if (grep /^(python-all-dbg|\Q$python\E)/, @dbg_build_needed) {
+ 			push @python_dbg, $python;
+diff --git a/Debian/Debhelper/Dh_Buildsystems.pm b/Debian/Debhelper/Dh_Buildsystems.pm
+index a9a13a2..2893c1a 100644
+--- a/Debian/Debhelper/Dh_Buildsystems.pm
++++ b/Debian/Debhelper/Dh_Buildsystems.pm
+@@ -14,6 +14,8 @@ use File::Spec;
+ use base 'Exporter';
+ our @EXPORT=qw(&buildsystems_init &buildsystems_do &load_buildsystem &load_all_buildsystems);
+ 
++use constant BUILD_STEPS => qw(configure build test install clean);
++
+ # Historical order must be kept for backwards compatibility. New
+ # build systems MUST be added to the END of the list.
+ our @BUILDSYSTEMS = (
+@@ -66,14 +68,26 @@ sub load_buildsystem {
+ 	}
+ 	else {
+ 		# Try to determine build system automatically
++		my $selected;
++		my $selected_level = 0;
+ 		for $system (@BUILDSYSTEMS) {
+ 			my $inst = create_buildsystem_instance($system, @_);
+-			if ($inst->check_auto_buildable($step)) {
+-				return $inst;
++
++			# Only derived (i.e. more specific) build system can be
++			# considered beyond the currently selected one.
++			next if defined $selected && !$inst->isa(ref $selected);
++
++			# If the build system says it is auto-buildable at the current
++			# step and it can provide more specific information about its
++			# status than its parent (if any), auto-select it.
++			my $level = $inst->check_auto_buildable($step);
++			if ($level > $selected_level) {
++				$selected = $inst;
++				$selected_level = $level;
+ 			}
+ 		}
++		return $selected;
+ 	}
+-	return;
+ }
+ 
+ sub load_all_buildsystems {
+@@ -189,7 +203,7 @@ sub buildsystems_do {
+ 		$step =~ s/^dh_auto_//;
+ 	}
+ 
+-	if (grep(/^\Q$step\E$/, qw{configure build test install clean}) == 0) {
++	if (grep(/^\Q$step\E$/, BUILD_STEPS) == 0) {
+ 		error("unrecognized build step: " . $step);
+ 	}
+ 
+diff --git a/t/buildsystems/buildsystem_tests b/t/buildsystems/buildsystem_tests
+index 0465a93..487fd2b 100755
+--- a/t/buildsystems/buildsystem_tests
++++ b/t/buildsystems/buildsystem_tests
+@@ -1,6 +1,6 @@
+ #!/usr/bin/perl
+ 
+-use Test::More tests => 277;
++use Test::More tests => 292;
+ 
+ use strict;
+ use warnings;
+@@ -229,14 +229,8 @@ sub test_check_auto_buildable {
+ 		} elsif (exists $expected->{default}) {
+ 			$e = $expected->{default};
+ 		}
+-		if ($e) {
+-			ok( $bs->check_auto_buildable($step),
+-			    $bs->NAME() . "($config): check_auto_buildable($step)" );
+-		}
+-		else {
+-			ok( ! $bs->check_auto_buildable($step),
+-			    $bs->NAME() . "($config): ! check_auto_buildable($step)" );
+-		}
++		is( $bs->check_auto_buildable($step), $e,
++			$bs->NAME() . "($config): check_auto_buildable($step) == $e" );
+ 	}
+ }
+ 
+@@ -262,17 +256,18 @@ touch "$tmpdir/configure", 0755;
+ test_check_auto_buildable($bs{autoconf}, "configure", { configure => 1 });
+ 
+ touch "$tmpdir/CMakeLists.txt";
+-test_check_auto_buildable($bs{cmake}, "CMakeLists.txt", { configure => 1 });
++test_check_auto_buildable($bs{cmake}, "CMakeLists.txt", 1);
+ 
+ touch "$tmpdir/Makefile.PL";
+-test_check_auto_buildable($bs{perl_mm}, "Makefile.PL",
+-    { configure => 1, install => 1 });
++test_check_auto_buildable($bs{perl_mm}, "Makefile.PL", { configure => 1 });
+ 
+ # With Makefile
+ touch "$builddir/Makefile";
+-test_check_auto_buildable($bs, "Makefile", { configure => 0, default => 1 });
++test_check_auto_buildable($bs, "Makefile", 1);
+ test_check_auto_buildable($bs{autoconf}, "configure+Makefile", { configure => 1 });
+ test_check_auto_buildable($bs{cmake}, "CMakeLists.txt+Makefile", 1);
++touch "$builddir/CMakeCache.txt"; # strong evidence that cmake was run
++test_check_auto_buildable($bs{cmake}, "CMakeCache.txt+Makefile", 2);
+ 
+ # Makefile.PL forces in-source
+ #(see note in check_auto_buildable() why always 1 here)
+@@ -298,18 +293,20 @@ cleandir($tmpdir);
+ 
+ ### Now test if it can autoselect a proper buildsystem for a typical package
+ sub test_autoselection {
+-	my $system=shift;
++	my $testname=shift;
+ 	my $expected=shift;
++	my %args=@_;
+ 	for my $step (@STEPS) {
+ 		my $bs = load_buildsystem(undef, $step, @_);
+ 		my $e = $expected;
+ 		$e = $expected->{$step} if ref $expected;
+ 		if (defined $bs) {
+-			is( $bs->NAME(), $e, "autoselection($system): $step=".((defined $e)?$e:'undef') );
++			is( $bs->NAME(), $e, "autoselection($testname): $step=".((defined $e)?$e:'undef') );
+ 		}
+ 		else {
+-			is ( undef, $e, "autoselection($system): $step=".((defined $e)?$e:'undef') );
++			is ( undef, $e, "autoselection($testname): $step=".((defined $e)?$e:'undef') );
+ 		}
++		&{$args{"code_$step"}}() if exists $args{"code_$step"};
+ 	}
+ }
+ 
+@@ -329,8 +326,7 @@ cleandir $tmpdir;
+ 
+ # Makefile
+ touch "$builddir/Makefile";
+-test_autoselection("makefile", { build => "makefile", test => "makefile",
+-		install => "makefile", clean => "makefile" }, %tmp);
++test_autoselection("makefile", "makefile", %tmp);
+ cleandir $tmpdir;
+ 
+ # Python Distutils
+@@ -346,10 +342,27 @@ cleandir $tmpdir;
+ 
+ # CMake
+ touch "$tmpdir/CMakeLists.txt";
++$tmp = sub {
++	touch "$builddir/Makefile";
++};
++test_autoselection("cmake without CMakeCache.txt",
++	{ configure => "cmake", build => "makefile",
++	  test => "makefile", install => "makefile", clean => "makefile" }, %tmp,
++	code_configure => $tmp);
++cleandir $tmpdir;
++
++touch "$tmpdir/CMakeLists.txt";
++$tmp = sub {
++	touch "$builddir/Makefile";
++	touch "$builddir/CMakeCache.txt";
++};
++test_autoselection("cmake with CMakeCache.txt",
++	"cmake", %tmp, code_configure => $tmp);
++cleandir $tmpdir;
++
++touch "$tmpdir/CMakeLists.txt";
+ touch "$builddir/Makefile";
+-test_autoselection("cmake",
+-    { configure => "cmake", build => "makefile",
+-      test => "makefile", install => "makefile", clean => "makefile" }, %tmp);
++test_autoselection("cmake and existing Makefile", "makefile", %tmp);
+ cleandir $tmpdir;
+ 
+ ### Test Buildsystem::rmdir_builddir()
+-- 
+tg: (93cab18..) patch/improved_bs_autoselection (depends on: master)

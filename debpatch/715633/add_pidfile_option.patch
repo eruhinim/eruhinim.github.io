@@ -1,0 +1,156 @@
+--- ample-0.5.7.orig/src/ample.c
++++ ample-0.5.7/src/ample.c
+@@ -241,6 +241,26 @@
+ 	return;
+ }
+ 
++/*
++ * Write a pidfile
++ * 
++ * Added by Debian Maintainer
++ *
++ */
++static int
++do_pidfile(void)
++{
++	FILE *f;
++	int pidnum;
++	pidnum = getpid();
++	f = fopen(gconf.pidfile, "w");
++	if (!f) {
++		return (1);
++	}
++	fprintf(f,"%d\n", pidnum);
++	fclose(f);
++	return(0);
++}
+ 
+ /*
+  * Checks if a file descriptor is a socket.
+@@ -292,6 +312,15 @@
+ 		die("fork");
+ }
+ 
++/* Remove pidfile when dies
++ * 
++ */
++static void
++removepidfile(void)
++{
++	unlink(gconf.pidfile);
++	exit(EXIT_SUCCESS);
++}
+ 
+ /*
+  * Prepares the proper way for ample to log messages.
+@@ -460,6 +489,18 @@
+ 	checkopt(argc, argv);	
+ 	gconf.inetd = issocket(0);
+ 	daemonize();
++
++	/* Added by Debian Maintainer */
++	if (gconf.pidfile) {
++		debug (1, "pidfile:%s \n", gconf.pidfile);
++		if (do_pidfile() != 0) {
++			debug(1, "could not write pidfile");
++			exit(1);
++		}
++
++	}
++	/**/
++
+ 	preparelog();
+ 	if(!gconf.inetd)
+ 		logmsg("Ample/%s started\n", AMPLE_VERSION);
+@@ -488,6 +529,12 @@
+ 	memset(&sa, 0, sizeof(sa));
+ 	sa.sa_handler = sigchild_handler;
+ 	sigaction(SIGCHLD, &sa, NULL);
++	
++	/* Added by the Debian Maintainer */
++	if (signal(SIGTERM, removepidfile) == SIG_ERR) {
++		debug(1, "err, I can't quit");
++	}
++	/**/
+ 	sigemptyset(&chld);
+ 	sigaddset(&chld, SIGCHLD);
+ 
+--- ample-0.5.7.orig/src/ample.h
++++ ample-0.5.7/src/ample.h
+@@ -36,6 +36,7 @@
+ 	char * servername;
+ 	char * serveraddress;
+ 	char * filter;
++	char * pidfile;
+ };
+ 
+ struct childstat {
+--- ample-0.5.7.orig/src/configuration.c
++++ ample-0.5.7/src/configuration.c
+@@ -621,6 +621,7 @@
+ 		{"servername", OPT_STRING, &gconf.servername},
+ 		{"serveraddress", OPT_STRING, &gconf.serveraddress},		
+ 		{"username", OPT_STRING, &gconf.username},
++		{"pidfile", OPT_STRING, &gconf.pidfile},
+ 		{NULL, 0, NULL}
+ 	};
+ 	
+@@ -674,13 +675,14 @@
+ 		{"debug", optional_argument, NULL, 'd'},
+ 		{"trace", no_argument, NULL, 't'},
+ 		{"version", no_argument, NULL, 'v'},
++		{"pidfile", required_argument, NULL, 'i'},
+ 		{NULL, 0, NULL, 0}
+ 	};
+ 
+-	while((c = getopt_long(argc, argv, "p:oc:nf:m:hd::tv", longopts, &i)) 
++	while((c = getopt_long(argc, argv, "p:oc:nf:m:hd::ti:v", longopts, &i)) 
+ 	      != -1) {
+ #else
+-	while((c = getopt(argc, argv, "p:oc:nf:m:hd::tv")) != -1) {
++	while((c = getopt(argc, argv, "p:oc:nf:m:hd::ti:v")) != -1) {
+ #endif
+ 		switch(c) {
+ 		case 'p':
+@@ -718,6 +720,9 @@
+ 		case 'v':
+ 			printf("Ample version %s\n", AMPLE_VERSION);
+ 			exit(0);
++		case 'i':
++			gconf.pidfile = strdup(optarg);
++			break;
+ 		default:
+ 			usage(TRUE);
+ 		}
+--- ample-0.5.7.orig/src/configuration.h
++++ ample-0.5.7/src/configuration.h
+@@ -70,6 +70,7 @@
+                               higher number means more detail\n\
+   -t, --trace                 no forking, no backgrounding\n\
+                               helpful when debugging\n\
++  -i, --pidfile               create a pidfile \n\
+   -v, --version               output version information and exit\n\
+ \n\
+ Report bugs to <david@2gen.com>\n"
+@@ -86,7 +87,8 @@
+   -d[=NUMBER]                 debug messages will be printed,\n\
+                               higher number means more detail\n\
+   -t                          no forking, no backgrounding,\n\
+-                              helpful when debugging)\n\
++                              (helpful when debugging)\n\
++  -i                          create a pidfile \n\
+   -v                          output version information and exit\n\
+ \n\
+ Report bugs to <david@2gen.com>\n"
+--- ample-0.5.7.orig/docs/ample.1.in
++++ ample-0.5.7/docs/ample.1.in
+@@ -86,6 +86,9 @@
+ .B -v --version
+ Display version information and exit.
+ .TP
++.B -i --pidfile [PIDFILE]
++Write a PIDFILE to handle ample as a daemon
++.TP
+ .BI "[" "PATH" "...]"
+ These are path(s) to files or directories that Ample can use to 
+ populate it's list of MP3's. If

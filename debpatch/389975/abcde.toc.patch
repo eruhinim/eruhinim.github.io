@@ -1,0 +1,209 @@
+--- abcde.svn	2006-09-28 11:41:31.480734913 -0500
++++ abcde.svn.toc	2006-09-28 11:44:28.203700281 -0500
+@@ -1363,6 +1363,38 @@
+ 					fi
+ 					;;
+ 			esac
++			# Lets move the toc file
++			if TOCFILE=$(checkstatus tocfile) >/dev/null ; then 
++				if [ -r "$ABCDETEMPDIR/$TOCFILE" ]; then
++					if checkstatus movetoc-$OUTPUT; then :; else
++						# Silence the Copying output since it overlaps with encoding processes...
++						#run_command '' vecho "Copying toc file to its destination directory..."
++						if checkstatus onetrack >/dev/null ; then
++							case $OUTPUT in
++								wav)
++									if [ "$DOCLEAN" != "y" ] && [ "$FORCE" != "y" ]; then
++										# We dont have the dir, since it was not created before.
++										:
++									else
++										run_command movetoc-$OUTPUT cp "$ABCDETEMPDIR/$TOCFILE" "$OUTPUTDIR/$OUTPUTFILE.toc"
++									fi
++									;;
++								# NOTE: Creating a toc file with the 3-char-extension files is to comply with
++								# http://brianvictor.tripod.com/mp3cue.htm#details
++								[a-z0-9][a-z0-9][a-z0-9])
++									run_command movetoc-$OUTPUT cp "$ABCDETEMPDIR/$TOCFILE" "$OUTPUTDIR/$OUTPUTFILE.toc"
++									;;
++								*)
++									run_command movetoc-$OUTPUT cp "$ABCDETEMPDIR/$TOCFILE" "$OUTPUTDIR/$OUTPUTFILE.$OUTPUT.toc"
++									;;
++							esac
++						else
++							run_command movetoc-$OUTPUT cp "$ABCDETEMPDIR/$TOCFILE" "$OUTPUTFILEDIR/$TOCFILE"
++						fi
++						echo movetoc-$OUTPUT >> "$ABCDETEMPDIR/status"
++					fi
++				fi
++			fi
+ 			# Lets move the cue file
+ 			if CUEFILE=$(checkstatus cuefile) >/dev/null ; then 
+ 				if [ -r "$ABCDETEMPDIR/$CUEFILE" ]; then
+@@ -1894,6 +1926,22 @@
+ 		# Store the abcde version in the status file.
+ 		echo "abcde-version=$VERSION" >> "$ABCDETEMPDIR/status"
+ 	fi
++}
++
++do_toc()
++{
++	if [ X"$DOTOC" = "Xy" -a X"$WEHAVEACD" = "Xy" ]; then
++		if checkstatus tocfile > /dev/null 2>&1 ; then :; else
++			TOCFILE=toc-$(echo "$TRACKINFO" | cut -f1 -d' ').txt
++			if $TOCREADER $TOCREADEROPTS "$CDROM" "$ABCDETEMPDIR/$TOCFILE"; then
++				echo tocfile=$TOCFILE >> "$ABCDETEMPDIR/status"
++			fi
++		fi
++	fi
++}
++
++do_cue()
++{
+ 	if [ X"$DOCUE" = "Xy" -a X"$WEHAVEACD" = "Xy" ]; then
+ 		if checkstatus cuefile > /dev/null 2>&1 ; then :; else
+ 			CUEFILE=cue-$(echo "$TRACKINFO" | cut -f1 -d' ').txt
+@@ -1907,13 +1955,28 @@
+ 					fi
+ 					;;
+ 				*)
+-					if $CUEREADER $CUEREADEROPTS > "$ABCDETEMPDIR/$CUEFILE"; then
+-						echo cuefile=$CUEFILE >> "$ABCDETEMPDIR/status"
+-					else
+-						log warning "reading the CUE sheet is still considered experimental"
+-						log warning "and there was a problem with the CD reading. abcde will continue,"
+-						log warning "but consider reporting the problem to the abcde author"
+-					fi
++					case $CUEREADERSYNTAX in
++						default|mkcue)
++							if $CUEREADER $CUEREADEROPTS > "$ABCDETEMPDIR/$CUEFILE"; then
++								echo cuefile=$CUEFILE >> "$ABCDETEMPDIR/status"
++							else
++								log warning "reading the CUE sheet is still considered experimental"
++								log warning "and there was a problem with the CD reading. abcde will continue,"
++								log warning "but consider reporting the problem to the abcde author"
++							fi
++							;;
++						toc2cue)
++							if TOCFILE="$ABCDETEMPDIR"/$(checkstatus tocfile); then
++								if $CUEREADER $CUEREADEROPTS "$TOCFILE" "$ABCDETEMPDIR/$CUEFILE"; then
++									echo cuefile=$CUEFILE >> "$ABCDETEMPDIR/status"
++								else
++									log warning "toc to cuesheet conversion failed."
++								fi
++							else
++								log warning "cuesheet conversion failed: cannot read toc file."
++							fi
++							;;
++					esac
+ 					;;
+ 			esac
+ 		fi
+@@ -2662,7 +2725,8 @@
+ 			cdparanoia) 
+ 				#XX FIXME XX
+ 				# Add a variable to check if tracks are provided in command line and if not, use "0-" to rip the tracks
+-				READTRACKNUMS="$FIRSTTRACK-$LASTTRACK" ;;
++				#READTRACKNUMS="$FIRSTTRACK-$LASTTRACK" ;;
++				READTRACKNUMS="[00:00:00.00]-$LASTRACK" ;;
+ 			cdda2wav) READTRACKNUMS="$FIRSTTRACK+$LASTTRACK" ;;
+ 			*) echo "abcde error: $CDROMREADERSYNTAX does not support ONETRACK mode"
+ 				exit 1 ;;
+@@ -2876,6 +2940,7 @@
+ AACENCODERSYNTAX=default
+ NORMALIZERSYNTAX=default
+ CUEREADERSYNTAX=default
++TOCREADERSYNTAX=default
+ 
+ OUTPUTFORMAT='${ARTISTFILE}-${ALBUMFILE}/${TRACKNUM}.${TRACKFILE}'
+ # Use the following VAOUTPUTFORMAT to revert to 2.0.x VA format:
+@@ -2949,8 +3014,9 @@
+ VORBISGAIN=vorbisgain
+ MP3GAIN=mp3gain
+ MPPGAIN=replaygain
++CDRDAO=cdrdao
++TOC2CUE=toc2cue
+ MKCUE=mkcue
+-MKTOC=cdrdao
+ DIFF=diff
+ CUE2DISCID=builtin
+ 
+@@ -3250,12 +3316,14 @@
+ DOPLAYLIST=n
+ DOCLEAN=n
+ DOCUE=n
++DOTOC=n
+ 
+ for ACTION in $(echo $ACTIONS | tr , \ )
+ do
+ 	case $ACTION in
+ 		default) DOCDDB=y; DOREAD=y; DOENCODE=y; DOTAG=y; DOMOVE=y; DOCLEAN=y;;
+ 		cue) DOCUE=y ; MAKECUEFILE=y ;;
++		toc) DOTOC=y ;;
+ 		cddb) DOCDDB=y;;
+ 		read) DOREAD=y;;
+ 		normalize) DONORMALIZE=y; DOREAD=y;;
+@@ -3565,12 +3633,23 @@
+ 	NOGAP=n
+ fi
+ 
++# Options for TOC reader
++case "$TOCREADERSYNTAX" in
++	default|cdrdao)
++		TOCREADEROPTS="read-toc --device"
++		TOCREADER="$CDRDAO"
++		;;
++esac
++
+ # Options for mkcue
+ case "$CUEREADERSYNTAX" in
+ 	default|mkcue)
+ 		CUEREADEROPTS="${CDROM}"
+ 		CUEREADER="$MKCUE"
+ 		;;
++	toc2cue)
++		CUEREADEROPTS=""
++		CUEREADER="$TOC2CUE"
+ esac
+ 
+ # which information retrieval tool are we using?
+@@ -3620,8 +3699,13 @@
+ fi
+ if [ "$DOCUE" = "y" ]; then
+ 	NEEDCUEREADER=y
++	if [ "$CUEREADERSYNTAX" = "toc2cue" ]; then
++		DOTOC=y
++	fi
++fi
++if [ "$DOTOC" = "y" ]; then
++	NEEDTOCREADER=y
+ fi
+-
+ if [ X"$CDSPEEDVALUE" != "X" ] && [ "$DOREAD" = "y" ]; then
+ 	case "$CDROMREADERSYNTAX" in
+ 		cdparanoia|debug) CDROMREADEROPTS="$CDPARANOIAOPTS -S $CDSPEEDVALUE" ;;
+@@ -3689,8 +3773,8 @@
+ 	${NEEDNORMALIZER+$NORMALIZER} ${NEEDEJECT+$EJECT} \
+ 	${NEEDDISKTOOL+disktool} ${NEEDCDSPEED+$CDSPEED} \
+ 	${NEEDVORBISGAIN+$VORBISGAIN} ${NEEDMP3GAIN+$MP3GAIN} \
+-	${NEEDMPPGAIN+$MPPGAIN} ${NEEDCUEREADER+$CUEREADER} \
+-	${NEEDCUE2DISCID+$CUE2DISCID}
++	${NEEDMPPGAIN+$MPPGAIN} ${NEEDTOCREADER+$TOCREADER} \
++	${NEEDCUEREADER+$CUEREADER} ${NEEDCUE2DISCID+$CUE2DISCID}
+ do
+ 	checkexec "$X"
+ done
+@@ -3771,6 +3855,14 @@
+ 	eval "$($CDDBTOOL parse "$CDDBDATA")"
+ fi
+ 
++if [ X"$DOTOC" = "Xy" ]; then
++	do_toc
++fi
++
++if [ X"$DOCUE" = "Xy" ]; then
++	do_cue
++fi
++
+ # Before reading tracks, we set the speed of the device
+ 
+ if [ X"$CDSPEEDVALUE" != "X" ]; then

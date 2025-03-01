@@ -1,0 +1,216 @@
+From e66a995cb13ae5cff6a17a1135bc4010c558f562 Mon Sep 17 00:00:00 2001
+From: Dinesh Shanbhag <perpetualtwiddler@gmail.com>
+Date: Sat, 5 Sep 2009 15:55:32 +0530
+Subject: [PATCH] Move on and continue uploading other package(s) even if
+ some are broken (via --moveon or -m switch)
+
+---
+ dput   |   64 +++++++++++++++++++++++++++++++++++++++++++++++-----------------
+ dput.1 |    4 ++++
+ 2 files changed, 51 insertions(+), 17 deletions(-)
+
+diff --git a/dput b/dput
+index eeb87a9..7b102ca 100755
+--- a/dput
++++ b/dput
+@@ -81,7 +81,7 @@ def parse_changes(chg_fd):
+     for a in changes.dict['files'].split('\n'):
+       if len(a.split()) != 5:
+         print >> sys.stderr, "Invalid Files line in .changes:\n  %s"%a
+-        sys.exit(1)
++        return None
+     return changes
+ 
+ # read configs in this order:
+@@ -111,6 +111,7 @@ def read_configs(extra_config, debug):
+     config.set('DEFAULT', 'passive_ftp', '1')
+     config.set('DEFAULT', 'progress_indicator', '0')
+     config.set('DEFAULT', 'delayed', '')
++    config.set('DEFAULT', 'moveon', '0')
+ 
+     if extra_config:
+         config_files = (extra_config,)
+@@ -269,21 +270,25 @@ def source_check(changes, debug):
+ # verify that they are in good shape.
+ def verify_files(path, filename, host, check_only, check_version,
+                  unsigned_upload, debug):
++    verified = True
+     file_seen = include_orig_tar_gz = include_tar_gz = binary_only = 0
+ 
+     name_of_file = filename
+    
+     change_file = os.path.join(path, name_of_file)
+ 
++    changes = None
+     if debug:
+         print "D: Validating contents of changes file %s" % change_file
+     try:
+         chg_fd = open(change_file, 'r')
++        changes = parse_changes(chg_fd)
++        chg_fd.close
+     except IOError:
+         print "Can't open %s" % change_file
+-        sys.exit(1)
+-    changes = parse_changes(chg_fd)
+-    chg_fd.close
++
++    if not changes:
++        return False
+ 
+     # Find out if it's a binary only upload or not
+     binary_upload = check_upload_variant(changes, debug)
+@@ -300,7 +305,7 @@ def verify_files(path, filename, host, check_only, check_version,
+                 dsc_file = os.path.join(path, filename)
+         if not dsc_file:
+           print >> sys.stderr, "Error: no dsc file found in sourceful upload"
+-          sys.exit(1)
++          return False
+ 
+     # Run the check to verify that the package has been tested.
+     if config.getboolean(host, 'check_version') == 1 or check_version:
+@@ -327,7 +332,7 @@ def verify_files(path, filename, host, check_only, check_version,
+                 print "D: Generated Checksum: %s" % \
+                       checksum_test(file_to_upload,hash_to_use)
+             print "Checksum doesn't match for %s" % file_to_upload
+-            sys.exit(1)
++            return False
+         else:
+             if debug: print "D: Checksum for %s is fine" % file_to_upload
+         if os.stat(file_to_upload)[stat.ST_SIZE] != int(size):
+@@ -368,6 +373,7 @@ def verify_files(path, filename, host, check_only, check_version,
+     if debug:
+         print "D: File to upload: %s" % change_file
+     files_to_upload.append(change_file)
++    return verified
+ 
+ # Print the configuration and exit.
+ def print_config(config, debug):
+@@ -400,8 +406,9 @@ def create_upload_file(package, host, path, files_to_upload, debug):
+         logfile_fd.write(entry_for_logfile)
+     logfile_fd.close()
+         
+-# Run lintian on the changes file and stop if it finds errors.
++# Run lintian on the changes file and return 1 on success, 0 otherwise 
+ def run_lintian_test(changes_file):
++    passed = False
+     if os.access(changes_file, os.R_OK):
+         if os.access("/usr/bin/lintian", os.R_OK):
+             old_signal = signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+@@ -413,16 +420,17 @@ def run_lintian_test(changes_file):
+                     "with the current policy."
+                 print "Please check the current policy and your package."
+                 print "Also see lintian documentation about overrides."
+-                sys.exit(1)
+             else:
+-                signal.signal(signal.SIGPIPE, old_signal)
+-                return 0
++                passed = True
++            signal.signal(signal.SIGPIPE, old_signal)
+         else:
+             print "lintian is not installed, skipping package test."
++            passed = True       # fair to assume lintian wasn't mandatory?
+     else:
+         print "Can't read %s" % changes_file
+-        sys.exit(1)
+-    
++    return passed
++
++
+ # Guess the host where the package should be uploaded to. This is based
+ # on information from the changes file.
+ def guess_upload_host(path, filename):
+@@ -594,6 +602,7 @@ USAGE = """Usage: dput [options] [host] <package(s).changes>
+    -u: Don't check GnuPG signature.
+    -v: Display version information.
+    -V: Check the package version and then upload it.
++   -m: Ignore broken package(s), move on to upload others specified.
+ """
+ 
+ # Main function, no further comment needed. :)
+@@ -609,16 +618,17 @@ def main():
+     check_version = config_print = force_upload = \
+     call_lintian = no_upload_log = config_host_list = 0
+     ftp_passive_mode = 0
++    moveon = 0
+     preferred_host = ''
+ 
+     # Parse Command Line Options.
+     (opts, args) = dputhelper.getopt(sys.argv[1:],
+-                            'c:dDe:fhHlUopPsuvV',
++                            'c:dDe:fhHlUopPsuvVm',
+                             ['debug', 'dinstall', 'check-only',
+                             'check-version', 'config=', 'force', 'help',
+                             'host-list', 'lintian', 'no-upload-log',
+                             'passive', 'print', 'simulate', 'unchecked',
+-                            'delayed=', 'version'])
++                            'delayed=', 'version', 'moveon'])
+     for option, arg in opts:
+         if option in ('-h', '--help'):
+             print USAGE
+@@ -658,6 +668,8 @@ def main():
+                 sys.exit(1)
+         elif option in ('-V', '--check_version'):
+             check_version = 1           
++        elif option in ('-m', '--moveon'):
++            moveon = 1
+   
+     # Always print the version number in the debug output
+     # so that in case of bugreports, we know which version
+@@ -770,18 +782,36 @@ def main():
+                              call_lintian, force_upload, debug)
+ 
+         # Run the change file tests.
+-        verify_files(path, name_of_package, host, check_only, check_version,
+-                     unsigned_upload, debug)
++        verified = verify_files(path, name_of_package, host,
++                                check_only, check_version,
++                                unsigned_upload, debug)
++
++        if not verified:
++            if moveon:
++                #print "Failed to verify files of %s." % name_of_package
++                print "Moving on to other packages if any."
++                continue
++            else:
++                sys.exit(1)
+ 
++        lintrv = True
+         # Run the lintian test if the user asked us to do so.
+         if (call_lintian or
+             config.getboolean(host, 'run_lintian') == 1):
+-            run_lintian_test(os.path.join(path, name_of_package))
++            lintrv = run_lintian_test(os.path.join(path, name_of_package))
+         elif check_only:
+             print "Warning: The option -o does not automatically include "
+             print "a lintian run any more. Please use the option -ol if "
+             print "you want to include running lintian in your checking."
+ 
++        if not lintrv:
++            if moveon:
++                #print "Lintian check failed on %s." % name_of_package
++                print "Moving on to other packages if any."
++                continue
++            else:
++                sys.exit(1)
++
+         # don't upload, skip to the next item
+         if check_only:
+             print "Package checked by dput."
+diff --git a/dput.1 b/dput.1
+index 9fb0d8a..79df511 100644
+--- a/dput.1
++++ b/dput.1
+@@ -97,6 +97,10 @@ from no delay at all.
+ \- check if the user has already installed and tested the package before
+ putting it into the archive.
+ .P
++.BR "-m",
++.BR --moveon
++\- Move on to upload other packages, ignoring broken packages.
++.P
+ 
+ .SH ENVIRONMENT
+ This program doesn't depend on any environment variables. But if the variable
+-- 
+1.6.3.3
+

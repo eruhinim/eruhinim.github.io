@@ -1,0 +1,110 @@
+diff -u dmraid-1.0.0.rc16/debian/changelog dmraid-1.0.0.rc16/debian/changelog
+--- dmraid-1.0.0.rc16/debian/changelog
++++ dmraid-1.0.0.rc16/debian/changelog
+@@ -1,3 +1,13 @@
++dmraid (1.0.0.rc16-3.1) unstable; urgency=low
++
++  * Non-maintainer upload.
++  * Make dmraid-activate work with DDF1 arrays by special-casing their
++    handling. (Closes: #603319) Similar to ISW case, there do not seem to be a
++    way for getting raid subsets for the physical drive except parsing native
++    log.
++
++ -- Modestas Vainius <modax@debian.org>  Sun, 14 Nov 2010 15:44:01 +0200
++
+ dmraid (1.0.0.rc16-3) unstable; urgency=low
+ 
+   * [3bea125] debian/patches/20_fix_isw_sectors_calculation.patch: Fix
+diff -u dmraid-1.0.0.rc16/debian/dmraid-activate dmraid-1.0.0.rc16/debian/dmraid-activate
+--- dmraid-1.0.0.rc16/debian/dmraid-activate
++++ dmraid-1.0.0.rc16/debian/dmraid-activate
+@@ -116,6 +116,58 @@
+ 	fi
+ }
+ 
++ddf1_virtual_drive_guids()
++{
++	ddf1_awk_script=$(cat <<'EOF'
++BEGIN {
++    section = ""
++    disk_ref = ""
++    guid_i = 0
++}
++
++function section_begins(name)
++{
++    section = name
++    vd_guid = ""
++    drive_map = 0
++}
++
++{
++    if (!/^0x/ && / at /) {
++        # Section begins
++        section_begins(substr($0, 1, match($0, / at /)-1))
++    } else if (section == "Disk Data" && /^0x020 reference:[ \t]*[0-9A-Fx]+/) {
++        disk_ref = $3
++        sub(/^0x/, "", disk_ref)
++    } else if (disk_ref) {
++        if (section == "Virtual Drive Config Record" && /^0x008 guid:/) {
++            vd_guid = substr($0, match($0,/\[[0-9a-f ]+\]$/)+1, RLENGTH-2)
++            gsub(/ /, "", vd_guid)
++            # IF LSI, do timestamp substitution to get persistent name, see
++            # 19_ddf1_lsi_persistent_name.patch
++            if (vd_guid ~ /^4c5349/)
++                vd_guid = substr(vd_guid, 1, 32) "47114711" substr(vd_guid, 41)
++        } else if (drive_map) {
++            # 0: 4BCBB980 @ 0
++            if ($2 == disk_ref) {
++                guids[guid_i] = vd_guid
++                guid_i++
++            }
++        } else if (vd_guid) {
++            drive_map = /^Drive map:/
++        }
++    }
++}
++END {
++    # Print discovered virtual drive GUIDs which belong to this physical drive
++    for (guid in guids)
++        print guids[guid]
++}
++EOF
++)
++	dmraid -i -n "$1" | awk "$ddf1_awk_script"
++}
++
+ if grep -qs "\<nodmraid\>" /proc/cmdline; then
+ 	log_warning "dmraid disabled by boot option"
+ 	exit 0
+@@ -141,10 +193,10 @@
+ 	exit 0
+ fi
+ 
+-# We need a special case for isw arrays, since it is possible to have several
+-# subsets of a RAID group, of varying RAID types.
+ case "$Raid_Name" in
+ 	isw_*)
++		# We need a special case for isw arrays, since it is possible to have several
++		# subsets of a RAID group, of varying RAID types.
+ 		Isw_Group_Name=$Raid_Name
+ 		Isw_Subsets=$(dmraid -i -n "/dev/$Node_Name" | grep volume | sed 's/.*volume: " *\(.*\)"$/\1/')
+ 
+@@ -154,6 +206,17 @@
+ 		done
+ 		break
+ 		;;
++	.ddf1_disks)
++		# Dummy name for the main DDF1 group. Needs special handling to
++		# find RAID subsets for this physical drive
++		Ddf1_guids=`ddf1_virtual_drive_guids "/dev/$Node_Name"`
++
++		for ddf1_guid in $Ddf1_guids
++		do
++			activate_array "ddf1_${ddf1_guid}"
++		done
++		break
++		;;
+ 	*)
+ 		activate_array "$Raid_Name"
+ 		break

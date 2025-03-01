@@ -1,0 +1,90 @@
+--- anna.c	2004-09-08 15:12:28.000000000 +0200
++++ anna_fjp.c	2004-09-08 17:28:57.000000000 +0200
+@@ -79,24 +79,57 @@
+     di_package *package, *status_package, **package_array, *test_package;
+     di_slist_node *node, *node1, *node2;
+     int reverse_depend=0;
++    bool kernel_packages_present = false;
+ 
+     config_retriever();
+ 
+-    *packages_allocator = di_system_packages_allocator_alloc();
+-    *packages = get_packages(*packages_allocator);
++    while (!kernel_packages_present) {
++        *packages_allocator = di_system_packages_allocator_alloc();
++        *packages = get_packages(*packages_allocator);
++
++        while (*packages == NULL) {
++            int status=retriever_handle_error("packages");
++            di_log(DI_LOG_LEVEL_WARNING, "bad d-i Packages file");
++            if (status != 1) {
++                /* Failed to handle error. */
++                return 4;
++            }
++            else {
++                /* Error handled, retry. */
++                *packages_allocator = di_system_packages_allocator_alloc();
++                *packages = get_packages(*packages_allocator);
++            }
++        }
++    
++        /* Go through the available packages to see if it contains at least
++           one package that is valid for the subarchitecture and corresponds
++           to the kernel version we are running */
++        for (node = (*packages)->list.head; node; node = node->next) {
++            package = node->data;
++        
++            if (!di_system_package_check_subarchitecture(package, subarchitecture))
++                continue;
++            if (((di_system_package *)package)->kernel_version)
++            {
++                if (running_kernel && strcmp(running_kernel, ((di_system_package *)package)->kernel_version) == 0)
++                {
++                    /* Found one! So break out of the loop */
++                    kernel_packages_present = true;
++                    break;
++                }
++            }
++        }
+ 
+-    while (*packages == NULL) {
+-	int status=retriever_handle_error("packages");
+-        di_log(DI_LOG_LEVEL_WARNING, "bad d-i Packages file");
+-	if (status != 1) {
+-	    /* Failed to handle error. */
+-	    return 4;
+-	}
+-	else {
+-            /* Error handled, retry. */
+-            *packages_allocator = di_system_packages_allocator_alloc();
+-            *packages = get_packages(*packages_allocator);
+-	}
++        if (!kernel_packages_present) {
++            /* Maybe the priority of the question for netretriever on which release to use
++               should be raised here */
++            int status=retriever_handle_error("kernel_version");
++            di_log(DI_LOG_LEVEL_WARNING, "no packages for kernel in archive");
++            if (status != 1) {
++                /* Failed to handle error. */
++                return 4;
++            }
++        }
+     }
+ 
+     for (node = status->list.head; node; node = node->next) {
+@@ -124,8 +157,13 @@
+ 
+         if (package->type != di_package_type_real_package)
+           continue;
+-        if (is_installed(package, status))
+-          continue;
++        if (is_installed(package, status)) {
++            /* Not sure if this is correct, but it seems logical to add this here.
++               Surely you don't want to deinstall already installed packages that
++               are at the correct version? */
++            package->status_want = di_package_status_want_hold;
++            continue;
++        }
+         if (!di_system_package_check_subarchitecture(package, subarchitecture))
+           continue;
+ 

@@ -1,0 +1,103 @@
+From fc33717e721954088ed14913af5002f0ef9d2d1a Mon Sep 17 00:00:00 2001
+From: Daniel Hartwig <mandyke@gmail.com>
+Date: Tue, 17 Apr 2012 00:46:23 +0800
+Subject: [PATCH] Avoid dpkg and infinite loop in download-only mode
+
+* src/generic/apt/download_install_manager.cc:
+  When in download_only mode:
+  - report download errors;
+  - post_dpkg save/reload cycle (fix for #429388) is not needed;
+  - ignore aptitude::Forget-New-On-Install;
+  - avoid dpkg and a potential infinite loop;
+  - do not run {Pre,Post}-Invoke scripts.
+
+Closes: #629266
+---
+ src/generic/apt/download_install_manager.cc |   42 +++++++++++++++++++++++----
+ 1 files changed, 36 insertions(+), 6 deletions(-)
+
+diff --git a/src/generic/apt/download_install_manager.cc b/src/generic/apt/download_install_manager.cc
+index e3ab4c3..6544e39 100644
+--- a/src/generic/apt/download_install_manager.cc
++++ b/src/generic/apt/download_install_manager.cc
+@@ -109,8 +109,6 @@ download_manager::result download_install_manager::finish_pre_dpkg(pkgAcquire::R
+ {
+   if(res != pkgAcquire::Continue)
+     return failure;
+-  else if(download_only)
+-    return success;
+ 
+   bool failed=false;
+   for(pkgAcquire::ItemIterator i = fetcher->ItemsBegin();
+@@ -128,6 +126,20 @@ download_manager::result download_install_manager::finish_pre_dpkg(pkgAcquire::R
+       break;
+     }
+ 
++  if(download_only)
++    {
++      // TODO: Handle files on other CDROMs (StatIdle?).
++      if(failed)
++	{
++	  _error->Error(_("Some files failed to download"));
++	  return failure;
++	}
++      else
++	{
++	  return success;
++	}
++    }
++
+   if(failed && !pm->FixMissing())
+     {
+       _error->Error(_("Unable to correct for unavailable packages"));
+@@ -226,9 +238,11 @@ void download_install_manager::finish_post_dpkg(pkgPackageManager::OrderResult d
+       // world.
+       //
+       // This implicitly updates the package state file on disk.
+-      apt_load_cache(progress, true);
++      if(!download_only)
++	apt_load_cache(progress, true);
+ 
+-      if(aptcfg->FindB(PACKAGE "::Forget-New-On-Install", false))
++      if(aptcfg->FindB(PACKAGE "::Forget-New-On-Install", false)
++	 && !download_only)
+ 	{
+ 	  if(apt_cache_file != NULL)
+ 	    {
+@@ -248,7 +262,7 @@ void download_install_manager::finish(pkgAcquire::RunResult result,
+ {
+   const download_manager::result pre_res = finish_pre_dpkg(result);
+ 
+-  if(pre_res == success)
++  if(pre_res == success && !download_only)
+     {
+       run_dpkg_in_terminal(sigc::mem_fun(*this, &download_install_manager::run_dpkg),
+ 			   sigc::bind(sigc::mem_fun(*this, &download_install_manager::finish_post_dpkg),
+@@ -258,7 +272,23 @@ void download_install_manager::finish(pkgAcquire::RunResult result,
+     }
+   else
+     {
+-      finish_post_dpkg(pkgPackageManager::Failed,
++      pkgPackageManager::OrderResult res;
++
++      switch(pre_res)
++	{
++	case success:
++	  res = pkgPackageManager::Completed;
++	  break;
++	case do_again:
++	  res = pkgPackageManager::Incomplete;
++	  break;
++	case failure:
++	default:
++	  res = pkgPackageManager::Failed;
++	  break;
++	}
++
++      finish_post_dpkg(res,
+ 		       progress,
+ 		       k);
+       return;
+-- 
+1.7.9
+

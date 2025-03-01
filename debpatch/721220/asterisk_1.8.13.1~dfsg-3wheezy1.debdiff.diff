@@ -1,0 +1,210 @@
+diff -Nru asterisk-1.8.13.1~dfsg/debian/changelog asterisk-1.8.13.1~dfsg/debian/changelog
+--- asterisk-1.8.13.1~dfsg/debian/changelog	2013-04-09 13:23:13.000000000 +0300
++++ asterisk-1.8.13.1~dfsg/debian/changelog	2013-08-29 18:07:24.000000000 +0300
+@@ -1,3 +1,13 @@
++asterisk (1:1.8.13.1~dfsg-3wheezy1) UNRELEASED; urgency=high
++
++  * Patch AST-2013-004 (CVE-2013-5641): chan_sip: crash in ACK to SDP
++  * Patch AST-2013-005 (CVE-2013-5642): Fix crash caused by invalid SDP
++    (Closes: #721220).
++  * Patch fix_xmpp_19532: fix a crash of the XMPP code (Closes: #545272).
++  * Update VCS links.
++
++ -- Tzafrir Cohen <tzafrir@debian.org>  Wed, 28 Aug 2013 23:40:03 +0300
++
+ asterisk (1:1.8.13.1~dfsg-3) unstable; urgency=high
+ 
+   * Rewrtote sip.conf parts of AST-2012-014: dropped patches
+diff -Nru asterisk-1.8.13.1~dfsg/debian/control asterisk-1.8.13.1~dfsg/debian/control
+--- asterisk-1.8.13.1~dfsg/debian/control	2012-03-18 06:00:13.000000000 +0200
++++ asterisk-1.8.13.1~dfsg/debian/control	2013-08-29 17:49:28.000000000 +0300
+@@ -50,8 +50,8 @@
+  zlib1g-dev
+ Standards-Version: 3.9.2.0
+ Homepage: http://www.asterisk.org/
+-Vcs-Svn: svn://svn.debian.org/pkg-voip/asterisk/trunk/
+-Vcs-Browser: http://svn.debian.org/wsvn/pkg-voip/asterisk/?op=log
++Vcs-Git: git://anonscm.debian.org/pkg-voip/asterisk.git
++Vcs-Browser: http://anonscm.debian.org/gitweb/?p=pkg-voip/asterisk.git
+ 
+ Package: asterisk
+ Architecture: any
+diff -Nru asterisk-1.8.13.1~dfsg/debian/patches/AST-2013-004 asterisk-1.8.13.1~dfsg/debian/patches/AST-2013-004
+--- asterisk-1.8.13.1~dfsg/debian/patches/AST-2013-004	1970-01-01 02:00:00.000000000 +0200
++++ asterisk-1.8.13.1~dfsg/debian/patches/AST-2013-004	2013-08-29 17:53:00.000000000 +0300
+@@ -0,0 +1,39 @@
++From: Matthew Jordan <mjordan@digium.com>
++Date: Tue, 27 Aug 2013 15:49:14 +0000
++Subject: AST-2013-004: Fix crash when handling ACK on dialog that has no channel
++Bug: https://issues.asterisk.org/jira/browse/ASTERISK-21064
++CVE: CVE-2013-5641
++Origin: http://svnview.digium.com/svn/asterisk?view=rev&rev=397710
++
++A remote exploitable crash vulnerability exists in the SIP channel driver if an
++ACK with SDP is received after the channel has been terminated. The handling
++code incorrectly assumed that the channel would always be present.
++
++This patch adds a check such that the SDP will only be parsed and applied if
++Asterisk has a channel present that is associated with the dialog.
++
++Note that the patch being applied was modified only slightly from the patch
++provided by Walter Doekes of OSSO B.V.
++
++Reported by: Colin Cuthbertson
++Tested by: wdoekes, Colin Cutherbertson
++patches:
++  issueA21064_fix.patch uploaded by wdoekes (License 5674)
++
++Backported to 1.8.13.1
++
++---
++ channels/chan_sip.c |    2 +-
++ 1 file changed, 1 insertion(+), 1 deletion(-)
++
++--- a/channels/chan_sip.c
+++++ b/channels/chan_sip.c
++@@ -25292,7 +25292,7 @@ static int handle_incoming(struct sip_pv
++ 			p->invitestate = INV_TERMINATED;
++ 			p->pendinginvite = 0;
++ 			acked = __sip_ack(p, seqno, 1 /* response */, 0);
++-			if (find_sdp(req)) {
+++			if (p->owner && find_sdp(req)) {
++ 				if (process_sdp(p, req, SDP_T38_NONE))
++ 					return -1;
++ 			}
+diff -Nru asterisk-1.8.13.1~dfsg/debian/patches/AST-2013-005 asterisk-1.8.13.1~dfsg/debian/patches/AST-2013-005
+--- asterisk-1.8.13.1~dfsg/debian/patches/AST-2013-005	1970-01-01 02:00:00.000000000 +0200
++++ asterisk-1.8.13.1~dfsg/debian/patches/AST-2013-005	2013-08-29 17:53:00.000000000 +0300
+@@ -0,0 +1,66 @@
++From: Matthew Jordan <mjordan@digium.com>
++Date: Tue, 27 Aug 2013 17:55:59 +0000
++Subject: AST-2013-005: Fix crash caused by invalid SDP
++Bug: https://issues.asterisk.org/jira/browse/ASTERISK-22007
++CVE: CVE-2013-5642
++Origin: http://svnview.digium.com/svn/asterisk?view=rev&rev=397756
++
++If the SIP channel driver processes an invalid SDP that defines media
++descriptions before connection information, it may attempt to reference
++the socket address information even though that information has not yet
++been set. This will cause a crash.
++
++This patch adds checks when handling the various media descriptions that
++ensures the media descriptions are handled only if we have connection
++information suitable for that media.
++
++Thanks to Walter Doekes, OSSO B.V., for reporting, testing, and providing
++the solution to this problem.
++
++Reported by: wdoekes
++Tested by: wdoekes
++patches:
++  issueA22007_sdp_without_c_death.patch uploaded by wdoekes (License 5674)
++
++---
++ channels/chan_sip.c |    8 ++++----
++ 1 file changed, 4 insertions(+), 4 deletions(-)
++
++--- a/channels/chan_sip.c
+++++ b/channels/chan_sip.c
++@@ -9258,7 +9258,7 @@ static int process_sdp(struct sip_pvt *p
++ 
++ 	/* Setup audio address and port */
++ 	if (p->rtp) {
++-		if (portno > 0) {
+++		if (sa && portno > 0) {
++ 			ast_sockaddr_set_port(sa, portno);
++ 			ast_rtp_instance_set_remote_address(p->rtp, sa);
++ 			if (debug) {
++@@ -9305,7 +9305,7 @@ static int process_sdp(struct sip_pvt *p
++ 
++ 	/* Setup video address and port */
++ 	if (p->vrtp) {
++-		if (vportno > 0) {
+++		if (vsa && vportno > 0) {
++ 			ast_sockaddr_set_port(vsa, vportno);
++ 			ast_rtp_instance_set_remote_address(p->vrtp, vsa);
++ 			if (debug) {
++@@ -9322,7 +9322,7 @@ static int process_sdp(struct sip_pvt *p
++ 
++ 	/* Setup text address and port */
++ 	if (p->trtp) {
++-		if (tportno > 0) {
+++		if (tsa && tportno > 0) {
++ 			ast_sockaddr_set_port(tsa, tportno);
++ 			ast_rtp_instance_set_remote_address(p->trtp, tsa);
++ 			if (debug) {
++@@ -9344,7 +9344,7 @@ static int process_sdp(struct sip_pvt *p
++ 	}
++ 	/* Setup image address and port */
++ 	if (p->udptl) {
++-		if (udptlportno > 0) {
+++		if (isa && udptlportno > 0) {
++ 			if (ast_test_flag(&p->flags[1], SIP_PAGE2_SYMMETRICRTP) && ast_test_flag(&p->flags[1], SIP_PAGE2_UDPTL_DESTINATION)) {
++ 				ast_rtp_instance_get_remote_address(p->rtp, isa);
++ 				if (!ast_sockaddr_isnull(isa) && debug) {
+diff -Nru asterisk-1.8.13.1~dfsg/debian/patches/fix_xmpp_19532 asterisk-1.8.13.1~dfsg/debian/patches/fix_xmpp_19532
+--- asterisk-1.8.13.1~dfsg/debian/patches/fix_xmpp_19532	1970-01-01 02:00:00.000000000 +0200
++++ asterisk-1.8.13.1~dfsg/debian/patches/fix_xmpp_19532	2013-08-29 17:53:00.000000000 +0300
+@@ -0,0 +1,52 @@
++From 519d65096a6a5c6702f194c29da45140ce698c01 Mon Sep 17 00:00:00 2001
++From: Matthew Jordan <mjordan@digium.com>
++Date: Thu, 4 Oct 2012 02:09:43 +0000
++Subject: Check for presence of buddy in info/dinfo handlers
++Bug: https://issues.asterisk.org/jira/browse/ASTERISK-19532
++Origin: http://svnview.digium.com/svn/asterisk?view=rev&rev=374335
++
++The res_jabber resource module uses the ASTOBJ library for managing its ref
++counted objects.  After calling ASTOBJ_CONTAINER_FIND to locate a buddy object,
++the pointer to the object has to be checked to see if the buddy existed.
++Prior to this patch, the buddy object was not checked for NULL; with this patch
++in both aji_client_info_handler and aji_dinfo_handler the pointer is checked
++before used and, if no buddy object was found, the handlers return an error
++code.
++
++---
++ res/res_jabber.c |   12 ++++++++++++
++ 1 file changed, 12 insertions(+)
++
++diff --git a/res/res_jabber.c b/res/res_jabber.c
++index 764ec6d..7d4eb66 100644
++--- a/res/res_jabber.c
+++++ b/res/res_jabber.c
++@@ -2004,6 +2004,12 @@ static int aji_client_info_handler(void *data, ikspak *pak)
++ 	struct aji_resource *resource = NULL;
++ 	struct aji_buddy *buddy = ASTOBJ_CONTAINER_FIND(&client->buddies, pak->from->partial);
++ 
+++	if (!buddy) {
+++		ast_log(LOG_NOTICE, "JABBER: Received client info from unknown buddy: %s.\n", pak->from->full);
+++		ASTOBJ_UNREF(client, ast_aji_client_destroy);
+++		return IKS_FILTER_EAT;
+++	}
+++
++ 	resource = aji_find_resource(buddy, pak->from->resource);
++ 	if (pak->subtype == IKS_TYPE_RESULT) {
++ 		if (!resource) {
++@@ -2071,6 +2077,12 @@ static int aji_dinfo_handler(void *data, ikspak *pak)
++ 	struct aji_resource *resource = NULL;
++ 	struct aji_buddy *buddy = ASTOBJ_CONTAINER_FIND(&client->buddies, pak->from->partial);
++ 
+++	if (!buddy) {
+++		ast_log(LOG_NOTICE, "JABBER: Received client info from unknown buddy: %s.\n", pak->from->full);
+++		ASTOBJ_UNREF(client, ast_aji_client_destroy);
+++		return IKS_FILTER_EAT;
+++	}
+++
++ 	if (pak->subtype == IKS_TYPE_ERROR) {
++ 		ast_log(LOG_WARNING, "Received error from a client, turn on jabber debug!\n");
++ 		ASTOBJ_UNREF(client, ast_aji_client_destroy);
++-- 
++1.7.10.4
++
+diff -Nru asterisk-1.8.13.1~dfsg/debian/patches/series asterisk-1.8.13.1~dfsg/debian/patches/series
+--- asterisk-1.8.13.1~dfsg/debian/patches/series	2013-04-09 02:27:03.000000000 +0300
++++ asterisk-1.8.13.1~dfsg/debian/patches/series	2013-08-29 17:53:00.000000000 +0300
+@@ -33,3 +33,6 @@
+ AST-2013-002
+ AST-2013-003
+ bluetooth_bind
++fix_xmpp_19532
++AST-2013-004
++AST-2013-005

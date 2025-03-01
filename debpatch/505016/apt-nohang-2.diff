@@ -1,0 +1,157 @@
+diff -Naur old/apt-0.7.20.2/apt-pkg/contrib/strutl.cc new/apt-0.7.20.2/apt-pkg/contrib/strutl.cc
+--- old/apt-0.7.20.2/apt-pkg/contrib/strutl.cc	2009-06-11 11:49:30.000000000 +0300
++++ new/apt-0.7.20.2/apt-pkg/contrib/strutl.cc	2009-06-11 11:49:43.000000000 +0300
+@@ -662,85 +662,80 @@
+ 
+    In particular: this reads blocks from the input until it believes
+    that it's run out of input text.  Each block is terminated by a
+-   double newline ('\n' followed by '\n').  As noted below, there is a
+-   bug in this code: it assumes that all the blocks have been read if
+-   it doesn't see additional text in the buffer after the last one is
+-   parsed, which will cause it to lose blocks if the last block
+-   coincides with the end of the buffer.
++   double newline ('\n' followed by '\n').
+  */
+ bool ReadMessages(int Fd, vector<string> &List)
+ {
+    char Buffer[64000];
+-   char *End = Buffer;
+    // Represents any left-over from the previous iteration of the
+-   // parse loop.  (i.e., if a message is split across the end
+-   // of the buffer, it goes here)
++   // parse loop.  (i.e., if a message is split across the end of the
++   // buffer, it goes here)
+    string PartialMessage;
+-   
+-   while (1)
+-   {
+-      int Res = read(Fd,End,sizeof(Buffer) - (End-Buffer));
+-      if (Res < 0 && errno == EINTR)
+-	 continue;
+-      
+-      // Process is dead, this is kind of bad..
+-      if (Res == 0)
+-	 return false;
+-      
+-      // No data
+-      if (Res < 0 && errno == EAGAIN)
+-	 return true;
+-      if (Res < 0)
+-	 return false;
+-			      
+-      End += Res;
+-      
+-      // Look for the end of the message
+-      for (char *I = Buffer; I + 1 < End; I++)
+-      {
+-	 if (I[0] != '\n' || I[1] != '\n')
+-	    continue;
+-	 
+-	 // Pull the message out
+-	 string Message(Buffer,I-Buffer);
+-	 PartialMessage += Message;
+-
+-	 // Fix up the buffer
+-	 for (; I < End && *I == '\n'; I++);
+-	 End -= I-Buffer;	 
+-	 memmove(Buffer,I,End-Buffer);
+-	 I = Buffer;
+-	 
+-	 List.push_back(PartialMessage);
+-	 PartialMessage.clear();
+-      }
+-      if (End != Buffer)
+-	{
+-	  // If there's text left in the buffer, store it
+-	  // in PartialMessage and throw the rest of the buffer
+-	  // away.  This allows us to handle messages that
+-	  // are longer than the static buffer size.
+-	  PartialMessage += string(Buffer, End);
+-	  End = Buffer;
+-	}
+-      else
+-	{
+-	  // BUG ALERT: if a message block happens to end at a
+-	  // multiple of 64000 characters, this will cause it to
+-	  // terminate early, leading to a badly formed block and
+-	  // probably crashing the method.  However, this is the only
+-	  // way we have to find the end of the message block.  I have
+-	  // an idea of how to fix this, but it will require changes
+-	  // to the protocol (essentially to mark the beginning and
+-	  // end of the block).
+-	  //
+-	  //  -- dburrows 2008-04-02
+-	  return true;
+-	}
+-
+-      if (WaitFd(Fd) == false)
+-	 return false;
+-   }   
++   // Buffer for parsing the stream
++   string MsgBuffer;
++   string BlockTerminator("\n\n");
++   // Was the MsgBuffer cleared during this round
++   bool Cleared = false;
++   string::size_type Pos;
++
++   while (1) {
++     int Res = read(Fd, Buffer, sizeof(Buffer));
++     if (Res < 0 && errno == EINTR)
++       continue;
++     
++     // Process is dead, this is kind of bad..
++     if (Res == 0)
++       return false;
++     
++     // No data
++     if (Res < 0 && errno == EAGAIN)
++       return true;
++     
++     if (Res < 0 && !Cleared)
++       return false;
++     
++     Cleared = false;
++     MsgBuffer.clear();
++     
++     if (!PartialMessage.empty()) {
++       MsgBuffer.assign(PartialMessage);
++     }
++     
++     if (Res > 0) {
++       MsgBuffer.append(string(Buffer, Res));
++     }
++     
++     while (!MsgBuffer.empty()) {
++       Pos = MsgBuffer.find(BlockTerminator);
++       if (Pos != string::npos) {
++         PartialMessage = MsgBuffer.substr(0, Pos);
++         MsgBuffer.erase(0, Pos+2); // get rid of the block terminator too
++         List.push_back(PartialMessage);
++         PartialMessage.clear();
++       }
++       else {
++         // If the block terminator was not found, copy the rest of
++         // the message to the MsgBuffer for the next round
++         PartialMessage.assign(MsgBuffer);
++         MsgBuffer.clear();
++         
++         if (WaitFd(Fd) == false)
++           return false;
++       }
++       
++       // once we come out from here, the MsgBuffer is empty
++       Cleared = true;
++     }
++
++     // There was something to read from the MsgBuffer, let's go
++     // around and see if there's more.
++     if (Cleared)
++       continue;
++     
++     // We may reach here if there was nothing to read anymore
++     if (MsgBuffer.empty())
++       return true;
++   }
+ }
+ 									/*}}}*/
+ // MonthConv - Converts a month string into a number			/*{{{*/

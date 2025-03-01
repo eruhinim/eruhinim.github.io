@@ -1,0 +1,191 @@
+From 275b043b8dffd404f3ecb378db150c5cd2ea63f1 Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Tue, 10 Jan 2017 09:29:45 +0100
+Subject: [PATCH 3/4] Add new DebianDoc-SGML to DocBook conversion script
+
+This is a draft conversion script, that should automate the whole
+process so that it can hopefully be repeated at any later point
+and can handle modifications to the documents text.
+---
+ html.dsl           |  42 +++++++++++++++++++
+ tools/sgml2docbook | 119 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 161 insertions(+)
+ create mode 100644 html.dsl
+ create mode 100755 tools/sgml2docbook
+
+diff --git a/html.dsl b/html.dsl
+new file mode 100644
+index 0000000..fae6763
+--- /dev/null
++++ b/html.dsl
+@@ -0,0 +1,42 @@
++<!DOCTYPE style-sheet PUBLIC "-//James Clark//DTD DSSSL Style Sheet//EN" [
++<!ENTITY docbook.dsl PUBLIC "-//Norman Walsh//DOCUMENT DocBook HTML Stylesheet//EN" CDATA dsssl>
++]>
++<style-sheet>
++
++<style-specification id="html" use="docbook">
++<style-specification-body>
++
++(define %section-autolabel% #t)
++(define %chunk-section-depth% 0)
++(define %header-navigation% #t)
++(define %footer-navigation% #t)
++(define %use-id-as-filename% #t)
++(define %html-ext% ".html")
++
++(define (article-titlepage-recto-elements)
++  (list
++        (normalize "title")
++        (normalize "subtitle")
++        (normalize "authorgroup")
++        (normalize "author")
++        (normalize "releaseinfo")
++        (normalize "copyright")
++        (normalize "pubdate")
++        (normalize "revhistory")
++        (normalize "legalnotice")
++        (normalize "abstract")
++))
++(define (chunk-element-list)
++  (list
++        (normalize "book")
++        (normalize "chapter")
++        (normalize "appendix")
++        (normalize "footnotes")
++))
++
++</style-specification-body>
++</style-specification>
++
++<external-specification id="docbook" document="docbook.dsl">
++
++</style-sheet>
+diff --git a/tools/sgml2docbook b/tools/sgml2docbook
+new file mode 100755
+index 0000000..fa2e48c
+--- /dev/null
++++ b/tools/sgml2docbook
+@@ -0,0 +1,119 @@
++#!/bin/sh
++
++set -e
++set -x
++
++cleanup=yes
++tidyxml=no
++
++files="menu-policy.sgml perl-policy.sgml upgrading-checklist.sgml policy.sgml"
++
++export LC_ALL=C
++
++# Generate fake entity files to be able to process the SGML and XML.
++(
++  echo '<!entity version "@@@VERSION@@@">'
++  echo '<!entity date    "@@@DATE@@@">'
++) >version.ent
++(
++  echo '<?xml version="1.0" encoding="utf-8"?>'
++  echo '<!ENTITY version "@@@VERSION@@@">'
++  echo '<!ENTITY date    "@@@DATE@@@">'
++) >version.xml
++
++for sgml in $files; do
++  base=$(basename $sgml .sgml)
++
++  # Remove invalid entities, encode other entities, and wrap
++  sed -e 's/ *&copy; *//g' \
++      -e 's/, &date;//g' \
++      -e 's/&\([a-z]*\);/@@@\1@@@/g' <$sgml >$base.new.sgml
++
++  # Do the conversion.
++  debiandoc2dbk -1 -l en $base.new.sgml
++
++  # Recode, and fixup markup.
++  iconv -f iso-8859-15 -t utf-8 <$base.new.dbk |
++    sed -e 's/@@@\([a-z]*\)@@@/\&\1;/g' \
++        -e 's/&version;/@@@version@@@/g' \
++        -e 's/<!-- put date -->/@@@date@@@/' \
++        -e '/<!-- Include entity/d' \
++        -e 's/<!-- \(<!ENTITY .*\)"version.ent"\(>.*\) *-->/\1"version.xml"\2/g' \
++        -e 's:<personname>\([^ ]*\) *\([^ ]*\)</personname>:<personname><firstname>\1</firstname><surname>\2</surname></personname>:g' \
++        -e 's:<personname>\(.*The Debian Policy mailing List.*\)</personname>:<othername>\1</othername>:gi' \
++        -e 's/ *$//g' \
++      >$base.xml
++
++  if [ "$base" = "policy" ]; then
++    # Fixup IDs, and insert entity.
++    sed -i \
++        -e '/^]>/i<!-- current Debian changes file format -->\
++<!ENTITY changesversion "1.8">' \
++        -e 's:<literal>"</literal>:&<!-- balance " -->:' \
++        -e 's/\(id\|linkend\)="\(pkg-alternatives\|pkg-binarypkg\|pkg-conffiles\|pkg-controlfields\|pkg-diversions\|pkg-scope\|pkg-sourcepkg\)"/\1="ap-\2"/g' \
++        -e 's/\(id\|linkend\)="\(archive\|binary\|controlfields\|customized-programs\|docs\|files\|maintainerscripts\|opersys\|relationships\|scope\|sharedlibs\|source\)"/\1="ch-\2"/' \
++        -e '/\(id\|linkend\)="\(ap-\|ch-\|s-\|s[0-9]\)[^"]*"/!s/\(id\|linkend\)="\([^"]*\)"/\1="s-\2"/g' \
++      $base.xml
++  elif [ "$base" = "perl-policy" ]; then
++    # Fixup IDs.
++    sed -i \
++        -e 's/\(id\|linkend\)="perl6"/\1="ap-perl6"/' \
++        -e 's/\(id\|linkend\)="module-packages"/\1="ch-module_packages"/' \
++        -e 's/\(id\|linkend\)="\(embed\|perl\|programs\|site\|files\)"/\1="ch-\2"/' \
++        -e '/\(id\|linkend\)="\(ap-\|ch-\|ch[0-9]\|s-\|s[0-9]\)[^"]*"/!s/\(id\|linkend\)="\([^"]*\)"/\1="s-\2"/g' \
++      $base.xml
++  elif [ "$base" = "upgrading-checklist" ]; then
++    # Fixup IDs.
++    sed -i -e 's/id="\([0-9]\)/id="s-\1/g' \
++      $base.xml
++  fi
++
++  case "$tidyxml" in
++  xmllint)
++    xmllint --encode utf-8 --format --nonet --postvalid $base.xml \
++      | sponge $base.xml
++    ;;
++  pandoc)
++    # Converts from book to an article, does not preserve entity declarations,
++    # nice output.
++    pandoc --normalize --chapters -s -f docbook -t docbook $base.xml \
++      | sponge $base.xml
++    ;;
++  tidy)
++    # Messes up spacing, and joins tags and words.
++    tidy -raw -wrap 76 --indent yes --quiet yes \
++         -xml --input-xml yes --output-xml yes \
++         --preserve-entities yes --vertical-space yes --add-xml-space yes \
++         -i -m $base.xml
++    ;;
++  esac
++
++  # Restore entities.
++  sed -i -e 's/@@@\([a-z]*\)@@@/\&\1;/g' $base.xml
++
++  # Test generating single file.
++  openjade -V nochunks \
++    -t sgml -d html.dsl /usr/share/xml/declaration/xml.dcl $base.xml \
++    >"$base-1.html"
++
++  # Test generating chunked files.
++  mkdir -p $base.html
++  openjade \
++    -V use-output-dir -V %output-dir%=$base.html/ \
++    -V %root-filename%=index \
++    -t sgml -d html.dsl /usr/share/xml/declaration/xml.dcl $base.xml
++
++  # Update git tree.
++  git add $base.xml
++  git rm $base.sgml
++
++  # Cleanup temporary files.
++  if [ $cleanup = yes ]; then
++    rm -f $base.new.*
++  fi
++done
++
++# Cleanup temporary files.
++if [ $cleanup = yes ]; then
++  rm -f version.ent version.xml
++fi
+-- 
+2.12.1.578.ge9c3154ca4
+

@@ -1,0 +1,108 @@
+--- update-alternatives.orig	2008-09-28 21:43:51.000000000 +0900
++++ update-alternatives	2008-10-04 00:05:31.000000000 +0900
+@@ -23,6 +23,7 @@
+ 
+ my $action = '';      # Action to perform (display / install / remove / display / auto / config)
+ my $mode = 'auto';    # Update mode for alternative (manual / auto)
++my $skip = '';        # Skip correct auto mode condition for --config
+ my $state;            # State of alternative:
+                       #   expected: alternative with highest priority is the active alternative
+                       #   expected-inprogress: busy selecting alternative with highest priority
+@@ -100,6 +101,7 @@
+ Options:
+   --altdir <directory>     change the alternatives directory.
+   --admindir <directory>   change the administrative directory.
++  --skip                   skip prompt for correct auto mode choice (--config)
+   --verbose                verbose operation, more output.
+   --quiet                  quiet operation, minimal output.
+   --help                   show this help message.
+@@ -253,7 +255,7 @@
+ {
+     my ($spath, $preferred) = (@_);
+ 
+-    printf STDOUT _g("Using '%s' to provide '%s'.") . "\n", $spath, $name;
++    printf STDOUT _g("Using '%s' to provide '%s' in mode=%s.") . "\n", $spath, $name, $mode;
+     checked_symlink("$spath","$altdir/$name.dpkg-tmp");
+     checked_mv("$altdir/$name.dpkg-tmp", "$altdir/$name");
+ 
+@@ -336,6 +338,8 @@
+     } elsif (m/^--admindir$/) {
+         @ARGV || &badusage(sprintf(_g("--%s needs a <directory> argument"), "admindir"));
+         $admindir= shift(@ARGV);
++    } elsif (m/^--skip$/) {
++	$skip = '--skip';
+     } elsif (m/^--all$/) {
+ 	$action = 'all';
+     } else {
+@@ -630,24 +634,29 @@
+ 	          "Nothing to configure.\n"), $name;
+ 	return -1;
+     }
+-    if ($#versions == 0) {
++    if ($skip eq '--skip' && $mode eq 'auto' && $best eq readlink("$altdir/$name")) {
+ 	print "\n";
+-	printf _g("There is only 1 program which provides %s\n".
++        display_link_group();
++        return -1;
++    }
++    if ($#versions == 0 && $mode eq 'auto' && $best eq readlink("$altdir/$name")) {
++	print "\n";
++	printf _g("There is only 1 program which provides %s properly in auto mode\n".
+ 	          "(%s). Nothing to configure.\n"), $name, $versions[0];
+ 	return -1;
+     }
+     print STDOUT "\n";
+     printf(STDOUT _g("There are %s alternatives which provide \`%s'.\n\n".
+-                     "  Selection    Alternative\n".
++                     " Selection    Alternative\n".
+                      "-----------------------------------------------\n"),
+                   $#versions+1, $name);
++    printf(STDOUT "%s        0    %s (auto mode)\n", ($mode eq "auto" && readlink("$altdir/$name") eq $best) ? '*' : ' ', $best);
+     for (my $i = 0; $i <= $#versions; $i++) {
+-	printf(STDOUT "%s%s %8s    %s\n",
+-	    (readlink("$altdir/$name") eq $versions[$i]) ? '*' : ' ',
+-	    ($best eq $versions[$i]) ? '+' : ' ',
+-	    $i+1, $versions[$i]);
++	printf(STDOUT "%s %8s    %s (manual mode) priority=%s\n",
++	    (readlink("$altdir/$name") eq $versions[$i] && $mode eq "manual") ? '*' : ' ',
++	    $i+1, $versions[$i], $priorities[$i]);
+     }
+-    printf(STDOUT "\n"._g("Press enter to keep the default[*], or type selection number: "));
++    printf(STDOUT "\n"._g("Press select number (type enter for the current selection[*]): "));
+     return 0;
+ }
+ 
+@@ -657,14 +666,19 @@
+ 	return if config_message() < 0;
+ 	$preferred=<STDIN>;
+ 	chop($preferred);
+-    } until $preferred eq '' || $preferred>=1 && $preferred<=$#versions+1 &&
++    } until $preferred eq '' || $preferred>=0 && $preferred<=$#versions+1 &&
+ 	($preferred =~ m/[0-9]*/);
+     if ($preferred ne '') {
+-	$mode = "manual";
+-	$preferred--;
+-	my $spath = $versions[$preferred];
++        if ($preferred == 0) {
++	    $action = "auto";
++	    $mode = "auto";
++	} else {
++	    $mode = "manual";
++	    $preferred--;
++	    my $spath = $versions[$preferred];
+ 
+-	set_links($spath, $preferred);
++	    set_links($spath, $preferred);
++	}
+     }
+ }
+ 
+@@ -717,7 +731,7 @@
+     my @filenames = grep !/^\.\.?$/, readdir ADMINDIR;
+     close ADMINDIR;
+     foreach my $name (@filenames) {
+-        system "$0 --config $name";
++        system "$0 $skip --config $name";
+         exit $? if $?;
+     }
+ }

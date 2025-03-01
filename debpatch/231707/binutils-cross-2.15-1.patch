@@ -1,0 +1,209 @@
+diff -urN binutils-2.15-1/debian/control.cross.in binutils-2.15/debian/control.cross.in
+--- binutils-2.15-1/debian/control.cross.in	1970-01-01 03:00:00.000000000 +0300
++++ binutils-2.15/debian/control.cross.in	2004-08-24 16:38:16.000000000 +0400
+@@ -0,0 +1,12 @@
++Package: binutils-TARGET
++Architecture: any
++Depends: binutils, ${shlibs:Depends}
++Suggests: binutils-doc (= ${Source-Version})
++Priority: extra
++OLD_EMDEBIAN_CONFLICT
++Description: The GNU binary utilities, for TARGET target
++ This package provides GNU assembler, linker and binary utilities
++ for TARGET target, for use in cross-compilation environment.
++ .
++ You don't need this package unless you plan to cross-compile programs
++ for TARGET.
+diff -urN binutils-2.15-1/debian/patches/00list binutils-2.15/debian/patches/00list
+--- binutils-2.15-1/debian/patches/00list	2004-08-23 23:46:28.000000000 +0400
++++ binutils-2.15/debian/patches/00list	2004-08-24 16:38:16.000000000 +0400
+@@ -4,3 +4,4 @@
+ 003_gprof_see_also_monitor
+ 006_better_file_error
+ 012_check_ldrunpath_length
++999_lib64_for_cross
+diff -urN binutils-2.15-1/debian/patches/999_lib64_for_cross.dpatch binutils-2.15/debian/patches/999_lib64_for_cross.dpatch
+--- binutils-2.15-1/debian/patches/999_lib64_for_cross.dpatch	1970-01-01 03:00:00.000000000 +0300
++++ binutils-2.15/debian/patches/999_lib64_for_cross.dpatch	2004-08-24 16:38:16.000000000 +0400
+@@ -0,0 +1,56 @@
++#! /bin/sh -e
++## 999_lib64_for_cross.dpatch by Nikita Youshchenko <yoush@cs.msu.su>
++##
++## DP: Add /usr/${target-alias}/lib${LIBPATH_SUFFIX} to ld's default
++## DP: library search path for cross targets. Needed for cross targets that
++## DP: try to support both 32bit and 64bit emulations.
++
++if [ $# -lt 1 ]; then
++    echo "`basename $0`: script expects -patch|-unpatch as argument" >&2
++    exit 1
++fi
++
++[ -f debian/patches/00patch-opts ] && . debian/patches/00patch-opts
++patch_opts="${patch_opts:--f --no-backup-if-mismatch} ${2:+-d $2}"
++
++case "$1" in
++    -patch) patch -p1 ${patch_opts} < $0;;
++    -unpatch) patch -R -p1 ${patch_opts} < $0;;
++    *)
++        echo "`basename $0`: script expects -patch|-unpatch as argument" >&2
++        exit 1;;
++esac
++
++exit 0
++
++@DPATCH@
++diff -urNad /home/nikita/debian/binutils/binutils-2.14.90.0.7.cross/ld/genscripts.sh binutils-2.14.90.0.7.cross/ld/genscripts.sh
++--- /home/nikita/debian/binutils/binutils-2.14.90.0.7.cross/ld/genscripts.sh	2003-10-29 20:37:48.000000000 +0300
+++++ binutils-2.14.90.0.7.cross/ld/genscripts.sh	2004-07-15 00:29:19.000000000 +0400
++@@ -176,6 +176,26 @@
++   ::) LIB_PATH=${tool_lib} ;;
++   *) LIB_PATH=${tool_lib}:${LIB_PATH} ;;
++   esac
+++  # For multilib'ed targets, ensure both ${target_alias}/lib${LIBPATH_SUFFIX}
+++  # and ${TOOL_LIB}/lib${LIBPATH_SUFFIX} to default search path, because
+++  # 64bit libraries may be in both places, depending on cross-development
+++  # setup method (e.g.: /usr/s390x-linux/lib64 vs /usr/s390-linux/lib64)
+++  case "${LIBPATH_SUFFIX}:${tool_lib}" in
+++    :*) ;;
+++    *:*${LIBPATH_SUFFIX}) ;;
+++    *)
+++      paths="${exec_prefix}/${target_alias}/lib${LIBPATH_SUFFIX}"
+++      if [ "${TOOL_LIB}" != x ]; then
+++        paths="${paths} ${exec_prefix}/${TOOL_LIB}/lib${LIBPATH_SUFFIX}"
+++      fi
+++      for path in $paths; do
+++        case :${LIB_PATH}: in
+++          ::: | *:${path}:*) ;;
+++          *) LIB_PATH=${path}:${LIB_PATH} ;;
+++        esac
+++      done
+++    ;;
+++  esac
++ fi
++ 
++ LIB_SEARCH_DIRS=`echo ${LIB_PATH} | sed -e 's/:/ /g' -e 's/\([^ ][^ ]*\)/SEARCH_DIR(\\"\1\\");/g'`
+diff -urN binutils-2.15-1/debian/README.cross binutils-2.15/debian/README.cross
+--- binutils-2.15-1/debian/README.cross	1970-01-01 03:00:00.000000000 +0300
++++ binutils-2.15/debian/README.cross	2004-08-24 16:38:17.000000000 +0400
+@@ -0,0 +1,12 @@
++Cross-binutils debian packages can be built directly from binutils
++source package.
++
++To build cross-binutils package, download and unpack binutils
++source package, and run
++
++TARGET=your-target fakeroot debian/rules binary-cross
++
++(substitute your target name, e.g. "arm-linux", instead of "your-target")
++
++---
++Nikita Youshchenko <yoush@cs.msu.su>
+diff -urN binutils-2.15-1/debian/rules binutils-2.15/debian/rules
+--- binutils-2.15-1/debian/rules	2004-08-23 23:46:28.000000000 +0400
++++ binutils-2.15/debian/rules	2004-08-24 16:39:13.000000000 +0400
+@@ -377,7 +377,8 @@
+ endif
+ 
+ 	$(install_file) $(pwd)/test-summary binutils/NEWS  \
+-	                debian/README.Debian $(d_bin)/usr/share/doc/$(p_bin)/
++	                debian/README.Debian debian/README.cross \
++			$(d_bin)/usr/share/doc/$(p_bin)/
+ 
+ 	$(install_file) binutils/ChangeLog $(d_bin)/usr/share/doc/$(p_bin)/changelog
+ 
+@@ -436,6 +437,95 @@
+ 
+ ################################################################################
+ 
++#################
++# cross targets #
++#################
++
++d_cross = debian/binutils-$(TARGET)
++p_cross = binutils-$(TARGET)
++
++ifneq ($(filter sparc-linux powerpc-linux mips-linux, $(TARGET)),)
++ADDITIONAL_TARGETS = --enable-targets=$(TARGET:%-linux=%64-linux)
++endif
++ifneq ($(filter i386-linux i486-linux i586-linux x86-linux, $(TARGET)),)
++ADDITIONAL_TARGETS = --enable-targets=x86_64-linux
++endif
++ifeq ($(TARGET), mipsel-linux)
++ADDITIONAL_TARGETS = --enable-targets=mips64el-linux
++endif
++ifeq ($(TARGET), sparc64-linux)
++ADDITIONAL_TARGETS = --enable-targets=sparc-linux
++endif
++ifeq ($(TARGET), s390-linux)
++ADDITIONAL_TARGETS = --enable-targets=s390x-linux
++endif
++
++configure-$(TARGET)-stamp: patch-stamp
++	$(checkdir)
++	test "" != "$(TARGET)"
++	rm -rf configure-$(TARGET)-stamp builddir-$(TARGET)
++	mkdir builddir-$(TARGET)
++	cd builddir-$(TARGET) \
++	    && env CC="$(CC)" ../configure --host=$(DEB_HOST_GNU_TYPE) \
++	        --build=$(DEB_BUILD_GNU_TYPE) --target=$(TARGET) --prefix=/usr \
++		$(ADDITIONAL_TARGETS)
++	touch $@
++
++build-$(TARGET)-stamp: configure-$(TARGET)-stamp
++	$(checkdir)
++	test "" != "$(TARGET)"
++	$(MAKE) -C builddir-$(TARGET) CFLAGS="$(CFLAGS)"
++	touch $@
++
++install-$(TARGET)-stamp: build-$(TARGET)-stamp
++	$(checkdir)
++	test "" != "$(TARGET)"
++	rm -rf $(d_cross)
++	$(MAKE) -C builddir-$(TARGET) prefix=$(pwd)/$(d_cross)/usr \
++		mandir=$(pwd)/$(d_cross)/usr/share/man install
++	rm -rf $(d_cross)/usr/lib $(d_cross)/usr/info $(d_cross)/usr/share/locale
++	$(STRIP) $(d_cross)/usr/bin/*
++	gzip -9 $(d_cross)/usr/share/man/man1/*
++	touch $@
++
++binary-cross: checkroot install-$(TARGET)-stamp
++	$(checkdir)
++	test "" != "$(TARGET)"
++	
++	sed '/^$$/ q' < debian/control > debian/control.$(TARGET)
++	case "$(TARGET)" in \
++	  arm-linux|powerpc-linux) \
++	    sed "s/TARGET/$(TARGET)/g; s/OLD_EMDEBIAN_CONFLICT/Conflicts: binutils-`echo $(TARGET) | sed s/-linux//`/" < debian/control.cross.in >> debian/control.$(TARGET) ;; \
++	  *) \
++	    grep -v OLD_EMDEBIAN_CONFLICT debian/control.cross.in | sed 's/TARGET/$(TARGET)/g' >> debian/control.$(TARGET) ;; \
++	esac
++	
++	$(install_dir) $(d_cross)/DEBIAN
++	
++	$(install_dir) $(d_cross)/usr/share/doc/$(p_cross)/
++	$(install_file)	debian/changelog $(d_cross)/usr/share/doc/$(p_cross)/changelog.Debian
++	$(install_file)	debian/copyright debian/README.cross $(d_cross)/usr/share/doc/$(p_cross)/
++	gzip -f -9 $(d_cross)/usr/share/doc/$(p_cross)/changelog.Debian
++	
++	for pkg in bfd gas gprof ld; do \
++	  ln -sf ../binutils/$$pkg $(d_cross)/usr/share/doc/$(p_cross)/$$pkg; \
++	done
++
++	rm -f debian/substvars
++	dpkg-shlibdeps $(d_cross)/usr/bin/*
++	dpkg-gencontrol -cdebian/control.$(TARGET) -P$(d_cross) -p$(p_cross)
++	dpkg --build $(d_cross) ..
++
++clean-cross: unpatch
++	$(checkdir)
++	test "" != "$(TARGET)"
++	rm -rf $(d_cross) debian/control.$(TARGET) debian/files debian/substvars \
++		builddir-$(TARGET) {configure,build,install}-$(TARGET)-stamp
++
++.PHONY: binary-cross clean-cross
++
++################################################################################
++
+ define checkdir
+         test -f bfd/elf32.c -a -f debian/rules
+ endef

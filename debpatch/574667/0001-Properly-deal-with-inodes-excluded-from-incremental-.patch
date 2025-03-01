@@ -1,0 +1,86 @@
+From 279c7540d6a060ffefedc95c8e3f1514b814134f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fr=C3=A9d=C3=A9ric=20Bri=C3=A8re?= <fbriere@fbriere.net>
+Date: Sat, 20 Mar 2010 14:02:16 -0400
+Subject: [PATCH] Properly deal with inodes excluded from incremental dump
+
+Files which are excluded from a dump (via -e or the nodump attribute)
+still have their inode marked as in-use in the dump header.  This can
+cause problems when restoring from an incremental dump, if that inode is
+currently assigned in the symtable:
+
+  - If assigned to a file that is being overwritten by another inode,
+    the old entry will be renamed away, but never reclaimed, thus
+    leaving the TMPNAME flag turned on and preventing its removal.
+
+  - If assigned to a directory, that directory will not be removed by
+    removeoldleaves(), and its entry will linger on in its parent's
+    e_entries.
+
+    - If its parent is being updated, removeleaf() will wrongly be
+      called on the entry.  The above comment about TMPNAME also
+      applies.
+
+    - If its parent is being deleted, this will fail due to the entry's
+      presence.
+---
+ restore/restore.c |   27 ++++++++++++++++++++++++---
+ 1 files changed, 24 insertions(+), 3 deletions(-)
+
+diff --git a/restore/restore.c b/restore/restore.c
+index c87b532..537be33 100644
+--- a/restore/restore.c
++++ b/restore/restore.c
+@@ -566,6 +566,9 @@ keyval(int key)
+ 
+ /*
+  * Find unreferenced link names.
++ *
++ * This also takes care of directories which were missed by removeoldleaves(),
++ * because their inode has been reused, but excluded from the dump.
+  */
+ void
+ findunreflinks(void)
+@@ -583,12 +586,19 @@ findunreflinks(void)
+ 			continue;
+ 		for (j = 0; j < dirhash_size; j++) {
+ 			for (np = ep->e_entries[j]; np != NULL; np = np->e_sibling) {
+-				if (np->e_flags == 0) {
++				if ((np->e_flags & ~TMPNAME) == 0) {
+ 					Dprintf(stdout,
+ 					    "%s: remove unreferenced name\n",
+ 					    myname(np));
+-					removeleaf(np);
+-					freeentry(np);
++					if (np->e_type == LEAF) {
++						removeleaf(np);
++						freeentry(np);
++					} else {
++						np->e_flags |= TMPNAME;
++						deleteino(np->e_ino);
++						np->e_next = removelist;
++						removelist = np;
++					}
+ 				}
+ 			}
+ 		}
+@@ -609,6 +619,17 @@ findunreflinks(void)
+ 					    myname(np));
+ 					removeleaf(np);
+ 					freeentry(np);
++				} else {
++					if ((np->e_flags & ~TMPNAME) != 0)
++						badentry(np, "unreferenced with flags");
++
++					if (np->e_flags == 0) {
++						Dprintf(stdout,
++						    "%s: remove unreferenced name\n",
++						    myname(np));
++						np->e_next = ep->e_next;
++						ep->e_next = np;
++					}
+ 				}
+ 			}
+ 		}
+-- 
+1.7.0.2
+

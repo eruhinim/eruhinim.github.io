@@ -1,0 +1,129 @@
+From b0a67f447be96d4b5df683da6f280d4b24eb3ff4 Mon Sep 17 00:00:00 2001
+From: Ben Hutchings <ben@decadent.org.uk>
+Date: Thu, 16 Aug 2012 04:16:54 +0100
+Subject: [PATCH] Fix mangling of '&' in URLs
+
+SDATA entities, e.g. '&amp;' are converted on input to different
+escape sequences, e.g. '\|[amp   ]\|'.  These need to be converted
+back to literal characters or entities on output, depending on the
+format.  Currently we fail to do this because:
+
+1. The HTML and XML back-ends only do URL-normalization; they never
+process the SDATA escape sequences.
+
+Change them to do CDATA conversion before normalizing URLs.  This is
+not theoretically correct: we should convert to literal text, then
+normalize the URL, then convert to CDATA.  However we know that '&'
+and ';' will not be URL-escaped and therefore the result should be the
+same.
+
+2. The driver does some basic normalization of the URL by squashing
+multiple spaces.  Since the spaces are significant in matching of the
+SDATA escape sequences, they are then not converted by any back-end.
+
+Change it to trim leading and trailing space only; URLs should not
+normally contain any spaces anyway.
+---
+ debian/changelog           |    7 +++++++
+ tools/lib/Format/Driver.pm |    2 +-
+ tools/lib/Format/HTML.pm   |   10 +++++++---
+ tools/lib/Format/XML.pm    |   10 +++++++---
+ 4 files changed, 22 insertions(+), 7 deletions(-)
+
+diff --git a/debian/changelog b/debian/changelog
+index 2f58e28..a8b1dc1 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,3 +1,10 @@
++debiandoc-sgml (1.2.27+nmu1) UNRELEASED; urgency=low
++
++  * Non-maintainer upload.
++  * Fix mangling of '&' in URLs.
++
++ -- Ben Hutchings <ben@decadent.org.uk>  Thu, 16 Aug 2012 03:55:35 +0100
++
+ debiandoc-sgml (1.2.27) unstable; urgency=low
+ 
+   * Rebuild with debhelper sgml-base >=1.26+nmu2. Closes: #675474
+diff --git a/tools/lib/Format/Driver.pm b/tools/lib/Format/Driver.pm
+index 368711f..b707291 100644
+--- a/tools/lib/Format/Driver.pm
++++ b/tools/lib/Format/Driver.pm
+@@ -918,7 +918,7 @@ sub end_httppath
+ sub start_url
+ {
+     ( $element, $event ) = @_;
+-    my $id = _normalize( _a( 'ID' ) );
++    my $id = _trim( _a( 'ID' ) );
+     my $name =  _a( 'NAME' );
+     $name = "" if ( $name eq '\|\|' ) || ( $name eq '\|urlname\|' )
+ 	|| ( $name eq $id );
+diff --git a/tools/lib/Format/HTML.pm b/tools/lib/Format/HTML.pm
+index 590bd79..564b420 100644
+--- a/tools/lib/Format/HTML.pm
++++ b/tools/lib/Format/HTML.pm
+@@ -956,7 +956,7 @@ sub _output_httppath
+ }
+ sub _output_url
+ {
+-    my $url = URI->new( $_[0] );
++    my $url = URI->new( _to_cdata( $_[0] ) );
+     $_[1] = $_[0] if $_[1] eq "";
+     output( "<code><a href=\"$url\">" );
+     _cdata( $_[1] );
+@@ -966,7 +966,7 @@ sub _output_url
+ ## ----------------------------------------------------------------------
+ ## data output subroutines
+ ## ----------------------------------------------------------------------
+-sub _cdata
++sub _to_cdata
+ {
+     ( $_ ) = @_;
+ 
+@@ -976,7 +976,11 @@ sub _cdata
+     # SDATA
+     s/\\\|(\[\w+\s*\])\\\|/$sdata{ $1 }/g;
+ 
+-    output( $_ );
++    return $_;
++}
++sub _cdata
++{
++    output( _to_cdata( $_[0] ) );
+ }
+ sub _sdata
+ {
+diff --git a/tools/lib/Format/XML.pm b/tools/lib/Format/XML.pm
+index 5e1b807..7d852ef 100644
+--- a/tools/lib/Format/XML.pm
++++ b/tools/lib/Format/XML.pm
+@@ -769,7 +769,7 @@ sub _output_httppath
+ }
+ sub _output_url
+ {
+-    my $url = URI->new( $_[0] );
++    my $url = URI->new( _to_cdata( $_[0] ) );
+     $_[1] = $_[0] if $_[1] eq "";
+     output( "<ulink url=\"$url\">" );
+     _cdata( $_[1] );
+@@ -779,14 +779,18 @@ sub _output_url
+ ## ----------------------------------------------------------------------
+ ## data output subroutines
+ ## ----------------------------------------------------------------------
+-sub _cdata
++sub _to_cdata
+ {
+     ( $_ ) = @_;
+ 
+     # SDATA
+     s/\\\|(\[\w+\s*\])\\\|/$sdata{ $1 }/g;
+ 
+-    output( $_ );
++    return $_;
++}
++sub _cdata
++{
++    output( _to_cdata( $_[0] ) );
+ }
+ sub _sdata
+ {

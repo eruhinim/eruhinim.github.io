@@ -1,0 +1,85 @@
+>From 12274448c17bad9f77ac7255680c5b559f91606e Mon Sep 17 00:00:00 2001
+From: Cyril Brulebois <kibi@debian.org>
+Date: Tue, 18 Feb 2014 20:23:29 +0300
+Subject: [PATCH 4/4] deb-reversion: Deal with deb/udeb specific cases.
+
+Two things here:
+ - Only massage changelog file in the deb case.
+ - Make sure to generate a .udeb file in the udeb case, which is
+   slightly tricky since "Package-Type: udeb" can be absent, and
+   dpkg-name would then default to the .deb extension.
+
+(Best viewed with git diff/log's -b flag.)
+---
+ scripts/deb-reversion.sh |   41 ++++++++++++++++++++++++++++-------------
+ 1 file changed, 28 insertions(+), 13 deletions(-)
+
+diff --git a/scripts/deb-reversion.sh b/scripts/deb-reversion.sh
+index 2ef7edd..de5af74 100755
+--- a/scripts/deb-reversion.sh
++++ b/scripts/deb-reversion.sh
+@@ -168,18 +168,23 @@ change_version()
+ {
+   PACKAGE=$(sed -ne 's,^Package: ,,p' DEBIAN/control)
+   VERSION=$1
+-  LOGFILE=
+-  for i in changelog{,.Debian}.gz; do
+-    [ -f usr/share/doc/${PACKAGE}/$i ] \
+-      && LOGFILE=usr/share/doc/${PACKAGE}/$i
+-  done
+-  [ -z "$LOGFILE" ] && { echo "changelog file not found"; return 1; }
+-  mkdir -p debian
+-  zcat $LOGFILE > debian/changelog
+-  shift
+-  dch $DCH_OPTIONS -v $VERSION -- $@
+-  call_hook
+-  gzip -9 -c debian/changelog >| $LOGFILE
++
++  # changelog massaging is only needed in the deb (not-udeb) case:
++  if [ "$DEB_TYPE" = "deb" ]; then
++    LOGFILE=
++    for i in changelog{,.Debian}.gz; do
++      [ -f usr/share/doc/${PACKAGE}/$i ] \
++        && LOGFILE=usr/share/doc/${PACKAGE}/$i
++    done
++    [ -z "$LOGFILE" ] && { echo "changelog file not found"; return 1; }
++    mkdir -p debian
++    zcat $LOGFILE > debian/changelog
++    shift
++    dch $DCH_OPTIONS -v $VERSION -- $@
++    call_hook
++    gzip -9 -c debian/changelog >| $LOGFILE
++  fi
++
+   sed -i -e "s,^Version: .*,Version: $VERSION," DEBIAN/control
+   rm -rf debian
+ }
+@@ -188,7 +193,16 @@ repack_file()
+ {
+   cd ..
+   dpkg-deb -b package >/dev/null
+-  dpkg-name package.deb | sed -e "s,.*['\`]\(.*\).,\1,"
++  debfile=$(dpkg-name package.deb | sed -e "s,.*['\`]\(.*\).,\1,")
++  # if Package-Type: udeb is absent, dpkg-name can't rename into *.udeb,
++  # so we're left to an extra rename afterwards:
++  if [ "$DEB_TYPE" = udeb ]; then
++    udebfile=${debfile%%.deb}.udeb
++    mv $debfile $udebfile
++    echo $udebfile
++  else
++    echo $debfile
++  fi
+ }
+ 
+ [ -z "${OLD_VERSION:-}" ] && OLD_VERSION="$(get_version $DEB)"
+@@ -207,6 +221,7 @@ fi
+ make_temp_dir
+ cd "$TMPDIR"
+ 
++DEB_TYPE=$(echo "$DEB"|sed 's/.*[.]//')
+ extract_deb_file "$DEB"
+ change_version "$NEW_VERSION" "${LOG:-Bumped version with $PROGNAME}"
+ FILE="$(repack_file)"
+-- 
+1.7.10.4
+

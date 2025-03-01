@@ -1,0 +1,76 @@
+From c17c29561a3a4229cd94df73330f7f02771107fc Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=A9my=20Bobbio?= <lunar@debian.org>
+Date: Tue, 27 Aug 2013 23:53:22 +0200
+Subject: [PATCH 2/2] Preset build timestamp to latest changelog entry
+
+dpkg-buildpackage will set the DEB_BUILD_TIMESTAMP environment variable to the
+date of the latest entry in debian/changelog. This enables build to be easily
+reproduced as the dates captured in the `.deb` archives will be deterministic.
+
+DEB_BUILD_TIMESTAMP can also be externaly set before running dpkg-buildpackage.
+to reproduce the build with an arbitrary date.
+
+Closes: #759999
+---
+ dpkg-deb/build.c             |   20 +++++++++++++++++++-
+ scripts/dpkg-buildpackage.pl |    6 ++++++
+ 2 files changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/dpkg-deb/build.c b/dpkg-deb/build.c
+index 6406493..a320b98 100644
+--- a/dpkg-deb/build.c
++++ b/dpkg-deb/build.c
+@@ -487,6 +487,24 @@ pkg_get_pathname(const char *dir, struct pkginfo *pkg)
+   return path;
+ }
+ 
++static time_t
++get_build_timestamp(void)
++{
++  time_t timestamp;
++  const char *value;
++  char *end;
++
++  errno = 0;
++  value = getenv("DEB_BUILD_TIMESTAMP");
++  if (!value)
++    return time(NULL);
++
++  timestamp = strtol(value, &end, 10);
++  if (value == end || *end || errno != 0)
++    ohshite(_("unable to parse timestamp `%.255s'"), value);
++  return timestamp;
++}
++
+ /**
+  * Overly complex function that builds a .deb file.
+  */
+@@ -548,7 +566,7 @@ do_build(const char *const *argv)
+   }
+   m_output(stdout, _("<standard output>"));
+ 
+-  build_timestamp = time(NULL);
++  build_timestamp = get_build_timestamp();
+ 
+   /* Now that we have verified everything its time to actually
+    * build something. Let's start by making the ar-wrapper. */
+diff --git a/scripts/dpkg-buildpackage.pl b/scripts/dpkg-buildpackage.pl
+index f678659..95c2eb7 100755
+--- a/scripts/dpkg-buildpackage.pl
++++ b/scripts/dpkg-buildpackage.pl
+@@ -411,6 +411,12 @@ if ($changedby) {
+     $maintainer = mustsetvar($changelog->{maintainer}, _g('source changed by'));
+ }
+ 
++if (!$ENV{DEB_BUILD_TIMESTAMP}) {
++    my $timestamp = `date -d'$changelog->{date}' +%s`;
++    chomp $timestamp;
++    $ENV{DEB_BUILD_TIMESTAMP} = $timestamp;
++}
++
+ open my $arch_env, '-|', 'dpkg-architecture', "-a$targetarch",
+     "-t$targetgnusystem", '-f' or subprocerr('dpkg-architecture');
+ while (<$arch_env>) {
+-- 
+1.7.10.4
+

@@ -1,0 +1,117 @@
+commit ff10ac8e17f358968fef795e62ff054112a4a0e1
+Author: Timo Aaltonen <tjaalton@debian.org>
+Date:   Sat Mar 19 11:48:00 2016 +0200
+
+    systemd integration
+
+diff --git a/debian/apache2.dirs b/debian/apache2.dirs
+index 531c08f..4060de8 100644
+--- a/debian/apache2.dirs
++++ b/debian/apache2.dirs
+@@ -2,6 +2,7 @@ etc/apache2/mods-enabled
+ etc/apache2/conf-enabled
+ etc/apache2/sites-enabled
+ etc/logrotate.d
++etc/systemd/system/apache2.target.wants
+ usr/lib/cgi-bin
+ var/lib/apache2
+ usr/share/lintian/overrides
+diff --git a/debian/apache2.htcacheclean.service b/debian/apache2.htcacheclean.service
+new file mode 100644
+index 0000000..eaf856b
+--- /dev/null
++++ b/debian/apache2.htcacheclean.service
+@@ -0,0 +1,10 @@
++[Unit]
++Description=Disk Cache Cleaning Daemon for Apache HTTP Server
++After=apache2.service
++
++[Service]
++Type=forking
++User=www-data
++PIDFile=/run/apache2/htcacheclean/pid
++EnvironmentFile=/etc/default/apache2
++ExecStart=/usr/bin/htcacheclean -P /run/apache2/htcacheclean/pid -d $HTCACHECLEAN_DAEMON_INTERVAL -p $HTCACHECLEAN_PATH -l $HTCACHECLEAN_SIZE $HTCACHECLEAN_OPTIONS
+diff --git a/debian/apache2.install b/debian/apache2.install
+index 46ee11d..e4cbe20 100644
+--- a/debian/apache2.install
++++ b/debian/apache2.install
+@@ -5,3 +5,4 @@ debian/apache2ctl				/usr/sbin
+ debian/a2query					/usr/sbin
+ debian/ask-for-passphrase			/usr/share/apache2/
+ debian/debhelper/apache2-maintscript-helper	/usr/share/apache2/
++debian/apache2.target				/lib/systemd/system
+diff --git a/debian/apache2.service b/debian/apache2.service
+new file mode 100644
+index 0000000..0540e96
+--- /dev/null
++++ b/debian/apache2.service
+@@ -0,0 +1,21 @@
++[Unit]
++Description=The Apache HTTP Server
++PartOf=apache2.target
++
++[Service]
++Type=forking
++Environment=LANG=C
++Environment=APACHE_RUN_USER=www-data
++Environment=APACHE_RUN_GROUP=www-data
++Environment=APACHE_CONF_DIR=/etc/apache2
++Environment=APACHE_PID_FILE=/run/apache2/apache2.pid
++Environment=APACHE_RUN_DIR=/run/apache2
++Environment=APACHE_LOCK_DIR=/var/lock/apache2
++Environment=APACHE_LOG_DIR=/var/log/apache2
++
++ExecStart=/usr/sbin/apache2
++ExecReload=/usr/sbin/apache2 -k graceful
++# Send SIGWINCH for graceful stop
++KillSignal=SIGWINCH
++KillMode=mixed
++PrivateTmp=true
+diff --git a/debian/apache2.tmpfile b/debian/apache2.tmpfile
+new file mode 100644
+index 0000000..3249a93
+--- /dev/null
++++ b/debian/apache2.tmpfile
+@@ -0,0 +1,2 @@
++d /run/apache2   710 root www-data
++d /run/apache2/htcacheclean   700 www-data www-data
+diff --git a/debian/control b/debian/control
+index f1dc6aa..54549fd 100644
+--- a/debian/control
++++ b/debian/control
+@@ -6,7 +6,8 @@ Uploaders: Stefan Fritsch <sf@debian.org>, Arno TÃ¶ll <arno@debian.org>
+ Build-Depends: debhelper (>= 9.20131213~), lsb-release, dpkg-dev (>= 1.16.1~),
+  libaprutil1-dev (>= 1.5.0), libapr1-dev (>= 1.5.0), libpcre3-dev, zlib1g-dev,
+  libnghttp2-dev, libssl-dev (>= 0.9.8m), perl,
+- liblua5.1-0-dev, libxml2-dev, autotools-dev, gawk | awk
++ liblua5.1-0-dev, libxml2-dev, autotools-dev, gawk | awk,
++ dh-systemd,
+ Build-Conflicts: autoconf2.13
+ Standards-Version: 3.9.6
+ Vcs-Browser: https://anonscm.debian.org/cgit/pkg-apache/apache2.git/
+diff --git a/debian/rules b/debian/rules
+index 451c169..4e98c8a 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -65,7 +65,7 @@ generate-maintainer-scripts:
+ 	done
+ 
+ clean build build-arch build-indep binary binary-arch binary-indep: %:
+-	dh $@ --parallel --with autotools_dev
++	dh $@ --parallel --with autotools_dev,systemd
+ 
+ override_dh_auto_configure: generate-maintainer-scripts prebuild-checks support/suexec-custom.c
+ 	./configure --enable-layout=Debian --enable-so --with-program-name=apache2 \
+@@ -104,6 +104,11 @@ override_dh_fixperms-indep:
+ override_dh_installinit:
+ 	dh_installinit --restart-after-upgrade --error-handler=true -- defaults 91 09
+ 
++override_dh_systemd_enable:
++	dh_systemd_enable -papache2 apache2.service
++	dh_systemd_enable -papache2 --name=apache2@ apache2@.service
++	dh_systemd_enable -papache2 --no-enable --name=htcacheclean htcacheclean.service
++
+ override_dh_installdocs-indep:
+ 	# TODO: So, did anyone check convert_docs needs an update? ;)
+ 	perl debian/convert_docs debian/apache2-doc/usr/share/doc/apache2-doc/manual

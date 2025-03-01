@@ -1,0 +1,147 @@
+diff --git a/apt-listbugs b/apt-listbugs
+index 251b5dd..fbbc815 100755
+--- a/apt-listbugs
++++ b/apt-listbugs
+@@ -125,6 +125,12 @@ apt-listbugs [-h] [-v] [-s <severities>] [-T <tags>] [-S <states>] [-B <bug#>] [
+ 
+   Specifies the apt configuration file to use.
+ 
++* -F | --force-pin
++
++  When set it will automatically pin all packages without any prompt. If not
++  specified in the command line, apt.conf is consulted for
++  AptListbugs::Force-Pin.
++
+ * -y, --force-yes
+ 
+   Assumes that you select yes for all questions.
+@@ -211,8 +217,6 @@ notable configuration options are
+   Summary:
+    apt-listbugs(2 bugs)
+ 
+-
+-
+ == EXIT CODE
+ 
+ : 0
+diff --git a/lib/apt-listbugs/logic.rb b/lib/apt-listbugs/logic.rb
+index 66dec3c..c994f61 100644
+--- a/lib/apt-listbugs/logic.rb
++++ b/lib/apt-listbugs/logic.rb
+@@ -55,6 +55,7 @@ class AppConfig
+       _(" -E <title>       : Title of RSS output.\n"),
+       _(" -q               : Don't display progress bar.\n"),
+       _(" -C <apt.conf>    : apt.conf file to use.\n"),
++      _(" -F               : Pin any package found with a bug and exit.\n"),
+       _(" -y               : Assume that you select yes for all questions.\n"),
+       _(" -n               : Assume that you select no for all questions.\n"),
+       _(" -d               : Debug.\n"),
+@@ -95,6 +96,7 @@ class AppConfig
+     @apt_conf = nil
+ 
+     @yes = nil
++    @force_pin = false
+ 
+     @arrow = "->"
+     @xarrow = "-&gt;"
+@@ -106,7 +108,7 @@ class AppConfig
+ 
+   attr_accessor :severity, :stats, :quiet, :title
+   attr_accessor :show_downgrade, :hostname, :tag, :fbugs
+-  attr_accessor :frontend, :pin_priority, :yes, :ignore_regexp
++  attr_accessor :frontend, :pin_priority, :yes, :ignore_regexp, :force_pin
+   attr_reader :command, :parser, :querybts, :ignore_bugs, :system_ignore_bugs, :browser, :arrow, :xarrow
+ 
+   def parse_options
+@@ -124,6 +126,7 @@ class AppConfig
+                            ['--title', '-E', GetoptLong::REQUIRED_ARGUMENT],
+                            ['--quiet', '-q', GetoptLong::NO_ARGUMENT],
+                            ['--aptconf', '-C', GetoptLong::REQUIRED_ARGUMENT],
++                           ['--force-pin', '-F', GetoptLong::NO_ARGUMENT],
+                            ['--force-yes', '-y', GetoptLong::NO_ARGUMENT],
+                            ['--force-no', '-n', GetoptLong::NO_ARGUMENT],
+                            ['--debug', '-d', GetoptLong::NO_ARGUMENT]
+@@ -171,6 +174,8 @@ class AppConfig
+           @yes = true
+         when '--force-no'
+           @yes = false
++        when '--force-pin'
++          @force_pin = true
+         end
+       }
+     rescue GetoptLong::AmbigousOption, GetoptLong::NeedlessArgument,
+@@ -179,6 +184,13 @@ class AppConfig
+       exit 1
+     end
+ 
++    if @force_pin.nil?
++      if /true/ =~ `apt-config #{@apt_conf} shell force_pin AptListbugs::Force-Pin`
++        @force_pin = true
++      end
++    end
++    @force_pin = false if @force_pin.nil?
++
+     if ! $stdout.isatty
+       @quiet = true
+       @yes = false if @yes.nil?
+@@ -359,22 +371,28 @@ class Viewer
+       answer = "n"
+       hold_pkgs = []
+       while true
+-        ask_str = _("Are you sure you want to install/upgrade the above packages?").dup
+-        if @config.querybts != nil || @config.browser != nil
+-          if hold_pkgs.empty?
+-            ask_str << " [Y/n/?/...]"
++        if @config.force_pin
++          @config.frontend.puts $intl._("Pinning all ackages at your request ...")
++          a = "p"
++        else
++          ask_str = _("Are you sure you want to install/upgrade the above packages?").dup
++          if @config.querybts != nil || @config.browser != nil
++            if hold_pkgs.empty?
++              ask_str << " [Y/n/?/...]"
++            else
++              ask_str << " [N/?/...]"
++            end
+           else
+-            ask_str << " [N/?/...]"
++            ask_str << " [Y/n]"
++          end
++          if @config.yes.nil?
++            a = @config.frontend.ask ask_str
++          else
++            a = "y" if @config.yes
++            a = "n" if ! @config.yes
+           end
+-        else
+-          ask_str << " [Y/n]"
+-        end
+-        if @config.yes.nil?
+-          a = @config.frontend.ask ask_str
+-        else
+-          a = "y" if @config.yes
+-          a = "n" if ! @config.yes
+         end
++
+         if a == ""
+           if hold_pkgs.empty?
+             answer = "y"
+@@ -456,7 +474,9 @@ class Viewer
+             }
+           end
+           if pkgs.size != 0
+-            if @config.frontend.yes_or_no? ngettext(
++            if @config.force_pin
++              h = pinned(pkgs.keys, cur_pkgs, bugs)
++            elsif @config.frontend.yes_or_no? ngettext(
+              # TRANSLATORS: %{plist} is a comma-separated list of %{npkgs} packages to be pinned or put on hold.
+              "The following %{npkgs} package will be pinned or on hold:\n %{plist}\nAre you sure?",
+              "The following %{npkgs} packages will be pinned or on hold:\n %{plist}\nAre you sure?",
+@@ -469,6 +489,7 @@ class Viewer
+               end
+             end
+             hold_pkgs.concat(h) if h != nil
++            return false if @config.force_pin
+           else
+             @config.frontend.puts sprintf(_("All selected packages are already pinned or on hold. Ignoring %s command."), key)
+           end

@@ -1,0 +1,80 @@
+From c1ac43595f282edee8b88ccf08bc64f731522921 Mon Sep 17 00:00:00 2001
+From: Michael Stapelberg <stapelberg@debian.org>
+Date: Mon, 29 Oct 2012 18:06:29 +0100
+Subject: [PATCH] dh_installinit: only add systemd-tmpfiles --create when
+ shipping tmpfiles
+
+---
+ autoscripts/postinst-init          |    6 ------
+ autoscripts/postinst-init-tmpfiles |    5 +++++
+ dh_installinit                     |   20 ++++++++++++++++++++
+ 3 files changed, 25 insertions(+), 6 deletions(-)
+ create mode 100644 autoscripts/postinst-init-tmpfiles
+
+diff --git a/autoscripts/postinst-init b/autoscripts/postinst-init
+index f5371ce..2430b2c 100644
+--- a/autoscripts/postinst-init
++++ b/autoscripts/postinst-init
+@@ -1,10 +1,4 @@
+ if [ -x "/etc/init.d/#SCRIPT#" ]; then
+-	# In case this system is running systemd, we need to ensure that all
+-	# necessary tmpfiles (if any) are created before starting.
+-	if [ -d /sys/fs/cgroup/systemd ] ; then
+-		systemd-tmpfiles --create >/dev/null || true
+-	fi
+-
+ 	update-rc.d #SCRIPT# #INITPARMS# >/dev/null
+ 	invoke-rc.d #SCRIPT# start || #ERROR_HANDLER#
+ fi
+diff --git a/autoscripts/postinst-init-tmpfiles b/autoscripts/postinst-init-tmpfiles
+new file mode 100644
+index 0000000..41f738a
+--- /dev/null
++++ b/autoscripts/postinst-init-tmpfiles
+@@ -0,0 +1,5 @@
++# In case this system is running systemd, we need to ensure that all
++# necessary tmpfiles (if any) are created before starting.
++if [ -d /sys/fs/cgroup/systemd ] ; then
++	systemd-tmpfiles --create >/dev/null || true
++fi
+diff --git a/dh_installinit b/dh_installinit
+index f657f85..2daad63 100755
+--- a/dh_installinit
++++ b/dh_installinit
+@@ -8,6 +8,7 @@ dh_installinit - install service init files into package build directories
+ 
+ use strict;
+ use Debian::Debhelper::Dh_Lib;
++use File::Find;
+ 
+ =head1 SYNOPSIS
+ 
+@@ -251,6 +252,25 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 		}
+ 		
+ 		if (! $dh{NOSCRIPTS}) {
++			# Include postinst-init-tmpfiles if the package ships any files
++			# in /usr/lib/tmpfiles.d or /etc/tmpfiles.d
++			my $got_tmpfile = undef;
++			my $tmpdir = tmpdir($package);
++			find({
++				wanted => sub {
++					return unless -f $File::Find::name;
++					if (!$got_tmpfile &&
++						$File::Find::name =~ m,^$tmpdir/usr/lib/tmpfiles\.d/, ||
++						$File::Find::name =~ m,^$tmpdir/etc/tmpfiles\.d/,) {
++						$got_tmpfile = 1;
++					}
++				},
++				no_chdir => 1,
++			}, $tmpdir);
++			if ($got_tmpfile) {
++				autoscript($package,"postinst", "postinst-init-tmpfiles", "");
++			}
++
+ 			if (! $dh{NO_START}) {
+ 				if ($dh{RESTART_AFTER_UPGRADE}) {
+ 					# update-rc.d, and restart (or
+-- 
+1.7.10.4
+

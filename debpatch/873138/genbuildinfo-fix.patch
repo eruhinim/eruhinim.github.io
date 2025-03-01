@@ -1,0 +1,621 @@
+From 62529c0b35880058c714f2b90cc050ad9db831d5 Mon Sep 17 00:00:00 2001
+From: Johannes 'josch' Schauer <josch@mister-muffin.de>
+Date: Thu, 26 Jan 2017 10:52:48 +0100
+Subject: [PATCH] Fix multiarch handling of dpkg-checkbuilddeps and
+ dpkg-genbuildinfo
+
+Problems with dpkg-genbuildinfo:
+
+ - ignores Pre-Depends
+ - no architecture reduction for build dependencies
+ - dropping of version restrictions of build dependencies
+ - not adding explicit architecture qualifier for packages that are not
+   of the host architecture
+ - no handling of :native and :any architecture qualifiers
+ - allowing the :all architecture qualifier
+ - ignoring Multi-Arch:foreign and Multi-Arch:allowed
+
+Problems with dpkg-checkbuilddeps:
+
+ - ignores multiarch constraints on virtual packages
+ - build dependencies without architecture qualifier are satisfied by
+   Architecture:all packages
+
+These problems were solved by:
+
+ - extending Dpkg::Deps::KnownFacts to handle more than build dependency
+   resolution
+     * let functions return lists of packages instead of booleans
+     * special-case dependencies of type build_dep
+         o respect the host architecture instead of the binary package
+           architecture
+         o allow :native
+     * Architecture:all packages are now of the build architecture
+     * respect multiarch constraints for providers of virtual packages
+ - extending Dpkg::Deps::Simple with a function who_provides returning
+   all installed real providers of a dependency
+     * let get_evaluation be a wrapper around who_provides
+ - extending Dpkg::Deps::Simple with a member storing the binary package
+   architecture that the dependency originates from to allow propagation
+   of the architecture in a multiarch scenario
+ - letting dpkg-genbuildinfo use who_provides for dependency resolution
+---
+ scripts/Dpkg/Deps.pm         | 181 ++++++++++++++++++++++++++++++++++++-------
+ scripts/dpkg-genbuildinfo.pl | 148 ++++++++++++++++-------------------
+ scripts/t/Dpkg_Deps.t        |  36 +++++++--
+ 3 files changed, 247 insertions(+), 118 deletions(-)
+
+diff --git a/scripts/Dpkg/Deps.pm b/scripts/Dpkg/Deps.pm
+index 56f7b2826..dbe65f75f 100644
+--- a/scripts/Dpkg/Deps.pm
++++ b/scripts/Dpkg/Deps.pm
+@@ -238,6 +238,11 @@ this when parsing non-dependency fields like Conflicts.
+ If set to 1, allow build-dep only arch qualifiers, that is “:native”.
+ This should be set whenever working with build-deps.
+ 
++=item architecture (defaults to undef)
++
++The architecture of the binary package that this dependency is from. This will
++be stored in the returned Dpkg::Deps::Simple objects.
++
+ =item tests_dep (defaults to 0)
+ 
+ If set to 1, allow tests-specific package names in dependencies, that is
+@@ -268,6 +273,7 @@ sub deps_parse {
+     $options{union} //= 0;
+     $options{build_dep} //= 0;
+     $options{tests_dep} //= 0;
++    $options{architecture} //= get_build_arch();
+ 
+     if ($options{reduce_restrictions}) {
+         $options{reduce_arch} = 1;
+@@ -280,6 +286,7 @@ sub deps_parse {
+         build_arch => $options{build_arch},
+         build_dep => $options{build_dep},
+         tests_dep => $options{tests_dep},
++	architecture => $options{architecture},
+     );
+ 
+     # Strip trailing/leading spaces
+@@ -491,6 +498,16 @@ Dpkg::Deps::KnownFacts object given as parameters.
+ Returns 1 when it's true, 0 when it's false, undef when some information
+ is lacking to conclude.
+ 
++=item $dep->who_provides($facts)
++
++Evaluates the dependency given a list of installed packages and a list of
++virtual packages provided. Those lists are part of the
++Dpkg::Deps::KnownFacts object given as parameters.
++
++Returns an array reference to the list of real packages from the
++Dpkg::Deps::KnownFacts object that satisfy the dependency, undef when some
++information is lacking to conclude.
++
+ =item $dep->simplify_deps($facts, @assumed_deps)
+ 
+ Simplifies the dependency as much as possible given the list of facts (see
+@@ -587,6 +604,7 @@ sub new {
+     $self->{build_arch} = $opts{build_arch} || Dpkg::Arch::get_build_arch();
+     $self->{build_dep} = $opts{build_dep} // 0;
+     $self->{tests_dep} = $opts{tests_dep} // 0;
++    $self->{architecture} = $opts{architecture};
+     $self->parse_string($arg) if defined($arg);
+     return $self;
+ }
+@@ -599,6 +617,7 @@ sub reset {
+     $self->{arches} = undef;
+     $self->{archqual} = undef;
+     $self->{restrictions} = undef;
++    $self->{architecture} = undef;
+ }
+ 
+ sub parse {
+@@ -922,6 +941,14 @@ sub reduce_profiles {
+ sub get_evaluation {
+     my ($self, $facts) = @_;
+     return if not defined $self->{package};
++    my $real_providers = $facts->_evaluate_simple_dep($self);
++    return if not defined $real_providers;
++    return scalar @{$real_providers} > 0;
++}
++
++sub who_provides {
++    my ($self, $facts) = @_;
++    return if not defined $self->{package};
+     return $facts->_evaluate_simple_dep($self);
+ }
+ 
+@@ -1161,6 +1188,25 @@ sub get_evaluation {
+     return $result;
+ }
+ 
++sub who_provides {
++    my ($self, $facts) = @_;
++    # Return the intersection of real packages that satisfy each of the given
++    # dependencies.
++    my @result = ();
++    foreach my $dep ($self->get_deps()) {
++	my $eval = $dep->who_provides($facts);
++	return if not defined $eval;
++	# Since we are interested in the intersection we can return early if
++	# one of the lists is empty
++	return () if scalar @{$eval} == 0;
++	# Now intersect the new list with the old list.
++	my %old = map {$_ => 1} @result;
++	@result = grep ($old{$_}, @{$eval});
++	return () if scalar @result == 0;
++    }
++    return \@result;
++}
++
+ sub simplify_deps {
+     my ($self, $facts, @knowndeps) = @_;
+     my @new;
+@@ -1269,6 +1315,22 @@ sub get_evaluation {
+     return $result;
+ }
+ 
++sub who_provides {
++    my ($self, $facts) = @_;
++    # Return the union of real packages that satisfy each of the given
++    # dependencies.
++    # Use a hash to make the result unique.
++    my %result = ();
++    foreach my $dep ($self->get_deps()) {
++	my $eval = $dep->who_provides($facts);
++	return if not defined $eval;
++	foreach my $p (@{$eval}) {
++	    $result{$p} = 1;
++	}
++    }
++    return \(keys %result);
++}
++
+ sub simplify_deps {
+     my ($self, $facts) = @_;
+     my @new;
+@@ -1305,6 +1367,8 @@ The output method uses ", " to join the list of relationships.
+ 
+ =item $union->get_evaluation($other_dep)
+ 
++=item $union->who_provides($other_dep)
++
+ Those methods are not meaningful for this object and always return undef.
+ 
+ =item $union->simplify_deps($facts)
+@@ -1340,6 +1404,11 @@ sub get_evaluation {
+     return;
+ }
+ 
++sub who_provides {
++    # Providers are not useful on Union
++    return;
++}
++
+ sub simplify_deps {
+     my ($self, $facts) = @_;
+     my @new;
+@@ -1457,29 +1526,63 @@ sub check_package {
+ 
+ ## The functions below are private to Dpkg::Deps
+ 
+-sub _find_package {
+-    my ($self, $dep, $lackinfos) = @_;
+-    my ($pkg, $archqual) = ($dep->{package}, $dep->{archqual});
+-    return if not exists $self->{pkg}{$pkg};
++sub _check_multiarch {
++    my ($self, $p, $dep, $lackinfos) = @_;
++    # dependency properties
++    my $archqual = $dep->{archqual};
++    my $is_build_dep = $dep->{build_dep};
++    my $deparch = $dep->{architecture};
++    return unless $is_build_dep or defined $deparch;
+     my $host_arch = $dep->{host_arch};
+     my $build_arch = $dep->{build_arch};
+-    foreach my $p (@{$self->{pkg}{$pkg}}) {
+-	my $a = $p->{architecture};
+-	my $ma = $p->{multiarch};
+-	if (not defined $a) {
+-	    $$lackinfos = 1;
+-	    next;
+-	}
+-	if (not defined $archqual) {
+-	    return $p if $ma eq 'foreign';
+-	    return $p if $a eq $host_arch or $a eq 'all';
+-	} elsif ($archqual eq 'any') {
+-	    return $p if $ma eq 'allowed';
+-	} elsif ($archqual eq 'native') {
+-	    return $p if $a eq $build_arch and $ma ne 'foreign';
++    # package properties
++    my $a = $p->{architecture};
++    my $ma = $p->{multiarch};
++    if (not defined $a) {
++	$$lackinfos = 1;
++	return;
++    }
++    if (not defined $archqual) {
++	return $p if $ma eq 'foreign';
++	if ($is_build_dep) {
++	    return $p if $a eq $host_arch;
++	} elsif ($deparch eq "all") {
++	    return $p if $a eq $build_arch;
+ 	} else {
+-	    return $p if $a eq $archqual;
++	    return $p if $a eq $deparch;
+ 	}
++    } elsif ($archqual eq 'any') {
++	return $p if $ma eq 'allowed';
++    } elsif ($is_build_dep and $archqual eq 'native') {
++	return $p if $a eq $build_arch;
++	return $p if $ma eq 'foreign'
++    } else {
++	return $p if $a eq $archqual;
++    }
++}
++
++sub _find_package {
++    my ($self, $dep, $lackinfos) = @_;
++    # Given a package name (and optionally an architecture qualifier), find
++    # the real package matching that dependency. This does not take virtual
++    # packages or version constraints into account but does respect multiarch
++    # rules.
++    #
++    # On success, returns the package hash from the facts object. Otherwise,
++    # return undef.
++    #
++    # As a side-effect, the $lackinfos variable will be set to 1 if one or
++    # more of the matching packages has an undefined architecture.
++    my $pkg = $dep->{package};
++    return if not exists $self->{pkg}{$pkg};
++    # There can exist more than one package with the same name but only a
++    # single version of a package can be installed per architecture and if the
++    # package is installed for multiple architectures (M-A:same), then their
++    # version must be equal.
++    foreach my $p (@{$self->{pkg}{$pkg}}) {
++	my $res = $self->_check_multiarch($p, $dep, $lackinfos);
++	next if not defined $res;
++	return $res;
+     }
+     return;
+ }
+@@ -1492,34 +1595,58 @@ sub _find_virtual_packages {
+ 
+ sub _evaluate_simple_dep {
+     my ($self, $dep) = @_;
++    # Returns the list of real packages that satisfy the given dependency.
++    # Returns undef if the status db lacked information about architecture or
++    # version of the installed packages.
+     my ($lackinfos, $pkg) = (0, $dep->{package});
+     my $p = $self->_find_package($dep, \$lackinfos);
++    my @result = ();
+     if ($p) {
+ 	if (defined $dep->{relation}) {
+ 	    if (defined $p->{version}) {
+-		return 1 if version_compare_relation($p->{version},
+-		                           $dep->{relation}, $dep->{version});
++		if (version_compare_relation($p->{version},
++			$dep->{relation}, $dep->{version})) {
++		    push @result, $p;
++		}
+ 	    } else {
+ 		$lackinfos = 1;
+ 	    }
+ 	} else {
+-	    return 1;
++	    push @result, $p;
+ 	}
+     }
++    # Add all real providers of the virtual packages satisfying the given
++    # dependency.
+     foreach my $virtpkg ($self->_find_virtual_packages($pkg)) {
+ 	next if defined $virtpkg->[1] and $virtpkg->[1] ne REL_EQ;
+ 
++	my $candidate;
+ 	if (defined $dep->{relation}) {
+ 	    next if not defined $virtpkg->[2];
+-	    return 1 if version_compare_relation($virtpkg->[2],
+-	                                         $dep->{relation},
+-	                                         $dep->{version});
++	    if (version_compare_relation($virtpkg->[2],
++		    $dep->{relation},
++		    $dep->{version})) {
++		$candidate = $self->{pkg}{$virtpkg->[0]};
++	    } else {
++		next;
++	    }
+ 	} else {
+-	    return 1;
++	    $candidate = $self->{pkg}{$virtpkg->[0]};
++	}
++	# Now check if the real provider satisfies the multiarch constraints
++	if (ref($candidate) ne 'ARRAY') {
++	    $candidate = [$candidate];
++	}
++	foreach my $c (@{$candidate}) {
++	    my $res = $self->_check_multiarch($c, $dep, \$lackinfos);
++	    next if not defined $res;
++	    push @result, $candidate;
+ 	}
+     }
+     return if $lackinfos;
+-    return 0;
++    # Return array reference because the function can also return undef which
++    # in list context would result in a list with the singleton value undef.
++    return \@result;
+ }
+ 
+ =head1 CHANGES
+diff --git a/scripts/dpkg-genbuildinfo.pl b/scripts/dpkg-genbuildinfo.pl
+index 09bcc139b..02a59bbb7 100755
+--- a/scripts/dpkg-genbuildinfo.pl
++++ b/scripts/dpkg-genbuildinfo.pl
+@@ -85,7 +85,7 @@ sub parse_status {
+ 
+     my $facts = Dpkg::Deps::KnownFacts->new();
+     my %depends;
+-    my @essential_pkgs;
++    my @essential_deps;
+ 
+     local $/ = '';
+     open my $status_fh, '<', $status or syserr(g_('cannot open %s'), $status);
+@@ -100,12 +100,11 @@ sub parse_status {
+         $facts->add_installed_package($package, $version, $arch, $multiarch);
+ 
+         if (/^Essential: yes$/m) {
+-            push @essential_pkgs, $package;
++            push @essential_deps, "$package:native (= $version)";
+         }
+ 
+         if (/^Provides: (.*)$/m) {
+             my $provides = deps_parse($1, reduce_arch => 1, union => 1);
+-
+             next if not defined $provides;
+ 
+             deps_iterate($provides, sub {
+@@ -115,33 +114,45 @@ sub parse_status {
+             });
+         }
+ 
+-        if (/^(?:Pre-)?Depends: (.*)$/m) {
+-            my $depends = $1;
+-            foreach (split /,\s*/, $depends) {
+-                push @{$depends{"$package:$arch"}}, $_;
+-            }
+-        }
++	my @deps;
++	if (/^Depends: (.*)$/m) {
++	    my $depends = deps_parse($1, reduce_arch => 1,
++		                     architecture => $arch);
++	    # flatten dependencies
++	    deps_iterate($depends, sub {
++		    push @deps, @_;
++		    1
++		});
++	}
++	if (/^Pre-Depends: (.*)$/m) {
++	    my $depends = deps_parse($1, reduce_arch => 1,
++		                     architecture => $arch);
++	    # flatten dependencies
++	    deps_iterate($depends, sub {
++		    push @deps, @_;
++		    1
++		});
++	}
++	push @{$depends{"$package:$arch"}}, @deps;
+     }
+     close $status_fh;
+ 
+-    return ($facts, \%depends, \@essential_pkgs);
++    return ($facts, \%depends, \@essential_deps);
+ }
+ 
+ sub append_deps {
+-    my $pkgs = shift;
++    my $result = shift;
+ 
+     foreach my $dep_str (@_) {
+         next unless $dep_str;
+ 
+         my $deps = deps_parse($dep_str, reduce_restrictions => 1,
+-                              build_dep => 1,
++                              build_dep => 1, reduce_arch => 1,
+                               build_profiles => \@build_profiles);
+ 
+-        # We add every sub-dependencies as we cannot know which package in
+-        # an OR dependency has been effectively used.
++	# flatten dependencies
+         deps_iterate($deps, sub {
+-            push @{$pkgs},
+-                $_[0]->{package} . (defined $_[0]->{archqual} ? ':' . $_[0]->{archqual} : '');
++            push @{$result}, @_;
+             1
+         });
+     }
+@@ -150,87 +161,58 @@ sub append_deps {
+ sub collect_installed_builddeps {
+     my $control = shift;
+ 
+-    my ($facts, $depends, $essential_pkgs) = parse_status("$admindir/status");
+-    my %seen_pkgs;
+-    my @unprocessed_pkgs;
++    my ($facts, $depends, $essential_deps) = parse_status("$admindir/status");
++    my @build_depends;
+ 
+-    # Parse essential packages list.
+-    append_deps(\@unprocessed_pkgs,
+-                @{$essential_pkgs},
++    # Parse essential packages list as build dependencies
++    append_deps(\@build_depends,
++                @{$essential_deps},
+                 run_vendor_hook('builtin-build-depends'),
+                 $control->get_source->{'Build-Depends'});
+ 
+     if (build_has_any(BUILD_ARCH_DEP)) {
+-        append_deps(\@unprocessed_pkgs,
++        append_deps(\@build_depends,
+                     $control->get_source->{'Build-Depends-Arch'});
+     }
+ 
+     if (build_has_any(BUILD_ARCH_INDEP)) {
+-        append_deps(\@unprocessed_pkgs,
++        append_deps(\@build_depends,
+                     $control->get_source->{'Build-Depends-Indep'});
+     }
++    # Turn the build dependencies into a list of real packages
++    my @unprocessed_pkgs;
++    foreach my $dep (@build_depends) {
++	push @unprocessed_pkgs, $dep->who_provides($facts);
++    }
+ 
+     my $installed_deps = Dpkg::Deps::AND->new();
+ 
+-    while (my $pkg_name = shift @unprocessed_pkgs) {
+-        next if $seen_pkgs{$pkg_name};
+-        $seen_pkgs{$pkg_name} = 1;
+-
+-        my $required_architecture;
+-        if ($pkg_name =~ /\A(.*):(.*)\z/) {
+-            $pkg_name = $1;
+-            my $arch = $2;
+-            $required_architecture = $arch if $arch !~ /\A(?:all|any|native)\Z/
+-        }
+-        my $pkg;
+-        my $qualified_pkg_name;
+-        foreach my $installed_pkg (@{$facts->{pkg}->{$pkg_name}}) {
+-            if (!defined $required_architecture ||
+-                $required_architecture eq $installed_pkg->{architecture}) {
+-                $pkg = $installed_pkg;
+-                $qualified_pkg_name = $pkg_name . ':' . $installed_pkg->{architecture};
+-                last;
+-            }
+-        }
+-        if (defined $pkg) {
+-            my $version = $pkg->{version};
+-            my $architecture = $pkg->{architecture};
+-            my $new_deps_str = defined $depends->{$qualified_pkg_name} ? deps_concat(@{$depends->{$qualified_pkg_name}}) : '';
+-            my $new_deps = deps_parse($new_deps_str);
+-            if (!defined $required_architecture) {
+-                $installed_deps->add(Dpkg::Deps::Simple->new("$pkg_name (= $version)"));
+-            } else {
+-                $installed_deps->add(Dpkg::Deps::Simple->new("$qualified_pkg_name (= $version)"));
+-
+-                # Dependencies of foreign packages are also foreign packages
+-                # (or Arch:all) so we need to qualify them as well. We figure
+-                # out if the package is actually foreign by searching for an
+-                # installed package of the right architecture.
+-                deps_iterate($new_deps, sub {
+-                    my $dep = shift;
+-                    $dep->{archqual} //= $architecture
+-                        if any { $_[0]->{architecture} eq $architecture }, @{$facts->{pkg}->{$dep->{package}}};
+-                    1;
+-                });
+-            }
+-
+-            # We add every sub-dependencies as we cannot know which package
+-            # in an OR dependency has been effectively used.
+-            deps_iterate($new_deps, sub {
+-                push @unprocessed_pkgs,
+-                     $_[0]->{package} . (defined $_[0]->{archqual} ? ':' . $_[0]->{archqual} : '');
+-                1
+-            });
+-        } elsif (defined $facts->{virtualpkg}->{$pkg_name}) {
+-            # virtual package: we cannot know for sure which implementation
+-            # is the one that has been used, so let's add them all...
+-            foreach my $provided (@{$facts->{virtualpkg}->{$pkg_name}}) {
+-                my ($provided_by, $provided_rel, $provided_ver) = @{$provided};
+-                push @unprocessed_pkgs, $provided_by;
+-            }
+-        }
+-        # else: it is a package in an OR dependency that has been otherwise
+-        # satisfied.
++    my %seen_pkgs;
++    my $host_arch = get_host_arch();
++    while (my $pkg_id = shift @unprocessed_pkgs) {
++	# $pkg_id is the pkgname:arch string which uniquely identifies an
++	# installed package
++	next if $seen_pkgs{$pkg_id};
++	$seen_pkgs{$pkg_id} = 1;
++
++	my $pkg = $facts->{$pkg_id};
++	my $name = $pkg->{package};
++	my $arch = $pkg->{architecture};
++	my $version = $pkg->{version};
++
++	# add the current package as one of the installed packages
++	if ($arch eq "all" or $arch eq $host_arch) {
++	    # packages of the host architecture or which are Architecture:all
++	    # are not architecture qualified
++	    $installed_deps->add(Dpkg::Deps::Simple->new("$name (= $version)"));
++	} else {
++	    $installed_deps->add(Dpkg::Deps::Simple->new("$name:$arch (= $version)"));
++	}
++
++	# compute more installed packages by retrieving its dependencies
++	foreach my $dep ($depends->{$pkg_id}) {
++	    push @unprocessed_pkgs, $dep->who_provides($facts);
++	}
+     }
+     $installed_deps->simplify_deps(Dpkg::Deps::KnownFacts->new());
+     $installed_deps->sort();
+diff --git a/scripts/t/Dpkg_Deps.t b/scripts/t/Dpkg_Deps.t
+index 71a3cf16a..6452e7e63 100644
+--- a/scripts/t/Dpkg_Deps.t
++++ b/scripts/t/Dpkg_Deps.t
+@@ -16,7 +16,7 @@
+ use strict;
+ use warnings;
+ 
+-use Test::More tests => 70;
++use Test::More tests => 74;
+ 
+ use Dpkg::Arch qw(get_host_arch);
+ use Dpkg::Version;
+@@ -152,18 +152,38 @@ $dep_restrict = deps_parse($field_restrict);
+ $dep_restrict->reduce_profiles([]);
+ is($dep_restrict->output(), 'dep1, dep3, dep5', 'Unknown restrictions post-reduce');
+ 
++# We store these hashes as a list so that we can easily reference them later
++# in the who_provides tests.
++my @realpkgs = (
++    {package => 'mypackage',       version => '1.3.4-1', architecture => get_host_arch(), multiarch => 'no'},
++    {package => 'mypackage2',      version => '1.3.4-1', architecture => 'somearch',      multiarch => 'no'},
++    {package => 'pkg-ma-foreign',  version => '1.3.4-1', architecture => 'somearch',      multiarch => 'foreign'},
++    {package => 'pkg-ma-foreign2', version => '1.3.4-1', architecture => get_host_arch(), multiarch => 'foreign'},
++    {package => 'pkg-ma-allowed',  version => '1.3.4-1', architecture => 'somearch',      multiarch => 'allowed'},
++    {package => 'pkg-ma-allowed2', version => '1.3.4-1', architecture => 'somearch',      multiarch => 'allowed'},
++    {package => 'pkg-ma-allowed3', version => '1.3.4-1', architecture => get_host_arch(), multiarch => 'allowed'},
++);
++
+ my $facts = Dpkg::Deps::KnownFacts->new();
+-$facts->add_installed_package('mypackage', '1.3.4-1', get_host_arch(), 'no');
+-$facts->add_installed_package('mypackage2', '1.3.4-1', 'somearch', 'no');
+-$facts->add_installed_package('pkg-ma-foreign', '1.3.4-1', 'somearch', 'foreign');
+-$facts->add_installed_package('pkg-ma-foreign2', '1.3.4-1', get_host_arch(), 'foreign');
+-$facts->add_installed_package('pkg-ma-allowed', '1.3.4-1', 'somearch', 'allowed');
+-$facts->add_installed_package('pkg-ma-allowed2', '1.3.4-1', 'somearch', 'allowed');
+-$facts->add_installed_package('pkg-ma-allowed3', '1.3.4-1', get_host_arch(), 'allowed');
++foreach my $pkg (@realpkgs) {
++    $facts->add_installed_package($pkg->{package}, $pkg->{version}, $pkg->{architecture}, $pkg->{multiarch});
++}
+ $facts->add_provided_package('myvirtual', undef, undef, 'mypackage');
+ $facts->add_provided_package('myvirtual2', REL_EQ, '1.0-1', 'mypackage');
+ $facts->add_provided_package('myvirtual3', REL_GE, '2.0-1', 'mypackage');
+ 
++my $dep = Dpkg::Deps::Simple->new("mypackage (>= 1.3)", architecture => get_host_arch());
++is_deeply($dep->who_provides($facts), [$realpkgs[0]], "Who provides mypackage");
++
++my $dep = Dpkg::Deps::Simple->new("pkg-ma-foreign", architecture => get_host_arch());
++is_deeply($dep->who_provides($facts), [$realpkgs[2]], "Who provides pkg-ma-foreign");
++
++my $dep = Dpkg::Deps::Simple->new("pkg-ma-allowed:any", architecture => get_host_arch());
++is_deeply($dep->who_provides($facts), [$realpkgs[4]], "Who provides pkg-ma-allowed:any");
++
++my $dep = Dpkg::Deps::Simple->new("pkg-ma-allowed", architecture => get_host_arch());
++is_deeply($dep->who_provides($facts), [], "Who provides pkg-ma-allowed");
++
+ my $field_duplicate = 'libc6 (>= 2.3), libc6 (>= 2.6-1), mypackage (>=
+ 1.3), myvirtual | something, python (>= 2.5), mypackage2, pkg-ma-foreign,
+ pkg-ma-foreign2, pkg-ma-allowed:any, pkg-ma-allowed2, pkg-ma-allowed3';
+-- 
+2.11.0
+

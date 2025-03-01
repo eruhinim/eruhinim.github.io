@@ -1,0 +1,61 @@
+From 57c16ab7b51e094d7b8b3f3e131a4bc860a6df48 Mon Sep 17 00:00:00 2001
+From: Jakub Wilk <jwilk@jwilk.net>
+Date: Mon, 24 Sep 2018 09:36:09 +0200
+Subject: [PATCH] find-dbgsym-packages: Make unexpected errors from
+ grep-aptavail fatal
+
+grep-aptavail should exit with status 0 on success, or with status 1
+when nothing was found. Let's make all other errors fatal.
+
+This way we get a helpful error message when dctrl-tools is not
+installed:
+
+    $ find-dbgsym-packages /bin/ls
+    "grep-aptavail" failed to start: "No such file or directory" at ./find-dbgsym-packages line 191.
+---
+ find-dbgsym-packages | 15 ++++-----------
+ 1 file changed, 4 insertions(+), 11 deletions(-)
+
+diff --git a/find-dbgsym-packages b/find-dbgsym-packages
+index 318114d..58eebf1 100755
+--- a/find-dbgsym-packages
++++ b/find-dbgsym-packages
+@@ -24,7 +24,7 @@ use strict;
+ use warnings FATAL => 'all';
+ use autodie qw(:all);
+ use v5.14;
+-use IPC::System::Simple qw(capturex);
++use IPC::System::Simple qw(capturex $EXITVAL);
+ 
+ $ENV{LC_ALL} = 'C';
+ 
+@@ -188,12 +188,7 @@ sub get_debs_from_id
+     my ($id) = @_;
+ 
+     my $output;
+-    eval {
+-        $output = capturex(qw(grep-aptavail --no-field-names --show-field Package --field Build-IDs --pattern), $id);
+-    };
+-    if ($@) {
+-        return;
+-    }
++    $output = capturex([0, 1], qw(grep-aptavail --no-field-names --show-field Package --field Build-IDs --pattern), $id);
+ 
+     my %pkgs = map { $_ => 1 } split(/\n/, $output);
+     return sort keys %pkgs;
+@@ -232,10 +227,8 @@ sub get_debs_from_path
+     my %dbg_pkgs = ();
+     foreach my $src_pkg (split(/\n/, $output)) {
+         my $output;
+-        eval {
+-            $output = capturex(qw(grep-aptavail --no-field-names --show-field Package --field Package --pattern -dbg --and --whole-pkg --field Source:Package --pattern), $src_pkg);
+-        };
+-        if ($@) {
++        $output = capturex([0, 1], qw(grep-aptavail --no-field-names --show-field Package --field Package --pattern -dbg --and --whole-pkg --field Source:Package --pattern), $src_pkg);
++        if ($EXITVAL) {
+             warn "No dbg package for source '$src_pkg'\n";
+             next;
+         }
+-- 
+2.19.0
+

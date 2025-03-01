@@ -1,0 +1,153 @@
+Index: avrdude-6.2/arduino.c
+===================================================================
+--- avrdude-6.2.orig/arduino.c	2016-03-28 18:25:31.648762178 +0200
++++ avrdude-6.2/arduino.c	2016-03-28 18:31:02.925108185 +0200
+@@ -80,6 +80,22 @@
+   return 3;
+ }
+ 
++static void arduino_frob_reset(PROGRAMMER * pgm)
++{
++  static bool dtr = 1;
++
++    avrdude_message(MSG_INFO, "%s: arduino_open(): DTR is %sset\n",
++		    progname, dtr ? "" : "not ");
++  /* Clear DTR and RTS to unload the RESET capacitor 
++   * (for example in Arduino) */
++  serial_set_dtr_rts(&pgm->fd, 1 ^ dtr);
++  usleep(250*1000);
++  /* Set DTR and RTS back to high */
++  serial_set_dtr_rts(&pgm->fd, 0 ^ dtr);
++  usleep(50*1000);
++  dtr = dtr ^ 1;
++}
++
+ static int arduino_open(PROGRAMMER * pgm, char * port)
+ {
+   union pinfo pinfo;
+@@ -89,13 +105,7 @@
+     return -1;
+   }
+ 
+-  /* Clear DTR and RTS to unload the RESET capacitor 
+-   * (for example in Arduino) */
+-  serial_set_dtr_rts(&pgm->fd, 0);
+-  usleep(250*1000);
+-  /* Set DTR and RTS back to high */
+-  serial_set_dtr_rts(&pgm->fd, 1);
+-  usleep(50*1000);
++  arduino_frob_reset(pgm);
+ 
+   /*
+    * drain any extraneous input
+@@ -129,4 +139,5 @@
+   pgm->read_sig_bytes = arduino_read_sig_bytes;
+   pgm->open = arduino_open;
+   pgm->close = arduino_close;
++  pgm->frob_reset = arduino_frob_reset;
+ }
+Index: avrdude-6.2/doc/Makefile.in
+===================================================================
+--- avrdude-6.2.orig/doc/Makefile.in	2016-03-28 18:25:31.648762178 +0200
++++ avrdude-6.2/doc/Makefile.in	2016-03-28 18:25:31.620762488 +0200
+@@ -339,6 +339,7 @@
+ prefix = @prefix@
+ program_transform_name = @program_transform_name@
+ psdir = @psdir@
++runstatedir = @runstatedir@
+ sbindir = @sbindir@
+ sharedstatedir = @sharedstatedir@
+ srcdir = @srcdir@
+@@ -472,9 +473,6 @@
+ 
+ maintainer-clean-vti:
+ 	-rm -f $(srcdir)/stamp-vti $(srcdir)/version.texi
+-.dvi.ps:
+-	$(AM_V_DVIPS)TEXINPUTS="$(am__TEXINFO_TEX_DIR)$(PATH_SEPARATOR)$$TEXINPUTS" \
+-	$(DVIPS) $(AM_V_texinfo) -o $@ $<
+ 
+ uninstall-dvi-am:
+ 	@$(NORMAL_UNINSTALL)
+@@ -826,11 +824,11 @@
+ 
+ all-local: info html ps pdf
+ 
+-html: avrdude-html/avrdude.html
++html: avrdude-html/index.html
+ 
+-avrdude-html/avrdude.html: $(srcdir)/$(info_TEXINFOS) $(GENERATED_TEXINFOS)
+-	texi2html -split_node $(srcdir)/$(info_TEXINFOS)
+-	if [ -e ./avrdude.html -o -e ./avrdude_1.html ]; then \
++avrdude-html/index.html: $(srcdir)/$(info_TEXINFOS) $(GENERATED_TEXINFOS)
++	makeinfo --html --split=node $(srcdir)/$(info_TEXINFOS)
++	if [ -e ./index.html -o -e ./avrdude_1.html ]; then \
+ 	 mkdir -p avrdude-html ; \
+ 	 mv -f *.html avrdude-html ; \
+ 	else \
+@@ -841,6 +839,13 @@
+ $(builddir)/avrdude.dvi: $(GENERATED_TEXINFOS)
+ $(builddir)/avrdude.pdf: $(GENERATED_TEXINFOS)
+ 
++.dvi.ps:
++	$(AM_V_DVIPS)TEXINPUTS="$(am__TEXINFO_TEX_DIR)$(PATH_SEPARATOR)$$TEXINPUTS" \
++	$(DVIPS) $(AM_V_texinfo) -o $@.tmp $<
++	printf "[ /CreationDate (%s)\n/DOCINFO pdfmark\n" "`date -u -r ../debian/changelog +%Y-%m-%dT%H:%M:%SZ`" > $@.mark
++	gs -q -dBATCH -dNOPAUSE -sDEVICE=ps2write -sOutputFile=$@ $@.tmp $@.mark
++	rm -f $@.mark $@.tmp
++
+ # if it does not exist make this first
+ ../avrdude$(EXEEXT):
+ 	$(MAKE) -C .. avrdude$(EXEEXT)
+Index: avrdude-6.2/libavrdude.h
+===================================================================
+--- avrdude-6.2.orig/libavrdude.h	2016-03-28 18:25:31.648762178 +0200
++++ avrdude-6.2/libavrdude.h	2016-03-28 18:25:31.624762443 +0200
+@@ -649,6 +649,7 @@
+                           unsigned char *res, int count);
+   int  (*open)           (struct programmer_t * pgm, char * port);
+   void (*close)          (struct programmer_t * pgm);
++  void (*frob_reset)     (struct programmer_t * pgm);
+   int  (*paged_write)    (struct programmer_t * pgm, AVRPART * p, AVRMEM * m, 
+                           unsigned int page_size, unsigned int baseaddr,
+                           unsigned int n_bytes);
+Index: avrdude-6.2/pgm.c
+===================================================================
+--- avrdude-6.2.orig/pgm.c	2016-03-28 18:25:31.648762178 +0200
++++ avrdude-6.2/pgm.c	2016-03-28 18:25:31.624762443 +0200
+@@ -134,6 +134,7 @@
+   pgm->parseextparams = NULL;
+   pgm->setup          = NULL;
+   pgm->teardown       = NULL;
++  pgm->frob_reset     = NULL;
+ 
+   return pgm;
+ }
+Index: avrdude-6.2/stk500.c
+===================================================================
+--- avrdude-6.2.orig/stk500.c	2016-03-28 18:25:31.648762178 +0200
++++ avrdude-6.2/stk500.c	2016-03-28 18:38:16.396326986 +0200
+@@ -99,19 +99,20 @@
+    * First send and drain a few times to get rid of line noise 
+    */
+    
+-  stk500_send(pgm, buf, 2);
+-  stk500_drain(pgm, 0);
+-  stk500_send(pgm, buf, 2);
+-  stk500_drain(pgm, 0);
+ 
+   for (attempt = 0; attempt < MAX_SYNC_ATTEMPTS; attempt++) {
+     stk500_send(pgm, buf, 2);
++    stk500_drain(pgm, 0);
++    stk500_send(pgm, buf, 2);
++    stk500_drain(pgm, 0);
++    stk500_send(pgm, buf, 2);
+     stk500_recv(pgm, resp, 1);
+     if (resp[0] == Resp_STK_INSYNC){
+       break;
+     }
+     avrdude_message(MSG_INFO, "%s: stk500_getsync() attempt %d of %d: not in sync: resp=0x%02x\n",
+                     progname, attempt + 1, MAX_SYNC_ATTEMPTS, resp[0]);
++    if(pgm->frob_reset) pgm->frob_reset(pgm);
+   }
+   if (attempt == MAX_SYNC_ATTEMPTS) {
+     stk500_drain(pgm, 0);

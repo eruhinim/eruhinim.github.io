@@ -1,0 +1,106 @@
+--- /tmp/exim4-base/etc/init.d/exim4	2015-05-18 20:42:37.000000000 +0200
++++ /etc/init.d/exim4	2015-08-20 10:53:28.619955732 +0200
+@@ -1,4 +1,4 @@
+-#! /bin/sh
++#! /bin/bash
+ # /etc/init.d/exim4
+ #
+ # Written by Miquel van Smoorenburg <miquels@drinkel.ow.org>.
+@@ -21,7 +21,24 @@
+ 
+ set -e
+ 
+-test -x /usr/lib/exim4/exim4 || exit 0
++DAEMON="/usr/sbin/exim4"
++NAME="exim4"
++QUEUERUNNER='combined'
++QUEUEINTERVAL='30m'
++UPEX4OPTS=''
++# Get some vars from the exim config
++PIDFILE="$(${DAEMON} -bP pid_file_path)"  ; PIDFILE="${PIDFILE/*= }"
++QRPIDFILE="${PIDFILE//.pid/qr.pid}"
++PANICLOG="$(${DAEMON} -bP log_file_path)" ; PANICLOG="${PANICLOG#*/}"; PANICLOG="/${PANICLOG%/*}/paniclog"
++EXIM_USER="$(${DAEMON} -bP exim_user)"    ; EXIM_USER="${EXIM_USER/*= }"
++EXIM_GROUP="$(${DAEMON} -bP exim_group)"  ; EXIM_GROUP="${EXIM_GROUP/*= }"
++
++#read default file
++[ -f /etc/default/exim4 ] && . /etc/default/exim4
++
++RUNDIR=${PIDFILE%/*}
++
++test -x ${DAEMON} || exit 0
+ 
+ . /lib/lsb/init-functions
+ 
+@@ -33,13 +50,6 @@
+ LANG=C
+ export LANG
+ 
+-#read default file
+-QUEUERUNNER='combined'
+-QUEUEINTERVAL='30m'
+-UPEX4OPTS=''
+-PIDFILE="/var/run/exim4/exim.pid"
+-QRPIDFILE="/var/run/exim4/eximqr.pid"
+-[ -f /etc/default/exim4 ] && . /etc/default/exim4
+ 
+ upex4conf() {
+   UPEX4CONF="update-exim4.conf"
+@@ -48,7 +58,7 @@
+   for p in $PATH; do
+     if [ -x "$p/$UPEX4CONF" ]; then
+       IFS="$OLDIFS"
+-      $p/$UPEX4CONF $UPEX4OPTS $1
++      $p/$UPEX4CONF $UPEX4OPTS
+       return 0
+     fi
+   done
+@@ -63,8 +73,6 @@
+ fi
+ 
+ 
+-DAEMON="/usr/sbin/exim4"
+-NAME="exim4"
+ 
+ # this is from madduck on IRC, 2006-07-06
+ # There should be a better possibility to give daemon error messages
+@@ -81,8 +89,8 @@
+ 
+ start_exim()
+ {
+-  [ -e /var/run/exim4 ] || \
+-    install -d -oDebian-exim -gDebian-exim -m750 /var/run/exim4
++  [ -e ${RUNDIR} ] || \
++    install -d -o${EXIM_USER} -g${EXIM_GROUP} -m750 ${RUNDIR}
+   case ${QUEUERUNNER} in
+     combined)
+       start_daemon -p "$PIDFILE" \
+@@ -214,9 +222,9 @@
+ # check for non-empty paniclog
+ warn_paniclog()
+ {
+-  if [ -s "/var/log/exim4/paniclog" ]; then
+-    if [ -z "$E4BCD_PANICLOG_NOISE" ] || grep -vq "$E4BCD_PANICLOG_NOISE" /var/log/exim4/paniclog; then
+-      echo "ALERT: exim paniclog /var/log/exim4/paniclog has non-zero size, mail system possibly broken" 1>&2
++  if [ -s "${PANICLOG}" ]; then
++    if [ -z "$E4BCD_PANICLOG_NOISE" ] || grep -vq "$E4BCD_PANICLOG_NOISE" ${PANICLOG}; then
++      echo "ALERT: exim paniclog ${PANICLOG} has non-zero size, mail system possibly broken" 1>&2
+     fi
+   fi
+ }
+@@ -238,13 +246,11 @@
+     warn_paniclog
+     ;;
+   restart)
+-    # check whether newly generated config would work
+-    upex4conf --check
+     log_daemon_msg "Stopping MTA for restart"
+-    stop_exim
+     # regenerate exim4.conf
+     upex4conf
+     isconfigvalid
++    stop_exim
+     log_end_msg 0
+     sleep 2
+     log_daemon_msg "Restarting MTA"
+

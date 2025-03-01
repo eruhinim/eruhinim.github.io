@@ -1,0 +1,1664 @@
+diff --git a/configure.ac b/configure.ac
+index a023b03..1b899ef 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -112,6 +112,7 @@ AC_CONFIG_FILES([ Makefile
+ 		  origins/Makefile
+ 		  po/Makefile.in
+ 		  scripts/Makefile
++		  scripts/modules/Makefile
+ 		  scripts/po/Makefile.in
+ 		  src/Makefile
+ 		  utils/Makefile ])
+diff --git a/debian/dpkg-dev.install b/debian/dpkg-dev.install
+index fda7604..d5e165c 100644
+--- a/debian/dpkg-dev.install
++++ b/debian/dpkg-dev.install
+@@ -8,6 +8,7 @@ usr/bin/dpkg-checkbuilddeps
+ usr/bin/dpkg-distaddfile
+ usr/bin/dpkg-genchanges
+ usr/bin/dpkg-gencontrol
++usr/bin/dpkg-gensymbols
+ usr/bin/dpkg-name
+ usr/bin/dpkg-parsechangelog
+ usr/bin/dpkg-scanpackages
+@@ -15,6 +16,7 @@ usr/bin/dpkg-scansources
+ usr/bin/dpkg-shlibdeps
+ usr/bin/dpkg-source
+ usr/lib/dpkg/controllib.pl
++usr/lib/dpkg/Dpkg
+ usr/lib/dpkg/parsechangelog
+ usr/share/locale/*/LC_MESSAGES/dpkg-dev.mo
+ usr/share/man/*/*/822-date.1
+diff --git a/scripts/Makefile.am b/scripts/Makefile.am
+index b8b3643..45eaedf 100644
+--- a/scripts/Makefile.am
++++ b/scripts/Makefile.am
+@@ -1,6 +1,6 @@
+ ## Process this file with automake to produce Makefile.in
+ 
+-SUBDIRS = po
++SUBDIRS = po modules
+ 
+ bin_SCRIPTS = \
+ 	822-date \
+@@ -10,6 +10,7 @@ bin_SCRIPTS = \
+ 	dpkg-distaddfile \
+ 	dpkg-genchanges \
+ 	dpkg-gencontrol \
++	dpkg-gensymbols \
+ 	dpkg-name \
+ 	dpkg-parsechangelog \
+ 	dpkg-scanpackages \
+@@ -36,6 +37,7 @@ EXTRA_DIST = \
+ 	dpkg-distaddfile.pl \
+ 	dpkg-genchanges.pl \
+ 	dpkg-gencontrol.pl \
++	dpkg-gensymbols.pl \
+ 	dpkg-name.sh \
+ 	dpkg-parsechangelog.pl \
+ 	dpkg-scanpackages.pl \
+diff --git a/scripts/dpkg-gensymbols.pl b/scripts/dpkg-gensymbols.pl
+new file mode 100755
+index 0000000..c1066e0
+--- /dev/null
++++ b/scripts/dpkg-gensymbols.pl
+@@ -0,0 +1,235 @@
++#!/usr/bin/perl
++
++use strict;
++use warnings;
++
++our $version;
++our $dpkglibdir;
++BEGIN {
++    $version="1.14.4"; # This line modified by Makefile
++    $dpkglibdir="/usr/lib/dpkg"; # This line modified by Makefile
++    push(@INC,$dpkglibdir);
++}
++require 'controllib.pl';
++
++use Dpkg::Version qw(compare_versions);
++use Dpkg::Shlibs qw(@librarypaths);
++use Dpkg::Shlibs::Objdump;
++use Dpkg::Shlibs::SymbolFile;
++
++our $progname;
++our (%f, %fi);
++our %p2i;
++our @librarypaths;
++
++our $host_arch= `dpkg-architecture -qDEB_HOST_ARCH`;
++chomp $host_arch;
++
++require 'dpkg-gettext.pl';
++textdomain("dpkg-dev");
++
++my $controlfile = 'debian/control';
++my $changelogfile = 'debian/changelog';
++my $packagebuilddir = 'debian/tmp';
++
++my $sourceversion;
++my $stdout;
++my $oppackage;
++my $compare = 1; # Bail on missing symbols by default
++my $output;
++my $debug = 0;
++
++sub version {
++    printf _g("Debian %s version %s.\n"), $progname, $version;
++
++    printf _g("
++Copyright (C) 2007 Raphael Hertzog.
++");
++
++    printf _g("
++This is free software; see the GNU General Public Licence version 2 or
++later for copying conditions. There is NO warranty.
++");
++}
++
++sub usage {
++    printf _g(
++"Usage: %s [<option> ...]
++
++Options:
++  -p<package>              generate symbols file for package.
++  -P<packagebuilddir>      temporary build dir instead of debian/tmp.
++  -e<library>              explicitely list libraries to scan.
++  -v<version>              version of the packages (defaults to
++                           version extracted from debian/changelog).
++  -c<level>                compare generated symbols file with the
++                           reference file in the debian directory.
++			   Fails if difference are too important
++			   (level goes from 0 for no check, to 4
++			   for all checks). By default checks at
++			   level 1.
++  -O<file>                 write to <file>, not .../DEBIAN/symbols.
++  -O                       write to stdout, not .../DEBIAN/symbols.
++  -d                       display debug information during work.
++  -h, --help               show this help message.
++      --version            show the version.
++"), $progname;
++}
++
++my @files;
++while (@ARGV) {
++    $_=shift(@ARGV);
++    if (m/^-p([-+0-9a-z.]+)$/) {
++        $oppackage= $1;
++    } elsif (m/^-c(\d)?$/) {
++	$compare = defined($1) ? $1 : 1;
++    } elsif (m/^-d$/) {
++	$debug = 1;
++    } elsif (m/^-v(.*)/) {
++	$sourceversion = $1;
++    } elsif (m/^-e(.*)/) {
++	my $file = $1;
++	if (-e $file) {
++	    push @files, $file;
++	} else {
++	    push @files, glob($file);
++	}
++    } elsif (m/^-p(.*)/) {
++        &error(sprintf(_g("Illegal package name \`%s'"), $1));
++    } elsif (m/^-P(.*)$/) {
++        $packagebuilddir = $1;
++        $packagebuilddir =~ s{/+$}{};
++    } elsif (m/^-O$/) {
++        $stdout= 1;
++    } elsif (m/^-O(.+)$/) {
++        $output= $1;
++    } elsif (m/^-(h|-help)$/) {
++        &usage; exit(0);
++    } elsif (m/^--version$/) {
++        &version; exit(0);
++    } else {
++        &usageerr(sprintf(_g("unknown option \`%s'"), $_));
++    }
++}
++
++if (not defined($sourceversion)) {
++    parsechangelog($changelogfile);
++    $sourceversion = $fi{"L Version"};
++}
++if (not defined($oppackage)) {
++    parsecontrolfile($controlfile);
++    my @packages = grep(m/^C /, keys %p2i);
++    @packages==1 ||
++        &error(sprintf(_g("must specify package since control info has many (%s)"), "@packages"));
++    $oppackage = $packages[0];
++    $oppackage =~ s/^C //;
++}
++
++my $symfile = Dpkg::Shlibs::SymbolFile->new();
++my $ref_symfile = Dpkg::Shlibs::SymbolFile->new();
++# Load source-provided symbol information
++foreach my $file ($output, "debian/$oppackage.symbols.$host_arch",
++    "debian/symbols.$host_arch", "debian/$oppackage.symbols",
++    "debian/symbols")
++{
++    if (defined $file and -e $file) {
++	print "Using references symbols from $file\n" if $debug;
++	$symfile->load($file);
++	$ref_symfile->load($file) if $compare;
++	last;
++    }
++}
++
++# Scan package build dir looking for libraries
++if (not scalar @files) {
++    foreach my $path (@librarypaths) {
++	my $libdir = "$packagebuilddir$path";
++	$libdir =~ s{/+}{/}g;
++	next if not -d $libdir;
++	opendir(DIR, "$libdir") || 
++	    syserr(sprintf(_g("Can't read directory %s: %s"), $libdir, $!));
++	push @files, grep {
++	    /(\.so\.|\.so$)/ &&
++	    Dpkg::Shlibs::Objdump::is_elf($_);
++	} map { "$libdir/$_" } readdir(DIR);
++	close(DIR);
++    }
++}
++
++# Merge symbol information
++my $od = Dpkg::Shlibs::Objdump->new();
++foreach my $file (@files) {
++    print "Scanning $file for symbol information\n" if $debug;
++    my $objid = $od->parse($file);
++    unless (defined($objid)) {
++	warning(sprintf(_g("Objdump couldn't parse %s\n"), $file));
++	next;
++    }
++    my $object = $od->get_object($objid);
++    if ($object->{SONAME}) { # Objects without soname are of no interest
++	print "Merging symbols from $file as $object->{SONAME}\n" if $debug;
++	if (not $symfile->has_object($object->{SONAME})) {
++	    $symfile->create_object($object->{SONAME}, "$oppackage #MINVER#");
++	}
++	$symfile->merge_symbols($object, $sourceversion);
++    } else {
++	print "File $file doesn't have a soname. Ignoring.\n" if $debug;
++    }
++}
++$symfile->clear_except(keys %{$od->{objects}});
++
++# Write out symbols files
++if ($stdout) {
++    $output = "standard output";
++    $symfile->save("-");
++} else {
++    unless (defined($output)) {
++	$output = "$packagebuilddir/DEBIAN/symbols";
++	mkdir("$packagebuilddir/DEBIAN") if not -e "$packagebuilddir/DEBIAN";
++    }
++    print "Storing symbols in $output.\n" if $debug;
++    $symfile->save($output);
++}
++
++# Check if generated files differs from reference file
++my $exitcode = 0;
++if ($compare) {
++    use File::Temp;
++    use Digest::MD5;
++    # Compare 
++    if ($symfile->has_new_libs($ref_symfile)) {
++	warning(_g("new libraries appeared in the symbols file."));
++	$exitcode = 4 if ($compare >= 4);
++    }
++    if ($symfile->has_lost_libs($ref_symfile)) {
++	warning(_g("some libraries disappeared in the symbols file."));
++	$exitcode = 3 if ($compare >= 3);
++    }
++    if ($symfile->has_new_symbols($ref_symfile)) {
++	warning(_g("some new symbols appeared in the symbols file."));
++	$exitcode = 2 if ($compare >= 2);
++    }
++    if ($symfile->has_lost_symbols($ref_symfile)) {
++	warning(_g("some symbols disappeared in the symbols file."));
++	$exitcode = 1 if ($compare >= 1);
++    }
++    # Output diffs between symbols files if needed
++    my $before = File::Temp->new(TEMPLATE=>'dpkg-gensymbolsXXXXXX');
++    my $after = File::Temp->new(TEMPLATE=>'dpkg-gensymbolsXXXXXX');
++    $ref_symfile->dump($before); $symfile->dump($after);
++    seek($before, 0, 0); seek($after, 0, 0);
++    my ($md5_before, $md5_after) = (Digest::MD5->new(), Digest::MD5->new());
++    $md5_before->addfile($before);
++    $md5_after->addfile($after);
++    if ($md5_before->hexdigest() ne $md5_after->hexdigest()) {
++	if (defined($ref_symfile->{file})) {
++	    warning(sprintf(_g("%s doesn't match completely %s\n"), 
++		    $output, $ref_symfile->{file}));
++	} else {
++	    warning(sprintf(_g("no debian/symbols file used as basis for generating %s\n"), $output));
++	}
++	my ($a, $b) = ($before->filename, $after->filename);
++	system("diff -u $a $b") if -x "/usr/bin/diff";
++    }
++}
++exit($exitcode);
+diff --git a/scripts/dpkg-shlibdeps.pl b/scripts/dpkg-shlibdeps.pl
+index 67f45d5..3c097b5 100755
+--- a/scripts/dpkg-shlibdeps.pl
++++ b/scripts/dpkg-shlibdeps.pl
+@@ -1,41 +1,270 @@
+-#! /usr/bin/perl
+-#
+-# dpkg-shlibdeps
+-# $Id$
++#!/usr/bin/perl -w
+ 
+ use strict;
+ use warnings;
+ 
++use File::Find;
++
+ our $progname;
+-our $version = "1.4.1.19"; # This line modified by Makefile
+-our $dpkglibdir = "/usr/lib/dpkg";
++our $version;
++our $dpkglibdir;
+ my $admindir = "/var/lib/dpkg";
+ 
+-use English;
+-use POSIX qw(:errno_h :signal_h);
++BEGIN {
++    $version="1.14.4"; # This line modified by Makefile
++    $dpkglibdir="/usr/lib/dpkg"; # This line modified by Makefile
++    push(@INC,$dpkglibdir);
++}
++
++use Dpkg::Version qw(compare_versions);
++use Dpkg::Shlibs qw(find_library);
++use Dpkg::Shlibs::Objdump;
++use Dpkg::Shlibs::SymbolFile;
++
++our $host_arch= `dpkg-architecture -qDEB_HOST_ARCH`;
++chomp $host_arch;
++
++my @depfields= qw(Suggests Recommends Depends Pre-Depends); # By increasing importance
++my $i=0; my %depstrength = map { $_ => $i++ } @depfields;
++
++require 'controllib.pl';
++require 'dpkg-gettext.pl';
++textdomain("dpkg-dev");
+ 
+ my $shlibsoverride= '/etc/dpkg/shlibs.override';
+ my $shlibsdefault= '/etc/dpkg/shlibs.default';
+ my $shlibslocal= 'debian/shlibs.local';
+-my $shlibsppdir;
+-my $shlibsppext= '.shlibs';
+-my $varnameprefix= 'shlibs';
++my $packagetype= 'deb';
+ my $dependencyfield= 'Depends';
+ my $varlistfile= 'debian/substvars';
+-my $packagetype= 'deb';
++my $varnameprefix= 'shlibs';
++my $debug= 0;
++
++my (@pkg_shlibs, @pkg_symbols);
++if (-d "debian") {
++    find sub {
++	push @pkg_shlibs, $File::Find::name if ($File::Find::name =~ m{/DEBIAN/shlibs$});
++	push @pkg_symbols, $File::Find::name if ($File::Find::name =~ m{/DEBIAN/symbols$});
++    }, "debian";
++}
++
++my ($stdout, %exec);
++foreach (@ARGV) {
++    if (m/^-T(.*)$/) {
++        $varlistfile= $1;
++    } elsif (m/^-p(\w[-:0-9A-Za-z]*)$/) {
++        $varnameprefix= $1;
++    } elsif (m/^-L(.*)$/) {
++        $shlibslocal= $1;
++    } elsif (m/^-O$/) {
++        $stdout= 1;
++    } elsif (m/^-(h|-help)$/) {
++        usage(); exit(0);
++    } elsif (m/^--version$/) {
++        version(); exit(0);
++    } elsif (m/^--admindir=(.*)$/) {
++        $admindir = $1;
++        -d $admindir ||
++            error(sprintf(_g("administrative directory '%s' does not exist"),
++                             $admindir));
++    } elsif (m/^-d(.*)$/) {
++        $dependencyfield= capit($1);
++        defined($depstrength{$dependencyfield}) ||
++            warning(sprintf(_g("unrecognised dependency field \`%s'"), $dependencyfield));
++    } elsif (m/^-e(.*)$/) {
++	$exec{$1} = $dependencyfield;
++    } elsif (m/^-t(.*)$/) {
++        $packagetype = $1;
++    } elsif (m/-v$/) {
++	$debug = 1;
++    } elsif (m/^-/) {
++        usageerr(sprintf(_g("unknown option \`%s'"), $_));
++    } else {
++	$exec{$_} = $dependencyfield;
++    }
++}
+ 
+-my @depfields= qw(Suggests Recommends Depends Pre-Depends);
+-my %depstrength;
+-my $i=0; grep($depstrength{$_}= ++$i, @depfields);
++scalar keys %exec || usageerr(_g("need at least one executable"));
+ 
+-push(@INC,$dpkglibdir);
+-require 'controllib.pl';
++my %dependencies;
++my %shlibs;
+ 
+-require 'dpkg-gettext.pl';
+-textdomain("dpkg-dev");
++my $cur_field;
++foreach my $file (keys %exec) {
++    $cur_field = $exec{$file};
++    print "Scanning $file (for $cur_field field)\n" if $debug;
+ 
+-#use strict;
+-#use warnings;
++    my $dump = Dpkg::Shlibs::Objdump->new();
++    my $id = $dump->parse($file);
++    my $obj = $dump->get_object($id);
++
++    # Load symbols files for all needed libraries (identified by SONAME)
++    my %libfiles;
++    foreach my $soname ($obj->get_needed_libraries) {
++	my $file = my_find_library($soname, $obj->{RPATH}, $obj->{format});
++	warning("Couldn't find library $soname.") unless defined($file);
++	$libfiles{$file} = $soname if defined($file);
++    }
++    my $file2pkg = find_packages(keys %libfiles);
++    my $symfile = Dpkg::Shlibs::SymbolFile->new();
++    my $dumplibs_wo_symfile = Dpkg::Shlibs::Objdump->new();
++    my @soname_wo_symfile;
++    foreach my $file (keys %libfiles) {
++	my $soname = $libfiles{$file};
++	if (not exists $file2pkg->{$file}) {
++	    # If the library is not available in an installed package,
++	    # it's because it's in the process of being built
++	    # Empty package name will lead to consideration of symbols
++	    # file from the package being built only
++	    $file2pkg->{$file} = [""];
++	}
++
++	# Load symbols/shlibs files from packages providing libraries
++	foreach my $pkg (@{$file2pkg->{$file}}) {
++	    my $dpkg_symfile;
++	    if ($packagetype eq "deb") {
++		# Use fine-grained dependencies only on real deb
++		$dpkg_symfile = find_symbols_file($pkg, $soname);
++	    }
++	    if (defined $dpkg_symfile) {
++		# Load symbol information
++		print "Using symbols file $dpkg_symfile for $soname\n" if $debug;
++		$symfile->load($dpkg_symfile);
++		# Initialize dependencies as an unversioned dependency
++		my $dep = $symfile->get_dependency($soname);
++		foreach my $subdep (split /\s*,\s*/, $dep) {
++		    if (not exists $dependencies{$cur_field}{$subdep}) {
++			$dependencies{$cur_field}{$subdep} = '';
++		    }
++		}
++	    } else {
++		# No symbol file found, fall back to standard shlibs
++		$dumplibs_wo_symfile->parse($file);
++		push @soname_wo_symfile, $soname;
++		add_shlibs_dep($soname, $pkg);
++	    }
++	}
++    }
++
++    # Scan all undefined symbols of the binary and resolve to a
++    # dependency
++    my @sonames = $obj->get_needed_libraries;
++    my %used_sonames = map { $_ => 0 } @sonames;
++    foreach my $sym ($obj->get_undefined_dynamic_symbols()) {
++	my $name = $sym->{name};
++	if ($sym->{version}) {
++	    $name .= "\@$sym->{version}";
++	} else {
++	    $name .= "\@Base";
++	}
++	my $symdep = $symfile->lookup_symbol($name, \@sonames);
++	if (defined($symdep)) {
++	    my ($d, $m) = ($symdep->{depends}, $symdep->{minver});
++	    $used_sonames{$symdep->{soname}}++;
++	    foreach my $subdep (split /\s*,\s*/, $d) {
++		if (exists $dependencies{$cur_field}{$subdep} and
++		    defined($dependencies{$cur_field}{$subdep})) 
++		{
++		    if ($dependencies{$cur_field}{$subdep} eq '' or 
++			compare_versions($m, "gt", $dependencies{$cur_field}{$subdep})) 
++		    {
++			$dependencies{$cur_field}{$subdep} = $m;
++		    }
++		} else {
++		    $dependencies{$cur_field}{$subdep} = $m;
++		}
++	    }
++	} else {
++	    my $syminfo = $dumplibs_wo_symfile->locate_symbol($name);
++	    if (not defined($syminfo)) {
++		my $print_name = $name;
++		$print_name =~ s/\@Base$//; # Drop the default suffix for readability
++		warning(sprintf(
++		    _g("symbol %s used by %s found in none of the libraries."), 
++		    $print_name, $file)) unless $sym->{weak};
++	    } else {
++		$used_sonames{$syminfo->{soname}}++;
++	    }
++	}
++    }
++    # Warn about un-NEEDED libraries
++    foreach my $soname (@sonames) {
++	unless ($used_sonames{$soname}) {
++	    warning(sprintf(
++		_g("%s shouldn't be linked with %s (it uses none of its symbols)."),
++		$file, $soname));
++	}
++    }
++}
++
++# Open substvars file
++my $fh;
++if ($stdout) {
++    $fh = \*STDOUT;
++} else {
++    open(NEW,"> $varlistfile.new") ||
++        syserr(sprintf(_g("open new substvars file \`%s'"), "$varlistfile.new"));
++    if (-e $varlistfile) {
++	open(OLD,"< $varlistfile") || 
++	    syserr(sprintf(_g("open old varlist file \`%s' for reading"), $varlistfile));
++	foreach my $entry (grep { not /^\Q$varnameprefix\E:/ } (<OLD>)) {
++	    print(NEW $entry) ||
++		syserr(sprintf(_g("copy old entry to new varlist file \`%s'"), "$varlistfile.new"));
++	}
++    }
++    $fh = \*NEW;
++} 
++
++# Write out the shlibs substvars 
++my %depseen;
++foreach my $field (reverse @depfields) {
++    my $dep = "";
++    if (exists $dependencies{$field} and scalar keys %{$dependencies{$field}}) {
++	$dep = join ", ", 
++	    map {
++		# Translate dependency templates into real dependencies
++		if ($dependencies{$field}{$_}) {
++		    s/#MINVER#/(>= $dependencies{$field}{$_})/g;
++		} else {
++		    s/#MINVER#//g;
++		}
++		s/\s+/ /g;
++		$_;
++	    } grep { 
++		# Don't include dependencies if they are already
++		# mentionned in a higher priority field
++		if (not defined($depseen{$_})) {
++		    $depseen{$_} = $dependencies{$field}{$_};
++		    1;
++		} else {
++		    #Â Since dependencies can be versionned, we have to
++		    # verify if the dependency is stronger than the
++		    # previously seen one
++		    if (compare_versions($depseen{$_}, "gt",
++			$dependencies{$field}{$_})) {
++			0;
++		    } else {
++			$depseen{$_} = $dependencies{$field}{$_};
++			1;
++		    }
++		}
++	    } keys %{$dependencies{$field}};
++    }
++    if ($dep) {
++	print $fh "$varnameprefix:$field=$dep\n";
++    }
++}
++
++# Replace old file by new one
++if (!$stdout) {
++    close($fh);
++    rename("$varlistfile.new",$varlistfile) ||
++        syserr(sprintf(_g("install new varlist file \`%s'"), $varlistfile));
++}
++
++##
++## Functions
++##
+ 
+ sub version {
+     printf _g("Debian %s version %s.\n"), $progname, $version;
+@@ -43,7 +272,9 @@ sub version {
+     printf _g("
+ Copyright (C) 1996 Ian Jackson.
+ Copyright (C) 2000 Wichert Akkerman.
+-Copyright (C) 2006 Frank Lichtenheld.");
++Copyright (C) 2006 Frank Lichtenheld.
++Copyright (C) 2007 Raphael Hertzog.
++");
+ 
+     printf _g("
+ This is free software; see the GNU General Public Licence version 2 or
+@@ -75,376 +306,117 @@ Dependency fields recognised are:
+ "), $progname, join("/",@depfields);
+ }
+ 
+-my ($stdout, @exec, @execfield);
+-foreach (@ARGV) {
+-    if (m/^-T/) {
+-	$varlistfile= $POSTMATCH;
+-    } elsif (m/^-p(\w[-:0-9A-Za-z]*)$/) {
+-	$varnameprefix= $1;
+-    } elsif (m/^-L/) {
+-	$shlibslocal= $POSTMATCH;
+-    } elsif (m/^-O$/) {
+-	$stdout= 1;
+-    } elsif (m/^-(h|-help)$/) {
+-	usage; exit(0);
+-    } elsif (m/^--version$/) {
+-	version; exit(0);
+-    } elsif (m/^--admindir=/) {
+-	$admindir = $POSTMATCH;
+-	-d $admindir ||
+-	    error(sprintf(_g("administrative directory '%s' does not exist"),
+-			     $admindir));
+-    } elsif (m/^-d/) {
+-	$dependencyfield= capit($POSTMATCH);
+-	defined($depstrength{$dependencyfield}) ||
+-	    warning(sprintf(_g("unrecognised dependency field '%s'"), $dependencyfield));
+-    } elsif (m/^-e/) {
+-	push(@exec,$POSTMATCH); push(@execfield,$dependencyfield);
+-    } elsif (m/^-t/) {
+-	$packagetype= $POSTMATCH;
+-    } elsif (m/^-/) {
+-	usageerr(sprintf(_g("unknown option \`%s'"), $_));
+-    } else {
+-	push(@exec,$_); push(@execfield,$dependencyfield);
++sub add_shlibs_dep {
++    my ($soname, $pkg) = @_;
++    foreach my $file ($shlibslocal, $shlibsoverride, @pkg_shlibs,
++			"$admindir/info/$pkg.shlibs") 
++    {
++	next if not -e $file;
++	my $dep = extract_from_shlibs($soname, $file);
++	if (defined($dep)) {
++	    foreach (split(/,\s*/, $dep)) {
++		$dependencies{$cur_field}{$_} = 1;
++	    }
++	    last;
++	}
+     }
+ }
+ 
+-$shlibsppdir = "$admindir/info";
+-
+-@exec || usageerr(_g("need at least one executable"));
+-
+-sub isbin {
+-    open (F, $_[0]) || die(sprintf(_g("unable to open '%s' for test"), $_[0]));
+-    my $d;
+-    if (read (F, $d, 4) != 4) {
+-       die (sprintf(_g("unable to read first four bytes of '%s' as magic number"), $_[0]));
+-    }
+-    if ($d =~ /^\177ELF$/) { # ELF binary
+-       return 1;
+-    } elsif (unpack ('N', $d) == 0x8086010B) { # obsd dyn bin
+-       return 1;
+-    } elsif (unpack ('N', $d) ==   0x86010B) { # obsd stat bin
+-       return 1;
+-    } elsif ($d =~ /^\#\!..$/) { # shell script
+-       return 0;
+-    } elsif (unpack ('N', $d) == 0xcafebabe) { # JAVA binary
+-       return 0;
++sub extract_from_shlibs {
++    my ($soname, $shlibfile) = @_;
++    my ($libname, $libversion);
++    # Split soname in name/version
++    if ($soname =~ /^(.*)\.so\.(.*)$/) {
++	$libname = $1; $libversion = $2;
++    } elsif ($soname =~ /^(.*)-(.*)\.so$/) {
++	$libname = $1; $libversion = $2;
+     } else {
+-       die(sprintf(_g("unrecognized file type for '%s'"), $_[0]));
+-    }
+-}
+-
+-my @librarypaths = qw( /lib /usr/lib /lib32 /usr/lib32 /lib64 /usr/lib64
+-		       /emul/ia32-linux/lib /emul/ia32-linux/usr/lib );
+-my %librarypaths = map { $_ => 'default' } @librarypaths;
+-
+-if ($ENV{LD_LIBRARY_PATH}) {
+-    foreach (reverse split( /:/, $ENV{LD_LIBRARY_PATH} )) {
+-	s,/+$,,;
+-	unless (exists $librarypaths{$_}) {
+-	    $librarypaths{$_} = 'env';
+-	    unshift @librarypaths, $_;
+-	}
++	warning(sprintf(_g("Can't extract name and version from library name \`%s'"), $soname));
++	return;
+     }
+-}
+-
+-# Support system library directories.
+-my $ldconfigdir = '/lib/ldconfig';
+-if (opendir(DIR, $ldconfigdir)) {
+-    my @dirents = readdir(DIR);
+-    closedir(DIR);
+-
+-    for (@dirents) {
+-	next if /^\./;
+-	my $d = `readlink -f $ldconfigdir/$_`;
+-	chomp $d;
+-	unless (exists $librarypaths{$d}) {
+-	    $librarypaths{$d} = 'ldconfig';
+-	    push @librarypaths, $d;
++    # Open shlibs file
++    $shlibfile = "./$shlibfile" if $shlibfile =~ m/^\s/;
++    open(SHLIBS, "< $shlibfile") || syserr(sprintf(_g("unable to open shared libs info file \`%s'"), $shlibfile));
++    my $dep;
++    while (<SHLIBS>) {
++	s/\s*\n$//; next if m/^\#/;
++        if (!m/^\s*(?:(\S+):\s+)?(\S+)\s+(\S+)\s+(\S.*\S)\s*$/) {
++            warning(sprintf(_g("shared libs info file \`%s' line %d: bad line \`%s'"), $shlibfile, $., $_));
++            next;
++        }
++	my $type = defined($1) ? $1 : "deb";
++	next if $type ne $packagetype;
++	if (($libname eq $2) && ($libversion eq $3)) {
++	    $dep = $4;
++	    last;
+ 	}
+     }
++    close(SHLIBS);
++    return $dep;
+ }
+ 
+-open CONF, '</etc/ld.so.conf' or
+-    warning(sprintf(_g("couldn't open /etc/ld.so.conf: %s"), $!));
+-while( <CONF> ) {
+-    next if /^\s*$/;
+-    chomp;
+-    s,/+$,,;
+-    unless (exists $librarypaths{$_}) {
+-	$librarypaths{$_} = 'conf';
+-	push @librarypaths, $_;
+-    }
+-}
+-close CONF;
+-
+-my (%rpaths, %format);
+-my (@libfiles, @libname, @libsoname, @libfield, @libexec);
+-for ($i=0;$i<=$#exec;$i++) {
+-    if (!isbin ($exec[$i])) { next; }
+-
+-    # Now we get the direct deps of the program
+-    defined(my $c= open(P,"-|")) || syserr(_g("cannot fork for objdump"));
+-    if (!$c) {
+-	exec("objdump", "-p", "--", $exec[$i]) or
+-	    syserr(_g("cannot exec objdump"));
+-    }
+-    while (<P>) {
+-	chomp;
+-	if (/^\s*\S+:\s*file\s+format\s+(\S+)\s*$/) {
+-	    $format{$exec[$i]} = $1;
+-	} elsif (m,^\s*NEEDED\s+,) {
+-	    if (m,^\s*NEEDED\s+((\S+)\.so\.(\S+))$,) {
+-		push(@libname,$2); push(@libsoname,$3);
+-		push(@libfield,$execfield[$i]);
+-		push(@libfiles,$1);
+-		push(@libexec,$exec[$i]);
+-	    } elsif (m,^\s*NEEDED\s+((\S+)-(\S+)\.so)$,) {
+-		push(@libname,$2); push(@libsoname,$3);
+-		push(@libfield,$execfield[$i]);
+-		push(@libfiles,$1);
+-		push(@libexec,$exec[$i]);
+-	    } else {
+-		m,^\s*NEEDED\s+(\S+)$,;
+-		warning(sprintf(_g("format of 'NEEDED %s' not recognized"), $1));
+-	    }
+-	} elsif (/^\s*RPATH\s+(\S+)\s*$/) {
+-	    push @{$rpaths{$exec[$i]}}, split(/:/, $1);
++sub find_symbols_file {
++    my ($pkg, $soname) = @_;
++    foreach my $file (@pkg_symbols,
++	"/etc/dpkg/symbols/$pkg.symbols.$host_arch",
++	"/etc/dpkg/symbols/$pkg.symbols",
++	"$admindir/info/$pkg.symbols") 
++    {
++	if (-e $file and symfile_has_soname($file, $soname)) {
++	    return $file;
+ 	}
+     }
+-    close(P) or subprocerr(sprintf(_g("objdump on \`%s'"), $exec[$i]));
++    return undef;
+ }
+ 
+-# Now: See if it is in this package.  See if it is in any other package.
+-my @curshlibs;
+-sub searchdir {
+-    my $dir = shift;
+-    if(opendir(DIR, $dir)) {
+-	my @dirents = readdir(DIR);
+-	closedir(DIR);
+-	for (@dirents) {
+-	    if ( -f "$dir/$_/DEBIAN/shlibs" ) {
+-		push(@curshlibs, "$dir/$_/DEBIAN/shlibs");
+-		next;
+-	    } elsif ( $_ !~ /^\./ && ! -e "$dir/$_/DEBIAN" &&
+-		      -d "$dir/$_" && ! -l "$dir/$_" ) {
+-		&searchdir("$dir/$_");
+-	    }
++sub symfile_has_soname {
++    my ($file, $soname) = @_;
++    open(SYM_FILE, "< $file") || syserr("can't open file $file");
++    my $result = 0;
++    while (<SYM_FILE>) {
++	if (/^\Q$soname\E /) {
++	    $result = 1;
++	    last;
+ 	}
+     }
++    close(SYM_FILE);
++    return $result;
+ }
+ 
+-my $searchdir = $exec[0];
+-my $curpackdir = "debian/tmp";
+-do { $searchdir =~ s,/[^/]*$,,; } while($searchdir =~ m,/,
+-					&& ! -d "$searchdir/DEBIAN");
+-if ($searchdir =~ m,/,) {
+-    $curpackdir = $searchdir;
+-    $searchdir =~ s,/[^/]*,,;
+-    &searchdir($searchdir);
+-}
+-
+-if (1 || $#curshlibs >= 0) {
+-  PRELIB:
+-    for ($i=0;$i<=$#libname;$i++) {
+-	if(scanshlibsfile($shlibslocal,$libname[$i],$libsoname[$i],$libfield[$i])
+-	   || scanshlibsfile($shlibsoverride,$libname[$i],$libsoname[$i],$libfield[$i])) {
+-	    splice(@libname, $i, 1);
+-	    splice(@libsoname, $i, 1);
+-	    splice(@libfield, $i, 1);
+-	    splice(@libfiles, $i, 1);
+-	    splice(@libexec, $i, 1);
+-	    $i--;
+-	    next PRELIB;
+-	}
+-	for my $shlibsfile (@curshlibs) {
+-	    if(scanshlibsfile($shlibsfile, $libname[$i], $libsoname[$i], $libfield[$i])) {
+-		splice(@libname, $i, 1);
+-		splice(@libsoname, $i, 1);
+-		splice(@libfield, $i, 1);
+-		splice(@libfiles, $i, 1);
+-		splice(@libexec, $i, 1);
+-		$i--;
+-		next PRELIB;
+-	    }
+-	}
++# find_library ($soname, \@rpath, $format)
++sub my_find_library {
++    my ($lib, $rpath, $format) = @_;
++    my $file = find_library($lib, $rpath, $format, "");
++    return $file if defined($file);
++
++    # Look into the packages we're currently building (but only those
++    # that provides shlibs file...)
++    # TODO: we should probably replace that by a cleaner way to look into
++    # the various temporary build directories...
++    foreach my $builddir (map { s{/DEBIAN/shlibs$}{}; $_ } @pkg_shlibs) {
++	$file = find_library($lib, $rpath, $format, $builddir);
++	return $file if defined($file);
+     }
++    return undef;
+ }
+ 
+-my %pathpackages;
+-if ($#libfiles >= 0) {
+-    grep(s/\[\?\*/\\$&/g, @libname);
+-    defined(my $c= open(P,"-|")) || syserr(_g("cannot fork for dpkg --search"));
+-    if (!$c) {
+-	my %seen_libfiles;
+-	my @uniq_libfiles = grep !$seen_libfiles{$_}++, @libfiles;
+-
+-	close STDERR; # we don't need to see dpkg's errors
+-	open STDERR, "> /dev/null";
+-	$ENV{LC_ALL} = "C";
+-	exec("dpkg", "--search", "--", @uniq_libfiles) or
+-	    syserr(_g("cannot exec dpkg"));
+-    }
+-    while (<P>) {
+-	chomp;
++sub find_packages {
++    my @files = (@_);
++    my $pkgmatch = {};
++    open(DPKG, "dpkg --search -- @files 2>/dev/null |") ||
++	syserr(sprintf(_g("Can't execute dpkg --search: %s"), $!));
++    while(defined($_ = <DPKG>)) {
++	chomp($_);
+ 	if (m/^local diversion |^diversion by/) {
+ 	    warning(_g("diversions involved - output may be incorrect"));
+ 	    print(STDERR " $_\n") || syserr(_g("write diversion info to stderr"));
+-	} elsif (m=^(\S+(, \S+)*): (\S+)$=) {
+-	    push @{$pathpackages{$LAST_PAREN_MATCH}}, split(/, /, $1);
++	} elsif (m/^([^:]+): (\S+)$/) {
++	    $pkgmatch->{$2} = [ split(/, /, $1) ];
+ 	} else {
+ 	    warning(sprintf(_g("unknown output from dpkg --search: '%s'"), $_));
+ 	}
+     }
+-    close(P);
++    close(DPKG);
++    return $pkgmatch;
+ }
+ 
+- LIB:
+-    for ($i=0;$i<=$#libname;$i++) {
+-	my $file = $libfiles[$i];
+-	my @packages;
+-	foreach my $rpath (@{$rpaths{$libexec[$i]}}) {
+-	    if (exists $pathpackages{"$rpath/$file"}
+-		&& format_matches($libexec[$i],"$rpath/$file")) {
+-		push @packages, @{$pathpackages{"$rpath/$file"}};
+-	    }
+-	}
+-	foreach my $path (@librarypaths) {
+-	    if (exists $pathpackages{"$path/$file"}
+-		&& format_matches($libexec[$i],"$path/$file")) {
+-		push @packages, @{$pathpackages{"$path/$file"}};
+-	    }
+-	}
+-	if (!@packages) {
+-	    warning(sprintf(_g("could not find any packages for %s"), $libfiles[$i]));
+-	} else {
+-	    for my $p (@packages) {
+-		scanshlibsfile("$shlibsppdir/$p$shlibsppext",
+-			       $libname[$i],$libsoname[$i],$libfield[$i])
+-		    && next LIB;
+-	    }
+-	}
+-	scanshlibsfile($shlibsdefault,$libname[$i],$libsoname[$i],$libfield[$i])
+-	    && next;
+-	warning(sprintf(_g("unable to find dependency information for ".
+-	                   "shared library %s (soname %s, ".
+-	                   "path %s, dependency field %s)"),
+-	                $libname[$i], $libsoname[$i],
+-	                $libfiles[$i], $libfield[$i]));
+-    }
+-
+-sub format_matches {
+-    my ($file1, $file2) = @_;
+-    my ($format1, $format2) = (get_format($file1),get_format($file2));
+-    return $format1 eq $format2;
+-}
+-
+-sub get_format {
+-    my ($file) = @_;
+-
+-    if ($format{$file}) {
+-	return $format{$file};
+-    } else {
+-	defined(my $c= open(P,"-|")) || syserr(_g("cannot fork for objdump"));
+-	if (!$c) {
+-	    exec("objdump", "-a", "--", $file) or
+-		syserr(_g("cannot exec objdump"));
+-	}
+-	while (<P>) {
+-	    chomp;
+-	    if (/^\s*\S+:\s*file\s+format\s+(\S+)\s*$/) {
+-		$format{$file} = $1;
+-		return $format{$file};
+-	    }
+-	}
+-	close(P) or subprocerr(sprintf(_g("objdump on \`%s'"), $file));
+-    }
+-}
+-
+-my (%predefdepfdep, %unkdepfdone, %unkdepf);
+-sub scanshlibsfile {
+-    my ($fn,$ln,$lsn,$lf) = @_;
+-    my ($da,$dk);
+-    $fn= "./$fn" if $fn =~ m/^\s/;
+-    if (!open(SLF,"< $fn")) {
+-        $! == ENOENT || syserr(sprintf(_g("unable to open shared libs info file \`%s'"), $fn));
+-        return 0;
+-    }
+-
+-    while (<SLF>) {
+-        s/\s*\n$//; next if m/^\#/;
+-        if (!m/^\s*(?:(\S+):\s+)?(\S+)\s+(\S+)/) {
+-	    warning(sprintf(_g("shared libs info file '%s' line %d: bad line '%s'"), $fn, $., $_));
+-            next;
+-        }
+-        next if defined $1 && $1 ne $packagetype;
+-        next if $2 ne $ln || $3 ne $lsn;
+-        return 1 if $fn eq "$curpackdir/DEBIAN/shlibs";
+-        $da= $POSTMATCH;
+-        last if defined $1; # exact match, otherwise keep looking
+-    }
+-    close(SLF);
+-
+-    return 0 unless defined $da;
+-
+-    for my $dv (split(/,/,$da)) {
+-        $dv =~ s/^\s+//; $dv =~ s/\s+$//;
+-        if (defined($depstrength{$lf})) {
+-            if (!defined($predefdepfdep{$dv}) ||
+-                $depstrength{$predefdepfdep{$dv}} < $depstrength{$lf}) {
+-                $predefdepfdep{$dv}= $lf;
+-            }
+-        } else {
+-            $dk= "$lf: $dv";
+-            if (!defined($unkdepfdone{$dk})) {
+-                $unkdepfdone{$dk}= 1;
+-                $unkdepf{$lf} .= ', ' if defined($unkdepf{$lf});
+-                $unkdepf{$lf}.= $dv;
+-            }
+-        }
+-    }
+-    return 1;
+-}
+-
+-my $fh;
+-if (!$stdout) {
+-    open(Y,"> $varlistfile.new") ||
+-        syserr(sprintf(_g("open new substvars file \`%s'"), "$varlistfile.new"));
+-    unless ($REAL_USER_ID) {
+-	chown(getfowner(), "$varlistfile.new") ||
+-	    syserr(sprintf(_g("chown of \`%s'"), "$varlistfile.new"));
+-    }
+-    if (open(X,"< $varlistfile")) {
+-        while (<X>) {
+-            s/\n$//;
+-            next if m/^(\w[-:0-9A-Za-z]*):/ && $1 eq $varnameprefix;
+-            print(Y "$_\n") ||
+-                syserr(sprintf(_g("copy old entry to new varlist file \`%s'"), "$varlistfile.new"));
+-        }
+-    } elsif ($! != ENOENT) {
+-        syserr(sprintf(_g("open old varlist file \`%s' for reading"), $varlistfile));
+-    }
+-    $fh = \*Y;
+-} else {
+-    $fh = \*STDOUT;
+-}
+-my %defdepf;
+-for my $dv (sort keys %predefdepfdep) {
+-    my $lf= $predefdepfdep{$dv};
+-    $defdepf{$lf} .= ', ' if defined($defdepf{$lf});
+-    $defdepf{$lf}.= $dv;
+-}
+-for my $lf (reverse @depfields) {
+-    next unless defined($defdepf{$lf});
+-    print($fh "$varnameprefix:$lf=$defdepf{$lf}\n")
+-        || syserr(_g("write output entry"));
+-}
+-for my $lf (sort keys %unkdepf) {
+-    print($fh "$varnameprefix:$lf=$unkdepf{$lf}\n")
+-        || syserr(_g("write userdef output entry"));
+-}
+-close($fh) || syserr(_g("close output"));
+-if (!$stdout) {
+-    rename("$varlistfile.new",$varlistfile) ||
+-        syserr(sprintf(_g("install new varlist file \`%s'"), $varlistfile));
+-}
+diff --git a/scripts/modules/Makefile.am b/scripts/modules/Makefile.am
+new file mode 100644
+index 0000000..0b6f25f
+--- /dev/null
++++ b/scripts/modules/Makefile.am
+@@ -0,0 +1,7 @@
++
++shlibsmodulesdir=$(pkglibdir)/Dpkg/Shlibs
++dpkgmodulesdir=$(pkglibdir)/Dpkg
++
++dist_shlibsmodules_DATA = Objdump.pm SymbolFile.pm
++dist_dpkgmodules_DATA = Shlibs.pm Version.pm
++
+diff --git a/scripts/modules/Objdump.pm b/scripts/modules/Objdump.pm
+new file mode 100644
+index 0000000..da93f82
+--- /dev/null
++++ b/scripts/modules/Objdump.pm
+@@ -0,0 +1,235 @@
++package Dpkg::Shlibs::Objdump;
++
++require 'dpkg-gettext.pl';
++
++sub new {
++    my $this = shift;
++    my $class = ref($this) || $this;
++    my $self = { 'objects' => {} };
++    bless $self, $class;
++    return $self;
++}
++
++sub parse {
++    my ($self, $file) = @_;
++    local $ENV{LC_ALL} = 'C';
++    open(OBJDUMP, "objdump -w -p -T $file |") || syserr(sprintf(_g("Can't execute objdump: %s"), $!));
++    my $obj = Dpkg::Shlibs::Objdump::Object->new($file);
++    my $section = "none";
++    while (defined($_ = <OBJDUMP>)) {
++	chomp($_);
++	next if (/^\s*$/);
++	
++	if ($_ =~ /^DYNAMIC SYMBOL TABLE:/) {
++	    $section = "dynsym";
++	    next;
++	} elsif ($_ =~ /^Dynamic Section:/) {
++	    $section = "dyninfo";
++	    next;
++	} elsif ($_ =~ /^Program Header:/) {
++	    $section = "header";
++	    next;
++	} elsif ($_ =~ /^Version definitions:/) {
++	    $section = "verdef";
++	    next;
++	} elsif ($_ =~ /^Version References:/) {
++	    $section = "verref";
++	    next;
++	}
++
++	if ($section eq "dynsym") {
++	    $self->parse_dynamic_symbol($_, $obj);
++	} elsif ($section eq "dyninfo") {
++	    if ($_ =~ /^\s*NEEDED\s+(\S+)/) {
++		push @{$obj->{NEEDED}}, $1;
++	    } elsif ($_ =~ /^\s*SONAME\s+(\S+)/) {
++		$obj->{SONAME} = $1;
++	    } elsif ($_ =~ /^\s*HASH\s+(\S+)/) {
++		$obj->{HASH} = $1;
++	    } elsif ($_ =~ /^\s*GNU_HASH\s+(\S+)/) {
++		$obj->{GNU_HASH} = $1;
++	    } elsif ($_ =~ /^\s*RPATH\s+(\S+)/) {
++		push @{$obj->{RPATH}}, split (/:/, $1);
++	    }
++	} elsif ($section eq "none") {
++	    if ($_ =~ /^\s*\S+:\s*file\s+format\s+(\S+)\s*$/) {
++		$obj->{format} = $1;
++	    }
++	}
++    }
++    close(OBJDUMP);
++    if ($section eq "none") {
++	return undef;
++    } else {
++	my $id = $obj->{SONAME} || $obj->{file};
++	$self->{objects}{$id} = $obj;
++	return $id;
++    }
++}
++
++# Output format of objdump -w -T
++#
++# /lib/libc.so.6:     format de fichier elf32-i386
++# 
++# DYNAMIC SYMBOL TABLE:
++# 00056ef0 g    DF .text  000000db  GLIBC_2.2   getwchar
++# 00000000 g    DO *ABS*  00000000  GCC_3.0     GCC_3.0
++# 00069960  w   DF .text  0000001e  GLIBC_2.0   bcmp
++# 00000000  w   D  *UND*  00000000              _pthread_cleanup_pop_restore
++# 0000b788 g    DF .text  0000008e  Base        .protected xine_close
++# |        ||||||| |      |         |           |
++# |        ||||||| |      |         Version str (.visibility) + Symbol name
++# |        ||||||| |      Alignment           
++# |        ||||||| Section name (or *UND* for an undefined symbol)
++# |        ||||||F=Function,f=file,O=object
++# |        |||||d=debugging,D=dynamic
++# |        ||||I=Indirect
++# |        |||W=warning
++# |        ||C=constructor
++# |        |w=weak
++# |        g=global,l=local,!=both global/local   
++# Size of the symbol
++#
++# GLIBC_2.2 is the version string associated to the symbol
++# (GLIBC_2.2) is the same but the symbol is hidden, a newer version of the
++# symbol exist
++
++sub parse_dynamic_symbol {
++    my ($self, $line, $obj) = @_;
++    my $vis = '(?:\s+(?:\.protected|\.hidden|\.internal|0x\S+))?';
++    if ($line =~ /^[0-9a-f]+ (.{7})\s+(\S+)\s+[0-9a-f]+\s+(\S+)?(?:$vis\s+(\S+))/) {
++
++	my ($flags, $sect, $ver, $name) = ($1, $2, $3, $4);
++	my $symbol = {
++		'name' => $name,
++		'version' => defined($ver) ? $ver : '',
++		'section' => $sect,
++		'dynamic' => substr($flags, 5, 1) eq "D",
++		'debug' => substr($flags, 5, 1) eq "d",
++		'type' => substr($flags, 6, 1),
++		'weak' => substr($flags, 1, 1) eq "w",
++		'hidden' => 0,
++		'defined' => $sect ne '*UND*'
++	    };
++	
++	#Â Handle hidden symbols
++	if (defined($ver) and $ver =~ /^\((.*)\)$/) {
++	    $ver = $1;
++	    $symbol->{'version'} = $1;
++	    $symbol->{'hidden'} = 1;
++	}
++
++	# Register symbol
++	$obj->add_dynamic_symbol($symbol);
++    } elsif ($line =~ /^[0-9a-f]+ (.{7})\s+(\S+)\s+[0-9a-f]+/) {
++	# Same start but no version and no symbol ... just ignore
++    } else {
++	main::warning(sprintf(_g("Couldn't parse one line of objdump's output: %s"), $line));
++    }
++}
++
++sub locate_symbol {
++    my ($self, $name) = @_;
++    foreach my $obj (values %{$self->{objects}}) {
++	my $sym = $obj->get_symbol($name);
++	if (defined($sym) && $sym->{defined}) {
++	    return $sym;
++	}
++    }
++    return undef;
++}
++
++sub get_object {
++    my ($self, $objid) = @_;
++    if (exists $self->{objects}{$objid}) {
++	return $self->{objects}{$objid};
++    }
++    return undef;
++}
++
++{
++    my %format; # Cache of result
++    sub get_format {
++        my ($file) = @_;
++
++        if (exists $format{$file}) {
++            return $format{$file};
++        } else {
++            local $ENV{LC_ALL} = "C";
++            open(P, "objdump -a -- $file |") || syserr(_g("cannot fork for objdump"));
++            while (<P>) {
++                chomp;
++                if (/^\s*\S+:\s*file\s+format\s+(\S+)\s*$/) {
++                    $format{$file} = $1;
++                    return $format{$file};
++                }
++            }
++            close(P) or main::subprocerr(sprintf(_g("objdump on \`%s'"), $file));
++        }
++    }
++}
++
++sub is_elf {
++    my ($file) = @_;
++    open(FILE, "< $file") || main::syserr(sprintf(_g("Can't open %s for test: %s"), $file, $!));
++    my ($header, $result) = ("", 0);
++    if (read(FILE, $header, 4) == 4) {
++	$result = 1 if ($header =~ /^\177ELF$/);
++    }
++    close(FILE);
++    return $result;
++}
++
++package Dpkg::Shlibs::Objdump::Object;
++
++sub new {
++    my $this = shift;
++    my $file = shift || '';
++    my $class = ref($this) || $this;
++    my $self = {
++	'file' => $file,
++	'SONAME' => '',
++	'NEEDED' => [],
++	'RPATH' => [],
++	'dynsyms' => {}
++    };
++    bless $self, $class;
++    return $self;
++}
++
++sub add_dynamic_symbol {
++    my ($self, $symbol) = @_;
++    $symbol->{soname} = $self->{SONAME};
++    if ($symbol->{version}) {
++	$self->{dynsyms}{$symbol->{name} . '@' . $symbol->{version}} = $symbol;
++    } else {
++	$self->{dynsyms}{$symbol->{name}} = $symbol;
++    }
++}
++
++sub get_symbol {
++    my ($self, $name) = @_;
++    if (exists $self->{dynsyms}{$name}) {
++	return $self->{dynsyms}{$name};
++    }
++    return undef;
++}
++
++sub get_exported_dynamic_symbols {
++    my ($self) = @_;
++    return grep { $_->{defined} && $_->{dynamic} } 
++	    values %{$self->{dynsyms}};
++}
++
++sub get_undefined_dynamic_symbols {
++    my ($self) = @_;
++    return grep { (!$_->{defined}) && $_->{dynamic} } 
++	    values %{$self->{dynsyms}};
++}
++
++sub get_needed_libraries {
++    my $self = shift;
++    return @{$self->{NEEDED}};
++}
++
++1;
+diff --git a/scripts/modules/Shlibs.pm b/scripts/modules/Shlibs.pm
+new file mode 100644
+index 0000000..f029933
+--- /dev/null
++++ b/scripts/modules/Shlibs.pm
+@@ -0,0 +1,69 @@
++#!/usr/bin/perl -w
++
++use strict;
++use warnings;
++
++require 'dpkg-gettext.pl';
++
++use IO::File;
++
++use Exporter 'import';
++our @EXPORT_OK = qw(@librarypaths find_library);
++
++our @librarypaths = qw(/lib /usr/lib /lib32 /usr/lib32 /lib64 /usr/lib64
++                       /emul/ia32-linux/lib /emul/ia32-linux/usr/lib);
++
++# Update library paths with LD_LIBRARY_PATH
++if ($ENV{LD_LIBRARY_PATH}) {
++    foreach my $path (reverse split( /:/, $ENV{LD_LIBRARY_PATH} )) {
++        $path =~ s{/+$}{};
++        unless (scalar grep { $_ eq $path } @librarypaths) {
++            unshift @librarypaths, $path;
++        }
++    }
++}
++
++# Update library paths with ld.so config
++parse_ldso_conf("/etc/ld.so.conf") if -e "/etc/ld.so.conf";
++
++sub parse_ldso_conf {
++    my $file = shift;
++    my $fh = new IO::File;
++    $fh->open("< $file")
++	or main::syserr(sprintf(_g("couldn't open %s: %s"), $file, $!));
++    while (<$fh>) {
++	next if /^\s*$/;
++        chomp;
++	s{/+$}{};
++	if (/^include\s+(\S.*\S)\s*$/) {
++	    foreach my $include (glob($1)) {
++		parse_ldso_conf($include) if -e $include;
++	    }
++	} elsif (m{^\s*/}) {
++	    s/^\s+//;
++	    my $libdir = $_;
++	    unless (scalar grep { $_ eq $libdir } @librarypaths) {
++		push @librarypaths, $libdir;
++	    }
++	}
++    }
++    $fh->close;
++}
++
++# find_library ($soname, \@rpath, $format, $root)
++sub find_library {
++    my ($lib, $rpath, $format, $root) = @_;
++    $root = "" if not defined($root);
++    $root =~ s{/+$}{};
++    my @rpath = @{$rpath};
++    foreach my $dir (@rpath, @librarypaths) {
++	if (-e "$root$dir/$lib") {
++	    my $libformat = Dpkg::Shlibs::Objdump::get_format("$root$dir/$lib");
++	    if ($format eq $libformat) {
++		return "$root$dir/$lib";
++	    }
++	}
++    }
++    return undef;
++}
++
+diff --git a/scripts/modules/SymbolFile.pm b/scripts/modules/SymbolFile.pm
+new file mode 100644
+index 0000000..ccec332
+--- /dev/null
++++ b/scripts/modules/SymbolFile.pm
+@@ -0,0 +1,237 @@
++package Dpkg::Shlibs::SymbolFile;
++
++require 'dpkg-gettext.pl';
++
++use Dpkg::Version qw(compare_versions);
++
++sub new {
++    my $this = shift;
++    my $file = shift;
++    my $class = ref($this) || $this;
++    my $self = { };
++    bless $self, $class;
++    if (defined($file) ) {
++	$self->{file} = $file;
++	$self->load($file) if -e $file;
++    }
++    return $self;
++}
++
++sub clear {
++    my ($self) = @_;
++    $self->{objects} = {};
++}
++
++sub clear_except {
++    my ($self, @ids) = @_;
++    my %has;
++    $has{$_} = 1 foreach (@ids);
++    foreach my $objid (keys %{$self->{objects}}) {
++	delete $self->{objects}{$objid} unless exists $has{$objid};
++    }
++}
++
++sub load {
++    my ($self, $file) = @_;
++    $self->{file} = $file;
++    open(SYM_FILE, "< $file") || main::syserr(sprintf(_g("Can't open %s: %s"), $file));
++    my ($object);
++    while (defined($_ = <SYM_FILE>)) {
++	chomp($_);
++	if (/^\s+(\S+)\s(\S+)(?:\s(\d+))?/) {
++	    # New symbol
++	    my $sym = {
++		'minver' => $2,
++		'dep_id' => defined($3) ? $3 : 0,
++		'deprecated' => 0
++	    };
++	    $self->{objects}{$object}{syms}{$1} = $sym;
++	} elsif (/^#DEPRECATED: ([^#]+)#\s*(\S+)\s(\S+)(?:\s(\d+))?/) {
++	    my $sym = {
++		'minver' => $3,
++		'dep_id' => defined($4) ? $4 : 0,
++		'deprecated' => $1
++	    };
++	    $self->{objects}{$object}{syms}{$2} = $sym;
++	} elsif (/^\|\s*(.*)$/) {
++	    # Alternative dependency template
++	    push @{$self->{objects}{$object}{deps}}, "$1";
++	} elsif (/^(\S+)\s+(.*)$/) {
++	    # New object and dependency template
++	    $object = $1;
++	    $self->{objects}{$object} = {
++		'syms' => {},
++		'deps' => [ "$2" ]
++	    };
++	} else {
++	    main::warning(sprintf(_g("Failed to parse a line in %s: %s"), $file, $_));
++	}
++    }
++    close(SYM_FILE);
++}
++
++sub save {
++    my ($self, $file) = @_;
++    $file = $self->{file} unless defined($file);
++    my $fh;
++    if ($file eq "-") {
++	$fh = \*STDOUT;
++    } else {
++	open(SYM_FILE, "> $file") || main::syserr(sprintf(_g("Can't open %s for writing: %s"), $file, $!));
++	$fh = \*SYM_FILE;
++    }
++    $self->dump($fh);
++    close($fh) if ($file ne "-");
++}
++
++sub dump {
++    my ($self, $fh) = @_;
++    foreach my $soname (sort keys %{$self->{objects}}) {
++	print $fh "$soname $self->{objects}{$soname}{deps}[0]\n";
++	print $fh "| $_" foreach (@{$self->{objects}{$soname}{deps}}[ 1 .. -1 ]);
++	foreach my $sym (sort keys %{$self->{objects}{$soname}{syms}}) {
++	    my $info = $self->{objects}{$soname}{syms}{$sym};
++	    print $fh "#DEPRECATED: $info->{deprecated}#" if $info->{deprecated};
++	    print $fh " $sym $info->{minver}";
++	    print $fh " $info->{dep_id}" if $info->{dep_id};
++	    print $fh "\n";
++	}
++    }
++}
++
++# merge_symbols($object, $minver)
++# Needs $Objdump->get_object($soname) as parameter
++sub merge_symbols {
++    my ($self, $object, $minver) = @_;
++    my $soname = $object->{SONAME} || main::error(_g("Can't merge symbols from objects without SONAME."));
++    my %dynsyms = map { $_ => $object->{dynsyms}{$_} } 
++	grep { local $a = $object->{dynsyms}{$_}; $a->{dynamic} && $a->{defined} } 
++	keys %{$object->{dynsyms}};
++    # Scan all symbols provided by the objects
++    foreach my $sym (keys %dynsyms) {
++	if (exists $self->{objects}{$soname}{syms}{$sym}) {
++	    # If the symbol is already listed in the file
++	    my $info = $self->{objects}{$soname}{syms}{$sym};
++	    if ($info->{deprecated}) {
++		#Â Symbol reappeared somehow
++		$info->{deprecated} = 0;
++		$info->{minver} = $minver;
++		next;
++	    }
++	    # We assume that the right dependency information is already
++	    # there.
++	    if (compare_versions($minver, "lt", $info->{minver})) {
++		$info->{minver} = $minver;
++	    }
++	} else {
++	    # The symbol is new and not present in the file
++	    my $info = {
++		'minver' => $minver,
++		'deprecated' => 0,
++		'dep_id' => 0
++	    };
++	    $self->{objects}{$soname}{syms}{$sym} = $info;
++	}
++    }
++
++    # Scan all symbols in the file and mark as deprecated those that are
++    # no more provided
++    foreach my $sym (keys %{$self->{objects}{$soname}{syms}}) {
++	if (! exists $dynsyms{$sym}) {
++	    $self->{objects}{$soname}{syms}{$sym}{deprecated} = $minver;
++	}
++    }
++}
++
++sub has_object {
++    my ($self, $soname) = @_;
++    return exists $self->{objects}{$soname};
++}
++
++sub create_object {
++    my ($self, $soname, @deps) = @_;
++    $self->{objects}{$soname} = {
++	"syms" => {},
++	"deps" => [ @deps ]
++    };
++}
++
++sub get_dependency {
++    my ($self, $soname, $dep_id) = @_;
++    $dep_id = 0 unless defined($dep_id);
++    return $self->{objects}{$soname}{deps}[$dep_id];
++}
++
++sub lookup_symbol {
++    my ($self, $name, $sonames) = @_;
++    foreach my $so (@{$sonames}) {
++	next if (! exists $self->{objects}{$so});
++	if (exists $self->{objects}{$so}{syms}{$name} and
++	    not $self->{objects}{$so}{syms}{$name}{deprecated}) 
++	{
++	    my $dep_id = $self->{objects}{$so}{syms}{$name}{dep_id};
++	    return {
++		'depends' => $self->{objects}{$so}{deps}[$dep_id],
++		'soname' => $so,
++		%{$self->{objects}{$so}{syms}{$name}}
++	    };
++	}
++    }
++    return undef;
++}
++
++sub has_lost_symbols {
++    my ($self, $ref) = @_;
++    foreach my $soname (keys %{$self->{objects}}) {
++	my $mysyms = $self->{objects}{$soname}{syms};
++	next if not exists $ref->{objects}{$soname};
++	my $refsyms = $ref->{objects}{$soname}{syms};
++	foreach my $sym (grep { not $refsyms->{$_}{deprecated} } 
++	    keys %{$refsyms}) 
++	{
++	    if ((not exists $mysyms->{$sym}) or 
++		$mysyms->{$sym}{deprecated}) 
++	    {
++		return 1;
++	    }
++	}
++    }
++    return 0;
++}
++
++sub has_new_symbols {
++    my ($self, $ref) = @_;
++    foreach my $soname (keys %{$self->{objects}}) {
++	my $mysyms = $self->{objects}{$soname}{syms};
++	next if not exists $ref->{objects}{$soname};
++	my $refsyms = $ref->{objects}{$soname}{syms};
++	foreach my $sym (grep { not $mysyms->{$_}{deprecated} } 
++	    keys %{$mysyms}) 
++	{
++	    if ((not exists $refsyms->{$sym}) or 
++		$refsyms->{$sym}{deprecated}) 
++	    {
++		return 1;
++	    }
++	}
++    }
++    return 0;
++}
++
++sub has_new_libs {
++    my ($self, $ref) = @_;
++    foreach my $soname (keys %{$self->{objects}}) {
++	return 1 if not exists $ref->{objects}{$soname};
++    }
++    return 0;
++}
++
++sub has_lost_libs {
++    my ($self, $ref) = @_;
++    foreach my $soname (keys %{$ref->{objects}}) {
++	return 1 if not exists $self->{objects}{$soname};
++    }
++    return 0;
++}
++
++1;
+diff --git a/scripts/modules/Version.pm b/scripts/modules/Version.pm
+new file mode 100644
+index 0000000..04132cf
+--- /dev/null
++++ b/scripts/modules/Version.pm
+@@ -0,0 +1,16 @@
++package Dpkg::Version;
++
++use strict;
++use warnings;
++
++use Exporter 'import';
++our @EXPORT_OK = qw(compare_versions);
++
++sub compare_versions {
++    my ($a, $op, $b) = @_;
++    # TODO: maybe replace by a real full-perl versions
++    system("dpkg", "--compare-versions", $a, $op, $b) == 0
++	or return 0;
++    return 1;
++}
++

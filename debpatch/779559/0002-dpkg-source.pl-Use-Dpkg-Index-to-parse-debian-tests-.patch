@@ -1,0 +1,57 @@
+From 39d57273571abaca5de407d96ac8264f0dff2456 Mon Sep 17 00:00:00 2001
+From: Martin Pitt <martin.pitt@ubuntu.com>
+Date: Fri, 13 May 2016 13:54:02 +0200
+Subject: [PATCH 2/2] dpkg-source.pl: Use Dpkg::Index to parse
+ debian/tests/control
+
+... instead of Dpkg::Control::HashCore.
+
+Merge this into the previous commit if you like this.
+---
+ scripts/dpkg-source.pl | 22 ++++++++--------------
+ 1 file changed, 8 insertions(+), 14 deletions(-)
+
+diff --git a/scripts/dpkg-source.pl b/scripts/dpkg-source.pl
+index b2334c9..c9a8acd 100755
+--- a/scripts/dpkg-source.pl
++++ b/scripts/dpkg-source.pl
+@@ -42,6 +42,7 @@ use Dpkg::Compression;
+ use Dpkg::Conf;
+ use Dpkg::Control::Info;
+ use Dpkg::Control::Fields;
++use Dpkg::Index;
+ use Dpkg::Substvars;
+ use Dpkg::Version;
+ use Dpkg::Vars;
+@@ -528,21 +529,14 @@ sub set_testsuite_triggers_field
+     return unless -e $tc_path;
+ 
+     # parse Tests: from debian/tests/control
+-    my $control = Dpkg::Control::HashCore->new(
+-        drop_empty => 1,
+-        allow_duplicate => 1,
+-        name => 'autopkgtest control');
+-    open(my $tc_fh, '<', $tc_path)
+-        or syserr(g_('cannot read %s'), $tc_path);
+-
+-    my $cb_dep = sub {
+-        # ignore autopkgtest meta-depends like @ or @builddeps@
+-        $testdeps{$_[0]->{package}} = 1 unless $_[0]->{package} =~ /^@/;
+-    };
++    my $index = Dpkg::Index->new(get_key_func =>
++        sub { return $_[0]->{'Tests'} || $_[0]->{'Test-Command'} });
++    $index->load($tc_path);
++    foreach my $rec (values %{$index->{items}}) {
++        my $deps = deps_parse($rec->{'Depends'} || '', use_arch => 0, tests_dep => 1);
+ 
+-    while($control->parse($tc_fh, $tc_path)) {
+-        my $deps = deps_parse($control->{'Depends'}, use_arch => 0, tests_dep => 1);
+-        deps_iterate($deps, $cb_dep);
++        # ignore autopkgtest meta-depends like @ or @builddeps@
++        deps_iterate($deps, sub { $testdeps{$_[0]->{package}} = 1 unless $_[0]->{package} =~ /^@/ });
+     }
+ 
+     # remove our own binaries
+-- 
+2.7.4
+

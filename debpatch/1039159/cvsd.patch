@@ -1,0 +1,168 @@
+? debian/.debhelper
+? debian/autoreconf.after
+? debian/autoreconf.before
+? debian/cvsd.service
+? debian/debhelper-build-stamp
+Index: ChangeLog
+===================================================================
+RCS file: /arthur/cvsd/ChangeLog,v
+retrieving revision 1.64
+diff -u -r1.64 ChangeLog
+--- ChangeLog	2 Jun 2012 15:11:17 -0000	1.64
++++ ChangeLog	8 Nov 2024 13:33:23 -0000
+@@ -1,3 +1,13 @@
++2024-11-08 13:54  nabijaczleweli
++
++	* cfg.h, cvsd.8.in, cvsd.c: add --nofork that just prevents the daemon(3) call
++	* debian/cvsd.service: add (Closes: #1039159)
++	* debian/control: Pre-Depends: ${misc:Pre-Depends}
++	* debian/control: drop Depends: lsb-base (>= 3.0-6)
++	* debian/control: Build-Depends: debhelper-compat 13
++	* debian/compat: drop
++	* cvsd.c: exit 0 if died due to SIGTERM
++
+ 2012-06-02 17:10  arthur
+ 
+ 	* NEWS, configure.ac, debian/changelog, ChangeLog: release 1.0.24
+Index: cfg.h
+===================================================================
+RCS file: /arthur/cvsd/cfg.h,v
+retrieving revision 1.6
+diff -u -r1.6 cfg.h
+--- cfg.h	21 May 2006 14:36:01 -0000	1.6
++++ cfg.h	8 Nov 2024 13:33:23 -0000
+@@ -68,8 +68,10 @@
+      default is no pidfile (NULL) */
+   char *pidfile;
+ 
++  /* whether to skip daemon(3) */
++  unsigned nofork : 1,
+   /* whether debugging mode is enabled */
+-  int debugging;
++           debugging : 1;
+ 
+   /* the location of the rootjail
+      NULL or "none": no chroot */
+Index: cvsd.8.in
+===================================================================
+RCS file: /arthur/cvsd/cvsd.8.in,v
+retrieving revision 1.14
+diff -u -r1.14 cvsd.8.in
+--- cvsd.8.in	12 Jun 2009 21:48:30 -0000	1.14
++++ cvsd.8.in	8 Nov 2024 13:33:23 -0000
+@@ -38,9 +38,13 @@
+ .B  \-f, \-\-config=FILE
+ Use FILE as configfile (default is @CONFIGFILE@).
+ .TP
++.B \-\-nofork
++\fBcvsd\fP will not put itself in the background.
++.TP
+ .B \-d, \-\-debug
+-Enable debugging mode.
+-\fBcvsd\fP will not put itself in the background and sends verbose debugging info to stderr.
++Enable debugging mode:
++.B \-\-nofork
+++ send verbose debugging info to stderr.
+ Otherwise cvsd handles connections as usual.
+ This option is for debugging purposes only.
+ .TP
+Index: cvsd.c
+===================================================================
+RCS file: /arthur/cvsd/cvsd.c,v
+retrieving revision 1.126
+diff -u -r1.126 cvsd.c
+--- cvsd.c	11 Oct 2013 14:17:04 -0000	1.126
++++ cvsd.c	8 Nov 2024 13:33:23 -0000
+@@ -136,6 +136,7 @@
+   fprintf(fp,"Usage: %s [OPTION]...\n",program_name);
+   fprintf(fp,"chroot wrapper to run `cvs pserver' more securely.\n");
+   fprintf(fp,"  -f, --config=FILE  use FILE as configfile (default %s)\n",DEFAULT_CONFIGFILE);
++  fprintf(fp,"      --nofork       don't fork\n");
+   fprintf(fp,"  -d, --debug        don't fork and print debugging to stderr\n");
+   fprintf(fp,"      --help         display this help and exit\n");
+   fprintf(fp,"      --version      output version information and exit\n");
+@@ -148,6 +149,7 @@
+ static struct option const cvsd_options[] =
+ {
+   { "config",      required_argument, NULL, 'f' },
++  { "nofork",      no_argument,       NULL, 'n' },
+   { "debug",       no_argument,       NULL, 'd' },
+   { "help",        no_argument,       NULL, 'h' },
+   { "version",     no_argument,       NULL, 'V' },
+@@ -173,8 +175,11 @@
+       }
+       cfg->configfile=xstrdup(optarg);
+       break;
++    case 'n': /*     --nofork       don't fork */
++      cfg->nofork=1;
++      break;
+     case 'd': /* -d, --debug        don't fork and print debugging to stderr */
+-      cfg->debugging=1;
++      cfg->nofork=cfg->debugging=1;
+       log_setdefaultloglevel(LOG_DEBUG);
+       break;
+     case 'h': /*     --help         display this help and exit */
+@@ -738,7 +743,7 @@
+     cfg_addaddress(cfg,NULL,0,DEFAULT_ADDR,DEFAULT_PORT);
+ 
+   /* daemonize */
+-  if ((!cfg->debugging)&&(daemon(0,0)<0))
++  if ((!cfg->nofork)&&(daemon(0,0)<0))
+   {
+     log_log(LOG_ERR,"unable to daemonize: %s",strerror(errno));
+     exit(1);
+@@ -947,5 +952,5 @@
+                  signame(cvsd_exitsignal),cvsd_exitsignal);
+   }
+ 
+-  return 1;
++  return cvsd_exitsignal != SIGTERM;
+ }
+Index: debian/changelog
+===================================================================
+RCS file: /arthur/cvsd/debian/changelog,v
+retrieving revision 1.50
+diff -u -r1.50 changelog
+--- debian/changelog	2 Jun 2012 15:10:36 -0000	1.50
++++ debian/changelog	8 Nov 2024 13:33:23 -0000
+@@ -1,3 +1,14 @@
++cvsd (1.0.25) UNRELEASED; urgency=low
++
++  * new --nofork option that does just the "no daemon(3)" part of -d
++  * debian/cvsd.service: add (closes: #1039159)
++    (+ Pre-Depends: ${misc:Pre-Depends})
++  * debian/control: drop Depends: lsb-base (>= 3.0-6)
++    (lintian E: depends-on-obsolete-package)
++  * debhelper: 9 -> 13
++
++ -- наб <nabijaczleweli@nabijaczleweli.xyz>  Fri, 08 Nov 2024 13:54:53 +0100
++
+ cvsd (1.0.24) unstable; urgency=low
+ 
+   * bump debhelper compatibility to 9 and enable hardening flags (thanks
+Index: debian/control
+===================================================================
+RCS file: /arthur/cvsd/debian/control,v
+retrieving revision 1.42
+diff -u -r1.42 control
+--- debian/control	4 Mar 2012 20:08:58 -0000	1.42
++++ debian/control	8 Nov 2024 13:33:23 -0000
+@@ -2,7 +2,7 @@
+ Section: vcs
+ Priority: optional
+ Maintainer: Arthur de Jong <adejong@debian.org>
+-Build-Depends: debhelper (>= 9), po-debconf
++Build-Depends: debhelper-compat (= 13), po-debconf
+ Standards-Version: 3.9.3
+ Homepage: http://arthurdejong.org/cvsd/
+ Vcs-Cvs: :pserver:anonymous@arthurdejong.org:/arthur/
+@@ -10,7 +10,8 @@
+ 
+ Package: cvsd
+ Architecture: any
+-Depends: ${shlibs:Depends}, ${misc:Depends}, cvs, adduser, lsb-base (>= 3.0-6)
++Pre-Depends: ${misc:Pre-Depends}
++Depends: ${shlibs:Depends}, ${misc:Depends}, cvs, adduser
+ Suggests: perl, tmpreaper
+ Description: chroot wrapper to run 'cvs pserver' more securely
+  cvsd is a wrapper program for cvs in pserver mode. it will run 'cvs pserver'

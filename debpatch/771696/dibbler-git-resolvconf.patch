@@ -1,0 +1,276 @@
+diff --git a/Misc/Portable.h.in b/Misc/Portable.h.in
+index d8bc4a9..a2fe9e6 100644
+--- a/Misc/Portable.h.in
++++ b/Misc/Portable.h.in
+@@ -151,6 +151,7 @@ struct link_state_notify_t
+ #define SRVCONF_FILE       "/etc/dibbler/server.conf"
+ #define RELCONF_FILE       "/etc/dibbler/relay.conf"
+ #define RESOLVCONF_FILE    "/etc/resolv.conf"
++#define PRIV_RESOLVCONF_FILE "/var/lib/dibbler/resolv.conf"
+ #define NTPCONF_FILE       "/etc/ntp.conf"
+ #define RADVD_FILE         "/etc/dibbler/radvd.conf"
+ #define CLNTPID_FILE       "/var/lib/dibbler/client.pid"
+diff --git a/Port-linux/lowlevel-options-linux.c b/Port-linux/lowlevel-options-linux.c
+index 4000290..d6045a4 100644
+--- a/Port-linux/lowlevel-options-linux.c
++++ b/Port-linux/lowlevel-options-linux.c
+@@ -9,6 +9,7 @@
+ 
+ #define _BSD_SOURCE
+ #define _POSIX_SOURCE
++#define _GNU_SOURCE
+ 
+ #include <stdio.h>
+ #include <unistd.h>
+@@ -42,19 +43,24 @@ extern char * Message;
+  * the pipe needs to be closed by the caller
+  *
+  * @param arg1 first command line argument passed to resolvconf
+- * @param arg2 second command line argument passed to resolvconf
++ * @param ifname interface name for which to run resolvconf
+  *
+  * @return file handler (pipe to resolvconf process) or NULL
+  */
+-FILE *resolvconf_open(const char *arg1, const char *arg2)
++FILE *resolvconf_open(const char *arg1, const char *ifname)
+ {
+     pid_t child;
+     int pipefd[2];
++    char * ifname_;
+ 
+     if (access(RESOLVCONF, X_OK) != 0)
+         return NULL;
+-    if (pipe(pipefd) != 0)
++    if (!asprintf(&ifname_, "%s.inet6", ifname))
+         return NULL;
++    if (pipe(pipefd) != 0) {
++        free(ifname_);
++        return NULL;
++    }
+     switch(child = fork()) {
+       case 0: /* child */
+           close(pipefd[1]);
+@@ -63,19 +69,35 @@ FILE *resolvconf_open(const char *arg1, const char *arg2)
+ 	  close(pipefd[0]);
+ 	  /* double fork so init reaps the child */
+ 	  if (!fork()) { /* child */
+-              execl(RESOLVCONF, RESOLVCONF, arg1, arg2, (char *)NULL);
++              execl(RESOLVCONF, RESOLVCONF, arg1, ifname_, (char *)NULL);
+ 	  } /* All other cases are meaningless here */
+ 	  exit(EXIT_FAILURE);
+ 	  break;
+     case EXIT_FAILURE: /* error */
++          free(ifname_);
+           return NULL;
+ 	  break;
+     }
+     /* parent */
++    free(ifname_);
+     close(pipefd[0]);
+     waitpid(child, NULL, 0);
+     return fdopen(pipefd[1], "w");
+ }
++
++int resolvconf_feed(FILE * pipe, const char * file) {
++    FILE * f2 = NULL;
++    unsigned int c;
++
++    if (!(f2=fopen(file, "r")))
++        return LOWLEVEL_ERROR_FILE;
++
++    while ((c = fgetc(f2)) != EOF) {
++        fputc(c, pipe);
++    }
++    fclose(f2);
++    return LOWLEVEL_NO_ERROR;
++}
+ #endif
+ 
+ /* in iproute.c, borrowed from iproute2 */
+@@ -232,16 +254,50 @@ int cfg_file_del(const char *file, const char *keyword, const char *value) {
+  */
+ int dns_add(const char * ifname, int ifaceid, const char * addrPlain) {
+     FILE * f = NULL;
+-    unsigned char c;
++    char * file;
++    int ret;
+ 
+ #ifdef MOD_RESOLVCONF
+     /* try to use resolvconf */
+     f=resolvconf_open("-a", ifname);
++    if (f) {
++        if (!asprintf(&file, PRIV_RESOLVCONF_FILE ".%s", ifname)) {
++            fclose(f);
++            return LOWLEVEL_ERROR_UNSPEC;
++        }
++
++        /* edit private resolv.conf-like file */
++        if (!(ret = dns_add_file(ifname, ifaceid, addrPlain, file))) {
++            free(file);
++            fclose(f);
++            return ret;
++        }
++
++        /* feed that file to resolvconf */
++        ret = resolvconf_feed(f, file);
++        free(file);
++        fclose(f);
++        return ret;
++    }
++
+ #endif
+ 
+     /* if resolvconf is not available, fallback to normal file append */
+-    if (!f && !(f=fopen(RESOLVCONF_FILE, "a+")) ) {
+-            return LOWLEVEL_ERROR_FILE;
++    return dns_add_file(ifname, ifaceid, addrPlain, RESOLVCONF_FILE);
++}
++
++
++/*
++ * results 0 - ok
++          -1 - unable to open temp. file
++          -2 - unable to open resolv.conf file
++ */
++int dns_add_file(const char * ifname, int ifaceid, const char * addrPlain, const char * file) {
++    FILE * f = NULL;
++    unsigned char c;
++
++    if (!(f=fopen(file, "a+")) ) {
++        return LOWLEVEL_ERROR_FILE;
+     }
+     
+     fseek(f, -1, SEEK_END);
+@@ -260,11 +316,28 @@ int dns_add(const char * ifname, int ifaceid, const char * addrPlain) {
+ int dns_del(const char * ifname, int ifaceid, const char *addrPlain) {
+     
+ #ifdef MOD_RESOLVCONF
+-    FILE *f = NULL;
+-    /* try to use resolvconf to remove config */
+-    if ((f=resolvconf_open("-d", ifname))) {
++    FILE * f = NULL;
++    char * file;
++    int ret;
++    /* try to use resolvconf to update config */
++    if ((f=resolvconf_open("-a", ifname))) {
++        if (!asprintf(&file, PRIV_RESOLVCONF_FILE ".%s", ifname)) {
++            fclose(f);
++            return LOWLEVEL_ERROR_UNSPEC;
++        }
++
++        /* edit private resolv.conf-like file */
++        if ((ret = cfg_file_del(file, "nameserver", addrPlain))) {
++            free(file);
++            fclose(f);
++            return ret;
++        }
++
++        /* feed that file to resolvconf */
++        ret = resolvconf_feed(f, file);
++        free(file);
+         fclose(f);
+-        return LOWLEVEL_NO_ERROR;
++        return ret;
+     }
+ #endif
+     
+@@ -272,31 +345,56 @@ int dns_del(const char * ifname, int ifaceid, const char *addrPlain) {
+ }
+ 
+ int domain_add(const char* ifname, int ifaceid, const char* domain) {
+-    FILE * f, *f2;
+-    char buf[512];
+-    int found = 0;
+-    unsigned char c;
+-    struct stat st;
++    FILE * f;
++    char * file;
++    int ret;
+ 
+ #ifdef MOD_RESOLVCONF
+     /* try to use resolvconf it is available */
+     if ( (f=resolvconf_open("-a", ifname))) {
+-        fprintf(f, "search %s\n", domain);
++        if (!asprintf(&file, PRIV_RESOLVCONF_FILE ".%s", ifname)) {
++            fclose(f);
++            return LOWLEVEL_ERROR_UNSPEC;
++        }
++
++        /* edit private resolv.conf-like file */
++        if (ret = domain_add_file(ifname, ifaceid, domain, file)) {
++            free(file);
++            fclose(f);
++            return ret;
++        }
++
++        /* feed that file to resolvconf */
++        ret = resolvconf_feed(f, file);
++        free(file);
+         fclose(f);
+-        return LOWLEVEL_NO_ERROR;
++        return ret;
+     }
+ #endif
+-    
++
+     /* otherwise do the edit on your own */
+ 
++    return domain_add_file(ifname, ifaceid, domain, RESOLVCONF_FILE);
++}
++    
++int domain_add_file(const char* ifname, int ifaceid, const char* domain, const char* file) {
++    FILE * f, *f2;
++    char buf[512];
++    char * file_old;
++    int found = 0;
++    unsigned char c;
++    struct stat st;
++
+     memset(&st,0,sizeof(st));
+-    stat(RESOLVCONF_FILE, &st);
++    stat(file, &st);
+ 
+-    unlink(RESOLVCONF_FILE ".old");
+-    rename(RESOLVCONF_FILE, RESOLVCONF_FILE ".old");
+-    if ( !(f = fopen(RESOLVCONF_FILE ".old", "r")) )
++    if (!asprintf(&file_old, "%s.old", file))
++        return LOWLEVEL_ERROR_UNSPEC;
++    unlink(file_old);
++    rename(file, file_old);
++    if ( !(f = fopen(file_old, "r")) )
+ 	return LOWLEVEL_ERROR_FILE;
+-    if ( !(f2 = fopen(RESOLVCONF_FILE, "w+")) ) {
++    if ( !(f2 = fopen(file, "w+")) ) {
+         fclose(f);
+ 	return LOWLEVEL_ERROR_FILE;
+     }
+@@ -332,10 +430,27 @@ int domain_del(const char * ifname, int ifaceid, const char *domain) {
+ 
+ #ifdef MOD_RESOLVCONF
+     FILE * f;
++    char * file;
++    int ret;
+     /* try to use resolvconf if it is available */
+-    if ((f = resolvconf_open("-d", ifname))) {
++    if ((f = resolvconf_open("-a", ifname))) {
++        if (!asprintf(&file, PRIV_RESOLVCONF_FILE ".%s", ifname)) {
++            fclose(f);
++            return LOWLEVEL_ERROR_UNSPEC;
++        }
++
++        /* edit private resolv.conf-like file */
++        if (ret = cfg_file_del(file, "search", domain)) {
++            free(file);
++            fclose(f);
++            return ret;
++        }
++
++        /* feed that file to resolvconf */
++        ret = resolvconf_feed(f, file);
++        free(file);
+         fclose(f);
+-        return LOWLEVEL_NO_ERROR;
++        return ret;
+     }
+ #endif
+ 

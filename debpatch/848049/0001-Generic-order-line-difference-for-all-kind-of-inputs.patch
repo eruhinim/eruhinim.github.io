@@ -1,0 +1,185 @@
+From 7abab29f878f7fe8e1229995c06a404d5d4e0b40 Mon Sep 17 00:00:00 2001
+From: Maria Glukhova <siamezzze@gmail.com>
+Date: Sat, 7 Jan 2017 18:42:19 +0300
+Subject: [PATCH] Generic order-line difference for all kind of inputs.
+
+---
+ diffoscope/comparators/text.py | 13 -------------
+ diffoscope/diff.py             | 27 ++++++++++++++++++++-------
+ diffoscope/difference.py       | 24 ++++++++++++++++--------
+ 3 files changed, 36 insertions(+), 28 deletions(-)
+
+diff --git a/diffoscope/comparators/text.py b/diffoscope/comparators/text.py
+index fc2f446..ea488c3 100644
+--- a/diffoscope/comparators/text.py
++++ b/diffoscope/comparators/text.py
+@@ -25,16 +25,6 @@ from diffoscope.difference import Difference
+ from .utils.file import File
+ 
+ 
+-def order_only_difference(unified_diff):
+-    diff_lines = unified_diff.splitlines()
+-    added_lines = [line[1:] for line in diff_lines if line.startswith('+')]
+-    removed_lines = [line[1:] for line in diff_lines if line.startswith('-')]
+-    # Faster check: does number of lines match?
+-    if len(added_lines) != len(removed_lines):
+-        return False
+-    return sorted(added_lines) == sorted(removed_lines) and added_lines != removed_lines
+-
+-
+ class TextFile(File):
+     RE_FILE_TYPE = re.compile(r'\btext\b')
+ 
+@@ -55,9 +45,6 @@ class TextFile(File):
+             with codecs.open(self.path, 'r', encoding=my_encoding) as my_content, \
+                  codecs.open(other.path, 'r', encoding=other_encoding) as other_content:
+                 difference = Difference.from_text_readers(my_content, other_content, self.name, other.name, source)
+-                # Check if difference is only in line order.
+-                if difference and order_only_difference(difference.unified_diff):
+-                    difference.add_comment("ordering differences only")
+                 if my_encoding != other_encoding:
+                     if difference is None:
+                         difference = Difference(None, self.path, other.path, source)
+diff --git a/diffoscope/diff.py b/diffoscope/diff.py
+index 011916a..9783b27 100644
+--- a/diffoscope/diff.py
++++ b/diffoscope/diff.py
+@@ -190,12 +190,13 @@ def run_diff(fifo1, fifo2, end_nl_q1, end_nl_q2):
+ 
+     return parser.diff
+ 
+-def feed(feeder, f, end_nl_q):
++def feed(feeder, f, end_nl_q, order_hash_q):
+     # work-around unified diff limitation: if there's no newlines in both
+     # don't make it a difference
+     try:
+-        end_nl = feeder(f)
++        end_nl, h_order = feeder(f)
+         end_nl_q.put(end_nl)
++        order_hash_q.put(h_order)
+     finally:
+         f.close()
+ 
+@@ -227,9 +228,9 @@ class ExThread(threading.Thread):
+         raise ex
+ 
+ @contextlib.contextmanager
+-def fd_from_feeder(feeder, end_nl_q, fifo):
++def fd_from_feeder(feeder, end_nl_q, order_hash_q, fifo):
+     f = open(fifo, 'wb')
+-    t = ExThread(target=feed, args=(feeder, f, end_nl_q))
++    t = ExThread(target=feed, args=(feeder, f, end_nl_q, order_hash_q))
+ 
+     t.daemon = True
+     t.start()
+@@ -272,16 +273,28 @@ def make_feeder_from_raw_reader(in_file, filter=lambda buf: buf):
+         return end_nl
+     return feeder
+ 
++def compare_order_hashes(order_hash_q1, order_hash_q2):
++    # Check if the only difference is in line numbers by comparing sums of hashes.
++    order_hash1 = order_hash_q1.get()
++    order_hash2 = order_hash_q2.get()
++    if order_hash1 is None or order_hash2 is None:
++        return False
++    return order_hash1 == order_hash2
++
+ def diff(feeder1, feeder2):
+     end_nl_q1 = Queue()
+     end_nl_q2 = Queue()
++    order_hash_q1 = Queue()
++    order_hash_q2 = Queue()
+ 
+     with tempfile.TemporaryDirectory() as tmpdir:
+         fifo1 = '{}/f1'.format(tmpdir)
+         fifo2 = '{}/f2'.format(tmpdir)
+-        fd_from_feeder(feeder1, end_nl_q1, fifo1)
+-        fd_from_feeder(feeder2, end_nl_q2, fifo2)
+-        return run_diff(fifo1, fifo2, end_nl_q1, end_nl_q2)
++        fd_from_feeder(feeder1, end_nl_q1, order_hash_q1, fifo1)
++        fd_from_feeder(feeder2, end_nl_q2, order_hash_q2, fifo2)
++        diff_result = run_diff(fifo1, fifo2, end_nl_q1, end_nl_q2)
++        order_only_diff = compare_order_hashes(order_hash_q1, order_hash_q2)
++        return diff_result, order_only_diff
+ 
+ def reverse_unified_diff(diff):
+     res = []
+diff --git a/diffoscope/difference.py b/diffoscope/difference.py
+index 8342cc0..10725de 100644
+--- a/diffoscope/difference.py
++++ b/diffoscope/difference.py
+@@ -67,10 +67,13 @@ class Difference(object):
+     @staticmethod
+     def from_feeder(feeder1, feeder2, path1, path2, source=None, comment=None, **kwargs):
+         try:
+-            unified_diff = diff(feeder1, feeder2)
++            unified_diff, order_only_diff = diff(feeder1, feeder2)
+             if not unified_diff:
+                 return None
+-            return Difference(unified_diff, path1, path2, source, comment, **kwargs)
++            difference = Difference(unified_diff, path1, path2, source, comment, **kwargs)
++            if order_only_diff:
++                difference.add_comment("ordering differences only")
++            return difference
+         except RequiredToolNotFound:
+             difference = Difference(None, path1, path2, source)
+             difference.add_comment('diff is not available!')
+@@ -183,13 +186,13 @@ def make_feeder_from_text_reader(in_file, filter=lambda text_buf: text_buf):
+ def make_feeder_from_command(command):
+     def feeder(out_file):
+         with profile('command', command.cmdline()[0]):
+-            end_nl = make_feeder_from_raw_reader(command.stdout, command.filter)(out_file)
++            end_nl, h_order = make_feeder_from_raw_reader(command.stdout, command.filter)(out_file)
+             if command.poll() is None:
+                 command.terminate()
+             returncode = command.wait()
+         if returncode not in (0, -signal.SIGTERM):
+             raise subprocess.CalledProcessError(returncode, command.cmdline(), output=command.stderr.getvalue())
+-        return end_nl
++        return end_nl, h_order
+     return feeder
+ 
+ def make_feeder_from_raw_reader(in_file, filter=lambda buf: buf):
+@@ -198,6 +201,7 @@ def make_feeder_from_raw_reader(in_file, filter=lambda buf: buf):
+         line_count = 0
+         end_nl = False
+         h = None
++        h_order = 0
+         if max_lines < float("inf"):
+             h = hashlib.sha1()
+         for buf in in_file:
+@@ -205,23 +209,27 @@ def make_feeder_from_raw_reader(in_file, filter=lambda buf: buf):
+             out = filter(buf)
+             if h:
+                 h.update(out)
++                h_order += int(hashlib.sha1(out).hexdigest(), 16)
+             if line_count < max_lines:
+                 out_file.write(out)
+             end_nl = buf[-1] == '\n'
+         if h and line_count >= max_lines:
+             out_file.write('[ Too much input for diff (SHA1: {}) ]\n'.format(h.hexdigest()).encode('utf-8'))
+             end_nl = True
+-        return end_nl
++        return end_nl, h_order
+     return feeder
+ 
+ def make_feeder_from_text(content):
+     def feeder(f):
++        h_order = 0
+         for offset in range(0, len(content), DIFF_CHUNK):
+-            f.write(content[offset:offset + DIFF_CHUNK].encode('utf-8'))
+-        return content and content[-1] == '\n'
++            out = content[offset:offset + DIFF_CHUNK].encode('utf-8')
++            h_order += int(hashlib.sha1(out).hexdigest(), 16)
++            f.write(out)
++        return (content and content[-1] == '\n'), h_order
+     return feeder
+ 
+ def empty_file_feeder():
+     def feeder(f):
+-        return False
++        return False, None
+     return feeder
+-- 
+2.11.0
+

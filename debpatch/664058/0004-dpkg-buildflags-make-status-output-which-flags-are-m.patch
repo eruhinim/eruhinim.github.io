@@ -1,0 +1,201 @@
+From 133cf205844c9bcf97fed209ababa493c84709a9 Mon Sep 17 00:00:00 2001
+From: "Bernhard R. Link" <brlink@debian.org>
+Date: Fri, 16 Mar 2012 11:05:17 +0100
+Subject: [PATCH 4/4] dpkg-buildflags: make --status output which flags are
+ modified by maintainer
+
+As flags modified by DEB_*_MAINT_* are not reflected by its origin, add
+a new flag to describe flags modified that way.
+
+Signed-off-by: Bernhard R. Link <brlink@debian.org>
+---
+ scripts/Dpkg/BuildFlags.pm |   61 ++++++++++++++++++++++++++++++++-----------
+ scripts/dpkg-buildflags.pl |    4 +-
+ 2 files changed, 47 insertions(+), 18 deletions(-)
+
+diff --git a/scripts/Dpkg/BuildFlags.pm b/scripts/Dpkg/BuildFlags.pm
+index 654f755..d371095 100644
+--- a/scripts/Dpkg/BuildFlags.pm
++++ b/scripts/Dpkg/BuildFlags.pm
+@@ -87,6 +87,13 @@ sub load_vendor_defaults {
+ 	FFLAGS   => 'vendor',
+ 	LDFLAGS  => 'vendor',
+     };
++    $self->{maintainer} = {
++	CPPFLAGS => 0,
++	CFLAGS   => 0,
++	CXXFLAGS => 0,
++	FFLAGS   => 0,
++	LDFLAGS  => 0,
++    };
+     # The Debian vendor hook will add hardening build flags
+     run_vendor_hook("update-buildflags", $self);
+     # run_vendor_hook looked at DEB_VENDOR
+@@ -165,22 +172,22 @@ sub load_maintainer_config {
+ 	my $envvar = "DEB_" . $flag . "_MAINT_SET";
+ 	$self->mark_used_envvar($envvar);
+ 	if (exists $ENV{$envvar}) {
+-	    $self->set($flag, $ENV{$envvar}, undef);
++	    $self->set($flag, $ENV{$envvar}, undef, 1);
+ 	}
+ 	$envvar = "DEB_" . $flag . "_MAINT_STRIP";
+ 	$self->mark_used_envvar($envvar);
+ 	if (exists $ENV{$envvar}) {
+-	    $self->strip($flag, $ENV{$envvar}, undef);
++	    $self->strip($flag, $ENV{$envvar}, undef, 1);
+ 	}
+ 	$envvar = "DEB_" . $flag . "_MAINT_APPEND";
+ 	$self->mark_used_envvar($envvar);
+ 	if (exists $ENV{$envvar}) {
+-	    $self->append($flag, $ENV{$envvar}, undef);
++	    $self->append($flag, $ENV{$envvar}, undef, 1);
+ 	}
+ 	$envvar = "DEB_" . $flag . "_MAINT_PREPEND";
+ 	$self->mark_used_envvar($envvar);
+ 	if (exists $ENV{$envvar}) {
+-	    $self->prepend($flag, $ENV{$envvar}, undef);
++	    $self->prepend($flag, $ENV{$envvar}, undef, 1);
+ 	}
+     }
+ }
+@@ -202,17 +209,19 @@ sub load_config {
+     $self->load_maintainer_config();
+ }
+ 
+-=item $bf->set($flag, $value, $source)
++=item $bf->set($flag, $value, $source, $maint)
+ 
+ Update the build flag $flag with value $value and record its origin as
+-$source (if defined).
++$source (if defined). Record it as maintainer modified if $maint is
++defined and true.
+ 
+ =cut
+ 
+ sub set {
+-    my ($self, $flag, $value, $src) = @_;
++    my ($self, $flag, $value, $src, $maint) = @_;
+     $self->{flags}->{$flag} = $value;
+     $self->{origin}->{$flag} = $src if defined $src;
++    $self->{maintainer}->{$flag} = $maint if $maint;
+ }
+ 
+ =item $bf->set_feature($area, $feature, $enabled)
+@@ -228,15 +237,16 @@ sub set_feature {
+     $self->{'features'}{$area}{$feature} = $enabled;
+ }
+ 
+-=item $bf->strip($flag, $value, $source)
++=item $bf->strip($flag, $value, $source, $maint)
+ 
+ Update the build flag $flag by stripping the flags listed in $value and
+-record its origin as $source (if defined).
++record its origin as $source (if defined). Record it as maintainer modified
++if $maint is defined and true.
+ 
+ =cut
+ 
+ sub strip {
+-    my ($self, $flag, $value, $src) = @_;
++    my ($self, $flag, $value, $src, $maint) = @_;
+     foreach my $tostrip (split(/\s+/, $value)) {
+ 	next unless length $tostrip;
+ 	$self->{flags}->{$flag} =~ s/(^|\s+)\Q$tostrip\E(\s+|$)/ /g;
+@@ -244,40 +254,45 @@ sub strip {
+     $self->{flags}->{$flag} =~ s/^\s+//g;
+     $self->{flags}->{$flag} =~ s/\s+$//g;
+     $self->{origin}->{$flag} = $src if defined $src;
++    $self->{maintainer}->{$flag} = $maint if $maint;
+ }
+ 
+-=item $bf->append($flag, $value, $source)
++=item $bf->append($flag, $value, $source, $maint)
+ 
+ Append the options listed in $value to the current value of the flag $flag.
+-Record its origin as $source (if defined).
++Record its origin as $source (if defined). Record it as maintainer modified
++if $maint is defined and true.
+ 
+ =cut
+ 
+ sub append {
+-    my ($self, $flag, $value, $src) = @_;
++    my ($self, $flag, $value, $src, $maint) = @_;
+     if (length($self->{flags}->{$flag})) {
+         $self->{flags}->{$flag} .= " $value";
+     } else {
+         $self->{flags}->{$flag} = $value;
+     }
+     $self->{origin}->{$flag} = $src if defined $src;
++    $self->{maintainer}->{$flag} = $maint if $maint;
+ }
+ 
+-=item $bf->prepend($flag, $value, $source)
++=item $bf->prepend($flag, $value, $source, $maint)
+ 
+ Prepend the options listed in $value to the current value of the flag $flag.
+-Record its origin as $source (if defined).
++Record its origin as $source (if defined). Record it as maintainer modified
++if $maint is defined and true.
+ 
+ =cut
+ 
+ sub prepend {
+-    my ($self, $flag, $value, $src) = @_;
++    my ($self, $flag, $value, $src, $maint) = @_;
+     if (length($self->{flags}->{$flag})) {
+         $self->{flags}->{$flag} = "$value " . $self->{flags}->{$flag};
+     } else {
+         $self->{flags}->{$flag} = $value;
+     }
+     $self->{origin}->{$flag} = $src if defined $src;
++    $self->{maintainer}->{$flag} = $maint if $maint;
+ }
+ 
+ 
+@@ -368,6 +383,17 @@ sub get_origin {
+     return $self->{'origin'}{$key};
+ }
+ 
++=item $bf->is_maintainer_modified($flag)
++
++Return true if the flag is modified by the maintainer.
++
++=cut
++
++sub is_maintainer_modified {
++    my ($self, $key) = @_;
++    return $self->{'maintainer'}{$key};
++}
++
+ =item $bf->has_features($area)
+ 
+ Returns true if the given area of features is known, and false otherwise.
+@@ -451,6 +477,9 @@ $bf->get_features.
+ New methods: $bf->mark_used_envvar(), $bf->list_used_envvars().
+ Remember and list influencal environment variables.
+ 
++New method $bf->is_maintainer_modified() and new optional parameter to
++$bf->set(), $bf->append(), $bf->prepend(), $bf->strip().
++
+ =head1 AUTHOR
+ 
+ Raphaël Hertzog <hertzog@debian.org>
+diff --git a/scripts/dpkg-buildflags.pl b/scripts/dpkg-buildflags.pl
+index 6a70c56..4181d3d 100755
+--- a/scripts/dpkg-buildflags.pl
++++ b/scripts/dpkg-buildflags.pl
+@@ -178,8 +178,8 @@ if ($action eq "get") {
+     foreach my $flag ($build_flags->list()) {
+ 	my $value = $build_flags->get($flag);
+ 	my $origin = $build_flags->get_origin($flag);
+-	# Note that DEB_*_MAINT_* does not effect $origin.
+-	print "dpkg-buildflags: $flag [$origin]: $value\n";
++	my $maintainer = $build_flags->is_maintainer_modified($flag) ? "+maintainer" : "";
++	print "dpkg-buildflags: $flag [$origin$maintainer]: $value\n";
+     }
+     exit(0);
+ }
+-- 
+1.7.9.1
+

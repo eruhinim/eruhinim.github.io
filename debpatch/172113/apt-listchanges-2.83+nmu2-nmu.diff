@@ -1,0 +1,806 @@
+diff -Nru apt-listchanges-2.83+nmu1/apt-listchanges/ALCConfig.py apt-listchanges-2.83+nmu2/apt-listchanges/ALCConfig.py
+--- apt-listchanges-2.83+nmu1/apt-listchanges/ALCConfig.py	2009-09-22 15:40:24.000000000 -0300
++++ apt-listchanges-2.83+nmu2/apt-listchanges/ALCConfig.py	2009-12-31 17:46:11.000000000 -0200
+@@ -47,6 +47,7 @@
+         self.which = 'both'
+         self.allowed_which = ('both', 'news', 'changelogs')
+         self.since = None
++        self.reverse = False
+ 
+     def read(self, file):
+         self.parser = ConfigParser.ConfigParser()
+@@ -57,7 +58,7 @@
+             for option in self.parser.options(self.profile):
+                 value = None
+                 if self.parser.has_option(self.profile, option):
+-                    if option in ('confirm', 'run', 'show_all', 'headers', 'verbose'):
++                    if option in ('confirm', 'run', 'show_all', 'headers', 'verbose', 'reverse'):
+                         value = self.parser.getboolean(self.profile, option)
+                     else:
+                         value = self.parser.get(self.profile, option)
+@@ -81,7 +82,7 @@
+             (optlist, args) = getopt.getopt(argv[1:], 'vf:s:cah', [
+                 "apt", "verbose", "frontend=", "email-address=", "confirm",
+                 "all", "headers", "save_seen=", "since=", "debug", "which=",
+-                "help", "profile="])
++                "help", "profile=", "reverse"])
+         except getopt.GetoptError:
+             return None
+ 
+@@ -134,6 +135,8 @@
+                     sys.exit(1)
+             elif opt == '--debug':
+                 self.debug = 1
++            elif opt == '--reverse':
++                self.reverse = 1
+ 
+         if self.email_address == 'none':
+             self.email_address = None
+diff -Nru apt-listchanges-2.83+nmu1/apt-listchanges/DebianFiles.py apt-listchanges-2.83+nmu2/apt-listchanges/DebianFiles.py
+--- apt-listchanges-2.83+nmu1/apt-listchanges/DebianFiles.py	2009-09-22 15:40:24.000000000 -0300
++++ apt-listchanges-2.83+nmu2/apt-listchanges/DebianFiles.py	2009-12-31 17:46:11.000000000 -0200
+@@ -110,7 +110,7 @@
+         self.source  = pkgdata.source()
+         self.Version = pkgdata.Version
+ 
+-    def extract_changes(self, which, since_version=None):
++    def extract_changes(self, which, since_version=None, reverse=None):
+         '''Extract changelog entries, news or both from the package.
+         If since_version is specified, only return entries later than the specified version.
+         returns a sequence of Changes objects.'''
+@@ -128,7 +128,7 @@
+ 
+         tempdir = self.extract_contents(filenames)
+ 
+-        find_first = lambda acc, fname: acc or self.read_changelog(os.path.join(tempdir, fname), since_version)
++        find_first = lambda acc, fname: acc or self.read_changelog(os.path.join(tempdir, fname), since_version, reverse)
+ 
+         news       = reduce(find_first, news_filenames, None)
+         changelog  = reduce(find_first, changelog_filenames + changelog_filenames_native, None)
+@@ -151,7 +151,7 @@
+ 
+         return tempdir
+ 
+-    def read_changelog(self, filename, since_version):
++    def read_changelog(self, filename, since_version, reverse=False):
+         filenames = glob.glob(filename)
+ 
+         fd = None
+@@ -175,10 +175,13 @@
+ 
+         urgency = numeric_urgency('low')
+         changes = ''
++        rev = []
+         is_debian_changelog = 0
+         for line in fd.readlines():
+             match = self.changelog_header.match(line)
+             if match:
++                rev += [changes]
++                changes = ''
+                 is_debian_changelog = 1
+                 if since_version:
+                     if apt_pkg.VersionCompare(match.group('version'),
+@@ -192,6 +195,10 @@
+         if not is_debian_changelog:
+             return None
+ 
++        if reverse:
++            rev.reverse()
++        changes = "".join(rev)
++
+         return Changes(self.source, changes, urgency)
+ 
+     def _changelog_variations(self, filename):
+diff -Nru apt-listchanges-2.83+nmu1/apt-listchanges.py apt-listchanges-2.83+nmu2/apt-listchanges.py
+--- apt-listchanges-2.83+nmu1/apt-listchanges.py	2009-09-22 15:40:24.000000000 -0300
++++ apt-listchanges-2.83+nmu2/apt-listchanges.py	2009-12-31 17:46:11.000000000 -0200
+@@ -132,7 +132,7 @@
+                                                                       srcversion))
+             continue
+ 
+-        (news, changelog) = pkg.extract_changes(config.which, fromversion)
++        (news, changelog) = pkg.extract_changes(config.which, fromversion, config.reverse)
+ 
+         if news or changelog:
+             found[srcpackage] = 1
+diff -Nru apt-listchanges-2.83+nmu1/debian/changelog apt-listchanges-2.83+nmu2/debian/changelog
+--- apt-listchanges-2.83+nmu1/debian/changelog	2009-09-30 01:03:03.000000000 -0300
++++ apt-listchanges-2.83+nmu2/debian/changelog	2009-12-31 18:22:18.000000000 -0200
+@@ -1,3 +1,11 @@
++apt-listchanges (2.83+nmu2) unstable; urgency=low
++
++  * Non-maintainer upload.
++  * Introduce the --reverse option to list entries in the reverse order.
++    Closes: #172113
++
++ -- Thadeu Lima de Souza Cascardo <cascardo@minaslivre.org>  Thu, 31 Dec 2009 17:58:25 -0200
++
+ apt-listchanges (2.83+nmu1) unstable; urgency=low
+ 
+   * Non-maintainer upload with maintainer's agreement
+diff -Nru apt-listchanges-2.83+nmu1/.git/COMMIT_EDITMSG apt-listchanges-2.83+nmu2/.git/COMMIT_EDITMSG
+--- apt-listchanges-2.83+nmu1/.git/COMMIT_EDITMSG	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/COMMIT_EDITMSG	2009-12-31 17:59:05.000000000 -0200
+@@ -0,0 +1,15 @@
++Implement --reverse option.
++
++That will show changes in ascending version order from top to bottom.
++
++# Please enter the commit message for your changes. Lines starting
++# with '#' will be ignored, and an empty message aborts the commit.
++# On branch master
++# Changes to be committed:
++#   (use "git reset HEAD^1 <file>..." to unstage)
++#
++#	modified:   apt-listchanges.py
++#	modified:   apt-listchanges/ALCConfig.py
++#	modified:   apt-listchanges/DebianFiles.py
++#	modified:   debian/changelog
++#
+diff -Nru apt-listchanges-2.83+nmu1/.git/config apt-listchanges-2.83+nmu2/.git/config
+--- apt-listchanges-2.83+nmu1/.git/config	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/config	2009-12-31 17:45:57.000000000 -0200
+@@ -0,0 +1,5 @@
++[core]
++	repositoryformatversion = 0
++	filemode = true
++	bare = false
++	logallrefupdates = true
+diff -Nru apt-listchanges-2.83+nmu1/.git/description apt-listchanges-2.83+nmu2/.git/description
+--- apt-listchanges-2.83+nmu1/.git/description	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/description	2009-12-31 17:45:57.000000000 -0200
+@@ -0,0 +1 @@
++Unnamed repository; edit this file 'description' to name the repository.
+diff -Nru apt-listchanges-2.83+nmu1/.git/HEAD apt-listchanges-2.83+nmu2/.git/HEAD
+--- apt-listchanges-2.83+nmu1/.git/HEAD	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/HEAD	2009-12-31 17:45:57.000000000 -0200
+@@ -0,0 +1 @@
++ref: refs/heads/master
+diff -Nru apt-listchanges-2.83+nmu1/.git/hooks/applypatch-msg.sample apt-listchanges-2.83+nmu2/.git/hooks/applypatch-msg.sample
+--- apt-listchanges-2.83+nmu1/.git/hooks/applypatch-msg.sample	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/hooks/applypatch-msg.sample	2009-12-31 17:45:57.000000000 -0200
+@@ -0,0 +1,15 @@
++#!/bin/sh
++#
++# An example hook script to check the commit log message taken by
++# applypatch from an e-mail message.
++#
++# The hook should exit with non-zero status after issuing an
++# appropriate message if it wants to stop the commit.  The hook is
++# allowed to edit the commit message file.
++#
++# To enable this hook, rename this file to "applypatch-msg".
++
++. git-sh-setup
++test -x "$GIT_DIR/hooks/commit-msg" &&
++	exec "$GIT_DIR/hooks/commit-msg" ${1+"$@"}
++:
+diff -Nru apt-listchanges-2.83+nmu1/.git/hooks/commit-msg.sample apt-listchanges-2.83+nmu2/.git/hooks/commit-msg.sample
+--- apt-listchanges-2.83+nmu1/.git/hooks/commit-msg.sample	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/hooks/commit-msg.sample	2009-12-31 17:45:57.000000000 -0200
+@@ -0,0 +1,24 @@
++#!/bin/sh
++#
++# An example hook script to check the commit log message.
++# Called by git-commit with one argument, the name of the file
++# that has the commit message.  The hook should exit with non-zero
++# status after issuing an appropriate message if it wants to stop the
++# commit.  The hook is allowed to edit the commit message file.
++#
++# To enable this hook, rename this file to "commit-msg".
++
++# Uncomment the below to add a Signed-off-by line to the message.
++# Doing this in a hook is a bad idea in general, but the prepare-commit-msg
++# hook is more suited to it.
++#
++# SOB=$(git var GIT_AUTHOR_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
++# grep -qs "^$SOB" "$1" || echo "$SOB" >> "$1"
++
++# This example catches duplicate Signed-off-by lines.
++
++test "" = "$(grep '^Signed-off-by: ' "$1" |
++	 sort | uniq -c | sed -e '/^[ 	]*1[ 	]/d')" || {
++	echo >&2 Duplicate Signed-off-by lines.
++	exit 1
++}
+diff -Nru apt-listchanges-2.83+nmu1/.git/hooks/post-commit.sample apt-listchanges-2.83+nmu2/.git/hooks/post-commit.sample
+--- apt-listchanges-2.83+nmu1/.git/hooks/post-commit.sample	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/hooks/post-commit.sample	2009-12-31 17:45:57.000000000 -0200
+@@ -0,0 +1,8 @@
++#!/bin/sh
++#
++# An example hook script that is called after a successful
++# commit is made.
++#
++# To enable this hook, rename this file to "post-commit".
++
++: Nothing
+diff -Nru apt-listchanges-2.83+nmu1/.git/hooks/post-receive.sample apt-listchanges-2.83+nmu2/.git/hooks/post-receive.sample
+--- apt-listchanges-2.83+nmu1/.git/hooks/post-receive.sample	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/hooks/post-receive.sample	2009-12-31 17:45:57.000000000 -0200
+@@ -0,0 +1,15 @@
++#!/bin/sh
++#
++# An example hook script for the "post-receive" event.
++#
++# The "post-receive" script is run after receive-pack has accepted a pack
++# and the repository has been updated.  It is passed arguments in through
++# stdin in the form
++#  <oldrev> <newrev> <refname>
++# For example:
++#  aa453216d1b3e49e7f6f98441fa56946ddcd6a20 68f7abf4e6f922807889f52bc043ecd31b79f814 refs/heads/master
++#
++# see contrib/hooks/ for a sample, or uncomment the next line and
++# rename the file to "post-receive".
++
++#. /usr/share/doc/git-core/contrib/hooks/post-receive-email
+diff -Nru apt-listchanges-2.83+nmu1/.git/hooks/post-update.sample apt-listchanges-2.83+nmu2/.git/hooks/post-update.sample
+--- apt-listchanges-2.83+nmu1/.git/hooks/post-update.sample	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/hooks/post-update.sample	2009-12-31 17:45:57.000000000 -0200
+@@ -0,0 +1,8 @@
++#!/bin/sh
++#
++# An example hook script to prepare a packed repository for use over
++# dumb transports.
++#
++# To enable this hook, rename this file to "post-update".
++
++exec git-update-server-info
+diff -Nru apt-listchanges-2.83+nmu1/.git/hooks/pre-applypatch.sample apt-listchanges-2.83+nmu2/.git/hooks/pre-applypatch.sample
+--- apt-listchanges-2.83+nmu1/.git/hooks/pre-applypatch.sample	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/hooks/pre-applypatch.sample	2009-12-31 17:45:57.000000000 -0200
+@@ -0,0 +1,14 @@
++#!/bin/sh
++#
++# An example hook script to verify what is about to be committed
++# by applypatch from an e-mail message.
++#
++# The hook should exit with non-zero status after issuing an
++# appropriate message if it wants to stop the commit.
++#
++# To enable this hook, rename this file to "pre-applypatch".
++
++. git-sh-setup
++test -x "$GIT_DIR/hooks/pre-commit" &&
++	exec "$GIT_DIR/hooks/pre-commit" ${1+"$@"}
++:
+diff -Nru apt-listchanges-2.83+nmu1/.git/hooks/pre-commit.sample apt-listchanges-2.83+nmu2/.git/hooks/pre-commit.sample
+--- apt-listchanges-2.83+nmu1/.git/hooks/pre-commit.sample	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/hooks/pre-commit.sample	2009-12-31 17:45:57.000000000 -0200
+@@ -0,0 +1,46 @@
++#!/bin/sh
++#
++# An example hook script to verify what is about to be committed.
++# Called by git-commit with no arguments.  The hook should
++# exit with non-zero status after issuing an appropriate message if
++# it wants to stop the commit.
++#
++# To enable this hook, rename this file to "pre-commit".
++
++if git-rev-parse --verify HEAD >/dev/null 2>&1
++then
++	against=HEAD
++else
++	# Initial commit: diff against an empty tree object
++	against=4b825dc642cb6eb9a060e54bf8d69288fbee4904
++fi
++
++# If you want to allow non-ascii filenames set this variable to true.
++allownonascii=$(git config hooks.allownonascii)
++
++# Cross platform projects tend to avoid non-ascii filenames; prevent
++# them from being added to the repository. We exploit the fact that the
++# printable range starts at the space character and ends with tilde.
++if [ "$allownonascii" != "true" ] &&
++	# Note that the use of brackets around a tr range is ok here, (it's
++	# even required, for portability to Solaris 10's /usr/bin/tr), since
++	# the square bracket bytes happen to fall in the designated range.
++	test "$(git diff --cached --name-only --diff-filter=A -z $against |
++	  LC_ALL=C tr -d '[ -~]\0')"
++then
++	echo "Error: Attempt to add a non-ascii file name."
++	echo
++	echo "This can cause problems if you want to work"
++	echo "with people on other platforms."
++	echo
++	echo "To be portable it is advisable to rename the file ..."
++	echo
++	echo "If you know what you are doing you can disable this"
++	echo "check using:"
++	echo
++	echo "  git config hooks.allownonascii true"
++	echo
++	exit 1
++fi
++
++exec git diff-index --check --cached $against --
+diff -Nru apt-listchanges-2.83+nmu1/.git/hooks/prepare-commit-msg.sample apt-listchanges-2.83+nmu2/.git/hooks/prepare-commit-msg.sample
+--- apt-listchanges-2.83+nmu1/.git/hooks/prepare-commit-msg.sample	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/hooks/prepare-commit-msg.sample	2009-12-31 17:45:57.000000000 -0200
+@@ -0,0 +1,36 @@
++#!/bin/sh
++#
++# An example hook script to prepare the commit log message.
++# Called by git-commit with the name of the file that has the
++# commit message, followed by the description of the commit
++# message's source.  The hook's purpose is to edit the commit
++# message file.  If the hook fails with a non-zero status,
++# the commit is aborted.
++#
++# To enable this hook, rename this file to "prepare-commit-msg".
++
++# This hook includes three examples.  The first comments out the
++# "Conflicts:" part of a merge commit.
++#
++# The second includes the output of "git diff --name-status -r"
++# into the message, just before the "git status" output.  It is
++# commented because it doesn't cope with --amend or with squashed
++# commits.
++#
++# The third example adds a Signed-off-by line to the message, that can
++# still be edited.  This is rarely a good idea.
++
++case "$2,$3" in
++  merge,)
++    perl -i.bak -ne 's/^/# /, s/^# #/#/ if /^Conflicts/ .. /#/; print' "$1" ;;
++
++# ,|template,)
++#   perl -i.bak -pe '
++#      print "\n" . `git diff --cached --name-status -r`
++#	 if /^#/ && $first++ == 0' "$1" ;;
++
++  *) ;;
++esac
++
++# SOB=$(git var GIT_AUTHOR_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
++# grep -qs "^$SOB" "$1" || echo "$SOB" >> "$1"
+diff -Nru apt-listchanges-2.83+nmu1/.git/hooks/pre-rebase.sample apt-listchanges-2.83+nmu2/.git/hooks/pre-rebase.sample
+--- apt-listchanges-2.83+nmu1/.git/hooks/pre-rebase.sample	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/hooks/pre-rebase.sample	2009-12-31 17:45:57.000000000 -0200
+@@ -0,0 +1,169 @@
++#!/bin/sh
++#
++# Copyright (c) 2006, 2008 Junio C Hamano
++#
++# The "pre-rebase" hook is run just before "git-rebase" starts doing
++# its job, and can prevent the command from running by exiting with
++# non-zero status.
++#
++# The hook is called with the following parameters:
++#
++# $1 -- the upstream the series was forked from.
++# $2 -- the branch being rebased (or empty when rebasing the current branch).
++#
++# This sample shows how to prevent topic branches that are already
++# merged to 'next' branch from getting rebased, because allowing it
++# would result in rebasing already published history.
++
++publish=next
++basebranch="$1"
++if test "$#" = 2
++then
++	topic="refs/heads/$2"
++else
++	topic=`git symbolic-ref HEAD` ||
++	exit 0 ;# we do not interrupt rebasing detached HEAD
++fi
++
++case "$topic" in
++refs/heads/??/*)
++	;;
++*)
++	exit 0 ;# we do not interrupt others.
++	;;
++esac
++
++# Now we are dealing with a topic branch being rebased
++# on top of master.  Is it OK to rebase it?
++
++# Does the topic really exist?
++git show-ref -q "$topic" || {
++	echo >&2 "No such branch $topic"
++	exit 1
++}
++
++# Is topic fully merged to master?
++not_in_master=`git-rev-list --pretty=oneline ^master "$topic"`
++if test -z "$not_in_master"
++then
++	echo >&2 "$topic is fully merged to master; better remove it."
++	exit 1 ;# we could allow it, but there is no point.
++fi
++
++# Is topic ever merged to next?  If so you should not be rebasing it.
++only_next_1=`git-rev-list ^master "^$topic" ${publish} | sort`
++only_next_2=`git-rev-list ^master           ${publish} | sort`
++if test "$only_next_1" = "$only_next_2"
++then
++	not_in_topic=`git-rev-list "^$topic" master`
++	if test -z "$not_in_topic"
++	then
++		echo >&2 "$topic is already up-to-date with master"
++		exit 1 ;# we could allow it, but there is no point.
++	else
++		exit 0
++	fi
++else
++	not_in_next=`git-rev-list --pretty=oneline ^${publish} "$topic"`
++	perl -e '
++		my $topic = $ARGV[0];
++		my $msg = "* $topic has commits already merged to public branch:\n";
++		my (%not_in_next) = map {
++			/^([0-9a-f]+) /;
++			($1 => 1);
++		} split(/\n/, $ARGV[1]);
++		for my $elem (map {
++				/^([0-9a-f]+) (.*)$/;
++				[$1 => $2];
++			} split(/\n/, $ARGV[2])) {
++			if (!exists $not_in_next{$elem->[0]}) {
++				if ($msg) {
++					print STDERR $msg;
++					undef $msg;
++				}
++				print STDERR " $elem->[1]\n";
++			}
++		}
++	' "$topic" "$not_in_next" "$not_in_master"
++	exit 1
++fi
++
++exit 0
++
++################################################################
++
++This sample hook safeguards topic branches that have been
++published from being rewound.
++
++The workflow assumed here is:
++
++ * Once a topic branch forks from "master", "master" is never
++   merged into it again (either directly or indirectly).
++
++ * Once a topic branch is fully cooked and merged into "master",
++   it is deleted.  If you need to build on top of it to correct
++   earlier mistakes, a new topic branch is created by forking at
++   the tip of the "master".  This is not strictly necessary, but
++   it makes it easier to keep your history simple.
++
++ * Whenever you need to test or publish your changes to topic
++   branches, merge them into "next" branch.
++
++The script, being an example, hardcodes the publish branch name
++to be "next", but it is trivial to make it configurable via
++$GIT_DIR/config mechanism.
++
++With this workflow, you would want to know:
++
++(1) ... if a topic branch has ever been merged to "next".  Young
++    topic branches can have stupid mistakes you would rather
++    clean up before publishing, and things that have not been
++    merged into other branches can be easily rebased without
++    affecting other people.  But once it is published, you would
++    not want to rewind it.
++
++(2) ... if a topic branch has been fully merged to "master".
++    Then you can delete it.  More importantly, you should not
++    build on top of it -- other people may already want to
++    change things related to the topic as patches against your
++    "master", so if you need further changes, it is better to
++    fork the topic (perhaps with the same name) afresh from the
++    tip of "master".
++
++Let's look at this example:
++
++		   o---o---o---o---o---o---o---o---o---o "next"
++		  /       /           /           /
++		 /   a---a---b A     /           /
++		/   /               /           /
++	       /   /   c---c---c---c B         /
++	      /   /   /             \         /
++	     /   /   /   b---b C     \       /
++	    /   /   /   /             \     /
++    ---o---o---o---o---o---o---o---o---o---o---o "master"
++
++
++A, B and C are topic branches.
++
++ * A has one fix since it was merged up to "next".
++
++ * B has finished.  It has been fully merged up to "master" and "next",
++   and is ready to be deleted.
++
++ * C has not merged to "next" at all.
++
++We would want to allow C to be rebased, refuse A, and encourage
++B to be deleted.
++
++To compute (1):
++
++	git-rev-list ^master ^topic next
++	git-rev-list ^master        next
++
++	if these match, topic has not merged in next at all.
++
++To compute (2):
++
++	git-rev-list master..topic
++
++	if this is empty, it is fully merged to "master".
+diff -Nru apt-listchanges-2.83+nmu1/.git/hooks/update.sample apt-listchanges-2.83+nmu2/.git/hooks/update.sample
+--- apt-listchanges-2.83+nmu1/.git/hooks/update.sample	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/hooks/update.sample	2009-12-31 17:45:57.000000000 -0200
+@@ -0,0 +1,128 @@
++#!/bin/sh
++#
++# An example hook script to blocks unannotated tags from entering.
++# Called by git-receive-pack with arguments: refname sha1-old sha1-new
++#
++# To enable this hook, rename this file to "update".
++#
++# Config
++# ------
++# hooks.allowunannotated
++#   This boolean sets whether unannotated tags will be allowed into the
++#   repository.  By default they won't be.
++# hooks.allowdeletetag
++#   This boolean sets whether deleting tags will be allowed in the
++#   repository.  By default they won't be.
++# hooks.allowmodifytag
++#   This boolean sets whether a tag may be modified after creation. By default
++#   it won't be.
++# hooks.allowdeletebranch
++#   This boolean sets whether deleting branches will be allowed in the
++#   repository.  By default they won't be.
++# hooks.denycreatebranch
++#   This boolean sets whether remotely creating branches will be denied
++#   in the repository.  By default this is allowed.
++#
++
++# --- Command line
++refname="$1"
++oldrev="$2"
++newrev="$3"
++
++# --- Safety check
++if [ -z "$GIT_DIR" ]; then
++	echo "Don't run this script from the command line." >&2
++	echo " (if you want, you could supply GIT_DIR then run" >&2
++	echo "  $0 <ref> <oldrev> <newrev>)" >&2
++	exit 1
++fi
++
++if [ -z "$refname" -o -z "$oldrev" -o -z "$newrev" ]; then
++	echo "Usage: $0 <ref> <oldrev> <newrev>" >&2
++	exit 1
++fi
++
++# --- Config
++allowunannotated=$(git config --bool hooks.allowunannotated)
++allowdeletebranch=$(git config --bool hooks.allowdeletebranch)
++denycreatebranch=$(git config --bool hooks.denycreatebranch)
++allowdeletetag=$(git config --bool hooks.allowdeletetag)
++allowmodifytag=$(git config --bool hooks.allowmodifytag)
++
++# check for no description
++projectdesc=$(sed -e '1q' "$GIT_DIR/description")
++case "$projectdesc" in
++"Unnamed repository"* | "")
++	echo "*** Project description file hasn't been set" >&2
++	exit 1
++	;;
++esac
++
++# --- Check types
++# if $newrev is 0000...0000, it's a commit to delete a ref.
++zero="0000000000000000000000000000000000000000"
++if [ "$newrev" = "$zero" ]; then
++	newrev_type=delete
++else
++	newrev_type=$(git-cat-file -t $newrev)
++fi
++
++case "$refname","$newrev_type" in
++	refs/tags/*,commit)
++		# un-annotated tag
++		short_refname=${refname##refs/tags/}
++		if [ "$allowunannotated" != "true" ]; then
++			echo "*** The un-annotated tag, $short_refname, is not allowed in this repository" >&2
++			echo "*** Use 'git tag [ -a | -s ]' for tags you want to propagate." >&2
++			exit 1
++		fi
++		;;
++	refs/tags/*,delete)
++		# delete tag
++		if [ "$allowdeletetag" != "true" ]; then
++			echo "*** Deleting a tag is not allowed in this repository" >&2
++			exit 1
++		fi
++		;;
++	refs/tags/*,tag)
++		# annotated tag
++		if [ "$allowmodifytag" != "true" ] && git rev-parse $refname > /dev/null 2>&1
++		then
++			echo "*** Tag '$refname' already exists." >&2
++			echo "*** Modifying a tag is not allowed in this repository." >&2
++			exit 1
++		fi
++		;;
++	refs/heads/*,commit)
++		# branch
++		if [ "$oldrev" = "$zero" -a "$denycreatebranch" = "true" ]; then
++			echo "*** Creating a branch is not allowed in this repository" >&2
++			exit 1
++		fi
++		;;
++	refs/heads/*,delete)
++		# delete branch
++		if [ "$allowdeletebranch" != "true" ]; then
++			echo "*** Deleting a branch is not allowed in this repository" >&2
++			exit 1
++		fi
++		;;
++	refs/remotes/*,commit)
++		# tracking branch
++		;;
++	refs/remotes/*,delete)
++		# delete tracking branch
++		if [ "$allowdeletebranch" != "true" ]; then
++			echo "*** Deleting a tracking branch is not allowed in this repository" >&2
++			exit 1
++		fi
++		;;
++	*)
++		# Anything else (is there anything else?)
++		echo "*** Update hook: unknown type of update to ref $refname of type $newrev_type" >&2
++		exit 1
++		;;
++esac
++
++# --- Finished
++exit 0
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/index and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/index differ
+diff -Nru apt-listchanges-2.83+nmu1/.git/info/exclude apt-listchanges-2.83+nmu2/.git/info/exclude
+--- apt-listchanges-2.83+nmu1/.git/info/exclude	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/info/exclude	2009-12-31 17:45:57.000000000 -0200
+@@ -0,0 +1,6 @@
++# git-ls-files --others --exclude-from=.git/info/exclude
++# Lines that start with '#' are comments.
++# For a project mostly in C, the following would be a good set of
++# exclude patterns (uncomment them if you want to use them):
++# *.[oa]
++# *~
+diff -Nru apt-listchanges-2.83+nmu1/.git/logs/HEAD apt-listchanges-2.83+nmu2/.git/logs/HEAD
+--- apt-listchanges-2.83+nmu1/.git/logs/HEAD	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/logs/HEAD	2009-12-31 17:59:06.000000000 -0200
+@@ -0,0 +1,3 @@
++0000000000000000000000000000000000000000 2712c59b1d0541c8c6e99f958865b5f910765201 Thadeu Lima de Souza Cascardo <cascardo@holoscopio.com> 1262288760 -0200	commit (initial): Import.
++2712c59b1d0541c8c6e99f958865b5f910765201 031b70a15c9ba31fd61435d9294fcc30abb27629 Thadeu Lima de Souza Cascardo <cascardo@holoscopio.com> 1262288777 -0200	commit: Implement --reverse option.
++031b70a15c9ba31fd61435d9294fcc30abb27629 57cf20ca1505197d32040d2ec62fba65f66de250 Thadeu Lima de Souza Cascardo <cascardo@holoscopio.com> 1262289545 -0200	commit (amend): Implement --reverse option.
+diff -Nru apt-listchanges-2.83+nmu1/.git/logs/refs/heads/master apt-listchanges-2.83+nmu2/.git/logs/refs/heads/master
+--- apt-listchanges-2.83+nmu1/.git/logs/refs/heads/master	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/logs/refs/heads/master	2009-12-31 17:59:06.000000000 -0200
+@@ -0,0 +1,3 @@
++0000000000000000000000000000000000000000 2712c59b1d0541c8c6e99f958865b5f910765201 Thadeu Lima de Souza Cascardo <cascardo@holoscopio.com> 1262288760 -0200	commit (initial): Import.
++2712c59b1d0541c8c6e99f958865b5f910765201 031b70a15c9ba31fd61435d9294fcc30abb27629 Thadeu Lima de Souza Cascardo <cascardo@holoscopio.com> 1262288777 -0200	commit: Implement --reverse option.
++031b70a15c9ba31fd61435d9294fcc30abb27629 57cf20ca1505197d32040d2ec62fba65f66de250 Thadeu Lima de Souza Cascardo <cascardo@holoscopio.com> 1262289545 -0200	commit (amend): Implement --reverse option.
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/00/d55ecf241ea19782e80223011b09246c2dde66 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/00/d55ecf241ea19782e80223011b09246c2dde66 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/01/6ef52e51cac990c6b71b9861289fcc2025aa75 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/01/6ef52e51cac990c6b71b9861289fcc2025aa75 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/02/1dcaeca32fcf4b049d4d615b06fef95b584584 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/02/1dcaeca32fcf4b049d4d615b06fef95b584584 differ
+diff -Nru apt-listchanges-2.83+nmu1/.git/objects/03/1b70a15c9ba31fd61435d9294fcc30abb27629 apt-listchanges-2.83+nmu2/.git/objects/03/1b70a15c9ba31fd61435d9294fcc30abb27629
+--- apt-listchanges-2.83+nmu1/.git/objects/03/1b70a15c9ba31fd61435d9294fcc30abb27629	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/objects/03/1b70a15c9ba31fd61435d9294fcc30abb27629	2009-12-31 17:46:26.000000000 -0200
+@@ -0,0 +1,2 @@
++x��Mj�0F��)t�ۍ�`(��
++ݵplyb���x:���=B�'�����Y�����qq+W!it:�N9���^��*���a� ��A�UD�l�KNY�ժ��h%�`��7j���7���CD��ۏ�7�"�%�M��t:2́������������%{/ǎ�Qk�~c;�����0�p���Fw��W<!W�Xc�Wx ���!��t��J�S��/�v
+\ No newline at end of file
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/08/08f68506699d6892443fcf3cbc2e14c9df5378 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/08/08f68506699d6892443fcf3cbc2e14c9df5378 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/0a/fe5cbfe92f3c0125d088b847a88ebe858e2934 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/0a/fe5cbfe92f3c0125d088b847a88ebe858e2934 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/0b/c21e41233dfb976548c69869998a91cccc570e and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/0b/c21e41233dfb976548c69869998a91cccc570e differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/0d/20b6487c61e7d1bde93acf4a14b7a89083a16d and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/0d/20b6487c61e7d1bde93acf4a14b7a89083a16d differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/0d/4b61c439e9d6813c92b1e4febf06932951ffc9 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/0d/4b61c439e9d6813c92b1e4febf06932951ffc9 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/0f/433c81d741b545563d41b1f78c2c9cec069d7e and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/0f/433c81d741b545563d41b1f78c2c9cec069d7e differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/10/8df4828064a775718918ed3fefa07361aaec9d and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/10/8df4828064a775718918ed3fefa07361aaec9d differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/13/74853d4ca0b440e62142d2d0bea70aedf04c68 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/13/74853d4ca0b440e62142d2d0bea70aedf04c68 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/13/89ec001ff33094664ffa31020c92e8e1535e32 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/13/89ec001ff33094664ffa31020c92e8e1535e32 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/15/12fa0ff8c07a75813ebb4035042224c3305d6e and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/15/12fa0ff8c07a75813ebb4035042224c3305d6e differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/17/280c95391a52c81f774bd511013dfe248476bf and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/17/280c95391a52c81f774bd511013dfe248476bf differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/18/ccf9b5118e11d29239a479e4b7a566a2f7cf66 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/18/ccf9b5118e11d29239a479e4b7a566a2f7cf66 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/1f/490a8af159707b1dff5f4448fbbf95f2668cc0 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/1f/490a8af159707b1dff5f4448fbbf95f2668cc0 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/22/1909e9da82ec61d012a8502a8c76285e23b2d6 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/22/1909e9da82ec61d012a8502a8c76285e23b2d6 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/22/4343707a755437d7456cf450837e4ea9684243 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/22/4343707a755437d7456cf450837e4ea9684243 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/24/f36ad020b657ac6b54550c956a0d86b3803d1a and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/24/f36ad020b657ac6b54550c956a0d86b3803d1a differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/26/0c8ebc4fc0bac03baa2cebeae03dbfec064bdd and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/26/0c8ebc4fc0bac03baa2cebeae03dbfec064bdd differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/26/fa04472c41abec9516a68418fddaefaf34f6b7 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/26/fa04472c41abec9516a68418fddaefaf34f6b7 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/27/12c59b1d0541c8c6e99f958865b5f910765201 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/27/12c59b1d0541c8c6e99f958865b5f910765201 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/2d/2391a43f137253b56589638fb74813d8cf1d97 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/2d/2391a43f137253b56589638fb74813d8cf1d97 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/31/62ad6e5220c53f3fff4e22d225218a16b078b0 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/31/62ad6e5220c53f3fff4e22d225218a16b078b0 differ
+diff -Nru apt-listchanges-2.83+nmu1/.git/objects/33/d77a5bb6792135e00fc0869aa80418e92fa935 apt-listchanges-2.83+nmu2/.git/objects/33/d77a5bb6792135e00fc0869aa80418e92fa935
+--- apt-listchanges-2.83+nmu1/.git/objects/33/d77a5bb6792135e00fc0869aa80418e92fa935	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/objects/33/d77a5bb6792135e00fc0869aa80418e92fa935	2009-12-31 17:45:59.000000000 -0200
+@@ -0,0 +1 @@
++x�S=o�0��_q[���$S�nY��h�ē�Z&]����w���c$���bم��O��/|H���T������e�ç^�mJ�R+de��.��^�Eb�3�jG�]�w'#���0�EC���g3�Z�	��g�|:�v�mN/��$f1u�0bߋ1�j�����^T�K�61}%g���ǂ�@~xp��e����Hn�Er>���i�d9q�Q��|HKē~�����QO)·�B�BCu���Rb�҃�����ЦwUJf��\�h ۻ* *A�g�+ޅ1?un�P��Fa'��Mz0�y�t��)6�JTg>f$��TK�[�T���@�0�ׁ3L�G*�����P.�A�8���}樫�W��R	f�H�UKɡ|��hi������ׄ>����/2�N��=��O���V��F`���V��޷d�����?��R�+^���'��|M��at��p��>����4��鄜��	4�o�h�v�m.�B��Zz	�O9ћ���̛S��Pz;uD����d�[E�
+\ No newline at end of file
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/35/4da186d35228d857deef0b8b1d1f5a79f54329 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/35/4da186d35228d857deef0b8b1d1f5a79f54329 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/3b/ab46e568438a8f8c856abb93ac1415b6012453 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/3b/ab46e568438a8f8c856abb93ac1415b6012453 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/45/48da4f17303a37194a056474497fd0903bba95 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/45/48da4f17303a37194a056474497fd0903bba95 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/45/5d00082533e59daf2e793f71b2c01bd0f60c39 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/45/5d00082533e59daf2e793f71b2c01bd0f60c39 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/47/52daa99f1056ec25c96f3cc2a448adcddc055e and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/47/52daa99f1056ec25c96f3cc2a448adcddc055e differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/47/a9e5aa1c7b11ff68b3103abb9e547b3a81d75a and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/47/a9e5aa1c7b11ff68b3103abb9e547b3a81d75a differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/4b/c9c58995dd9542a23e914dfd00553b4383debd and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/4b/c9c58995dd9542a23e914dfd00553b4383debd differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/4c/08e9d7abb1eb0fa5d8ed500af9ba7e51295fc4 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/4c/08e9d7abb1eb0fa5d8ed500af9ba7e51295fc4 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/4f/9f4f4f6c7db66524575cc80ed88296a1d8548b and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/4f/9f4f4f6c7db66524575cc80ed88296a1d8548b differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/54/876c643fa928197b5360e6d69bcdd845997802 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/54/876c643fa928197b5360e6d69bcdd845997802 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/57/239010f4ead59ebd557af9be9e322a1ad33a24 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/57/239010f4ead59ebd557af9be9e322a1ad33a24 differ
+diff -Nru apt-listchanges-2.83+nmu1/.git/objects/57/cf20ca1505197d32040d2ec62fba65f66de250 apt-listchanges-2.83+nmu2/.git/objects/57/cf20ca1505197d32040d2ec62fba65f66de250
+--- apt-listchanges-2.83+nmu1/.git/objects/57/cf20ca1505197d32040d2ec62fba65f66de250	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/objects/57/cf20ca1505197d32040d2ec62fba65f66de250	2009-12-31 17:59:06.000000000 -0200
+@@ -0,0 +1,3 @@
++x��Mj�0���)t����P
++]�k/����[�q:���s�.�'�ǧ@9�e^ZE��^Pi�2� ���2i/��n��z�Bi�v_�4�FȠ�*r5����┵Z�jq��$̟m�
++߫�x�g�"�����|���To+mt����+��������v����tjR�J�����a����@��%*#c���=m+�!�����T�3c������@5v��R�F{��5�#�]�u�
+\ No newline at end of file
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/59/eb613f1133c2382f2515e980b0258436812c32 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/59/eb613f1133c2382f2515e980b0258436812c32 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/5c/cfef6d74bf0f1c5fcac12a0297c0784f77cc39 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/5c/cfef6d74bf0f1c5fcac12a0297c0784f77cc39 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/5d/1d0f57c64813f26d52b73bc14b9a7e8b9e0d43 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/5d/1d0f57c64813f26d52b73bc14b9a7e8b9e0d43 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/70/ed97114511e9432daacff9343d12aafe7576c7 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/70/ed97114511e9432daacff9343d12aafe7576c7 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/76/6e38e4831f864479e0df0ae4229de0fbccde45 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/76/6e38e4831f864479e0df0ae4229de0fbccde45 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/76/7fe16f6bf4284667931b9d36ec19086db66da3 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/76/7fe16f6bf4284667931b9d36ec19086db66da3 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/7e/d6ff82de6bcc2a78243fc9c54d3ef5ac14da69 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/7e/d6ff82de6bcc2a78243fc9c54d3ef5ac14da69 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/87/cda2d4b1e5eb65243a754c4e4bde70d45d8ba0 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/87/cda2d4b1e5eb65243a754c4e4bde70d45d8ba0 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/8b/253bc3cacf184ab14499ae295642a1f1763632 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/8b/253bc3cacf184ab14499ae295642a1f1763632 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/8e/6a672b1242585fcbf8cf2af65cebf01dfb8d76 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/8e/6a672b1242585fcbf8cf2af65cebf01dfb8d76 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/91/4ae8e81d4ef606007cc4a91f5b722f835fd8b8 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/91/4ae8e81d4ef606007cc4a91f5b722f835fd8b8 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/98/7ae6f35a5746ff2b5102d9a0eb3be309371ac2 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/98/7ae6f35a5746ff2b5102d9a0eb3be309371ac2 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/9a/871c5f583ed5fdbad3f6155329a05abefd1abc and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/9a/871c5f583ed5fdbad3f6155329a05abefd1abc differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/9b/0c0b789a2c2e918452f71d6f4df8d91bfef0a9 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/9b/0c0b789a2c2e918452f71d6f4df8d91bfef0a9 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/9b/d49b01405cf6e96ce6fed0e5c6864f08085e85 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/9b/d49b01405cf6e96ce6fed0e5c6864f08085e85 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/9f/7e120222b29e9f332e7214d2c7421a40007147 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/9f/7e120222b29e9f332e7214d2c7421a40007147 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/a8/04c628c8992acc9a5ca9cbe3842647fdbdba00 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/a8/04c628c8992acc9a5ca9cbe3842647fdbdba00 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/ad/c00ab0ba382c4933e13006bf9543255768aa1e and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/ad/c00ab0ba382c4933e13006bf9543255768aa1e differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/af/67e6c8a32e2ecf1179b9ed78fbeb00c43cae98 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/af/67e6c8a32e2ecf1179b9ed78fbeb00c43cae98 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/b1/ddc9df38aad78e9275a504c473a24fa0231132 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/b1/ddc9df38aad78e9275a504c473a24fa0231132 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/b4/c753a27f2ac1c4c9d4a92e7d8cb65eab900d21 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/b4/c753a27f2ac1c4c9d4a92e7d8cb65eab900d21 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/b4/d2286fd6639d0053b6acdbb1ffaa4eaeabb525 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/b4/d2286fd6639d0053b6acdbb1ffaa4eaeabb525 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/b6/5657644b6f5b1f341197ae910c1415c17c1b51 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/b6/5657644b6f5b1f341197ae910c1415c17c1b51 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/ba/f20330e40dae41de2f2a2dfbb13bba227276d8 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/ba/f20330e40dae41de2f2a2dfbb13bba227276d8 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/be/9b24910c4b73ed7c96c810f95891326240ef9d and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/be/9b24910c4b73ed7c96c810f95891326240ef9d differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/bf/734a81465f38a47e158681ea42f5639f5777f0 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/bf/734a81465f38a47e158681ea42f5639f5777f0 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/bf/ca1da49fe022c71898e6530e1129a0200f5913 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/bf/ca1da49fe022c71898e6530e1129a0200f5913 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/c9/7466013c94ad740a17b44d8b2dec644b6f447b and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/c9/7466013c94ad740a17b44d8b2dec644b6f447b differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/cc/4eeaa26e81e778f3feb137ccb6044aa85b65f4 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/cc/4eeaa26e81e778f3feb137ccb6044aa85b65f4 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/cd/1f2c94391027336a5e2dc573f9f4c2365c32df and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/cd/1f2c94391027336a5e2dc573f9f4c2365c32df differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/ce/f83a3407df50c2213b6febd8062ee54c13051b and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/ce/f83a3407df50c2213b6febd8062ee54c13051b differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/d1/97d445f03d494b3396f43f433ebcfba17c0cba and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/d1/97d445f03d494b3396f43f433ebcfba17c0cba differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/d3/5276334e75dce8c4d608efd93b659380361539 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/d3/5276334e75dce8c4d608efd93b659380361539 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/d5/d11ecfc788e17d50680e17d4e3d23212b0c11f and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/d5/d11ecfc788e17d50680e17d4e3d23212b0c11f differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/d8/4db28a51cf3e3b623ee1fbaca99bb1980d4763 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/d8/4db28a51cf3e3b623ee1fbaca99bb1980d4763 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/d8/fafa4d918ebdbcf21e30195ff17517d8f205eb and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/d8/fafa4d918ebdbcf21e30195ff17517d8f205eb differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/da/76fe565e2c8c11989346a2eab9b14906fd1568 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/da/76fe565e2c8c11989346a2eab9b14906fd1568 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/da/9eaacf64f46aa9f9b2db6929c2e8b54056febd and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/da/9eaacf64f46aa9f9b2db6929c2e8b54056febd differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/dc/8d5972b8f1239f50d3873bca06bf8c6f868b61 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/dc/8d5972b8f1239f50d3873bca06bf8c6f868b61 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/dd/00ff9be52a1739a1ae86b5ad216efbb726585f and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/dd/00ff9be52a1739a1ae86b5ad216efbb726585f differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/e2/b7733ff34bf06d9312bafde8af078efca950e3 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/e2/b7733ff34bf06d9312bafde8af078efca950e3 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/e4/7d47283397db0dd696821d83422847b2a51124 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/e4/7d47283397db0dd696821d83422847b2a51124 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/e4/ba83ef5447b4958c0fdc663c99bb8ec8aca32d and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/e4/ba83ef5447b4958c0fdc663c99bb8ec8aca32d differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/e8/c753bb66c45f72b4ec16deaa1d89fbcb2f2b57 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/e8/c753bb66c45f72b4ec16deaa1d89fbcb2f2b57 differ
+diff -Nru apt-listchanges-2.83+nmu1/.git/objects/ee/ab79ab7ac26e48c47a3fbc8fe051d9b7a723f3 apt-listchanges-2.83+nmu2/.git/objects/ee/ab79ab7ac26e48c47a3fbc8fe051d9b7a723f3
+--- apt-listchanges-2.83+nmu1/.git/objects/ee/ab79ab7ac26e48c47a3fbc8fe051d9b7a723f3	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/objects/ee/ab79ab7ac26e48c47a3fbc8fe051d9b7a723f3	2009-12-31 17:45:59.000000000 -0200
+@@ -0,0 +1,2 @@
++xe�1O�0���W\��-q[ĀP; "u`�XCl�k���N��o�
++K�����q�9>=�<�+ƍcA�X����g�ۘ�ީR��ƚ��ݙ�Q���z����?P�߯59��5����/�	5�$A������B�5X��0��l�;f�gT����������d��zkqwx���c)Z�K<�K�'Ñy���8�FS���z;V��3�q7�fm
+\ No newline at end of file
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/ef/2b256e96f1b0238d479d2929670463836d748f and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/ef/2b256e96f1b0238d479d2929670463836d748f differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/ef/98918f13939589807de71a2936f630d677a7ac and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/ef/98918f13939589807de71a2936f630d677a7ac differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/f1/b130091d899fb78f439ffb3d886a881e54c949 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/f1/b130091d899fb78f439ffb3d886a881e54c949 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/f7/e585b87a69dedd50204eed833b1787ab63ad93 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/f7/e585b87a69dedd50204eed833b1787ab63ad93 differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/f8/3e64f1697d37c4c68456e29952a699f324237a and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/f8/3e64f1697d37c4c68456e29952a699f324237a differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/fb/baac77e93d0a87ded24f1be8df5d50618216cf and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/fb/baac77e93d0a87ded24f1be8df5d50618216cf differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/fc/5e1d3b0c444fcd5b51d437882b6b4d0281a33a and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/fc/5e1d3b0c444fcd5b51d437882b6b4d0281a33a differ
+Binary files /tmp/jfjASOTC0f/apt-listchanges-2.83+nmu1/.git/objects/fc/b585d74f62423530becd0f4328e1f5033bef52 and /tmp/45cq1zkIkx/apt-listchanges-2.83+nmu2/.git/objects/fc/b585d74f62423530becd0f4328e1f5033bef52 differ
+diff -Nru apt-listchanges-2.83+nmu1/.git/refs/heads/master apt-listchanges-2.83+nmu2/.git/refs/heads/master
+--- apt-listchanges-2.83+nmu1/.git/refs/heads/master	1969-12-31 21:00:00.000000000 -0300
++++ apt-listchanges-2.83+nmu2/.git/refs/heads/master	2009-12-31 17:59:06.000000000 -0200
+@@ -0,0 +1 @@
++57cf20ca1505197d32040d2ec62fba65f66de250

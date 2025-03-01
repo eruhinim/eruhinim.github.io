@@ -1,0 +1,161 @@
+commit 0b0adaa5365c498d50f3b5d2d288da81ab2adc92
+Author: Jérémy Bobbio <lunar@debian.org>
+Date:   Fri Aug 15 14:28:44 2008 +0200
+
+    Start udev before running init
+    
+    In order to solve the #484366, udev needs to be started before we start
+    busybox init as we don't want to create every /dev/ttyXXXX devices
+    manually.
+    
+    udev-udeb (>= 1.125-6) moved the startup script from
+    /lib/debian-installer-startup.d/S02udev to
+    /lib/debian-installer/start-udev.  The later is called directly in
+    the initial init script.
+    
+    Starting udev requires /sys to be available, and we now mount it
+    as we do for /proc.
+    
+    udev already needed be available in order to make the installer boot, so
+    rootskel now depends on udev-udeb.  We can thus avoid testing for the
+    presence of udevd on the initrd.
+    
+    As rootskel depends on udev-udeb, there is no further need to
+    explicitely udev-udeb to pkg-lists/base.
+
+diff --git a/installer/build/pkg-lists/base b/installer/build/pkg-lists/base
+index 3b93216..cd060d5 100644
+--- a/installer/build/pkg-lists/base
++++ b/installer/build/pkg-lists/base
+@@ -19,7 +19,5 @@ rescue-check
+ env-preseed
+ pciutils-udeb
+ 
+-#include "udev"
+-
+ # busybox modutils is gone 
+ module-init-tools-udeb
+diff --git a/installer/build/pkg-lists/udev b/installer/build/pkg-lists/udev
+deleted file mode 100644
+index f6f9800..0000000
+--- a/installer/build/pkg-lists/udev
++++ /dev/null
+@@ -1 +0,0 @@
+-udev-udeb
+diff --git a/installer/debian/changelog b/installer/debian/changelog
+index 17c5abf..1bb362b 100644
+--- a/installer/debian/changelog
++++ b/installer/debian/changelog
+@@ -65,6 +65,8 @@ debian-installer (2008xxxx) UNRELEASED; urgency=low
+ 
+   [ Jérémy Bobbio ]
+   * Add cdebconf-gtk-terminal to graphical images.
++  * As udev-udeb is now a dependency of rootskel, remove its explicit
++    inclusion.
+ 
+  -- Frans Pop <fjp@debian.org>  Tue, 15 Jul 2008 08:18:36 +0200
+ 
+diff --git a/packages/rootskel/debian/changelog b/packages/rootskel/debian/changelog
+index 7b2d0a1..5f75f83 100644
+--- a/packages/rootskel/debian/changelog
++++ b/packages/rootskel/debian/changelog
+@@ -1,8 +1,13 @@
+ rootskel (1.65) UNRELEASED; urgency=low
+ 
++  [ Colin Watson ]
+   * Add debian-installer/exit/poweroff to run poweroff rather than reboot or
+     halt at the end of the installation. Requested by Crispin Flowerday.
+ 
++  [ Jérémy Bobbio ]
++  * Start udev before running init.  (Closes: #484366)
++    Depends: udev-udeb (>= 0.125-6)
++
+  -- Colin Watson <cjwatson@debian.org>  Tue, 29 Jul 2008 17:24:58 +0100
+ 
+ rootskel (1.64) unstable; urgency=low
+diff --git a/packages/rootskel/debian/control b/packages/rootskel/debian/control
+index 3a347f6..f6cbc44 100644
+--- a/packages/rootskel/debian/control
++++ b/packages/rootskel/debian/control
+@@ -9,7 +9,7 @@ Vcs-Svn: svn://svn.debian.org/d-i/trunk/packages/rootskel
+ Package: rootskel
+ XC-Package-Type: udeb
+ Architecture: any
+-Depends: di-utils (>= 1.43), ${misc:Depends}
++Depends: di-utils (>= 1.43), udev-udeb (>= 0.125-6), ${misc:Depends}
+ Description: Skeleton root filesystem used by debian-installer
+ 
+ Package: rootskel-bootfloppy
+diff --git a/packages/rootskel/src/init b/packages/rootskel/src/init
+index 3dc1a6e..0a05b25 100755
+--- a/packages/rootskel/src/init
++++ b/packages/rootskel/src/init
+@@ -5,13 +5,9 @@ export PATH
+ debugshell "just booted"
+ 
+ mount /proc
+-if [ -x /sbin/udevd ]; then
+-	/lib/debian-installer/init-udev-devices
+-else
+-	echo "udev is missing. Giving up!" >&2
+-	sleep 5000
+-	exit
+-fi
++mount /sys
++/lib/debian-installer/start-udev
++
+ init='busybox init'
+ for i in $(cat /proc/cmdline); do
+ 	case $i in
+diff --git a/packages/rootskel/src/lib/debian-installer-startup.d/S01mount b/packages/rootskel/src/lib/debian-installer-startup.d/S01mount
+index 6428451..ebecf2f 100644
+--- a/packages/rootskel/src/lib/debian-installer-startup.d/S01mount
++++ b/packages/rootskel/src/lib/debian-installer-startup.d/S01mount
+@@ -1,11 +1,3 @@
+-# Make sure proc and devfs are mounted when we continue.
+-if [ ! -d /proc/self ] ; then
+-	mount -t proc proc /proc
+-fi
+-if grep -q '[[:space:]]sysfs' /proc/filesystems; then
+-	mount -t sysfs sysfs /sys
+-fi
+-
+ # Cleanup after the first init, which leaves the initrd mounted
+ # on /initrd (if we're not using initramfs)
+ umount /initrd/dev 2>/dev/null
+diff --git a/packages/rootskel/src/lib/debian-installer/Makefile b/packages/rootskel/src/lib/debian-installer/Makefile
+index 6624f32..d0af3a4 100644
+--- a/packages/rootskel/src/lib/debian-installer/Makefile
++++ b/packages/rootskel/src/lib/debian-installer/Makefile
+@@ -20,7 +20,6 @@ files = \
+ files_exec = \
+ 	exit \
+ 	exit-command \
+-	init-udev-devices \
+ 	menu
+ 
+ ifeq ($(DEB_HOST_ARCH_OS),linux)
+diff --git a/packages/rootskel/src/lib/debian-installer/init-udev-devices b/packages/rootskel/src/lib/debian-installer/init-udev-devices
+deleted file mode 100644
+index 42b0881..0000000
+--- a/packages/rootskel/src/lib/debian-installer/init-udev-devices
++++ /dev/null
+@@ -1,18 +0,0 @@
+-#! /bin/sh
+-
+-makedev () {
+-	[ -e "$2" ] || mknod -m "$1" "$2" "$3" "$4" "$5"
+-}
+-
+-mount -t tmpfs tmpfs /dev
+-
+-# Create just enough devices to cope until udev starts.
+-makedev 600 /dev/console c 5 1
+-makedev 666 /dev/null c 1 3
+-makedev 660 /dev/ram0 b 1 0
+-for i in 0 1 2 3 4; do
+-	makedev 600 /dev/tty"$i" c 4 "$i"
+-done
+-for i in 0 1 2 3; do
+-	makedev 600 /dev/ttyS"$i" c 4 "$(($i + 64))"
+-done

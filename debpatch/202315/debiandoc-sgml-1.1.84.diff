@@ -1,0 +1,851 @@
+diff -Nur debiandoc-sgml-1.1.84/debian/changelog debiandoc-sgml-1.1.85/debian/changelog
+--- debiandoc-sgml-1.1.84/debian/changelog	2004-10-20 05:53:26.000000000 +0200
++++ debiandoc-sgml-1.1.85/debian/changelog	2005-02-09 22:50:24.000000000 +0100
+@@ -1,3 +1,25 @@
++debiandoc-sgml (1.1.85) unstable; urgency=high
++
++  * Added PS/PDF support for Japanese, Chinese and Korean based on fixlatex
++    script from Debian Reference (closes: Bug#202315, Bug#214249) (compare
++    #207810)
++  * Added support for Slovenian (closes: Bug#291481)
++  * Added option -s to debiandoc2latexdvi, debiandoc2latexps and
++    debiandoc2latexpdf to specify script for postprocessing generated
++    .tex file (closes: Bug#202317)
++  * Added gs to Recommends: since PDFs thumbnail generation depends on it,
++    also cjk-latex (for Chinese and Japanese PS/PDF), hlatex and
++    hlatex-fonts-base (required for Korean PS/PDF)
++  * Use $PAPERSIZE instead of $PAPERCONF to set paper size (closes: Bug#286537)
++  * Added a missing space in LaTeX output after "..." (closes: Bug#244625)
++  * Minor translation fix for German copyright string
++  * Use "ngerman" language option instead of "german" for using new German
++    orthography in LaTeX formats
++  * The urgency is set to high since various documentation packages will
++    need to be rebuild and such now that this bug is fixed
++
++ -- Ardo van Rangelrooij <ardo@debian.org>  Sun, 30 Jan 2005 14:20:00 +0100
++
+ debiandoc-sgml (1.1.84) unstable; urgency=high
+ 
+   * Format/Driver.pm: fixed erroneous enum list item counter increase
+diff -Nur debiandoc-sgml-1.1.84/debian/control debiandoc-sgml-1.1.85/debian/control
+--- debiandoc-sgml-1.1.84/debian/control	2003-10-19 04:50:58.000000000 +0200
++++ debiandoc-sgml-1.1.85/debian/control	2005-02-10 00:03:03.000000000 +0100
+@@ -10,7 +10,7 @@
+ Priority: optional
+ Architecture: all
+ Depends: ${perl:Depends}, libhtml-parser-perl, libi18n-langtags-perl, libroman-perl, libsgmls-perl, libtext-format-perl, liburi-perl, sgml-data, sgmlspl, sp, ${misc:Depends}
+-Recommends: libpaperg, tetex-bin, tetex-extra, texinfo
++Recommends: libpaperg, tetex-bin, tetex-extra, texinfo, cjk-latex, hlatex, gs
+ Suggests: debiandoc-sgml-doc
+ Description: DebianDoc SGML DTD and formatting tools
+  This is an SGML-based documentation formatting package used for the
+diff -Nur debiandoc-sgml-1.1.84/debian/TODO debiandoc-sgml-1.1.85/debian/TODO
+--- debiandoc-sgml-1.1.84/debian/TODO	2004-10-20 05:53:26.000000000 +0200
++++ debiandoc-sgml-1.1.85/debian/TODO	2005-02-09 22:51:24.000000000 +0100
+@@ -9,11 +9,9 @@
+ SDBP Number Description
+ ------------------------------------------------------------------------------
+   x  188117 Non-compliant HTML code
+-  x  202315 debiandoc-sgml: Chinese latex source needs few fixes
+ x    213332 Incompatibility with sgmltexi
+-  p  214249 No linebreaks in URL in .dvi and .ps without hyperref driver option
+ p    218529 debiandoc2ps silly output handling
+-  x  256076 <enumlist> is totally broken
++  x  256076 <hr> tag interfare with indexing <ol>
+ ------------------------------------------------------------------------------
+ 
+ WISHLIST:
+@@ -25,11 +23,9 @@
+ ?xx  140684 <figure> tag
+ ?xx  141727 <table> tag and how it can be implemented
+   x  202311 proper handling of &ldquor; and &rdquor;
+-x x  202317 option to run script on tex source before build
+ x x  229849 lacks option for single-sided printing
+ x xx 235793 please support wml
+   x  238003 handling of -- in <tt> and <prgn>
+-  x  244625 Improve quality of output documents
+ ------------------------------------------------------------------------------
+ 
+ VARIOUS
+diff -Nur debiandoc-sgml-1.1.84/Makefile debiandoc-sgml-1.1.85/Makefile
+--- debiandoc-sgml-1.1.84/Makefile	2004-01-02 23:02:26.000000000 +0100
++++ debiandoc-sgml-1.1.85/Makefile	2005-02-05 13:49:19.000000000 +0100
+@@ -61,7 +61,7 @@
+ 			$(dtd_name)2pdf $(dtd_name)2ps
+ TOOLS		:= $(BCONVS) $(PCONVS)
+ MAN1S		:= $(pkg_name)
+-HELPERS		:= saspconvert
++HELPERS		:= saspconvert fixlatex
+ 
+ ## ----------------------------------------------------------------------
+ ## General (un)install definitions
+diff -Nur debiandoc-sgml-1.1.84/tools/bin/debiandoc2dvi debiandoc-sgml-1.1.85/tools/bin/debiandoc2dvi
+--- debiandoc-sgml-1.1.84/tools/bin/debiandoc2dvi	2004-01-03 02:32:16.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/bin/debiandoc2dvi	2005-02-05 13:49:19.000000000 +0100
+@@ -81,7 +81,7 @@
+     in
+ 	h  ) usage_message
+ 	     ;;
+-	O  ) stdout=true;
++	O  ) stdout=true
+ 	     ;;
+ 	b  ) basename="-${opt} ${OPTARG}"
+ 	     ;;
+diff -Nur debiandoc-sgml-1.1.84/tools/bin/debiandoc2latexdvi debiandoc-sgml-1.1.85/tools/bin/debiandoc2latexdvi
+--- debiandoc-sgml-1.1.84/tools/bin/debiandoc2latexdvi	2004-01-03 02:32:16.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/bin/debiandoc2latexdvi	2005-02-05 13:49:19.000000000 +0100
+@@ -27,6 +27,7 @@
+          -O               send output to stdout instead of <filename>.dvi
+          -b <basename>    basename to be used
+          -c               use content-negotiation
++         -s <script>      apply script on generated .tex file
+          -d <declaration> SGML declaration to be used
+          -e <extension>   extension to be used
+          -k               keep intermediate files
+@@ -80,6 +81,7 @@
+ ## set default values
+ basename=''
+ content=''
++postprocessing=''
+ declaration=''
+ extension=''
+ keep=false
+@@ -96,6 +98,7 @@
+ options="${options}O"
+ options="${options}b:"
+ options="${options}c"
++options="${options}s:"
+ options="${options}d:"
+ options="${options}e:"
+ options="${options}k"
+@@ -115,8 +118,10 @@
+ 	     ;;
+ 	c  ) content="-${opt}"
+ 	     ;;
++	s  ) postprocessing="${OPTARG}"
++	     ;;
+ 	d  ) declaration="-${opt} ${OPTARG}"
+-	     ;;	
++	     ;;
+ 	e  ) extension="-${opt} ${OPTARG}"
+ 	     ;;
+ 	k  ) keep=true
+@@ -126,8 +131,8 @@
+ 	     ;;
+ 	n  ) nsgmls="-${opt} ${OPTARG} ${nsgmls}"
+ 	     ;;
+-	p  ) PAPERCONF=${OPTARG}
+-	     export PAPERCONF
++	p  ) PAPERSIZE=${OPTARG}
++	     export PAPERSIZE
+ 	     ;;
+ 	v  ) verbose=true
+ 	     ;;
+@@ -202,6 +207,10 @@
+     echo >&2 "${script}: ERROR: ${bsn}.tex could not be generated properly"
+     exit 1
+ fi
++if [ -n "${postprocessing}" ]
++then
++    "${postprocessing}" ${locale} ${bsn}.tex
++fi
+ if [ -e ${bsn}.dvi ] && ( [ -n "${content}" ] || [ -n "${extension}" ] )
+ then
+     echo >&2 "${script}: WARNING: overwriting ${bsn}.dvi"
+diff -Nur debiandoc-sgml-1.1.84/tools/bin/debiandoc2latexpdf debiandoc-sgml-1.1.85/tools/bin/debiandoc2latexpdf
+--- debiandoc-sgml-1.1.84/tools/bin/debiandoc2latexpdf	2004-01-03 02:32:16.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/bin/debiandoc2latexpdf	2005-02-05 13:49:19.000000000 +0100
+@@ -27,6 +27,7 @@
+          -O               send output to stdout instead of <filename>.pdf
+          -b <basename>    basename to be used
+          -c               use content-negotiation
++         -s <script>      apply script on generated .tex file
+          -d <declaration> SGML declaration to be used
+          -e <extension>   extension to be used
+          -k               keep intermediate files
+@@ -50,7 +51,7 @@
+ ## check for presence of pdflatex
+ if ! which pdflatex >/dev/null 2>&1
+ then
+-    echo >&2 "${script}: LaTeX documentation system not found"
++    echo >&2 "${script}: LaTeX typesetting system not found"
+     echo >&2 "${script}: please install the package 'tetex-bin'"
+     exit 2
+ fi
+@@ -80,6 +81,7 @@
+ ## set default values
+ basename=''
+ content=''
++postprocessing=''
+ declaration=''
+ extension=''
+ keep=false
+@@ -96,6 +98,7 @@
+ options="${options}O"
+ options="${options}b:"
+ options="${options}c"
++options="${options}s:"
+ options="${options}d:"
+ options="${options}e:"
+ options="${options}k"
+@@ -115,6 +118,8 @@
+ 	     ;;
+ 	c  ) content="-${opt}"
+ 	     ;;
++	s  ) postprocessing="${OPTARG}"
++	     ;;
+ 	d  ) declaration="-${opt} ${OPTARG}"
+ 	     ;;
+ 	e  ) extension="-${opt} ${OPTARG}"
+@@ -126,8 +131,8 @@
+ 	     ;;
+ 	n  ) nsgmls="-${opt} ${OPTARG} ${nsgmls}"
+ 	     ;;
+-	p  ) PAPERCONF=${OPTARG}
+-	     export PAPERCONF
++	p  ) PAPERSIZE=${OPTARG}
++	     export PAPERSIZE
+ 	     ;;
+ 	v  ) verbose=true
+ 	     ;;
+@@ -202,6 +207,10 @@
+     echo >&2 "${script}: ERROR: ${bsn}.tex could not be generated properly"
+     exit 1
+ fi
++if [ -n "${postprocessing}" ]
++then
++    "${postprocessing}" ${locale} ${bsn}.tex
++fi
+ if [ -e ${bsn}.pdf ] && ( [ -n "${content}" ] || [ -n "${extension}" ] )
+ then
+     echo >&2 "${script}: WARNING: overwriting ${bsn}.pdf"
+diff -Nur debiandoc-sgml-1.1.84/tools/bin/debiandoc2latexps debiandoc-sgml-1.1.85/tools/bin/debiandoc2latexps
+--- debiandoc-sgml-1.1.84/tools/bin/debiandoc2latexps	2004-01-03 02:32:16.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/bin/debiandoc2latexps	2005-02-05 13:49:19.000000000 +0100
+@@ -27,6 +27,7 @@
+          -O               send output to stdout instead of <filename>.ps
+          -b <basename>    basename to be used
+          -c               use content-negotiation
++         -s <script>      apply script on generated .tex file
+          -d <declaration> SGML declaration to be used
+          -e <extension>   extension to be used
+          -k               keep intermediate files
+@@ -50,7 +51,7 @@
+ ## check for presence of latex and dvips
+ if ! which latex dvips >/dev/null 2>&1
+ then
+-    echo >&2 "${script}: LaTeX documentation system not found"
++    echo >&2 "${script}: LaTeX typesetting system not found"
+     echo >&2 "${script}: please install the package 'tetex-bin'"
+     exit 2
+ fi
+@@ -80,6 +81,7 @@
+ ## set default values
+ basename=''
+ content=''
++postprocessing=''
+ declaration=''
+ extension=''
+ keep=false
+@@ -97,6 +99,7 @@
+ options="${options}O"
+ options="${options}b:"
+ options="${options}c"
++options="${options}s:"
+ options="${options}d:"
+ options="${options}e:"
+ options="${options}k"
+@@ -116,6 +119,8 @@
+ 	     ;;
+ 	c  ) content="-${opt}"
+ 	     ;;
++	s  ) postprocessing="${OPTARG}"
++	     ;;
+ 	d  ) declaration="-${opt} ${OPTARG}"
+ 	     ;;
+ 	e  ) extension="-${opt} ${OPTARG}"
+@@ -127,9 +132,9 @@
+ 	     ;;
+ 	n  ) nsgmls="-${opt} ${OPTARG} ${nsgmls}"
+ 	     ;;
+-	p  ) PAPERCONF=${OPTARG}
+-	     export PAPERCONF
+-	     paperopt="-t ${PAPERCONF}"
++	p  ) PAPERSIZE=${OPTARG}
++	     export PAPERSIZE
++	     paperopt="-t ${PAPERSIZE}"
+ 	     ;;
+ 	v  ) verbose=true
+ 	     ;;
+@@ -204,6 +209,10 @@
+     echo >&2 "${script}: ERROR: ${bsn}.tex could not be generated properly"
+     exit 1
+ fi
++if [ -n "${postprocessing}" ]
++then
++    "${postprocessing}" ${locale} ${bsn}.tex
++fi
+ if [ -e ${bsn}.dvi ]
+ then
+     echo >&2 "${script}: WARNING: overwriting ${bsn}.dvi"
+diff -Nur debiandoc-sgml-1.1.84/tools/bin/debiandoc2pdf debiandoc-sgml-1.1.85/tools/bin/debiandoc2pdf
+--- debiandoc-sgml-1.1.84/tools/bin/debiandoc2pdf	2004-01-03 02:32:16.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/bin/debiandoc2pdf	2005-02-05 13:49:19.000000000 +0100
+@@ -81,7 +81,7 @@
+     in
+ 	h  ) usage_message
+ 	     ;;
+-	O  ) stdout=true;
++	O  ) stdout=true
+ 	     ;;
+ 	b  ) basename="-${opt} ${OPTARG}"
+ 	     ;;
+diff -Nur debiandoc-sgml-1.1.84/tools/bin/fixlatex debiandoc-sgml-1.1.85/tools/bin/fixlatex
+--- debiandoc-sgml-1.1.84/tools/bin/fixlatex	1970-01-01 01:00:00.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/bin/fixlatex	2005-02-09 23:49:41.000000000 +0100
+@@ -0,0 +1,43 @@
++#!/bin/sh
++
++# Perform some obscure postprocessing to obtain valid LaTeX code.
++# If you know a better way (such as using babel or integration into
++# Driver.pm or LaTeX.pm) let it me know.
++# Maybe the subroutine _cdata in LaTeX.pm is a good place, but we don't
++# want to call bg5conv for each little string, right?
++#
++# Further customization of LaTeX code in the compound conversion commands 
++# such as debiandoc2latexpdf can be accomplished with "-s script" option.
++#
++#  Jens Seidel
++
++locale=en
++
++while getopts ":l:" opt
++do
++        case ${opt}
++        in 
++           l) locale=${OPTARG};;
++           \? ) echo "unknown option \`${OPTARG}'"; exit -1;;
++        esac
++done
++shift $((${OPTIND} - 1))
++
++case "$locale"
++in
++("zh_TW")
++        tmp=$(mktemp)
++	perl -p \
++-e 's/([\x80-\xff])\\textbackslash\{\}/$1\\/g;' \
++-e 's/([\x80-\xff])\\textasciitilde\{\}/$1\~/g;' \
++-e 's/([\x80-\xff])\\textasciicircum\{\}/$1\^/g;' \
++-e 's/([\x80-\xff])\\\}/$1\}/g;' \
++-e 's/([\x80-\xff])\\\{/$1\{/g;' \
++-e 's/([\x80-\xff])\\\_/$1_/g;' > "$tmp"
++        bg5conv < "$tmp"
++        rm "$tmp"
++	;;
++(*)
++	cat 
++esac
++
+diff -Nur debiandoc-sgml-1.1.84/tools/bin/template debiandoc-sgml-1.1.85/tools/bin/template
+--- debiandoc-sgml-1.1.84/tools/bin/template	2004-01-03 02:32:16.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/bin/template	2005-02-05 13:49:19.000000000 +0100
+@@ -276,7 +276,13 @@
+     exec >${bsn}${cnt}${ext}
+ fi
+ @@@endstdout@@@
+-sgmlspl @@@perldir@@@/Driver.pm -f @@@format@@@ ${passing_on} <${tf2}
++if [ @@@format@@@ = latex ]
++then
++    sgmlspl @@@perldir@@@/Driver.pm -f @@@format@@@ ${passing_on} <${tf2} | \
++    fixlatex ${locale}
++else
++    sgmlspl @@@perldir@@@/Driver.pm -f @@@format@@@ ${passing_on} <${tf2}
++fi
+ 
+ ## ----------------------------------------------------------------------
+ ## remove temporary files
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Format/Driver.pm debiandoc-sgml-1.1.85/tools/lib/Format/Driver.pm
+--- debiandoc-sgml-1.1.84/tools/lib/Format/Driver.pm	2004-10-20 05:53:26.000000000 +0200
++++ debiandoc-sgml-1.1.85/tools/lib/Format/Driver.pm	2005-02-05 13:41:50.000000000 +0100
+@@ -72,7 +72,7 @@
+ ## ----------------------------------------------------------------------
+ 
+ ## ----------------------------------------------------------------------
+-use vars qw( @element $element $event %unkown_warn_done );
++use vars qw( @element $element $event %unknown_warn_done );
+ use vars qw( @p_length );
+ use vars qw( $in_author $in_translator );
+ use vars qw( $heading_level $toc_detail );
+@@ -106,7 +106,7 @@
+     my $file = $event->file;
+     my $line = $event->line;
+     warn "unknown start element $name at $file:$line\n"
+-	unless $unkown_warn_done{$name}++;
++	unless $unknown_warn_done{$name}++;
+ }
+ sub end_element
+ {
+@@ -115,7 +115,7 @@
+     my $file = $event->file;
+     my $line = $event->line;
+     warn "unknown end element $name at $file:$line\n"
+-	unless $unkown_warn_done{ $name }++;
++	unless $unknown_warn_done{ $name }++;
+ }
+ 
+ ## ----------------------------------------------------------------------
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Format/LaTeX.pm debiandoc-sgml-1.1.85/tools/lib/Format/LaTeX.pm
+--- debiandoc-sgml-1.1.84/tools/lib/Format/LaTeX.pm	2004-04-27 03:09:18.000000000 +0200
++++ debiandoc-sgml-1.1.85/tools/lib/Format/LaTeX.pm	2005-02-05 13:49:19.000000000 +0100
+@@ -65,19 +65,21 @@
+ ## ----------------------------------------------------------------------
+ sub _output_start_book
+ {
+-    output( "\\documentclass[11pt,$locale{ 'babel' }]{book}\n" );
++    output( "\\documentclass[11pt" );
++    output( ",$locale{ 'babel' }" ) 
++    	if (length( $locale{ 'babel' } ));
++    output( "]{book}\n" );
+     output( "\n" );
+-    output( "\\usepackage[$locale{ 'inputenc' }]{inputenc}\n" )
++    output( "\\usepackage[$locale{ 'inputenc' }]{inputenc}\n\n" )
+ 	if length( $locale{ 'inputenc' } );
+-    output( "\n" );
+     output( "\\usepackage[T1]{fontenc}\n" );
+     output( "\n" );
+     output( "\\usepackage{pifont}\n" );
+     output( "\\usepackage{textcomp}\n" );
+     output( "\\usepackage{wasysym}\n" );
+     output( "\n" );
+-    output( "\\usepackage{babel}\n" );
+-    output( "\n" );
++    output( "\\usepackage{babel}\n\n" )
++        if length( $locale{ 'babel' } );
+     output( "\\usepackage{helvet}\n" );
+     output( "\\usepackage{palatino}\n" );
+     output( "\n" );
+@@ -123,7 +125,10 @@
+     output( "\\ifx\\pdfoutput\\undefined\n" );
+     output( "\\usepackage[hypertex,colorlinks=true]{hyperref}\n" );
+     output( "\\else\n" );
+-    output( "\\usepackage[pdftex,colorlinks=true]{hyperref}\n" );
++    output( "\\usepackage[pdftex,colorlinks=true" );
++    output( ",$locale{ 'pdfhyperref' }" )
++    	if (length( $locale{ 'pdfhyperref' } ));
++    output( "]{hyperref}\n" );
+     output( "\\fi\n" );
+     output( "\n" );
+     output( "\\parindent=0pt\n" );
+@@ -134,11 +139,14 @@
+     output( "\n" );
+     output( "\\sloppy\n" );
+     output( "\n" );
++    output( "$locale{ 'before begin document' }\n" );
+     output( "\\begin{document}\n" );
++    output( "$locale{ 'after begin document' }\n" );
+ }
+ sub _output_end_book
+ {
+     output( "\n" );
++    output( "$locale{ 'before end document' }\n" );
+     output( "\\end{document}\n");
+     output( "\n" );
+ }
+@@ -632,7 +640,7 @@
+ 	}
+ 	
+ 	# dots should be ellipsis "..."
+-	s/\.\.\./\\dots /g;
++	s/\.\.\./\\dots{}/g;
+ 
+     }
+ 
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Locale/Alias.pm debiandoc-sgml-1.1.85/tools/lib/Locale/Alias.pm
+--- debiandoc-sgml-1.1.84/tools/lib/Locale/Alias.pm	2004-01-03 05:46:48.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/lib/Locale/Alias.pm	2005-02-05 13:49:19.000000000 +0100
+@@ -134,6 +134,10 @@
+ 		   'sk_SK'			=> 'sk_SK.ISO8859-2',
+ 		   'sk_SK.ISO8859-2'		=> 'sk_SK.ISO8859-2',
+ 
++		   'sl'                         => 'sl_SI.ISO8859-2',
++		   'sl_SI'                      => 'sl_SI.ISO8859-2',
++		   'sl_SI.ISO8859-2'            => 'sl_SI.ISO8859-2',
++
+ 		   'tr'				=> 'tr_TR.ISO8859-9',
+ 		   'tr_TR'			=> 'tr_TR.ISO8859-9',
+ 		   'tr_TR.ISO8859-9'		=> 'tr_TR.ISO8859-9',
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Locale/de_DE.ISO8859-1/HTML debiandoc-sgml-1.1.85/tools/lib/Locale/de_DE.ISO8859-1/HTML
+--- debiandoc-sgml-1.1.84/tools/lib/Locale/de_DE.ISO8859-1/HTML	2002-12-29 06:35:07.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/lib/Locale/de_DE.ISO8859-1/HTML	2005-02-05 13:49:19.000000000 +0100
+@@ -7,7 +7,7 @@
+ %locale = (
+ 	   'charset' => 'iso-8859-1',
+ 	   'abstract' => 'Zusammenfassung',
+-	   'copyright notice' => 'Copyright Hinweis',
++	   'copyright notice' => 'Copyright-Hinweis',
+ 	   'contents' => 'Inhalt',
+ 	   'chapter' => sub { return "Kapitel $_[0]" },
+ 	   'appendix' => sub { return "Anhang $_[0]" },
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Locale/de_DE.ISO8859-1/LaTeX debiandoc-sgml-1.1.85/tools/lib/Locale/de_DE.ISO8859-1/LaTeX
+--- debiandoc-sgml-1.1.84/tools/lib/Locale/de_DE.ISO8859-1/LaTeX	2002-12-29 06:35:07.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/lib/Locale/de_DE.ISO8859-1/LaTeX	2005-02-05 13:49:19.000000000 +0100
+@@ -5,10 +5,10 @@
+ 
+ ## ----------------------------------------------------------------------
+ %locale = (
+-	   'babel' => 'german',
++	   'babel' => 'ngerman',
+ 	   'inputenc' => 'latin1',
+ 	   'abstract' => 'Zusammenfassung',
+-	   'copyright notice' => 'Copyright Hinweis',
++	   'copyright notice' => 'Copyright-Hinweis',
+ 	   );
+ 
+ ## ----------------------------------------------------------------------
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Locale/de_DE.ISO8859-1/Text debiandoc-sgml-1.1.85/tools/lib/Locale/de_DE.ISO8859-1/Text
+--- debiandoc-sgml-1.1.84/tools/lib/Locale/de_DE.ISO8859-1/Text	2002-12-29 06:35:07.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/lib/Locale/de_DE.ISO8859-1/Text	2005-02-05 13:49:19.000000000 +0100
+@@ -6,7 +6,7 @@
+ ## ----------------------------------------------------------------------
+ %locale = (
+ 	   'abstract' => 'Zusammenfassung',
+-	   'copyright notice' => 'Copyright Hinweis',
++	   'copyright notice' => 'Copyright-Hinweis',
+ 	   'contents' => 'Inhalt',
+ 	   'chapter' => sub { return "Kapitel $_[0]" },
+ 	   'appendix' => sub { return "Anhang $_[0]" },
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Locale/de_DE.ISO8859-1/TextOV debiandoc-sgml-1.1.85/tools/lib/Locale/de_DE.ISO8859-1/TextOV
+--- debiandoc-sgml-1.1.84/tools/lib/Locale/de_DE.ISO8859-1/TextOV	2002-12-29 06:35:07.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/lib/Locale/de_DE.ISO8859-1/TextOV	2005-02-05 13:49:19.000000000 +0100
+@@ -6,7 +6,7 @@
+ ## ----------------------------------------------------------------------
+ %locale = (
+ 	   'abstract' => 'Zusammenfassung',
+-	   'copyright notice' => 'Copyright Hinweis',
++	   'copyright notice' => 'Copyright-Hinweis',
+ 	   'contents' => 'Inhalt',
+ 	   'chapter' => sub { return "Kapitel $_[0]" },
+ 	   'appendix' => sub { return "Anhang $_[0]" },
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Locale/de_DE.ISO8859-15/HTML debiandoc-sgml-1.1.85/tools/lib/Locale/de_DE.ISO8859-15/HTML
+--- debiandoc-sgml-1.1.84/tools/lib/Locale/de_DE.ISO8859-15/HTML	2004-01-03 02:04:21.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/lib/Locale/de_DE.ISO8859-15/HTML	2005-02-05 13:49:19.000000000 +0100
+@@ -7,7 +7,7 @@
+ %locale = (
+ 	   'charset' => 'iso-8859-15',
+ 	   'abstract' => 'Zusammenfassung',
+-	   'copyright notice' => 'Copyright Hinweis',
++	   'copyright notice' => 'Copyright-Hinweis',
+ 	   'contents' => 'Inhalt',
+ 	   'chapter' => sub { return "Kapitel $_[0]" },
+ 	   'appendix' => sub { return "Anhang $_[0]" },
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Locale/de_DE.ISO8859-15/LaTeX debiandoc-sgml-1.1.85/tools/lib/Locale/de_DE.ISO8859-15/LaTeX
+--- debiandoc-sgml-1.1.84/tools/lib/Locale/de_DE.ISO8859-15/LaTeX	2004-01-03 02:04:21.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/lib/Locale/de_DE.ISO8859-15/LaTeX	2005-02-05 13:49:19.000000000 +0100
+@@ -5,10 +5,10 @@
+ 
+ ## ----------------------------------------------------------------------
+ %locale = (
+-	   'babel' => 'german',
++	   'babel' => 'ngerman',
+ 	   'inputenc' => 'latin9',
+ 	   'abstract' => 'Zusammenfassung',
+-	   'copyright notice' => 'Copyright Hinweis',
++	   'copyright notice' => 'Copyright-Hinweis',
+ 	   );
+ 
+ ## ----------------------------------------------------------------------
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Locale/de_DE.ISO8859-15/Text debiandoc-sgml-1.1.85/tools/lib/Locale/de_DE.ISO8859-15/Text
+--- debiandoc-sgml-1.1.84/tools/lib/Locale/de_DE.ISO8859-15/Text	2004-01-03 02:04:22.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/lib/Locale/de_DE.ISO8859-15/Text	2005-02-05 13:49:19.000000000 +0100
+@@ -6,7 +6,7 @@
+ ## ----------------------------------------------------------------------
+ %locale = (
+ 	   'abstract' => 'Zusammenfassung',
+-	   'copyright notice' => 'Copyright Hinweis',
++	   'copyright notice' => 'Copyright-Hinweis',
+ 	   'contents' => 'Inhalt',
+ 	   'chapter' => sub { return "Kapitel $_[0]" },
+ 	   'appendix' => sub { return "Anhang $_[0]" },
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Locale/de_DE.ISO8859-15/TextOV debiandoc-sgml-1.1.85/tools/lib/Locale/de_DE.ISO8859-15/TextOV
+--- debiandoc-sgml-1.1.84/tools/lib/Locale/de_DE.ISO8859-15/TextOV	2004-01-03 02:04:22.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/lib/Locale/de_DE.ISO8859-15/TextOV	2005-02-05 13:49:19.000000000 +0100
+@@ -6,7 +6,7 @@
+ ## ----------------------------------------------------------------------
+ %locale = (
+ 	   'abstract' => 'Zusammenfassung',
+-	   'copyright notice' => 'Copyright Hinweis',
++	   'copyright notice' => 'Copyright-Hinweis',
+ 	   'contents' => 'Inhalt',
+ 	   'chapter' => sub { return "Kapitel $_[0]" },
+ 	   'appendix' => sub { return "Anhang $_[0]" },
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Locale/ja_JP.eucJP/LaTeX debiandoc-sgml-1.1.85/tools/lib/Locale/ja_JP.eucJP/LaTeX
+--- debiandoc-sgml-1.1.84/tools/lib/Locale/ja_JP.eucJP/LaTeX	2002-12-29 06:35:08.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/lib/Locale/ja_JP.eucJP/LaTeX	2005-02-05 13:49:19.000000000 +0100
+@@ -5,10 +5,37 @@
+ 
+ ## ----------------------------------------------------------------------
+ %locale = (
+-	   'babel' => 'japanese',
++	   'babel' => '',
+ 	   'inputenc' => '',
+ 	   'abstract' => '³µÍ×',
+ 	   'copyright notice' => 'Ãøºî¸¢É½¼¨',
++	   'pdfhyperref' => 'CJKbookmarks',
++	   'before begin document' => '\\usepackage{CJK}',
++	   'after begin document' => '\\begin{CJK}{JIS}{song}
++\\renewcommand{\\vpageref}[1]{on page \\pageref{#1}}
++\\def\\prefacename{½ø}
++\\def\\refname{Ê¸ ¸¥}
++\\def\\abstractname{³µ Í×}
++\\def\\bibname{»²¹ÍÊ¸¸¥}
++\\def\\chaptername{¾Ï}
++\\def\\appendixname{ÉÕ Ï¿}
++\\def\\contentsname{ÌÜ ¼¡}
++\\def\\listfigurename{¿Þ ÌÜ ¼¡}
++\\def\\listtablename{É½ ÌÜ ¼¡}
++\\def\\indexname{º÷ °ú}
++\\def\\figurename{¿Þ}
++\\def\\tablename{É½}
++\\def\\partname{Éô}
++\\def\\enclname{encl}
++\\def\\ccname{cc}
++\\def\\headtoname{¤Ø}
++\\def\\pagename{ÊÇ}
++\\def\\seename{»²¾È}
++\\def\\alsoname{»²¾È}
++\\def\\proofname{¾ÚÌÀ}
++\\def\\glossaryname{ÍÑ¸ì½¸}',
++	   'before end document' => '\\clearpage
++\\end{CJK}'
+ 	   );
+ 
+ ## ----------------------------------------------------------------------
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Locale/ko_KR.eucKR/LaTeX debiandoc-sgml-1.1.85/tools/lib/Locale/ko_KR.eucKR/LaTeX
+--- debiandoc-sgml-1.1.84/tools/lib/Locale/ko_KR.eucKR/LaTeX	2002-12-29 06:35:08.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/lib/Locale/ko_KR.eucKR/LaTeX	2005-02-05 13:49:19.000000000 +0100
+@@ -5,10 +5,12 @@
+ 
+ ## ----------------------------------------------------------------------
+ %locale = (
+-	   'babel' => 'korean',
+-	   'inputenc' => 'euc-kr',
++	   'babel' => '',
++	   'inputenc' => '',
+ 	   'abstract' => '¿ä¾à',
+ 	   'copyright notice' => 'ÀúÀÛ±Ç',
++	   'pdfhyperref' => 'CJKbookmarks',
++	   'before begin document' => '\\usepackage{hfont}'
+ 	   );
+ 
+ ## ----------------------------------------------------------------------
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Locale/sl_SI.ISO8859-2/HTML debiandoc-sgml-1.1.85/tools/lib/Locale/sl_SI.ISO8859-2/HTML
+--- debiandoc-sgml-1.1.84/tools/lib/Locale/sl_SI.ISO8859-2/HTML	1970-01-01 01:00:00.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/lib/Locale/sl_SI.ISO8859-2/HTML	2005-02-05 13:49:19.000000000 +0100
+@@ -0,0 +1,25 @@
++## -*- perl -*-
++## ----------------------------------------------------------------------
++## Locale/sl_SI.ISO8859-2/HTML: locale for Slovenian output in HTML format
++## ----------------------------------------------------------------------
++
++## ----------------------------------------------------------------------
++%locale = (
++	   'charset' => 'iso-8859-2',
++	   'abstract' => 'Povzetek',
++	   'copyright notice' => 'Opomba o avtorskih pravicah',
++	   'contents' => 'Vsebina',
++	   'chapter' => sub { return "Poglavje $_[0]" },
++	   'appendix' => sub { return "Dodatek $_[0]" },
++	   'section' => sub { return "Odsek $_[0]" },
++	   'subsection' => sub { return "Odsek $_[0]" },
++	   'subsubsection' => sub { return "Odsek $_[0]" },
++	   'paragraph' => sub { return "Odsek $_[0]" },
++	   'subparagraph' => sub { return "Odsek $_[0]" },
++	   'footnotes' => 'NoÅ¾ne opombe',
++	   'comments' => 'Komentarji',
++	   'next' => 'naprej',
++	   'previous' => 'nazaj',
++	   );
++
++## ----------------------------------------------------------------------
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Locale/sl_SI.ISO8859-2/LaTeX debiandoc-sgml-1.1.85/tools/lib/Locale/sl_SI.ISO8859-2/LaTeX
+--- debiandoc-sgml-1.1.84/tools/lib/Locale/sl_SI.ISO8859-2/LaTeX	1970-01-01 01:00:00.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/lib/Locale/sl_SI.ISO8859-2/LaTeX	2005-02-05 13:49:19.000000000 +0100
+@@ -0,0 +1,14 @@
++## -*- perl -*-
++## ----------------------------------------------------------------------
++## Locale/sl_SI.ISO8859-2/LaTeX2e: locale for Slovenian output in LaTeX2e format
++## ----------------------------------------------------------------------
++
++## ----------------------------------------------------------------------
++%locale = (
++	   'babel' => 'slovene',
++	   'inputenc' => 'latin2',
++	   'abstract' => 'Povzetek',
++	   'copyright notice' => 'Opomba o avtorskih pravicah',
++	   );
++
++## ----------------------------------------------------------------------
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Locale/sl_SI.ISO8859-2/Texinfo debiandoc-sgml-1.1.85/tools/lib/Locale/sl_SI.ISO8859-2/Texinfo
+--- debiandoc-sgml-1.1.84/tools/lib/Locale/sl_SI.ISO8859-2/Texinfo	1970-01-01 01:00:00.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/lib/Locale/sl_SI.ISO8859-2/Texinfo	2005-02-05 13:49:19.000000000 +0100
+@@ -0,0 +1,18 @@
++## -*- perl -*-
++## ----------------------------------------------------------------------
++## Locale/en_US.ISO8859-2/Texinfo: locale for Slovenian output in Texinfo format
++## ----------------------------------------------------------------------
++
++## ----------------------------------------------------------------------
++%locale = (
++	   'detailed' => 'Podrobni izpis vozliÅÄ',
++	   'chapter' => sub { return "Poglavje $_[0]" },
++	   'appendix' => sub { return "Dodatek $_[0]" },
++	   'section' => sub { return "Odsek $_[0]" },
++	   'subsection' => sub { return "Odsek $_[0]" },
++	   'subsubsection' => sub { return "Odsek $_[0]" },
++	   'paragraph' => sub { return "Odsek $_[0]" },
++	   'subparagraph' => sub { return "Odsek $_[0]" },
++	   );
++
++## ----------------------------------------------------------------------
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Locale/sl_SI.ISO8859-2/Text debiandoc-sgml-1.1.85/tools/lib/Locale/sl_SI.ISO8859-2/Text
+--- debiandoc-sgml-1.1.84/tools/lib/Locale/sl_SI.ISO8859-2/Text	1970-01-01 01:00:00.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/lib/Locale/sl_SI.ISO8859-2/Text	2005-02-05 13:49:19.000000000 +0100
+@@ -0,0 +1,20 @@
++## -*- perl -*-
++## ----------------------------------------------------------------------
++## Locale/sl_SI.ISO8859-2/Text: locale for Slovenian output in plain text format
++## ----------------------------------------------------------------------
++
++## ----------------------------------------------------------------------
++%locale = (
++	   'abstract' => 'Povzetek',
++	   'copyright notice' => 'Opomba o avtorskih pravicah',
++	   'contents' => 'Vsebina',
++	   'chapter' => sub { return "Poglavje $_[0]" },
++	   'appendix' => sub { return "Dodatek $_[0]" },
++	   'section' => sub { return "Odsek $_[0]" },
++	   'subsection' => sub { return "Odsek $_[0]" },
++	   'subsubsection' => sub { return "Odsek $_[0]" },
++	   'paragraph' => sub { return "Odsek $_[0]" },
++	   'subparagraph' => sub { return "Odsek $_[0]" },
++	   );
++
++## ----------------------------------------------------------------------
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Locale/sl_SI.ISO8859-2/TextOV debiandoc-sgml-1.1.85/tools/lib/Locale/sl_SI.ISO8859-2/TextOV
+--- debiandoc-sgml-1.1.84/tools/lib/Locale/sl_SI.ISO8859-2/TextOV	1970-01-01 01:00:00.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/lib/Locale/sl_SI.ISO8859-2/TextOV	2005-02-05 13:49:19.000000000 +0100
+@@ -0,0 +1,20 @@
++## -*- perl -*-
++## ----------------------------------------------------------------------
++## Locale/sl_SI.ISO8859-2/TextOV: locale for Slovenian output in overstrike text format
++## ----------------------------------------------------------------------
++
++## ----------------------------------------------------------------------
++%locale = (
++	   'abstract' => 'Povzetek',
++	   'copyright notice' => 'Opomba o avtorskih pravicah',
++	   'contents' => 'Vsebina',
++	   'chapter' => sub { return "Poglavje $_[0]" },
++	   'appendix' => sub { return "Dodatek $_[0]" },
++	   'section' => sub { return "Odsek $_[0]" },
++	   'subsection' => sub { return "Odsek $_[0]" },
++	   'subsubsection' => sub { return "Odsek $_[0]" },
++	   'paragraph' => sub { return "Odsek $_[0]" },
++	   'subparagraph' => sub { return "Odsek $_[0]" },
++	   );
++
++## ----------------------------------------------------------------------
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Locale/zh_CN.GB2312/LaTeX debiandoc-sgml-1.1.85/tools/lib/Locale/zh_CN.GB2312/LaTeX
+--- debiandoc-sgml-1.1.84/tools/lib/Locale/zh_CN.GB2312/LaTeX	2002-12-29 06:35:08.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/lib/Locale/zh_CN.GB2312/LaTeX	2005-02-05 13:49:19.000000000 +0100
+@@ -5,10 +5,15 @@
+ 
+ ## ----------------------------------------------------------------------
+ %locale = (
+-	   'babel' => 'chinese',
+-	   'inputenc' => 'gb2312',
++	   'babel' => '',
++	   'inputenc' => '',
+ 	   'abstract' => 'ÕªÒª',
+ 	   'copyright notice' => '°æÈ¨ÉùÃ÷',
++	   'pdfhyperref' => 'CJKbookmarks',
++	   'before begin document' => '\\usepackage{CJK}',
++	   'after begin document' => '\\begin{CJK}{GB}{kai}',
++	   'before end document' => '\\clearpage
++\\end{CJK}'
+ 	   );
+ 
+ ## ----------------------------------------------------------------------
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Locale/zh_TW.Big5/LaTeX debiandoc-sgml-1.1.85/tools/lib/Locale/zh_TW.Big5/LaTeX
+--- debiandoc-sgml-1.1.84/tools/lib/Locale/zh_TW.Big5/LaTeX	2002-12-29 06:35:08.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/lib/Locale/zh_TW.Big5/LaTeX	2005-02-05 13:49:19.000000000 +0100
+@@ -5,10 +5,16 @@
+ 
+ ## ----------------------------------------------------------------------
+ %locale = (
+-	   'babel' => 'chinese',
+-	   'inputenc' => 'big5',
++	   'babel' => '',
++	   'inputenc' => '',
+ 	   'abstract' => 'ºK­n',
+ 	   'copyright notice' => 'ª©ÅvÁn©ú',
++	   'pdfhyperref' => 'CJKbookmarks',
++	   'before begin document' => '\\usepackage{CJK}',
++	   'after begin document' => '\\begin{CJK}{Bg5}{kai}
++\\renewcommand{\\vpageref}[1]{\(²Ä \\pageref{#1} ­¶\)}',
++	   'before end document' => '\\clearpage
++\\end{CJK}'
+ 	   );
+ 
+ ## ----------------------------------------------------------------------
+diff -Nur debiandoc-sgml-1.1.84/tools/lib/Map/LaTeX.pm debiandoc-sgml-1.1.85/tools/lib/Map/LaTeX.pm
+--- debiandoc-sgml-1.1.84/tools/lib/Map/LaTeX.pm	2004-01-02 23:02:26.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/lib/Map/LaTeX.pm	2005-02-05 13:49:19.000000000 +0100
+@@ -41,7 +41,7 @@
+ 	  "[AElig ]" => "\\AE{}",
+ 	  "[ccedil]" => "\\c{c}",
+ 	  "[Ccedil]" => "\\c{C}",
+-	  "[eth   ]" => "[eth]",
++	  "[eth   ]" => "[eth]", # \\eth{} (AMS)???
+ 	  "[ETH   ]" => "[ETH]",
+ 	  "[eacute]" => "\\'{e}",
+ 	  "[Eacute]" => "\\'{E}",
+diff -Nur debiandoc-sgml-1.1.84/tools/man/debiandoc-sgml.1 debiandoc-sgml-1.1.85/tools/man/debiandoc-sgml.1
+--- debiandoc-sgml-1.1.84/tools/man/debiandoc-sgml.1	2004-01-05 03:02:18.000000000 +0100
++++ debiandoc-sgml-1.1.85/tools/man/debiandoc-sgml.1	2005-02-05 13:49:19.000000000 +0100
+@@ -43,18 +43,21 @@
+ .br
+ .B debiandoc2latexdvi
+ .I "[-O]"
++.I "[-s\ script]"
+ .I "[-p\ papersize]"
+ .I "[-v]"
+ .I "[shared options]"
+ .br
+ .B debiandoc2latexpdf
+ .I "[-O]"
++.I "[-s\ script]"
+ .I "[-p\ papersize]"
+ .I "[-v]"
+ .I "[shared options]"
+ .br
+ .B debiandoc2latexps
+ .I "[-O]"
++.I "[-s\ script]"
+ .I "[-p\ papersize]"
+ .I "[-v]"
+ .I "[shared options]"
+@@ -303,6 +306,12 @@
+ .BI -m
+ Put the comments in footnote style in the output.
+ .TP
++.BI -s \ script
++Apply the specified script on the generated .tex file. The script is called
++with parameters
++.I [ -l \ locale ] basename\fB.tex\fR.
++This may be useful to support new features, to correct bogus hyphenations, ...
++.TP
+ .BI -p \ papersize
+ Produce output in the indicated
+ .IR papersize .

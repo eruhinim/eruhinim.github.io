@@ -1,0 +1,222 @@
+diff -Nru equivs-2.0.7/debian/changelog equivs-2.0.7/debian/changelog
+--- equivs-2.0.7/debian/changelog	2006-02-28 09:01:18.000000000 +0100
++++ equivs-2.0.7/debian/changelog	2008-01-22 12:32:25.000000000 +0100
+@@ -1,3 +1,15 @@
++equivs (2.0.7-0.1) unstable; urgency=low
++
++  * Non-maintainer upload.
++  * equivs-build: add support for adding arbitrary extra files to a package.
++    Thanks to Anthony Towns for the patch (closes: #449542)
++  * equivs-build.pod: document the new "Files:" and "File:" fields
++  * debian/control: bump Standards-Version to 3.7.3, no changes needed
++  * debian/control: move debhelper dependency to Build-Depends, so that it is
++    available upon clean
++
++ -- Stefano Zacchiroli <zack@debian.org>  Tue, 22 Jan 2008 12:26:38 +0100
++
+ equivs (2.0.7) unstable; urgency=low
+ 
+   * New maintainer.  (Closes: #350835)
+diff -Nru /tmp/qkqEiDddKk/equivs-2.0.7/debian/control /tmp/4X1M7l859t/equivs-2.0.7/debian/control
+--- equivs-2.0.7/debian/control	2006-02-22 11:12:29.000000000 +0100
++++ equivs-2.0.7/debian/control	2008-01-22 12:26:24.000000000 +0100
+@@ -2,8 +2,8 @@
+ Section: admin
+ Priority: extra
+ Maintainer: Peter Samuelson <peter@p12n.org>
+-Standards-Version: 3.6.2
+-Build-Depends-Indep: debhelper (>= 4)
++Standards-Version: 3.7.3
++Build-Depends: debhelper (>= 4)
+ 
+ Package: equivs
+ Depends: perl, debhelper (>= 4), dpkg-dev, devscripts, make, fakeroot
+diff -Nru /tmp/qkqEiDddKk/equivs-2.0.7/debian/equivs-build.pod /tmp/4X1M7l859t/equivs-2.0.7/debian/equivs-build.pod
+--- equivs-2.0.7/debian/equivs-build.pod	2006-02-26 12:51:37.000000000 +0100
++++ equivs-2.0.7/debian/equivs-build.pod	2008-01-22 12:22:50.000000000 +0100
+@@ -60,6 +60,21 @@
+ A comma-separated list of files to copy to the 
+ F</usr/share/doc/packagename> directory.
+ 
++=item Files:
++
++Files to be copied into some directory of the created package.  The
++field syntax is a list of pairs, one per physical line of Files;
++each pair is space separated, the first component is a path pointing
++to the file to be installed, the second the destination path in the
++resulting package. E.g.: "Files: foo-cron /etc/cron.d/".
++
++=item File:
++
++Files to be copied into some directory of the created package,
++specified inline in the source control file. The field syntax is the
++name of the files to be created, followed by lines indented by 1
++space denoting file content; leading space will be trimmed.
++
+ =back
+ 
+ See F</usr/share/doc/equivs/README.Debian> for more information.
+diff -Nru /tmp/qkqEiDddKk/equivs-2.0.7/usr/bin/equivs-build /tmp/4X1M7l859t/equivs-2.0.7/usr/bin/equivs-build
+--- equivs-2.0.7/usr/bin/equivs-build	2006-02-28 09:33:25.000000000 +0100
++++ equivs-2.0.7/usr/bin/equivs-build	2008-01-22 11:12:32.000000000 +0100
+@@ -61,6 +61,51 @@
+ # Copy any additional files
+ 
+ my @extra_files = split ",", $control{'Extra-Files'} || "";
++my %install_files = ();
++for (split "\n", $control{'Files'} || "") {
++    $install_files{$2} = $1 if m/^\s*(\S+)\s+(\S+)\s*$/;
++}
++my %create_files = ();
++for (@{$control{'File'} || []}) {
++  if (m/^\s*(\S+)\n(.*)$/s) {
++    my ($f,$b) = ($1,$2);
++    $b =~ s/^ //mg;
++    $b =~ s/^[.]([.]*)$/$1/mg;
++    $create_files{$f} = $b;
++  }
++}
++
++mkdir "$builddir/install", 0755;
++open INSTALL, '>', "$builddir/debian/install" or
++  die "Cannot open $builddir/debian/installfor writing: $!\n";
++foreach my $target (keys %install_files, keys %create_files) {
++  $target =~ s/ +//g;
++  my $destination;
++  my $cnt = 0;
++  if ($target =~ m/^(preinst|postinst|prerm|postrm)$/) {
++    $destination = "debian/$target";
++  } else {
++  do {
++      $destination = "install/$cnt";
++      mkdir "$builddir/$destination" unless -d "$builddir/$destination";
++      $destination .= "/" . basename($target);
++      $cnt++;
++  } while ( -e "$builddir/$destination" );
++    print INSTALL "$destination " . dirname($target) . "\n";
++  }
++  if (defined $install_files{$target}) {
++    my $file = $install_files{$target};
++  copy $file, "$builddir/$destination" or
++    die "Cannot copy $file to $builddir/$destination: $!\n";
++  } else {
++    open CREATE, ">", "$builddir/$destination" or
++      die "Cannot create file $builddir/$destination: $!\n";
++    print CREATE $create_files{$target};
++    print CREATE "\n";
++    close CREATE;
++  } 
++}
++close INSTALL;
+ 
+ mkdir "$builddir/docs", 0755;
+ open DOCS, '>', "$builddir/debian/docs" or
+@@ -82,7 +127,6 @@
+       die "Cannot copy $script to $builddir/debian/$destination: $!\n";
+ }
+ 
+-
+ write_control_file($builddir, \%control);
+ 
+ if ($control{'Changelog'}) {
+@@ -132,11 +176,12 @@
+ 
+ sub read_control_file {
+   my ($builddir, $control, $specific_arch, $file) = @_;
++  my @control = ();
+   my $in;
+ 
+   open($in, "$builddir/debian/control.in") or
+     die "Cannot open control file: $!\n";
+-  read_control_file_section($in, $control) or
++  read_control_file_section($in, \@control) or
+     die "error: empty control file\n";
+   close $in;
+ 
+@@ -150,6 +195,8 @@
+ 
+   chomp($systemname = qx(hostname --fqdn));
+ 
++  %{$control} = @control;
++
+   $control->{'Maintainer'} = "$fullname <$username\@$systemname>";
+ 
+   $control->{'Architecture'} = $specific_arch ? 'any' : 'all';
+@@ -157,10 +204,24 @@
+   open($in, $file) or
+     die "Cannot open control file $file: $!\n";
+ 
+-  read_control_file_section($in, $control) or
++  @control = ();
++  read_control_file_section($in, \@control) or
+     die "error: empty control file\n";
+   close $in;
+ 
++  for (my $i = 0; $i < $#control; $i += 2) {
++    my $k = $control[$i];
++    my $v = $control[$i+1];
++    if ($k eq "File") {
++      my $vv = [];
++      $vv = $control->{$k} if defined $control->{$k};
++      push @{$vv}, $v;
++      $control->{$k} = $vv;
++    } else {
++      $control->{$k} = $v;
++    }
++  }
++
+   # Fix Source: entry
+   $control->{'Source'} = $control->{'Package'};
+ 
+@@ -177,17 +238,17 @@
+   my ($cf,$v);
+   while (<$fh>) {
+     chomp;
+-    next if (m/^\s*$/ or m/^\s*#/);
++    next if (m/^\s*$/ or m/^#/);
+ 
+     # new field?
+     if (/^(\S+)\s*:\s*(.*?)\s*$/) {
+       ($cf,$v) = (ucfirst lc $1, $2);
+       $cf =~ s/(?<=-)([a-z])/uc $1/eg;
+-      $pfields->{$cf} = $v;
++      push @{$pfields}, $cf, $v;
+     } elsif (/^(\s+\S.*)$/) {
+       $v = $1;
+       defined($cf) or die "syntax error in control file: no field specified\n";
+-      $pfields->{$cf} .= "\n$v";
++      $pfields->[-1] .= "\n$v";
+     } else {
+       die "syntax error in control file: $_\n";
+     }
+@@ -243,15 +304,16 @@
+ 
+ sub make_changelog {
+   my ($builddir, $control) = @_;
+-  my ($version, $date);
++  my ($version, $suite, $date);
+ 
+   $version = $control->{'Version'} || "1.0";
+-  chomp ($date = qx(822-date));
++  $suite = $control->{'Suite'} || "unstable";
++  chomp ($date = qx(date -R));
+ 
+   open OUT, '>', "$builddir/debian/changelog" or
+     die "Couldn't write changelog: $!\n";
+   print OUT <<EOINPUT;
+-$control->{Package} ($version) unstable; urgency=low
++$control->{Package} ($version) $suite; urgency=low
+ 
+   * First version
+ 
+diff -Nru /tmp/qkqEiDddKk/equivs-2.0.7/usr/share/equivs/template/debian/rules /tmp/4X1M7l859t/equivs-2.0.7/usr/share/equivs/template/debian/rules
+--- equivs-2.0.7/usr/share/equivs/template/debian/rules	2006-02-26 12:46:51.000000000 +0100
++++ equivs-2.0.7/usr/share/equivs/template/debian/rules	2008-01-22 11:11:26.000000000 +0100
+@@ -20,6 +20,7 @@
+ binary-arch: install
+ 	dh_testdir
+ 	dh_testroot
++	dh_install
+ 	dh_installdocs
+ 	dh_installchangelogs
+ 	dh_compress

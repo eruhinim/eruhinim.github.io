@@ -1,0 +1,138 @@
+>From a8ed0e6b21dc3e9250930949678d24f62e50eb2d Mon Sep 17 00:00:00 2001
+From: Afif Elghraoui <afif@ghraoui.name>
+Date: Sun, 17 Jan 2016 01:30:57 -0800
+Subject: [PATCH] Add support for debconf seeding
+
+Some configuration changes are more easily made by seeding
+debconf, as maintainers implement the configuration file
+parsing through that interface. This patch allows for
+packaging seed files in the format used by debconf-{set,get}-selections
+in order to use debconf to make configuration changes. Upon removal
+of the package, the original debconf setting is restored.
+---
+ debian/config-package-dev.install |  2 ++
+ dh_configpackage                  | 22 ++++++++++++++++++----
+ seed-postinst.sh.in               |  9 +++++++++
+ seed-prerm.sh.in                  |  6 ++++++
+ 4 files changed, 35 insertions(+), 4 deletions(-)
+ create mode 100644 seed-postinst.sh.in
+ create mode 100644 seed-prerm.sh.in
+
+diff --git a/debian/config-package-dev.install b/debian/config-package-dev.install
+index efd6dbc..0a72f43 100644
+--- a/debian/config-package-dev.install
++++ b/debian/config-package-dev.install
+@@ -6,6 +6,8 @@ transform-files.mk usr/share/cdbs/1/rules/
+ encode usr/share/config-package-dev/
+ decode usr/share/config-package-dev/
+ displace.sh.in usr/share/debhelper/autoscripts/
++seed-postinst.sh.in usr/share/debhelper/autoscripts/
++seed-prerm.sh.in usr/share/debhelper/autoscripts/
+ debconf-hack.sh usr/share/config-package-dev/
+ dh_configpackage usr/bin/
+ Debian usr/share/perl5/
+diff --git a/dh_configpackage b/dh_configpackage
+index 942766f..017ac6a 100755
+--- a/dh_configpackage
++++ b/dh_configpackage
+@@ -197,7 +197,7 @@ debathena-conffile-example-1.1 package in
+ 
+ =cut
+ 
+-my (@arg_displace, @arg_hide, @arg_undisplace, @arg_unhide, @arg_transform);
++my (@arg_displace, @arg_hide, @arg_undisplace, @arg_unhide, @arg_transform, $arg_seed);
+ my $args_present = 0;
+ 
+ init(options => {
+@@ -206,9 +206,10 @@ init(options => {
+     "undisplace=s" => \@arg_undisplace,
+     "unhide=s" => \@arg_unhide,
+     "transform=s" => \@arg_transform,
++    "seed=s" => $arg_seed
+ });
+ 
+-if (@arg_displace or @arg_hide or @arg_undisplace or @arg_unhide or @arg_transform) {
++if (@arg_displace or @arg_hide or @arg_undisplace or @arg_unhide or @arg_transform or $arg_seed) {
+     $args_present = 1;
+ }
+ 
+@@ -337,7 +338,7 @@ sub check_file {
+ }
+ 
+ foreach my $package (@{$dh{DOPACKAGES}}) {
+-    my (@displacefiles, @hidefiles, @undisplacefiles, @unhidefiles, @transformfiles);
++    my (@displacefiles, @hidefiles, @undisplacefiles, @unhidefiles, @transformfiles, $seedfile);
+ 
+     if (($package eq $dh{FIRSTPACKAGE} || $dh{PARAMS_ALL}) && $args_present) {
+         @displacefiles = @arg_displace;
+@@ -345,6 +346,7 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+         @undisplacefiles = @arg_undisplace;
+         @unhidefiles = @arg_unhide;
+         @transformfiles = map {[split]} @arg_transform;
++	$seedfile = $arg_seed;
+     } else {
+         my $displacefile = pkgfile($package, "displace");
+         @displacefiles = filearray($displacefile) if $displacefile;
+@@ -356,12 +358,13 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+         @unhidefiles = filearray($unhidefile) if $unhidefile;
+         my $transformfile = pkgfile($package, "transform");
+         @transformfiles = filedoublearray($transformfile) if $transformfile;
++	$seedfile = pkgfile($package, "seed");
+     }
+ 
+     my $tmp = tmpdir($package);
+     my $extension = displace_extension($package);
+ 
+-    if (! $dh{ONLYSCRIPTS} && @hidefiles) {
++    if (! $dh{ONLYSCRIPTS} && (@hidefiles || defined $seedfile)) {
+         doit("install", "-d", "$tmp/usr/share/$package");
+     }
+ 
+@@ -419,6 +422,17 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+             autoscript($package, "prerm", "displace.sh.in",
+                 "s/#PACKAGE#/$package/g; s/#DEB_DISPLACE_EXTENSION#/$extension/g; \\\$a\"$prerm\"");
+         }
++	if (defined $seedfile) {
++	    foreach my $script ("postinst", "prerm") {
++		autoscript($package, $script, "seed-$script.sh.in",
++			   "s|#SEEDFILE#|/usr/share/$package/seed|g");
++	    }
++	    doit('install','-m0644',$seedfile, "$tmp/usr/share/$package/seed");
++	    # Add debconf utilities to misc:Depends
++	    foreach my $dependency ("debconf","debconf-utils") {
++		addsubstvar($package, 'misc:Depends',$dependency);
++	    }
++	}
+     }
+ 
+     # Add an encoding of the names of the diverted files to the Provides:
+diff --git a/seed-postinst.sh.in b/seed-postinst.sh.in
+new file mode 100644
+index 0000000..056b1cd
+--- /dev/null
++++ b/seed-postinst.sh.in
+@@ -0,0 +1,9 @@
++if [ "$1" = "configure" ]
++then
++	for setting in $(cut --fields 2 #SEEDFILE#)
++	do
++		debconf-get-selections | grep -w $setting >> #SEEDFILE#.orig
++	done
++
++	debconf-set-selections #SEEDFILE#
++fi
+diff --git a/seed-prerm.sh.in b/seed-prerm.sh.in
+new file mode 100644
+index 0000000..cee409c
+--- /dev/null
++++ b/seed-prerm.sh.in
+@@ -0,0 +1,6 @@
++case "$1" in
++    remove|upgrade|deconfigure)
++	debconf-set-selections #SEEDFILE#.orig
++	rm -f #SEEDFILE#.orig
++	;;
++esac
+-- 
+2.1.4
+

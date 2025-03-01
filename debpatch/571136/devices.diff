@@ -1,0 +1,173 @@
+diff --git a/Makefile b/Makefile
+index 1020cbc..0bbb2c0 100644
+--- a/Makefile
++++ b/Makefile
+@@ -2,17 +2,9 @@
+ VERSION := $(shell sed 's/.*(\(.*\)).*/\1/; q' debian/changelog)
+ DATE := $(shell sed -n '/^ -- /{s/.*> \(.*\)/\1/p;q;}' debian/changelog)
+ 
+-MAKEDEV ?= /sbin/MAKEDEV
+-
+-ifeq ($(shell uname),Linux)
+-all: devices.tar.gz
+-else
+ all:
+-endif
+ 
+ clean:
+-	rm -f devices.tar.gz
+-	rm -rf dev
+ 
+ DSDIR=$(DESTDIR)/usr/share/debootstrap
+ install:
+@@ -26,19 +18,3 @@ install:
+ 	chown root:root $(DESTDIR)/usr/sbin/debootstrap
+ 	chmod 0755 $(DESTDIR)/usr/sbin/debootstrap
+ 
+-ifeq ($(shell uname),Linux)
+-	install -o root -g root -m 0644 devices.tar.gz $(DSDIR)/
+-endif
+-
+-devices.tar.gz:
+-	rm -rf dev
+-	mkdir -p dev
+-	chown 0:0 dev
+-	chmod 755 dev
+-	(cd dev && $(MAKEDEV) std ptmx fd consoleonly)
+-	tar --mtime="$(DATE)" -cf - dev | gzip -9n >devices.tar.gz
+-	@if [ "$$(tar tvf devices.tar.gz | wc -l)" -lt 2 ]; then \
+-		echo " ** devices.tar.gz is empty!" >&2; \
+-		exit 1; \
+-	fi
+-	rm -rf dev
+diff --git a/README b/README
+index 5c08e15..b416140 100644
+--- a/README
++++ b/README
+@@ -20,7 +20,6 @@ First, get the source.
+ 
+ Then as root, in the debootstrap source directory:
+ 
+-make devices.tar.gz
+ export DEBOOTSTRAP_DIR=`pwd`
+ debootstrap sid sid
+ 
+diff --git a/TODO b/TODO
+index e5fde0e..3a86214 100644
+--- a/TODO
++++ b/TODO
+@@ -7,5 +7,3 @@ Features:
+       -- versus command line
+       -- support for sources (vs mirrors)
+       -- faux-pinning for packages 
+-
+-  ++ makedev in second stage
+diff --git a/debian/changelog b/debian/changelog
+index 8a938a3..3a05192 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,3 +1,11 @@
++debootstrap (1.0.75+nmu1) unstable; urgency=medium
++
++  * Non-maintainer upload.
++  * Stop creating useless device nodes. This allows removing devices.tar.gz,
++    and the dependency on makedev. (Closes: #571136)
++
++ -- Marco d'Itri <md@linux.it>  Fri, 08 Jan 2016 02:02:21 +0100
++
+ debootstrap (1.0.75) unstable; urgency=medium
+ 
+   * Stop cleaning KEEP_DEBOOTSTRAP_DIR twice, as spotted by Chris Lamb
+diff --git a/debian/control b/debian/control
+index 334236b..1f52d1c 100644
+--- a/debian/control
++++ b/debian/control
+@@ -3,7 +3,7 @@ Section: admin
+ Priority: extra
+ Maintainer: Debian Install System Team <debian-boot@lists.debian.org>
+ Uploaders: Junichi Uekawa <dancer@debian.org>, Colin Watson <cjwatson@debian.org>, Christian Perrier <bubulle@debian.org>
+-Build-Depends: debhelper (>= 9), makedev (>= 2.3.1-69) [linux-any]
++Build-Depends: debhelper (>= 9)
+ Standards-Version: 3.9.6
+ Vcs-Browser: http://anonscm.debian.org/gitweb/?p=d-i/debootstrap.git
+ Vcs-Git: git://anonscm.debian.org/d-i/debootstrap.git
+diff --git a/debian/rules b/debian/rules
+index 2e44367..b395ba6 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -11,12 +11,7 @@ endif
+ %:
+ 	dh $@
+ 
+-# need to be root to make devices, so build is done in install target
+-override_dh_auto_build:
+-
+ override_dh_auto_install:
+-	dh_auto_build
+-	
+ 	$(MAKE) install DESTDIR=$(CURDIR)/debian/debootstrap
+ 	$(MAKE) install DESTDIR=$(CURDIR)/debian/debootstrap-udeb
+ 	
+diff --git a/debootstrap b/debootstrap
+index 2a959bb..4cea268 100755
+--- a/debootstrap
++++ b/debootstrap
+@@ -18,8 +18,6 @@ if [ -z "$DEBOOTSTRAP_DIR" ]; then
+ 	fi
+ fi
+ 
+-DEVICES_TARGZ=$DEBOOTSTRAP_DIR/devices.tar.gz
+-
+ . $DEBOOTSTRAP_DIR/functions
+ exec 4>&1
+ 
+@@ -635,7 +633,6 @@ if am_doing_phase first_stage; then
+ 	if ! am_doing_phase second_stage; then
+ 		cp "$0"				 "$TARGET/debootstrap/debootstrap"
+ 		cp $DEBOOTSTRAP_DIR/functions	 "$TARGET/debootstrap/functions"
+-		cp $DEBOOTSTRAP_DIR/devices.tar.gz	 "$TARGET/debootstrap/devices.tar.gz"
+ 		cp $SCRIPT			 "$TARGET/debootstrap/suite-script"
+ 		echo "$ARCH"			>"$TARGET/debootstrap/arch"
+ 		echo "$SUITE"			>"$TARGET/debootstrap/suite"
+diff --git a/functions b/functions
+index 8bef5e6..c882b3a 100644
+--- a/functions
++++ b/functions
+@@ -1060,19 +1060,27 @@ setup_devices () {
+ 	    hurd*)
+ 		setup_devices_hurd ;;
+ 	    *)
+-		if [ -e "$DEVICES_TARGZ" ]; then
+-			zcat "$DEVICES_TARGZ" | (cd "$TARGET"; tar -xf -)
+-		else
+-			if [ -e /dev/.devfsd ] ; then
+-				in_target mount -t devfs devfs /dev
+-			else
+-				error 1 NODEVTGZ "no %s. cannot create devices" "$DEVICES_TARGZ"
+-			fi
+-		fi
+-		;;
++		setup_devices_simple ;;
+ 	esac
+ }
+ 
++setup_devices_simple () {
++	# The list of devices that can be created in a container comes from
++	# src/core/cgroup.c in the systemd source tree.
++	mknod $TARGET/dev/null		c 1 3
++	mknod $TARGET/dev/zero		c 1 5
++	mknod $TARGET/dev/full		c 1 7
++	mknod $TARGET/dev/random	c 1 8
++	mknod $TARGET/dev/urandom	c 1 9
++	mknod $TARGET/dev/tty		c 5 0
++	mkdir $TARGET/dev/pts/ $TARGET/dev/shm/
++	ln -s pts/ptmx $TARGET/dev/ptmx
++	ln -s /proc/self/fd   $TARGET/dev/fd
++	ln -s /proc/self/fd/0 $TARGET/dev/stdin
++	ln -s /proc/self/fd/1 $TARGET/dev/stdout
++	ln -s /proc/self/fd/2 $TARGET/dev/stderr
++}
++
+ setup_devices_hurd () {
+ 	# Use the setup-translators of the hurd package, and firmlink
+ 	# $TARGET/{dev,servers} to the system ones.

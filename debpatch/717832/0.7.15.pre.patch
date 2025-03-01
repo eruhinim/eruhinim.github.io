@@ -1,0 +1,67 @@
+Index: source/dlcon.cc
+===================================================================
+--- source/dlcon.cc	(.../tags/0.7.14-1)	(Revision 4104)
++++ source/dlcon.cc	(.../trunk)	(Revision 4104)
+@@ -527,6 +527,14 @@
+ 		return EFLAG_JOB_BROKEN;
+ 	}
+ 
++	inline bool IsRecoverableState()
++	{
++		return (m_DlState == STATE_GETHEADER || m_DlState == STATE_REGETHEADER);
++		// XXX: In theory, could also easily recover from STATE_FINISH but that's
++		// unlikely to happen
++
++	}
++
+ private:
+ 	// not to be copied ever
+ 	tDlJob(const tDlJob&);
+@@ -707,7 +715,13 @@
+ 			dbgline;
+ 			sErrorMsg = "500 Connection timeout";
+ 			// was there anything to do at all?
+-			return inpipe.empty() ? HINT_SWITCH : (HINT_DISCON|EFLAG_JOB_BROKEN);
++			if(inpipe.empty())
++				return HINT_SWITCH;
++
++			if(inpipe.front()->IsRecoverableState())
++				return EFLAG_LOST_CON;
++			else
++				return (HINT_DISCON|EFLAG_JOB_BROKEN);
+ 		}
+ 
+ 		if (FD_ISSET(m_wakepipe[0], &rfds))
+@@ -916,17 +930,13 @@
+         {
+         	setLockGuard;
+         	LOG("New jobs: " << m_qNewjobs.size());
+-        	/* This evil code is left behind from the previous generation, now it breaks the
+-        	 * internal logics of the HTTP state machine by externally manipulating its state.
+-        	 * There is no need for this hack either because the pipeline cleanup after a sudden
+-        	 * interruption is handled explicitly elsewhere, see CleanRunning calls.
++
+         	if(m_bStopASAP)
+         	{
+-        		// ordered to stop but someone might rely on the running job. Keep it running,
+-        		// if the last user disappears and will cause the termination RSN
+-        		if(inpipe.size()>1)
+-        			inpipe.erase(++(inpipe.begin()), inpipe.end());
+-
++        		/* The no-more-users checking logic will purge orphaned items from the inpipe
++        		 * queue. When it's dirty, it will be have closed in the ExchangeData() handling
++        		 * but if not then it can be assumed to be clean and reusable.
++        		 */
+         		if(inpipe.empty())
+         		{
+         			if(con)
+@@ -934,8 +944,8 @@
+         			return;
+         		}
+         	}
+-        	*/
+ 
++
+         	if(m_qNewjobs.empty())
+         		goto go_select; // parent will notify RSN
+ 

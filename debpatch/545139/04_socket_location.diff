@@ -1,0 +1,251 @@
+From: Ansgar Burchardt <ansgar@debian.org>
+Date: Mon, 29 Nov 2010 12:40:18 +0100
+Subject: Move sockets away from $HOME
+Bug-Debian: http://bugs.debian.org/545139
+Bug: https://bugs.kde.org/show_bug.cgi?id=179006
+
+Move directories used for sockets to /tmp, using a symlink (that includes the
+hostname) to remember where it is located.
+
+Based on upstream commit e4affdfc2922efc10b647939fd4e068c02e256eb,
+includes the fix 1fa22c55fd98f29321b943605466ef4d4640de53 as well.
+
+--- akonadi-1.3.1.orig/server/CMakeLists.txt
++++ akonadi-1.3.1/server/CMakeLists.txt
+@@ -59,6 +59,7 @@
+ set(libakonadiprivate_SRCS
+   ${AKONADI_SHARED_SOURCES}
+   src/akonadi.cpp
++  src/socketdir.cpp
+   src/akonadiconnection.cpp
+   src/handler.cpp
+   src/handlerhelper.cpp
+--- akonadi-1.3.1.orig/server/src/akonadi.cpp
++++ akonadi-1.3.1/server/src/akonadi.cpp
+@@ -34,6 +34,7 @@
+ #include "debuginterface.h"
+ #include "storage/itemretrievalthread.h"
+ #include "preprocessormanager.h"
++#include "socketdir.h"
+ 
+ #include "libs/xdgbasedirs_p.h"
+ #include "libs/protocol_p.h"
+@@ -84,13 +85,7 @@
+     connectionSettings.setValue( QLatin1String( "Data/Method" ), QLatin1String( "NamedPipe" ) );
+     connectionSettings.setValue( QLatin1String( "Data/NamedPipe" ), namedPipe );
+ #else
+-    const QString defaultSocketDir = XdgBaseDirs::saveDir( "data", QLatin1String( "akonadi" ) );
+-    QString socketDir = settings.value( QLatin1String( "Connection/SocketDirectory" ), defaultSocketDir ).toString();
+-    if ( socketDir[0] != QLatin1Char( '/' ) ) {
+-      QDir::home().mkdir( socketDir );
+-      socketDir = QDir::homePath() + QLatin1Char( '/' ) + socketDir;
+-    }
+-
++    QString socketDir = preferredSocketDirectory( XdgBaseDirs::saveDir( "data", QLatin1String( "akonadi" ) ) );
+     const QString socketFile = socketDir + QLatin1String( "/akonadiserver.socket" );
+     unlink( socketFile.toUtf8().constData() );
+     if ( !listen( socketFile ) )
+@@ -202,8 +197,7 @@
+ 
+ #ifndef Q_OS_WIN
+     QSettings connectionSettings( connectionSettingsFile, QSettings::IniFormat );
+-    const QString defaultSocketDir = XdgBaseDirs::saveDir( "data", QLatin1String( "akonadi" ) );
+-    const QString socketDir = settings.value( QLatin1String( "Connection/SocketDirectory" ), defaultSocketDir ).toString();
++    const QString socketDir = preferredSocketDirectory( XdgBaseDirs::saveDir( "data", QLatin1String( "akonadi" ) ) );
+ 
+     if ( !QDir::home().remove( socketDir + QLatin1String( "/akonadiserver.socket" ) ) )
+         akError() << "Failed to remove Unix socket";
+@@ -261,7 +255,7 @@
+ void AkonadiServer::startPostgresqlDatabaseProcess()
+ {
+   const QString dataDir = XdgBaseDirs::saveDir( "data", QLatin1String( "akonadi/db_data" ) );
+-  const QString socketDir = XdgBaseDirs::saveDir( "data", QLatin1String( "akonadi/db_misc" ) );
++  const QString socketDir = preferredSocketDirectory( XdgBaseDirs::saveDir( "data", QLatin1String( "akonadi/db_misc" ) ) );
+ 
+   if ( !QFile::exists( QString::fromLatin1( "%1/PG_VERSION" ).arg( dataDir ) ) ) {
+     // postgre data directory not initialized yet, so call initdb on it
+@@ -371,7 +365,7 @@
+ 
+   const QString dataDir = XdgBaseDirs::saveDir( "data", QLatin1String( "akonadi/db_data" ) );
+   const QString akDir   = XdgBaseDirs::saveDir( "data", QLatin1String( "akonadi/" ) );
+-  const QString miscDir = XdgBaseDirs::saveDir( "data", QLatin1String( "akonadi/db_misc" ) );
++  const QString miscDir = preferredSocketDirectory( XdgBaseDirs::saveDir( "data", QLatin1String( "akonadi/db_misc" ) ) );
+   const QString fileDataDir = XdgBaseDirs::saveDir( "data", QLatin1String( "akonadi/file_db_data" ) );
+ 
+   // generate config file
+--- /dev/null
++++ akonadi-1.3.1/server/src/socketdir.cpp
+@@ -0,0 +1,127 @@
++#include "socketdir.h"
++
++#include "libs/xdgbasedirs_p.h"
++
++#include <QtCore/QDebug>
++#include <QtCore/QDir>
++#include <QtCore/QFileInfo>
++#include <QtCore/QSettings>
++#include <QtNetwork/QHostInfo>
++
++#include <cerrno>
++#include <cstdlib>
++#include <pwd.h>
++#include <sys/types.h>
++#include <unistd.h>
++
++static QString akonadiSocketDirectory();
++static bool checkSocketDirectory( const QString &path );
++static bool createSocketDirectory( const QString &link, const QString &tmpl );
++
++using namespace Akonadi;
++
++QString Akonadi::preferredSocketDirectory( const QString &defaultDirectory )
++{
++  const QString serverConfigFile = XdgBaseDirs::akonadiServerConfigFile( XdgBaseDirs::ReadWrite );
++  const QSettings serverSettings( serverConfigFile, QSettings::IniFormat );
++
++#if defined(Q_OS_WINCE) || defined(Q_OS_WIN)
++  const QString socketDir = serverSettings.value( QLatin1String( "Connection/SocketDirectory" ), defaultDirectory ).toString();
++#else
++  QString socketDir = defaultDirectory;
++  if ( !serverSettings.contains( QLatin1String( "Connection/SocketDirectory" ) ) ) {
++    // if no socket directory is defined, use the symlinked from /tmp
++    socketDir = akonadiSocketDirectory();
++
++    if ( socketDir.isEmpty() ) // if that does not work, fall back on default
++      socketDir = defaultDirectory;
++  } else {
++    socketDir = serverSettings.value( QLatin1String( "Connection/SocketDirectory" ), defaultDirectory ).toString();
++  }
++
++  const QString userName = QString::fromLocal8Bit( qgetenv( "USER" ) );
++  if ( socketDir.contains( QLatin1String( "$USER" ) ) && !userName.isEmpty() )
++    socketDir.replace( QLatin1String( "$USER" ), userName );
++
++  if ( socketDir[0] != QLatin1Char( '/' ) ) {
++    QDir::home().mkdir( socketDir );
++    socketDir = QDir::homePath() + QLatin1Char( '/' ) + socketDir;
++  }
++
++  QFileInfo dirInfo( socketDir );
++  if ( !dirInfo.exists() )
++    QDir::home().mkpath( dirInfo.absoluteFilePath() );
++#endif
++  return socketDir;
++}
++
++QString akonadiSocketDirectory()
++{
++  const QString hostname = QHostInfo::localHostName();
++
++  if ( hostname.isEmpty() ) {
++    qCritical() << "QHostInfo::localHostName() failed";
++    return QString();
++  }
++
++  const uid_t uid = getuid();
++  const struct passwd *pw_ent = getpwuid( uid );
++  if ( !pw_ent ) {
++    qCritical() << "Could not get passwd entry for user id" << uid;
++    return QString();
++  }
++
++  const QString link = XdgBaseDirs::saveDir( "data", QLatin1String( "akonadi" ) ) + QLatin1Char( '/' ) + QLatin1String( "socket-" ) + hostname;
++  const QString tmpl = QLatin1String( "akonadi-" ) + QLatin1String( pw_ent->pw_name ) + QLatin1String( ".XXXXXX" );
++
++  if ( checkSocketDirectory( link ) )
++    return link;
++
++  if ( createSocketDirectory( link, tmpl ) )
++    return link;
++
++  qCritical() << "Could not create socket directory for Akonadi.";
++  return QString();
++}
++
++static bool checkSocketDirectory( const QString &path )
++{
++  QFileInfo info( path );
++
++  if ( !info.exists() )
++    return false;
++
++  if ( info.isSymLink() )
++    info = QFileInfo( info.symLinkTarget() );
++
++  if ( !info.isDir() )
++    return false;
++
++  if ( info.ownerId() != getuid() )
++    return false;
++
++  return true;
++}
++
++static bool createSocketDirectory( const QString &link, const QString &tmpl )
++{
++  QString directory = QString::fromLatin1( "%1%2%3" ).arg( QDir::tempPath() ).arg( QDir::separator() ).arg( tmpl );
++
++  QByteArray directoryString = directory.toLocal8Bit().data();
++
++  if ( !mkdtemp( directoryString.data() ) ) {
++    qCritical() << "Creating socket directory with template" << directoryString << "failed:" << strerror( errno );
++    return false;
++  }
++
++  directory = QString::fromLocal8Bit( directoryString );
++
++  QFile::remove( link );
++
++  if ( !QFile::link( directory, link ) ) {
++    qCritical() << "Creating symlink from" << directory << "to" << link << "failed";
++    return false;
++  }
++
++  return true;
++}
+--- /dev/null
++++ akonadi-1.3.1/server/src/socketdir.h
+@@ -0,0 +1,10 @@
++#ifndef AKONADI_SOCKETDIR_H
++#define AKONADI_SOCKETDIR_H
++
++#include <QtCore/QString>
++
++namespace Akonadi {
++  QString preferredSocketDirectory(const QString &defaultDirectory);
++}
++
++#endif
+--- akonadi-1.3.1.orig/server/src/storage/dbconfig.cpp
++++ akonadi-1.3.1/server/src/storage/dbconfig.cpp
+@@ -20,6 +20,7 @@
+ #include "dbconfig.h"
+ #include "akdebug.h"
+ #include "../../libs/xdgbasedirs_p.h"
++#include "../socketdir.h"
+ 
+ #include <QDir>
+ #include <QFile>
+@@ -97,11 +98,11 @@
+         if ( !mysqladminPath.isEmpty() ) {
+           defaultCleanShutdownCommand = QString::fromLatin1("%1 shutdown --socket=%2/mysql.socket")
+                                             .arg(mysqladminPath)
+-                                            .arg(XdgBaseDirs::saveDir( "data", QLatin1String( "akonadi/db_misc" ) ) );
++                                            .arg( preferredSocketDirectory( XdgBaseDirs::saveDir( "data", QLatin1String( "akonadi/db_misc" ) ) ) );
+         }
+         mInternalServer = settings.value( QLatin1String("QMYSQL/StartServer"), defaultInternalServer ).toBool();
+         if ( mInternalServer ) {
+-          const QString miscDir = XdgBaseDirs::saveDir( "data", QLatin1String( "akonadi/db_misc" ) );
++          const QString miscDir = preferredSocketDirectory( XdgBaseDirs::saveDir( "data", QLatin1String( "akonadi/db_misc" ) ) );
+           defaultOptions = QString::fromLatin1( "UNIX_SOCKET=%1/mysql.socket" ).arg( miscDir );
+         }
+       } else if ( mDriverName == QLatin1String("QMYSQL_EMBEDDED") ) {
+@@ -142,7 +143,7 @@
+ 
+       // verify settings and apply permanent changes (written out below)
+       if ( mDriverName == QLatin1String( "QMYSQL" ) ) {
+-        if ( mInternalServer && mConnectionOptions.isEmpty() )
++        if ( mInternalServer /* && mConnectionOptions.isEmpty() */ )
+           mConnectionOptions = defaultOptions;
+         if ( mInternalServer && (mServerPath.isEmpty() || !QFile::exists(mServerPath) ) )
+           mServerPath = defaultServerPath;

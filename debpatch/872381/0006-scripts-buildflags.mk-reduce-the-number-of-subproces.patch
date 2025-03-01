@@ -1,0 +1,102 @@
+From 99a358059fac6ce7194a89234187c2e42e50b273 Mon Sep 17 00:00:00 2001
+From: Nicolas Boulenguez <nicolas@debian.org>
+Date: Wed, 10 Jan 2024 20:30:47 +0100
+Subject: [PATCH 06/10] scripts/buildflags.mk: reduce the number of
+ subprocesses
+
+Ensure that dpkg-buildflags is only called when a *FLAGS variable is
+is expanded.
+
+If so, call it once and cache all results for future expansions.
+---
+ scripts/mk/buildflags.mk | 45 +++++++++++++++++++++++-----------------
+ 1 file changed, 26 insertions(+), 19 deletions(-)
+
+diff --git a/scripts/mk/buildflags.mk b/scripts/mk/buildflags.mk
+index 02baa53f2..f0d32d78c 100644
+--- a/scripts/mk/buildflags.mk
++++ b/scripts/mk/buildflags.mk
+@@ -26,8 +26,13 @@
+ #   LDFLAGS_FOR_BUILD: flags for the build linker.
+ #
+ # You can also export them in the environment by setting
+-# DPKG_EXPORT_BUILDFLAGS to a non-empty value.
++# DPKG_EXPORT_BUILDFLAGS.
+ #
++# These variables are computed by dpkg-buildflags(1) and should not be
++# directly overridden.  The following setting are exported to
++# dpkg-buildflags.
++#   DEB_BUILD_{OPTIONS,MAINT_OPTIONS,PATH}
++#   DEB_*_MAINT_{APPEND,PREPEND,SET,STRIP}
+ 
+ ifndef dpkg_buildflags.mk_included
+ dpkg_buildflags.mk_included :=
+@@ -35,31 +40,24 @@ dpkg_buildflags.mk_included :=
+ # This list is kept in sync with the default set of flags returned
+ # by dpkg-buildflags.
+ 
+-dpkg_lazy_eval ?= $$(or $$(value DPKG_CACHE_$(1)),$$(eval DPKG_CACHE_$(1) := $$(shell $(2)))$$(value DPKG_CACHE_$(1)))
+-
+-DPKG_BUILDFLAGS_LIST = \
++DPKG_BUILDFLAGS_LIST := $(foreach var,\
+   ASFLAGS \
+-  ASFLAGS_FOR_BUILD \
+   CFLAGS \
+-  CFLAGS_FOR_BUILD \
+   CPPFLAGS \
+-  CPPFLAGS_FOR_BUILD \
+   CXXFLAGS \
+-  CXXFLAGS_FOR_BUILD \
+   OBJCFLAGS \
+-  OBJCFLAGS_FOR_BUILD \
+   OBJCXXFLAGS \
+-  OBJCXXFLAGS_FOR_BUILD \
++  GCJFLAGS \
+   DFLAGS \
+-  DFLAGS_FOR_BUILD \
+   FFLAGS \
+-  FFLAGS_FOR_BUILD \
+   FCFLAGS \
+-  FCFLAGS_FOR_BUILD \
+   LDFLAGS \
+-  LDFLAGS_FOR_BUILD \
+-  # EOL
++  ,$(var) $(var)_FOR_BUILD)
++
++# Accumulate the parameters for dpkg-buildflags, in case it is ever
++# called.
+ 
++DPKG_BUILDFLAGS_EXPORT_ENVVAR :=
+ define dpkg_buildflags_export_envvar
+   ifdef $(1)
+     DPKG_BUILDFLAGS_EXPORT_ENVVAR += $(1)="$$(value $(1))"
+@@ -73,13 +71,22 @@ $(foreach flag,$(DPKG_BUILDFLAGS_LIST),\
+   $(foreach operation,SET STRIP APPEND PREPEND,\
+     $(eval $(call dpkg_buildflags_export_envvar,DEB_$(flag)_MAINT_$(operation)))))
+ 
+-dpkg_buildflags_setvar = $(1) = $(call dpkg_lazy_eval,$(1),$(DPKG_BUILDFLAGS_EXPORT_ENVVAR) dpkg-buildflags --get $(1))
+-
+-$(foreach flag,$(DPKG_BUILDFLAGS_LIST),\
+-  $(eval $(call dpkg_buildflags_setvar,$(flag))))
++# This variable is only expanded on demand, and we ensure that it
++# happens at most once..
++dpkg-buildflags_run = $(eval $(shell \
++  $(DPKG_BUILDFLAGS_EXPORT_ENVVAR) dpkg-buildflags \
++  | sed 's/^\([^=]*\)\(.*\)/$$(eval \1:\2)/'))
+ 
+ ifdef DPKG_EXPORT_BUILDFLAGS
++  # We must compute all values right now.
++  $(dpkg-buildflags_run)
+   export $(DPKG_BUILDFLAGS_LIST)
++else
++  # Only run a subprocess when a variable is actually used,
++  # but then replace each recursive definition with a non-recursive one
++  # (and of course return the asked value).
++  $(foreach var,$(DPKG_BUILDFLAGS_LIST),\
++    $(eval $(var) = $$(dpkg-buildflags_run)$$(var)))
+ endif
+ 
+ endif
+-- 
+2.39.2
+

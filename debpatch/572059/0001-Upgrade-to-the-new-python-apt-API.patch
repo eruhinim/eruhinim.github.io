@@ -1,0 +1,415 @@
+From 1d7c4867a17786271784aedcb5c1b2deef0a4e61 Mon Sep 17 00:00:00 2001
+From: Julian Andres Klode <jak@debian.org>
+Date: Mon, 1 Mar 2010 13:13:09 +0100
+Subject: [PATCH] Upgrade to the new python-apt API.
+
+---
+ debdelta          |  103 ++++++++++++++++++-----------------------------------
+ debdelta.precache |   89 +++++++++++++++++----------------------------
+ debian/control    |    2 +-
+ 3 files changed, 70 insertions(+), 124 deletions(-)
+
+diff --git a/debdelta b/debdelta
+index 8e92cc1..cbb0126 100755
+--- a/debdelta
++++ b/debdelta
+@@ -2630,17 +2630,13 @@ def do_deltas(debs):
+   
+   original_cwd = os.getcwd()
+   start_time = time.time()
+-  import warnings
+-  warnings.simplefilter("ignore",FutureWarning)
++
+   try:
+-    from apt import VersionCompare
++    import apt_pkg
++    apt_pkg.init_system()
++    from apt_pkg import version_compare
+   except ImportError:
+-    try:
+-      import apt_pkg
+-      apt_pkg.InitSystem()
+-      from apt_pkg import VersionCompare
+-    except ImportError:
+-      raise DebDeltaError('python module "apt_pkg" is missing. Please install python-apt', retriable=True)
++    raise DebDeltaError('python module "apt_pkg" is missing. Please install python-apt', retriable=True)
+     
+   f=my_popen_read('hostname -f')
+   try:
+@@ -2920,7 +2916,7 @@ def do_deltas(debs):
+       return -1
+     if 'Version' not in b:
+       return 1
+-    return VersionCompare( a['Version'] , b['Version']  )
++    return version_compare( a['Version'] , b['Version']  )
+   
+   for pa,ar in info_by_pack_arch :
+     info_pack=info_by_pack_arch[ (pa,ar) ]
+@@ -3306,7 +3302,7 @@ def delta_upgrade_(args):
+   
+   apt_pkg.init()
+ 
+-  from apt import SizeToStr
++  from apt_pkg import size_to_str
+ 
+   if DO_PROGRESS:
+     sys.stderr.write('Upgrading APT cache...\r')
+@@ -3395,10 +3391,10 @@ def delta_upgrade_(args):
+               if  terminalcolumns:
+                 sys.stderr.write(' ' * (terminalcolumns-2) +'\r')
+               sys.stderr.write("Created,    time: %.2fsec speed: %4s/sec : %s\n" % \
+-                  (a , SizeToStr(l / (a+0.001)) , os.path.basename(newdeb)))
++                  (a , size_to_str(l / (a+0.001)) , os.path.basename(newdeb)))
+             else:
+               print  "Created,    time: %.2fsec speed: %4s/sec : %s " % \
+-                  (a , SizeToStr(l / (a+0.001)) , os.path.basename(newdeb))
++                  (a , size_to_str(l / (a+0.001)) , os.path.basename(newdeb))
+           except KeyboardInterrupt:
+             thread.interrupt_main()
+             rmtree(TD)
+@@ -3677,7 +3673,7 @@ def delta_upgrade_(args):
+           statusdb['downloadprogress']=99.9 * out.tell() / total_len
+         a=time.time() + conn_time - start_time
+         if a  > 0.5 :
+-          statusdb['downloadspeed']=SizeToStr(float(j+len_downloaded)/a)
++          statusdb['downloadspeed']=size_to_str(float(j+len_downloaded)/a)
+         s=r.read(1024)
+       out.close()
+       r.close()
+@@ -3687,12 +3683,12 @@ def delta_upgrade_(args):
+       #  total_len = os.path.getsize(outnametemp)
+       if not DO_PROGRESS:
+         print "Downloaded, time: %.2fsec speed: %4s/sec : %s " % \
+-              (a , SizeToStr(j / (a+0.001)) , os.path.basename(uri))
++              (a , size_to_str(j / (a+0.001)) , os.path.basename(uri))
+       else:
+         if terminalcolumns:
+           sys.stderr.write(' ' * (terminalcolumns-2) +'\r')
+         sys.stderr.write("Downloaded, time: %.2fsec speed: %4s/sec : %s\n" % \
+-                         (a , SizeToStr(j / (a+0.001)) , os.path.basename(uri)))
++                         (a , size_to_str(j / (a+0.001)) , os.path.basename(uri)))
+       
+       os.rename(outnametemp,outname)
+       #FIXME this is incorrect by 1024 bytes
+@@ -3715,21 +3711,6 @@ def delta_upgrade_(args):
+ 
+   not_available_deltas=[]
+ 
+-  #distinguish python-apt version 0.7.7 from 0.7.10
+-  newer_python_apt = hasattr(apt.package,'Version')
+-
+-  if hasattr(apt.package.Package,'is_installed'):
+-    is_installed=lambda p : p.is_installed
+-  elif hasattr(apt.package.Package,'isInstalled'):
+-    is_installed=lambda p : p.isInstalled
+-  else: assert 0
+-
+-  if hasattr(apt.package.Package,'marked_upgrade'):
+-    marked_upgrade=lambda p : p.marked_upgrade
+-  elif hasattr(apt.package.Package,'markedUpgrade'):
+-    marked_upgrade=lambda p : p.markedUpgrade
+-  else: assert 0
+-
+   progress_count=0
+   
+   ## first merry-go-round, use package cache to fill available_deltas
+@@ -3740,39 +3721,25 @@ def delta_upgrade_(args):
+       if 0 == (progress_count & 63):
+         sys.stderr.write('%2.1f%% %s\r' % ((float(progress_count) * 100.0 / len(cache)), ' '*max(1,terminalcolumns-7)))
+ 
+-    if is_installed(p) and marked_upgrade(p) :
++    if p.is_installed and p.marked_upgrade:
+       if args and p.name not in args:
+         continue
+-      if newer_python_apt:
+-        #thanks a lot to Julian Andres Klode
+-        candidate=p.candidate
+-        origin = p.candidate.origins[0]
+-        arch=candidate.architecture
+-        deb_uri=candidate.uri
+-        installed_version=p.installed.version
+-        candidate_version=p.candidate.version
+-        deb_path=string.split(deb_uri,'/')
+-        try:
+-          thepoolindex=deb_path.index('pool')
+-        except ValueError:
+-          sys.stderr.write('! Package "%s" (version %s) does not have "pool" in the uri %s \n' % (p.name, candidate_version, deb_uri))
+-          continue
+-        deb_path=string.join(deb_path[(thepoolindex):],'/')
+-      else:
+-        #thanks a lot to Michael Vogt
+-        p._lookupRecord(True)
+-        dpkg_params = apt_pkg.ParseSection(p._records.Record)
+-        arch = dpkg_params['Architecture']
+-        origin = p.candidateOrigin[0]
+-        candidate_version = p.candidateVersion
+-        installed_version = p.installedVersion
+-        deb_path = dpkg_params['Filename']
+-        for (packagefile,i) in p._depcache.GetCandidateVer(p._pkg).FileList:
+-          indexfile = cache._list.FindIndex(packagefile)
+-          if indexfile:
+-            deb_uri=indexfile.ArchiveURI(deb_path)
+-            break
+-      
++
++      #thanks a lot to Julian Andres Klode
++      candidate=p.candidate
++      origin = p.candidate.origins[0]
++      arch=candidate.architecture
++      deb_uri=candidate.uri
++      installed_version=p.installed.version
++      candidate_version=p.candidate.version
++      deb_path=string.split(deb_uri,'/')
++      try:
++        thepoolindex=deb_path.index('pool')
++      except ValueError:
++        sys.stderr.write('! Package "%s" (version %s) does not have "pool" in the uri %s \n' % (p.name, candidate_version, deb_uri))
++        continue
++      deb_path=string.join(deb_path[(thepoolindex):],'/')
++
+       #try all possible variants of the filename
+       newdebs=[p.name+'_'+candidate_version+'_'+arch+'.deb',
+                os.path.basename(deb_uri)]
+@@ -3917,11 +3884,11 @@ def delta_upgrade_(args):
+ 
+   if DEBUG or VERBOSE:
+     print ' So far, downloaded, time: %.2fsec size: %s speed: %4s/sec' % \
+-        (deltas_down_time, SizeToStr(deltas_down_size), SizeToStr(deltas_down_size/float(deltas_down_time+0.001)))
++        (deltas_down_time, size_to_str(deltas_down_size), size_to_str(deltas_down_size/float(deltas_down_time+0.001)))
+ 
+   if DEBUG or VERBOSE:
+     print 'Deltas: %d present and %d not.' % (len(available_deltas), len(not_available_deltas))
+-    print 'Need to get %s of deltas.' %  SizeToStr(sum([a[0] for a in available_deltas]))
++    print 'Need to get %s of deltas.' %  size_to_str(sum([a[0] for a in available_deltas]))
+ 
+   ############# start downloading and progress thread
+   
+@@ -4014,21 +3981,21 @@ def delta_upgrade_(args):
+       a=float(deltas_down_size)
+       t=deltas_down_time
+       print ' download deltas size %s time %dsec speed %s/sec' %\
+-            ( SizeToStr(a) , int(t), SizeToStr(a / t ))
++            ( size_to_str(a) , int(t), size_to_str(a / t ))
+     if thread_returns['debs_time'] :
+       a=float(thread_returns['debs_size'])
+       t=thread_returns['debs_time']
+       print ' patching to debs size %s time %dsec speed %s/sec' %\
+-            ( SizeToStr(a) , int(t), SizeToStr(a / t ))
++            ( size_to_str(a) , int(t), size_to_str(a / t ))
+     if debs_down_time :
+       a=float(debs_down_size)
+       t=debs_down_time
+       print ' download debs size %s time %dsec speed %s/sec' %\
+-            ( SizeToStr(a) , int(t), SizeToStr(a / t ))
++            ( size_to_str(a) , int(t), size_to_str(a / t ))
+   if total_time:
+     a=float(debs_down_size  + thread_returns['debs_size'])
+     print ' total resulting debs size %s time %dsec virtual speed: %s/sec' %  \
+-          ( SizeToStr(a ), int(total_time), SizeToStr(a / total_time))
++          ( size_to_str(a ), int(total_time), size_to_str(a / total_time))
+     
+   return max(mainexitcodes)
+ 
+diff --git a/debdelta.precache b/debdelta.precache
+index 774fdab..69aa287 100755
+--- a/debdelta.precache
++++ b/debdelta.precache
+@@ -2625,17 +2625,13 @@ def do_deltas(allargs, OLD, ALT, DIR):
+   
+   original_cwd = os.getcwd()
+   start_time = time.time()
+-  import warnings
+-  warnings.simplefilter("ignore",FutureWarning)
++
+   try:
+-    from apt import VersionCompare
++    import apt_pkg
++    apt_pkg.init_system()
++    from apt_pkg import version_compare
+   except ImportError:
+-    try:
+-      import apt_pkg
+-      apt_pkg.InitSystem()
+-      from apt_pkg import VersionCompare
+-    except ImportError:
+-      raise DebDeltaError('python module "apt_pkg" is missing. Please install python-apt', retriable=True)
++    raise DebDeltaError('python module "apt_pkg" is missing. Please install python-apt', retriable=True)
+     
+   f=my_popen_read('hostname -f')
+   try:
+@@ -2936,7 +2932,7 @@ def do_deltas(allargs, OLD, ALT, DIR):
+     return False
+ 
+   def order_by_version(a,b):
+-    return VersionCompare( a['Version'] , b['Version']  )
++    return version_compare( a['Version'] , b['Version']  )
+   
+   for pa,ar in info_by_pack_arch :
+     info_pack=info_by_pack_arch[ (pa,ar) ]
+@@ -3285,7 +3281,7 @@ def delta_upgrade_(args):
+   
+   apt_pkg.init()
+ 
+-  from apt import SizeToStr
++  from apt_pkg import size_to_str
+ 
+   if DO_PROGRESS:
+     sys.stderr.write('Upgrading APT cache...\r')
+@@ -3374,10 +3370,10 @@ def delta_upgrade_(args):
+               if  terminalcolumns:
+                 sys.stderr.write(' ' * (terminalcolumns-2) +'\r')
+               sys.stderr.write("Created,    time: %.2fsec speed: %4s/sec : %s\n" % \
+-                  (a , SizeToStr(l / (a+0.001)) , os.path.basename(newdeb)))
++                  (a , size_to_str(l / (a+0.001)) , os.path.basename(newdeb)))
+             else:
+               print  "Created,    time: %.2fsec speed: %4s/sec : %s " % \
+-                  (a , SizeToStr(l / (a+0.001)) , os.path.basename(newdeb))
++                  (a , size_to_str(l / (a+0.001)) , os.path.basename(newdeb))
+           except KeyboardInterrupt:
+             thread.interrupt_main()
+             rmtree(TD)
+@@ -3650,7 +3646,7 @@ def delta_upgrade_(args):
+           statusdb['downloadprogress']=99.9 * out.tell() / total_len
+         a=time.time() + conn_time - start_time
+         if a  > 0.5 :
+-          statusdb['downloadspeed']=SizeToStr(float(j+len_downloaded)/a)
++          statusdb['downloadspeed']=size_to_str(float(j+len_downloaded)/a)
+         s=r.read(1024)
+       out.close()
+       r.close()
+@@ -3660,12 +3656,12 @@ def delta_upgrade_(args):
+       #  total_len = os.path.getsize(outnametemp)
+       if not DO_PROGRESS:
+         print "Downloaded, time: %.2fsec speed: %4s/sec : %s " % \
+-              (a , SizeToStr(j / (a+0.001)) , os.path.basename(uri))
++              (a , size_to_str(j / (a+0.001)) , os.path.basename(uri))
+       else:
+         if terminalcolumns:
+           sys.stderr.write(' ' * (terminalcolumns-2) +'\r')
+         sys.stderr.write("Downloaded, time: %.2fsec speed: %4s/sec : %s\n" % \
+-                         (a , SizeToStr(j / (a+0.001)) , os.path.basename(uri)))
++                         (a , size_to_str(j / (a+0.001)) , os.path.basename(uri)))
+       
+       os.rename(outnametemp,outname)
+       #FIXME this is incorrect by 1024 bytes
+@@ -3680,9 +3676,6 @@ def delta_upgrade_(args):
+   available_deltas=[]
+ 
+   not_available_deltas=[]
+-
+-  #distinguish python-apt version 0.7.7 from 0.7.10
+-  newer_python_apt = hasattr(apt.package,'Version')
+   
+   progress_count=0
+   
+@@ -3694,38 +3687,24 @@ def delta_upgrade_(args):
+       if 0 == (progress_count & 63):
+         sys.stderr.write('%2.1f%% %s\r' % ((float(progress_count) * 100.0 / len(cache)), ' '*max(1,terminalcolumns-7)))
+ 
+-    if p.isInstalled and p.markedUpgrade :
++    if p.is_installed and p.marked_upgrade :
+       if args and p.name not in args:
+         continue
+-      if newer_python_apt:
+-        #thanks a lot to Julian Andres Klode
+-        candidate=p.candidate
+-        origin = p.candidate.origins[0]
+-        arch=candidate.architecture
+-        deb_uri=candidate.uri
+-        installed_version=p.installed.version
+-        candidate_version=p.candidate.version
+-        deb_path=string.split(deb_uri,'/')
+-        try:
+-          thepoolindex=deb_path.index('pool')
+-        except ValueError:
+-          sys.stderr.write('! Package "%s" (version %s) does not have "pool" in the uri %s \n' % (p.name, candidate_version, deb_uri))
+-          continue
+-        deb_path=string.join(deb_path[(thepoolindex):],'/')
+-      else:
+-        #thanks a lot to Michael Vogt
+-        p._lookupRecord(True)
+-        dpkg_params = apt_pkg.ParseSection(p._records.Record)
+-        arch = dpkg_params['Architecture']
+-        origin = p.candidateOrigin[0]
+-        candidate_version = p.candidateVersion
+-        installed_version = p.installedVersion
+-        deb_path = dpkg_params['Filename']
+-        for (packagefile,i) in p._depcache.GetCandidateVer(p._pkg).FileList:
+-          indexfile = cache._list.FindIndex(packagefile)
+-          if indexfile:
+-            deb_uri=indexfile.ArchiveURI(deb_path)
+-            break
++      #thanks a lot to Julian Andres Klode
++      candidate=p.candidate
++      origin = p.candidate.origins[0]
++      arch=candidate.architecture
++      deb_uri=candidate.uri
++      installed_version=p.installed.version
++      candidate_version=p.candidate.version
++      deb_path=string.split(deb_uri,'/')
++      try:
++        thepoolindex=deb_path.index('pool')
++      except ValueError:
++        sys.stderr.write('! Package "%s" (version %s) does not have "pool" in the uri %s \n' % (p.name, candidate_version, deb_uri))
++        continue
++      deb_path=string.join(deb_path[(thepoolindex):],'/')
++
+       
+       #try all possible variants of the filename
+       newdebs=[p.name+'_'+candidate_version+'_'+arch+'.deb',
+@@ -3865,11 +3844,11 @@ def delta_upgrade_(args):
+ 
+   if DEBUG or VERBOSE:
+     print ' So far, downloaded, time: %.2fsec size: %s speed: %4s/sec' % \
+-        (deltas_down_time, SizeToStr(deltas_down_size), SizeToStr(deltas_down_size/float(deltas_down_time+0.001)))
++        (deltas_down_time, size_to_str(deltas_down_size), size_to_str(deltas_down_size/float(deltas_down_time+0.001)))
+ 
+   if DEBUG or VERBOSE:
+     print 'Deltas: %d present and %d not.' % (len(available_deltas), len(not_available_deltas))
+-    print 'Need to get %s of deltas.' %  SizeToStr(sum([a[0] for a in available_deltas]))
++    print 'Need to get %s of deltas.' %  size_to_str(sum([a[0] for a in available_deltas]))
+ 
+   ############# start downloading and progress thread
+ 
+@@ -3965,21 +3944,21 @@ def delta_upgrade_(args):
+       a=float(deltas_down_size)
+       t=deltas_down_time
+       print ' download deltas size %s time %dsec speed %s/sec' %\
+-            ( SizeToStr(a) , int(t), SizeToStr(a / t ))
++            ( size_to_str(a) , int(t), size_to_str(a / t ))
+     if thread_returns['debs_time'] :
+       a=float(thread_returns['debs_size'])
+       t=thread_returns['debs_time']
+       print ' patching to debs size %s time %dsec speed %s/sec' %\
+-            ( SizeToStr(a) , int(t), SizeToStr(a / t ))
++            ( size_to_str(a) , int(t), size_to_str(a / t ))
+     if debs_down_time :
+       a=float(debs_down_size)
+       t=debs_down_time
+       print ' download debs size %s time %dsec speed %s/sec' %\
+-            ( SizeToStr(a) , int(t), SizeToStr(a / t ))
++            ( size_to_str(a) , int(t), size_to_str(a / t ))
+   if total_time:
+     a=float(debs_down_size  + thread_returns['debs_size'])
+     print ' total resulting debs size %s time %dsec virtual speed: %s/sec' %  \
+-          ( SizeToStr(a ), int(total_time), SizeToStr(a / total_time))
++          ( size_to_str(a ), int(total_time), size_to_str(a / total_time))
+     
+   return max(mainexitcodes)
+ 
+diff --git a/debian/control b/debian/control
+index a0918ef..9027532 100644
+--- a/debian/control
++++ b/debian/control
+@@ -8,7 +8,7 @@ Standards-Version: 3.8.3.0
+ Package: debdelta
+ Architecture: any
+ Depends: python, bzip2, binutils, ${shlibs:Depends}
+-Recommends: python-apt, xdelta3, xdelta, lzma, xdelta, bsdiff
++Recommends: python-apt (>= 0.7.93), xdelta3, xdelta, lzma, xdelta, bsdiff
+ Enhances: cupt
+ Description: diff and patch utilities which work with Debian packages
+  debdelta is a program suite designed to compute changes between
+-- 
+1.7.0
+

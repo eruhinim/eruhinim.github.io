@@ -1,0 +1,172 @@
+--- a/caja-dropbox.in	2017-07-12 18:33:02.375215166 -0400
++++ b/caja-dropbox.in	2017-07-12 18:37:44.826998583 -0400
+@@ -28,7 +28,7 @@
+ import platform
+ import shutil
+ import socket
+-import StringIO
++import io
+ import subprocess
+ import sys
+ import tarfile
+@@ -40,9 +40,9 @@
+ import urllib2
+ 
+ try:
+-    import gpgme
++    import gnupg
+ except ImportError:
+-    gpgme = None
++    gnupg = None
+ 
+ from contextlib import closing, contextmanager
+ from posixpath import curdir, sep, pardir, join, abspath, commonprefix
+@@ -67,22 +67,25 @@
+ enc = locale.getpreferredencoding()
+ 
+ # Available from https://linux.dropbox.com/fedora/rpm-public-key.asc
++# last fetched 2017-07-12
+ DROPBOX_PUBLIC_KEY = """
+ -----BEGIN PGP PUBLIC KEY BLOCK-----
+-Version: SKS 1.1.0
++Version: GnuPG v1.4.9 (GNU/Linux)
+ 
+-mQENBEt0ibEBCACv4hZRPqwtpU6z8+BB5YZU1a3yjEvg2W68+a6hEwxtCa2U++4dzQ+7EqaU
+-q5ybQnwtbDdpFpsOi9x31J+PCpufPUfIG694/0rlEpmzl2GWzY8NqfdBFGGm/SPSSwvKbeNc
+-FMRLu5neo7W9kwvfMbGjHmvUbzBUVpCVKD0OEEf1q/Ii0Qcekx9CMoLvWq7ZwNHEbNnij7ec
+-nvwNlE2MxNsOSJj+hwZGK+tM19kuYGSKw4b5mR8IyThlgiSLIfpSBh1n2KX+TDdk9GR+57TY
+-vlRu6nTPu98P05IlrrCP+KF0hYZYOaMvQs9Rmc09tc/eoQlN0kkaBWw9Rv/dvLVc0aUXABEB
+-AAG0MURyb3Bib3ggQXV0b21hdGljIFNpZ25pbmcgS2V5IDxsaW51eEBkcm9wYm94LmNvbT6J
+-ATYEEwECACAFAkt0ibECGwMGCwkIBwMCBBUCCAMEFgIDAQIeAQIXgAAKCRD8kYszUESRLi/z
+-B/wMscEa15rS+0mIpsORknD7kawKwyda+LHdtZc0hD/73QGFINR2P23UTol/R4nyAFEuYNsF
+-0C4IAD6y4pL49eZ72IktPrr4H27Q9eXhNZfJhD7BvQMBx75L0F5gSQwuC7GdYNlwSlCD0AAh
+-Qbi70VBwzeIgITBkMQcJIhLvllYo/AKD7Gv9huy4RLaIoSeofp+2Q0zUHNPl/7zymOqu+5Ox
+-e1ltuJT/kd/8hU+N5WNxJTSaOK0sF1/wWFM6rWd6XQUP03VyNosAevX5tBo++iD1WY2/lFVU
+-JkvAvge2WFk3c6tAwZT/tKxspFy4M/tNbDKeyvr685XKJw9ei6GcOGHD
++mQENBEt0ibEBCACv4hZRPqwtpU6z8+BB5YZU1a3yjEvg2W68+a6hEwxtCa2U++4d
++zQ+7EqaUq5ybQnwtbDdpFpsOi9x31J+PCpufPUfIG694/0rlEpmzl2GWzY8NqfdB
++FGGm/SPSSwvKbeNcFMRLu5neo7W9kwvfMbGjHmvUbzBUVpCVKD0OEEf1q/Ii0Qce
++kx9CMoLvWq7ZwNHEbNnij7ecnvwNlE2MxNsOSJj+hwZGK+tM19kuYGSKw4b5mR8I
++yThlgiSLIfpSBh1n2KX+TDdk9GR+57TYvlRu6nTPu98P05IlrrCP+KF0hYZYOaMv
++Qs9Rmc09tc/eoQlN0kkaBWw9Rv/dvLVc0aUXABEBAAG0MURyb3Bib3ggQXV0b21h
++dGljIFNpZ25pbmcgS2V5IDxsaW51eEBkcm9wYm94LmNvbT6JATYEEwECACAFAkt0
++ibECGwMGCwkIBwMCBBUCCAMEFgIDAQIeAQIXgAAKCRD8kYszUESRLi/zB/wMscEa
++15rS+0mIpsORknD7kawKwyda+LHdtZc0hD/73QGFINR2P23UTol/R4nyAFEuYNsF
++0C4IAD6y4pL49eZ72IktPrr4H27Q9eXhNZfJhD7BvQMBx75L0F5gSQwuC7GdYNlw
++SlCD0AAhQbi70VBwzeIgITBkMQcJIhLvllYo/AKD7Gv9huy4RLaIoSeofp+2Q0zU
++HNPl/7zymOqu+5Oxe1ltuJT/kd/8hU+N5WNxJTSaOK0sF1/wWFM6rWd6XQUP03Vy
++NosAevX5tBo++iD1WY2/lFVUJkvAvge2WFk3c6tAwZT/tKxspFy4M/tNbDKeyvr6
++85XKJw9ei6GcOGHD
+ =5rWG
+ -----END PGP PUBLIC KEY BLOCK-----
+ """
+@@ -178,26 +181,14 @@
+     return os.path.abspath(path.encode(sys.getfilesystemencoding())).decode(sys.getfilesystemencoding())
+ 
+ @contextmanager
+-def gpgme_context(keys):
+-    gpg_conf_contents = ''
++def gpg_context():
+     _gpghome = tempfile.mkdtemp(prefix='tmp.gpghome')
+-
+     try:
+         os.environ['GNUPGHOME'] = _gpghome
+-        fp = open(os.path.join(_gpghome, 'gpg.conf'), 'wb')
+-        fp.write(gpg_conf_contents)
+-        fp.close()
+-        ctx = gpgme.Context()
+-
+-        loaded = []
+-        for key_file in keys:
+-            result = ctx.import_(key_file)
+-            key = ctx.get_key(result.imports[0][0])
+-            loaded.append(key)
+-
+-        ctx.signers = loaded
+-
+-        yield ctx
++        open(os.path.join(_gpghome, 'gpg.conf'), 'a').close()
++        gpg = gnupg.GPG(gnupghome=_gpghome)
++        gpg.import_keys(DROPBOX_PUBLIC_KEY)
++        yield gpg
+     finally:
+         del os.environ['GNUPGHOME']
+         shutil.rmtree(_gpghome, ignore_errors=True)
+@@ -205,10 +196,10 @@
+ class SignatureVerifyError(Exception):
+     pass
+ 
+-def verify_signature(key_file, sig_file, plain_file):
+-    with gpgme_context([key_file]) as ctx:
+-        sigs = ctx.verify(sig_file, plain_file, None)
+-        return sigs[0].status == None
++def verify_signature(sig_filename, data):
++    with gpg_context() as gpg:
++        verification = gpg.verify_data(sig_filename, data)
++        return verification.valid
+ 
+ def download_file_chunk(url, buf):
+     opener = urllib2.build_opener()
+@@ -238,22 +229,33 @@
+ 
+ class DownloadState(object):
+     def __init__(self):
+-        self.local_file = StringIO.StringIO()
++        self.local_file = io.BytesIO()
+ 
+     def copy_data(self):
+         return download_file_chunk(DOWNLOAD_LOCATION_FMT % plat(), self.local_file)
+ 
+     def unpack(self):
+-        # download signature
+-        signature = StringIO.StringIO()
+-        for _ in download_file_chunk(SIGNATURE_LOCATION_FMT % plat(), signature):
+-            pass
+-        signature.seek(0)
+-        self.local_file.seek(0)
+-
+-        if gpgme:
+-            if not verify_signature(StringIO.StringIO(DROPBOX_PUBLIC_KEY), signature, self.local_file):
+-                raise SignatureVerifyError()
++        # download signature to disk in tempdir, because python-gnupg cannot accept both the target file and signature
++        # file residing in memory, one must be on-disk and referred to by filename. The signature file should always
++        # be small so the impact in terms of disk usage and I/O should be minimal
++        if gnupg:
++            try:
++                self.signaturedir = tempfile.mkdtemp(prefix='tmp.dropboxsignature')
++                self.signaturefilename = os.path.join(self.signaturedir, 'signature.asc')
++                self.signaturedata = io.BytesIO()
++                for _ in download_file_chunk(SIGNATURE_LOCATION_FMT % plat(), self.signaturedata):
++                    pass
++                self.signaturedata.seek(0)
++                self.signature = open(self.signaturefilename, 'ab')
++                self.signature.write(self.signaturedata.read())
++                self.signature.close()
++                self.local_file.seek(0)
++                if not verify_signature(self.signaturefilename, self.local_file.getvalue()):
++                    raise SignatureVerifyError()
++            finally:
++                self.signaturedata.close()
++                shutil.rmtree(self.signaturedir, ignore_errors=True)
++                pass
+ 
+         self.local_file.seek(0)
+         archive = tarfile.open(fileobj=self.local_file, mode='r:gz')
+@@ -457,7 +459,7 @@
+                 self.progress.set_property('width-request', 300)
+ 
+                 self.label = gtk.Label()
+-                GPG_WARNING_MSG = (u"\n\n" + GPG_WARNING) if not gpgme else u""
++                GPG_WARNING_MSG = (u"\n\n" + GPG_WARNING) if not gnupg else u""
+                 self.label.set_markup('%s <span foreground="#000099" underline="single" weight="bold">%s</span>\n\n%s%s' % (INFO, LINK, WARNING, GPG_WARNING_MSG))
+                 self.label.set_line_wrap(True)
+                 self.label.set_property('width-request', 300)
+@@ -546,7 +548,7 @@
+             write(save)
+             flush()
+         console_print(u"%s %s\n" % (INFO, LINK))
+-        GPG_WARNING_MSG = (u"\n%s" % GPG_WARNING) if not gpgme else u""
++        GPG_WARNING_MSG = (u"\n%s" % GPG_WARNING) if not gnupg else u""
+ 
+         download = DownloadState()
+ 

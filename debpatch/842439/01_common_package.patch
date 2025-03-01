@@ -1,0 +1,226 @@
+Move architecture-independent parts from binutils to binutils-common.
+
+This is a preparational step for splitting the triplet-prefixed tools out of
+binutils into binutils-$nativetriplet. For doing that split, we need to figure
+out which package should contain /usr/share/locale and
+/usr/share/doc/binutils/$documents.
+
+ * Leaving them in binutils is bad, because binutils will depend on
+   binutils-$nativetriplet and since binutils-$nativetriplet uses the locales
+   it would put up with a circular dependency.
+ * Moving them to binutils-$nativetriplet is bad, because then
+   binutils-$triplet will have file conflicts with other binutils-$triplet
+   packages, so they'd have to declare a Conflict. That'd render all non-native
+   cross binutils uninstallable.
+
+Therefore, we move the locales to a new binutils-common package.
+
+The textual documentation shipped in binutils is also moved to binutils-common,
+because it is architecture independent. It remains in /usr/share/doc/binutils
+to keep in line with Debian policy section 12.3.
+
+Index: debian/control.in
+===================================================================
+--- debian.orig/control.in
++++ debian/control.in
+@@ -13,7 +13,7 @@
+ 
+ Package: binutils
+ Architecture: any
+-Depends: ${shlibs:Depends}
++Depends: ${shlibs:Depends}, binutils-common (= ${source:Version})
+ Conflicts: gas, elf-binutils, modutils (<< 2.4.19-1), ${extraConflicts},
+   binutils-gold	(<< 2.20.51.20100415),
+   binutils-multiarch (<< 2.27-8)
+@@ -46,7 +46,8 @@
+ Package: binutils-multiarch
+ Architecture: any
+ Priority: extra
+-Depends: ${shlibs:Depends}, binutils (= ${binary:Version})
++Depends: ${shlibs:Depends}, binutils (= ${binary:Version}),
++  binutils-common (= ${source:Version})
+ Description: Binary utilities that support multi-arch targets
+  The programs in this package are used to manipulate binary and object
+  files that may have been created on other architectures.  This package
+@@ -74,7 +75,8 @@
+ 
+ Package: binutils-hppa64-linux-gnu
+ Architecture: amd64 i386 x32 hppa
+-Depends: ${shlibs:Depends}, binutils (= ${binary:Version})
++Depends: ${shlibs:Depends}, binutils (= ${binary:Version}),
++  binutils-common (= ${source:Version})
+ Recommends: libc6-dev
+ Provides: binutils-hppa64
+ Suggests: binutils-doc (>= ${source:Version})
+@@ -91,7 +93,7 @@
+ Section: doc
+ Architecture: all
+ Priority: optional
+-Depends: dpkg (>= 1.15.4) | install-info
++Depends: dpkg (>= 1.15.4) | install-info, binutils-common (= ${source:Version})
+ Conflicts: binutils (<< 2.9.1.0.25-3)
+ Suggests: binutils (= ${binary:Version})
+ Description: Documentation for the GNU assembler, linker and binary utilities
+@@ -105,3 +107,13 @@
+ Description: GNU assembler, linker and binary utilities (source)
+  This package contains the sources and patches which are needed to
+  build binutils.
++
++Package: binutils-common
++Architecture: all
++Breaks: binutils (<< 2.27-8.1)
++Replaces: binutils (<< 2.27-8.1)
++Multi-Arch: foreign
++Description: Common files for the GNU assembler, linker and binary utilities
++ This package contains the localization files used by binutils packages for
++ various target architectures and parts of the binutils documentation. It is
++ not useful on its own.
+Index: debian/control.cross.in
+===================================================================
+--- debian.orig/control.cross.in
++++ debian/control.cross.in
+@@ -1,7 +1,8 @@
+ 
+ Package: binutils-@target@
+ Architecture: @host_archs@
+-Depends: binutils (= ${binary:Version}), ${shlibs:Depends}
++Depends: binutils (= ${binary:Version}), binutils-common (= ${source:Version}),
++  ${shlibs:Depends}
+ Suggests: binutils-doc (= ${source:Version})
+ Provides: @binutils_alt_triplet@
+ Priority: extra
+Index: debian/rules
+===================================================================
+--- debian.orig/rules
++++ debian/rules
+@@ -20,6 +20,7 @@
+ p_doc = $(p_bin)-doc
+ p_hppa64 = $(p_bin)-hppa64-linux-gnu
+ p_src = $(p_bin)-source
++p_com = $(p_bin)-common
+ 
+ distribution := $(shell lsb_release -is)
+ distrelease  := $(shell lsb_release -cs)
+@@ -44,6 +45,7 @@
+ d_doc = debian/$(p_doc)
+ d_hppa64 = debian/$(p_hppa64)
+ d_src = debian/$(p_src)
++d_com = debian/$(p_com)
+ 
+ install_dir    = install -d -m 755
+ install_file   = install -m 644
+@@ -501,7 +503,7 @@
+ 	rm -rf stamps
+ 	find . -name \*.gmo -o -name \*~ -o -name \*.info ! -name sysroff.info | xargs -r rm -f
+ 	rm -f $(pwd)/test-summary*
+-	rm -rf $(d_bin) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_hppa64) $(d_src)
++	rm -rf $(d_bin) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_hppa64) $(d_src) $(d_com)
+ 	$(foreach ca,$(CROSS_ARCHS), rm -rf debian/binutils-$(shell echo $(call _gnu_type,$(ca)) | sed 's/_/-/g;s/i586/i686/'); )
+ 	rm -rf debian/patched debian/tmp debian/files* debian/substvars
+ 	rm -f debian/*.orig debian/*.rej
+@@ -920,8 +922,8 @@
+ stamps/install: checkroot stamps/build $(install_stamps) $(if $(CROSS),debian/strip.cross)
+ 	$(checkdir)
+ 
+-	rm -fr $(d_bin) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_src)
+-	$(install_dir) $(d_bin) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_src)
++	rm -fr $(d_bin) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_src) $(d_com)
++	$(install_dir) $(d_bin) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_src) $(d_com)
+ 
+ 	: # install binutils and -dev stuff
+ 	env MAKE="$(MAKE) VERSION=$(SINGLE_VERSION)" \
+@@ -930,6 +932,9 @@
+ 		mandir=$(pwd)/$(d_bin)/$(PF)/share/man \
+ 		infodir=$(pwd)/$(d_doc)/$(PF)/share/info install
+ 
++	$(install_dir) $(d_com)/$(PF)/share
++	mv $(d_bin)/$(PF)/share/locale $(d_com)/$(PF)/share/locale
++
+ ifeq ($(with_multiarch),yes)
+ 	: # now install binutils-multiarch stuff
+ 	env MAKE="$(MAKE) VERSION=$(MULTI_VERSION)" \
+@@ -1321,6 +1326,47 @@
+ 		xargs -0r touch --no-dereference --date='$(BUILD_DATE)'
+ 	dpkg --build $(d_src) ..
+ 
++	$(install_dir) $(d_com)/$(PF)/share/doc/$(p_bin)
++	$(install_file) binutils/NEWS debian/README.cross \
++                        $(d_com)/$(PF)/share/doc/$(p_bin)/
++
++	$(install_file) binutils/ChangeLog $(d_com)/$(PF)/share/doc/$(p_bin)/changelog
++
++	set -e; for i in bfd gas gprof ld; do \
++	  $(install_dir) $(d_com)/$(PF)/share/doc/$(p_bin)/$$i; \
++	done
++	$(install_file) bfd/ChangeLog bfd/PORTING bfd/TODO \
++			$(d_com)/$(PF)/share/doc/$(p_bin)/bfd/
++	$(install_file) gas/ChangeLog gas/NEWS $(d_com)/$(PF)/share/doc/$(p_bin)/gas/
++	$(install_file) gprof/ChangeLog gprof/TODO gprof/TEST \
++			$(d_com)/$(PF)/share/doc/$(p_bin)/gprof/
++	$(install_file) ld/ChangeLog ld/TODO ld/NEWS \
++			$(d_com)/$(PF)/share/doc/$(p_bin)/ld/
++
++	: # These only exist in H. J. Lu releases not GNU ones.
++	set -e; for dir in binutils bfd gas gprof ld; do \
++	  if [ -f $$dir/ChangeLog.linux ]; then \
++	    $(install_file) $$dir/ChangeLog.linux $(d_com)/$(PF)/share/doc/$(p_bin)/$$dir/; \
++	  fi; \
++	done
++
++	: # Copy bbconv.pl to the doc dir for use by interested people
++	$(install_file) gprof/bbconv.pl $(d_com)/$(PF)/share/doc/$(p_bin)/gprof/.
++
++	$(install_dir) $(d_com)/DEBIAN
++	$(install_dir) $(d_com)/$(PF)/share/doc/$(p_com)/
++	$(install_file) debian/changelog $(d_com)/$(PF)/share/doc/$(p_com)/changelog.Debian
++	find $(d_com)/$(PF)/share/doc/$(p_bin)/ -type f ! -name bbconv.pl | xargs gzip -9n
++	gzip -9n $(d_com)/$(PF)/share/doc/$(p_com)/changelog.Debian
++	$(install_file) debian/copyright $(d_com)/$(PF)/share/doc/$(p_com)/
++
++	dpkg-gencontrol -P$(d_com) -p$(p_com)
++	cd $(d_com) && find -type f ! -regex './DEBIAN/.*' -printf '%P\n' | LC_ALL=C sort | xargs md5sum > DEBIAN/md5sums
++	chown -R root:root $(d_com)
++	chmod -R go=rX $(d_com)
++	find $(d_com) -depth -newermt '$(BUILD_DATE)' -print0 | \
++		xargs -0r touch --no-dereference --date='$(BUILD_DATE)'
++	dpkg --build $(d_com) ..
+ endif
+ 
+ ###############################################################################
+@@ -1518,35 +1564,9 @@
+ 	$(install_file) $(pwd)/test-summary $(d_bin)/$(PF)/share/doc/$(p_bin)/
+ endif
+ endif
+-	$(install_file) binutils/NEWS debian/README.cross \
+-                        $(d_bin)/$(PF)/share/doc/$(p_bin)/
+-
+-	$(install_file) binutils/ChangeLog $(d_bin)/$(PF)/share/doc/$(p_bin)/changelog
+-
+-	for pkg in bfd gas gprof ld; do \
+-	  $(install_dir) $(d_bin)/$(PF)/share/doc/$(p_bin)/$$pkg; \
+-	done
+-	$(install_file) bfd/ChangeLog bfd/PORTING bfd/TODO \
+-			$(d_bin)/$(PF)/share/doc/$(p_bin)/bfd/
+-	$(install_file) gas/ChangeLog gas/NEWS $(d_bin)/$(PF)/share/doc/$(p_bin)/gas/
+-	$(install_file) gprof/ChangeLog gprof/TODO gprof/TEST \
+-			$(d_bin)/$(PF)/share/doc/$(p_bin)/gprof/
+-	$(install_file) ld/ChangeLog ld/TODO ld/NEWS \
+-			$(d_bin)/$(PF)/share/doc/$(p_bin)/ld/
+-
+-	: # These only exist in H. J. Lu releases not GNU ones.
+-	for dir in binutils bfd gas gprof ld; do \
+-	  if [ -f $$dir/ChangeLog.linux ]; then \
+-	    $(install_file) $$dir/ChangeLog.linux $(d_bin)/$(PF)/share/doc/$(p_bin)/$$dir/; \
+-	  fi; \
+-	done
+-
+-	: # Copy bbconv.pl to the doc dir for use by interested people
+-	$(install_file) gprof/bbconv.pl $(d_bin)/$(PF)/share/doc/$(p_bin)/gprof/.
+ 
+ 	: # Compress stuff that needs it
+-	gzip -9n $(d_bin)/$(PF)/share/man/man1/*.1
+-	find $(d_bin)/$(PF)/share/doc/$(p_bin)/ -type f ! -name copyright -a ! -name bbconv.pl | xargs gzip -9n
++	gzip -9n $(d_bin)/$(PF)/share/man/man1/*.1 $(d_bin)/$(PF)/share/doc/$(p_bin)/changelog.Debian
+ 
+ 	: # Finish it all up
+ 	find $(d_bin) -type f | xargs file | grep ELF | cut -d: -f 1 | xargs dpkg-shlibdeps

@@ -1,0 +1,174 @@
+From 6d4a66c0e7d429d0c7df6cd9370716c077eed8da Mon Sep 17 00:00:00 2001
+From: Mikael Magnusson <mikma.debian@m7n.se>
+Date: Tue, 30 May 2017 17:01:24 +0200
+Subject: [PATCH] add support for git source format
+
+---
+ bundle-files/steps/build-tar |  5 ++++-
+ debocker                     | 45 ++++++++++++++++++++++++++++++++------------
+ 2 files changed, 37 insertions(+), 13 deletions(-)
+
+diff --git a/bundle-files/steps/build-tar b/bundle-files/steps/build-tar
+index 06fb0e0..a8af3e7 100755
+--- a/bundle-files/steps/build-tar
++++ b/bundle-files/steps/build-tar
+@@ -11,7 +11,10 @@ cd /root/source/
+ if [ "${format}" = "native" ]; then
+     # native
+     exec tar -cf - *.build *.changes *.deb *.dsc *.tar.*
++elif [ "${format}" = "git" ]; then
++    # git
++    exec tar -cf - *.build *.changes *.deb *.dsc *.git
+ else
+-    # non-native
++    # non-native (quilt)
+     exec tar -cf - *.build *.changes *.deb *.dsc *.debian.tar.* *.orig.tar.*
+ fi
+diff --git a/debocker b/debocker
+index ae68c8a..7776d67 100755
+--- a/debocker
++++ b/debocker
+@@ -142,7 +142,7 @@ class Package:
+     def is_valid(self):
+         '''verifies that the current directory is a debian package'''
+         return isdir(self.debian) and isfile(self.control) and \
+-            isfile(self.source_format) and self.format in ['native', 'quilt']
++            isfile(self.source_format) and self.format in ['native', 'quilt', 'git']
+ 
+     def assert_is_valid(self):
+         if not self.is_valid():
+@@ -152,7 +152,7 @@ class Package:
+     def format(self):
+         with open(self.source_format) as f:
+             line = f.readline().strip()
+-        m = re.match(r'^3\.0 \((native|quilt)\)', line)
++        m = re.match(r'^3\.0 \((native|quilt|git)\)', line)
+         if not m:
+             fail('unsupported format ({})', line)
+         fmt = m.group(1)
+@@ -161,7 +161,7 @@ class Package:
+ 
+     @cached_property
+     def native(self):
+-        return self.format == 'native'
++        return self.long_version.find('-') == -1
+ 
+     @cached_property
+     def name(self):
+@@ -216,7 +216,7 @@ class Package:
+         fail('could not find original tarball')
+ 
+     def assert_orig_tarball(self):
+-        if self.native:
++        if self.format == 'native':
+             # for now, we just tar the current directory
+             path = tmppath('{}_{}.tar.xz'.format(
+                 self.name, self.version))
+@@ -225,6 +225,12 @@ class Package:
+                         '-C', self.path, '.' ]
+                 log_check_call(tar, stdout = output)
+             return path
++        elif self.format == 'git':
++            path = tmppath('{}_{}.git'.format(
++                self.name, self.version))
++            git = [ 'git', 'bundle', 'create', path, '--all']
++            log_check_call(git)
++            return path
+         else:
+             return self.orig_tarball  # simple alias
+ 
+@@ -255,10 +261,14 @@ class Package:
+             self.tar_package_debian(debian, comp = 'xz')
+         originalfile = self.assert_orig_tarball()
+         originalfile = abspath(originalfile)
+-        if self.native:
++        if self.format == 'native':
+             make_native_bundle(self.name, self.version,
+                                controlfile, originalfile,
+                                buildinfo, output)
++        elif self.format == 'git':
++            make_git_bundle(self.name, self.long_version,
++                            controlfile, originalfile, debianfile,
++                            buildinfo, output)
+         else:
+             make_quilt_bundle(self.name, self.long_version,
+                               controlfile, originalfile, debianfile,
+@@ -284,7 +294,7 @@ def make_native_bundle(name, version, control,
+                        source, buildinfo, output):
+     dsc_name = '{}_{}.dsc'.format(name, version)
+     bundler = Bundler(name, version, control, dsc_name,
+-                      buildinfo, native = True)
++                      buildinfo, 'native')
+     _, ext = splitext(source)
+     source_name = '{}_{}.tar{}'.format(name, version, ext)
+     bundler.add_source_file(source_name, source, 'source_tarball')
+@@ -294,7 +304,7 @@ def make_quilt_bundle(name, version, control,
+                       original, debian, buildinfo, output):
+     dsc_name = '{}_{}.dsc'.format(name, version)
+     bundler = Bundler(name, version, control, dsc_name,
+-                      buildinfo, native = False)
++                      buildinfo, 'quilt')
+     _, oext = splitext(original)
+     _, dext = splitext(debian)
+     # TODO: improve
+@@ -305,6 +315,17 @@ def make_quilt_bundle(name, version, control,
+     bundler.add_source_file(debian_name, debian, 'debian_tarball')
+     bundler.write_bundle(output = output)
+ 
++def make_git_bundle(name, version, control,
++                    source, debian, buildinfo, output):
++
++    dsc_name = '{}_{}.dsc'.format(name, version)
++    bundler = Bundler(name, version, control, dsc_name,
++                      buildinfo, 'git')
++    _, ext = splitext(source)
++    source_name = '{}_{}.git'.format(name, version)
++    bundler.add_source_file(source_name, source, 'source_tarball')
++    bundler.write_bundle(output = output)
++
+ def get_reproducible_filelist(path, base = None):
+     if base is None:
+         base = path
+@@ -331,10 +352,10 @@ STEPS = OrderedDict([
+ 
+ class Bundler:
+ 
+-    def __init__(self, name, version, control, dsc_name, buildinfo, native):
++    def __init__(self, name, version, control, dsc_name, buildinfo, fmt):
+         self.name = name
+         self.version = version
+-        self.native = native
++        self.format = fmt
+         self.control = control
+         self.sources = []
+         self.dsc_name = dsc_name
+@@ -346,7 +367,7 @@ class Bundler:
+ 
+     @property
+     def format_string(self):
+-        return ('3.0 (native)' if self.native else '3.0 (quilt)')
++        return ('3.0 ({})'.format(self.format))
+ 
+     def add_source_file(self, name, path, tag):
+         md5, size = calculate_md5_and_size(path)
+@@ -389,7 +410,7 @@ class Bundler:
+         info['bundle_version'] = __version__
+         info['name'] = self.name
+         info['version'] = self.version
+-        info['format'] = ('native' if self.native else 'quilt')
++        info['format'] = self.format
+ 
+         def make_link(target, parts):
+             return os.symlink(target, join(self.wdir, *parts))
+@@ -498,7 +519,7 @@ def bundle(path, output, flags, step, image):
+         name = '{}_{}_bundle.tar'.format(pkg.name, pkg.long_version)
+         output = join('..', name)
+     log('Preparing bundle for {} ({})...'.format(pkg.name, pkg.version))
+-    if not pkg.native:
++    if pkg.format == 'quilt':
+         pkg.assert_orig_tarball()
+     pkg.build_docker_tarball(output, {
+         'flags': flags, 'step': step, 'image': image })
+-- 
+2.7.4
+

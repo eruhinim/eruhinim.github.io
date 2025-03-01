@@ -1,0 +1,96 @@
+diff --git a/support/python/detect b/support/python/detect
+index 31e23be..4e4e528 100755
+--- a/support/python/detect
++++ b/support/python/detect
+@@ -1,4 +1,5 @@
+ #!/bin/sh
+ 
+ grep-dctrl --quiet -F Source -r '^python3\?-.*$' debian/control || \
+-  grep-dctrl --quiet -F Package -r '^python3\?-.*$' debian/control
++  grep-dctrl --quiet -F Package -r '^python3\?-.*$' debian/control || \
++    grep-dctrl --quiet -F Package -r '^pypy-.*$' debian/control
+diff --git a/support/python/generate b/support/python/generate
+index b6fd61c..96e1966 100755
+--- a/support/python/generate
++++ b/support/python/generate
+@@ -3,6 +3,7 @@
+ module=
+ py2_package=
+ py3_package=
++pypy_package=
+ 
+ # Try source package
+ source_package=$(grep-dctrl -n -s Source -F Source -r '^python3\?-.*$' debian/control || true)
+@@ -12,6 +13,12 @@ if [ -n "$source_package" ] ; then
+     py3_package=python3-$module
+ fi
+ 
++source_package=$(grep-dctrl -n -s Source -F Source -r '^pypy-.*$' debian/control || true)
++if [ -n "$source_package" ] ; then
++    module=${source_package#python-}
++    pypy_package=pypy-$module
++fi
++
+ # Try binary package(s)
+ if [ -z "$source_package" ] ; then
+     binary_packages=$(grep-dctrl -n -s Package -F Package -r '^python3\?-.*$' debian/control || true)
+@@ -31,6 +38,24 @@ if [ -z "$source_package" ] ; then
+     fi
+ fi
+ 
++# Try binary package(s)
++if [ -z "$source_package" ] ; then
++    binary_packages=$(grep-dctrl -n -s Package -F Package -r '^pypy-.*$' debian/control || true)
++    if [ -n "$binary_packages" ] ; then
++        for binary_package in $binary_packages ; do
++            module=${binary_package#*-}
++            case $module in
++                *-doc|*-dbg|*-dbgsym|*-dev)
++                    continue
++                ;;
++            esac
++
++            pypy_package=pypy-$module
++            break
++        done
++    fi
++fi
++
+ # Python2
+ if [ -n "$py2_package" ]; then
+     if [ "$(grep-dctrl -n -s Package -F Package -X "$py2_package" debian/control)" ] ; then
+@@ -52,3 +77,14 @@ Depends: $py3_package
+ EOF
+     fi
+ fi
++
++# PyPy
++if [ -n "$pypy_package" ]; then
++    if [ $(grep-dctrl -n -s Package -F Package -X "$pypy_package" debian/control) ] ; then
++        cat <<EOF
++Test-Command: cd "\$ADTTMP" ; pypy -c "import $module; print $module"
++Depends: $pypy_package
++
++EOF
++    fi
++fi
+diff --git a/test/python_test.sh b/test/python_test.sh
+index 578a85f..79d9ce9 100644
+--- a/test/python_test.sh
++++ b/test/python_test.sh
+@@ -16,6 +16,15 @@ test_python_detect_source_py3() {
+   assertTrue 'have py3 test' 'grep --quiet "print(" stdout'
+ }
+ 
++# PyPy is only Python 2 compatible for now.
++test_python_detect_source_pypy() {
++  has 'debian/control' 'Source: python-foo\n\nPackage:pypy-foo'
++  check_run autodep8
++  assertTrue 'get upstream name' 'grep --quiet "import foo;" stdout'
++  assertTrue 'have py2 test' 'grep --quiet "print " stdout'
++  assertFalse 'dont have py3 test' 'grep --quiet "print(" stdout'
++}
++
+ test_python_detect_binary_py2() {
+   has 'debian/control' 'Source: foo\n\nPackage: python-foo'
+   check_run autodep8

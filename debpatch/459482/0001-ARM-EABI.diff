@@ -1,0 +1,853 @@
+From 12af4842a698b4cd909c185846a41427f9b6c329 Mon Sep 17 00:00:00 2001
+From: leitner <leitner>
+Date: Fri, 5 Sep 2008 15:13:29 +0000
+Subject: [PATCH] ARM EABI
+
+---
+ CHANGES           |    1 +
+ arm/Makefile.add  |    3 +
+ arm/accept.S      |    7 +++
+ arm/bind.S        |    7 +++
+ arm/clone.S       |   71 +++++++++++++++++++++++++
+ arm/connect.S     |    7 +++
+ arm/getpeername.S |    7 +++
+ arm/getsockname.S |    7 +++
+ arm/listen.S      |    7 +++
+ arm/md5asm.S      |    6 ++-
+ arm/mmap.S        |   13 +++++
+ arm/recv.S        |    7 +++
+ arm/recvfrom.S    |    7 +++
+ arm/recvmsg.S     |    7 +++
+ arm/send.S        |    7 +++
+ arm/sendmsg.S     |    7 +++
+ arm/sendto.S      |    7 +++
+ arm/setjmp.S      |    2 +-
+ arm/setsockopt.S  |    7 +++
+ arm/shutdown.S    |    7 +++
+ arm/socket.S      |    7 +++
+ arm/socketpair.S  |    7 +++
+ arm/start.S       |   40 +++++++++++++-
+ arm/syscalls.h    |  152 +++++++++++++++++++++++++++++++++++++++++++++-------
+ arm/unified.S     |   28 +++++++++-
+ arm/waitpid.S     |    4 ++
+ diet.c            |    4 ++
+ include/elf.h     |    1 +
+ x86_64/strcpy.S   |    2 +-
+ 29 files changed, 412 insertions(+), 27 deletions(-)
+ create mode 100644 arm/accept.S
+ create mode 100644 arm/bind.S
+ create mode 100644 arm/connect.S
+ create mode 100644 arm/getpeername.S
+ create mode 100644 arm/getsockname.S
+ create mode 100644 arm/listen.S
+ create mode 100644 arm/recv.S
+ create mode 100644 arm/recvfrom.S
+ create mode 100644 arm/recvmsg.S
+ create mode 100644 arm/send.S
+ create mode 100644 arm/sendmsg.S
+ create mode 100644 arm/sendto.S
+ create mode 100644 arm/setsockopt.S
+ create mode 100644 arm/shutdown.S
+ create mode 100644 arm/socket.S
+ create mode 100644 arm/socketpair.S
+
+diff --git a/CHANGES b/CHANGES
+index 91d9ea9..856aaa7 100644
+--- a/CHANGES
++++ b/CHANGES
+@@ -14,6 +14,7 @@
+     (Enrico Scholz)
+   fix utmp, add utmpx support (R.L. Horn)
+   fix the dynamic library for the ARM architecture (Gernot Tenchio)
++  get ARM port to work with EABI (Tristan Newby)
+   fix of scanf with negative floats (Andre Oliveira)
+ 
+ 0.31:
+diff --git a/arm/Makefile.add b/arm/Makefile.add
+index f725532..f6126ec 100644
+--- a/arm/Makefile.add
++++ b/arm/Makefile.add
+@@ -1,5 +1,8 @@
+ 
+ LIBOBJ+=$(OBJDIR)/md5asm.o $(OBJDIR)/__aeabi_unwind_cpp.o
+ CFLAGS+=-Os -fomit-frame-pointer -fstrict-aliasing
++#ifdef __ARM_EABI__
++CFLAGS+=-mabi=aapcs-linux -mfloat-abi=soft -mno-thumb-interwork
++#endif
+ VPATH:=arm:syscalls.s:$(VPATH)
+ LIBGMON_OBJS+=$(OBJDIR)/mcount.o
+diff --git a/arm/accept.S b/arm/accept.S
+new file mode 100644
+index 0000000..1c4b223
+--- /dev/null
++++ b/arm/accept.S
+@@ -0,0 +1,7 @@
++#ifdef __ARM_EABI__
++	
++#include "syscalls.h"
++
++syscall(accept,accept)
++
++#endif
+diff --git a/arm/bind.S b/arm/bind.S
+new file mode 100644
+index 0000000..5c88e0c
+--- /dev/null
++++ b/arm/bind.S
+@@ -0,0 +1,7 @@
++#ifdef __ARM_EABI__
++	
++#include "syscalls.h"
++
++syscall(bind,bind)
++
++#endif
+diff --git a/arm/clone.S b/arm/clone.S
+index 86e2f35..4a4b2f4 100644
+--- a/arm/clone.S
++++ b/arm/clone.S
+@@ -10,6 +10,76 @@
+ @ Some slightly tricky stuff here... edit with care :-)
+ @
+ 
++
++#ifdef __ARM_EABI__
++
++#define CLONE_VM      0x00000100
++#define CLONE_THREAD  0x00010000
++	
++@ ;  don't do this yet
++@#define RESET_PID
++
++		
++clone:
++__clone:
++	@ ; start with a sanity check
++	cmp	r0, #0
++	cmpne	r1, #0
++	mvneq	r0, #-EINVAL
++	beq	__unified_syscall	@ handle as if error was returned by the syscall
++
++	@ ; insert args into stack
++	str	r3, [r1, #-4]!
++	str	r0, [r1, #-4]!
++	
++	@ ; do the system call
++	@ ; get the flags
++	mov	r0, r2
++#ifdef RESET_PID	
++	mov	ip, r2
++#endif	
++	@ ; child sp is already in r1
++	stmfd	sp!, {r4, r7}
++	@stmdb	sp!, {r4, r7}
++	ldr	r2, [sp, #8]
++	ldr	r3, [sp, #12]
++	ldr	r4, [sp, #16]
++        ldr     r7, =__NR_clone
++	swi	0
++	
++	cmp	r0, #0
++	beq	1f
++	ldmfd	sp!, {r4, r7}	
++	blt	__unified_syscall	@ (return code < 0): handle as an error
++	bx	lr
++1:	
++#ifdef RESET_PID		
++	tst	ip, #CLONE_THREAD
++	bne	3f
++
++	mov	r0, #0xffff0fff
++	mov	lr, pc
++	sub	pc, r0, #31
++	mov	r1, r0
++	tst	ip, #CLONE_VM
++	movne	r0, #-1
++        ldr     r7, =__NR_getpid
++	swi	0
++	str	r0, [r1, #PID_OFFSET] @	; not defined yet ??
++	str	r0, [r1, #TID_OFFSET] @	; not defined yet ??
++3:	
++#endif
++	@ ; pick the function arg and call address off the stack and execute
++	ldr	r0, [sp, #4]
++	mov	lr, pc
++	ldr	pc, [sp], #8
++	
++	@ ; and we're done, passing return value through r0
++	b	_exit			@ branch to _exit (PIC safe)
++
++	
++#else
++		
+ clone:
+ __clone:
+ 	movs	r12, r0			@ check function pointer
+@@ -32,3 +102,4 @@ __clone:
+ 
+ 1:	b	_exit			@ branch to _exit (PIC safe)
+ 
++#endif
+diff --git a/arm/connect.S b/arm/connect.S
+new file mode 100644
+index 0000000..118404f
+--- /dev/null
++++ b/arm/connect.S
+@@ -0,0 +1,7 @@
++#ifdef __ARM_EABI__
++	
++#include "syscalls.h"
++
++syscall(connect,connect)
++
++#endif
+diff --git a/arm/getpeername.S b/arm/getpeername.S
+new file mode 100644
+index 0000000..fd2d911
+--- /dev/null
++++ b/arm/getpeername.S
+@@ -0,0 +1,7 @@
++#ifdef __ARM_EABI__
++	
++#include "syscalls.h"
++
++syscall(getpeername,getpeername)
++
++#endif
+diff --git a/arm/getsockname.S b/arm/getsockname.S
+new file mode 100644
+index 0000000..6d6594d
+--- /dev/null
++++ b/arm/getsockname.S
+@@ -0,0 +1,7 @@
++#ifdef __ARM_EABI__
++	
++#include "syscalls.h"
++
++syscall(getsockname,getsockname)
++
++#endif
+diff --git a/arm/listen.S b/arm/listen.S
+new file mode 100644
+index 0000000..29d0cc1
+--- /dev/null
++++ b/arm/listen.S
+@@ -0,0 +1,7 @@
++#ifdef __ARM_EABI__
++	
++#include "syscalls.h"
++
++syscall(listen,listen)
++
++#endif
+diff --git a/arm/md5asm.S b/arm/md5asm.S
+index 422b992..370b503 100644
+--- a/arm/md5asm.S
++++ b/arm/md5asm.S
+@@ -57,8 +57,12 @@
+    .global MD5Update
+
+ 
+
+    .text
+
++#ifdef __ARM_EABI__
+
++   .align  4
+
++#else		
+
+    .align  2
+
+-
+
++#endif
+
++	
+
+     @ --
+
+     @ void MD5Init (MD5_CTX* context);
+
+     @ --
+
+diff --git a/arm/mmap.S b/arm/mmap.S
+index 522a9cd..db3aa9e 100644
+--- a/arm/mmap.S
++++ b/arm/mmap.S
+@@ -15,6 +15,18 @@
+ 
+ .global mmap
+ 
++#ifdef __ARM_EABI__
++
++mmap:
++	mov	ip, r7
++	mov	r7, #__NR_mmap2
++	svc	0x00000000
++	mov	r7, ip
++	cmn	r0, #4096
++	mov	pc, lr			@ return
++
++#else	
++		
+ mmap:
+ 	stmdb	sp!, {r0, r1, r2, r3}
+ 	mov	r0, sp
+@@ -22,3 +34,4 @@ mmap:
+ 	add	sp, sp, #16
+ 	b	__unified_syscall
+ 
++#endif
+diff --git a/arm/recv.S b/arm/recv.S
+new file mode 100644
+index 0000000..bcb8014
+--- /dev/null
++++ b/arm/recv.S
+@@ -0,0 +1,7 @@
++#ifdef __ARM_EABI__
++	
++#include "syscalls.h"
++
++syscall(recv,recv)
++
++#endif
+diff --git a/arm/recvfrom.S b/arm/recvfrom.S
+new file mode 100644
+index 0000000..757110e
+--- /dev/null
++++ b/arm/recvfrom.S
+@@ -0,0 +1,7 @@
++#ifdef __ARM_EABI__
++	
++#include "syscalls.h"
++
++syscall(recvfrom,recvfrom)
++
++#endif
+diff --git a/arm/recvmsg.S b/arm/recvmsg.S
+new file mode 100644
+index 0000000..12ecb62
+--- /dev/null
++++ b/arm/recvmsg.S
+@@ -0,0 +1,7 @@
++#ifdef __ARM_EABI__
++	
++#include "syscalls.h"
++
++syscall(recvmsg,recvmsg)
++
++#endif
+diff --git a/arm/send.S b/arm/send.S
+new file mode 100644
+index 0000000..5ecbb09
+--- /dev/null
++++ b/arm/send.S
+@@ -0,0 +1,7 @@
++#ifdef __ARM_EABI__
++	
++#include "syscalls.h"
++
++syscall(send,send)
++
++#endif
+diff --git a/arm/sendmsg.S b/arm/sendmsg.S
+new file mode 100644
+index 0000000..b1c196c
+--- /dev/null
++++ b/arm/sendmsg.S
+@@ -0,0 +1,7 @@
++#ifdef __ARM_EABI__
++	
++#include "syscalls.h"
++
++syscall(sendmsg,sendmsg)
++
++#endif
+diff --git a/arm/sendto.S b/arm/sendto.S
+new file mode 100644
+index 0000000..c080577
+--- /dev/null
++++ b/arm/sendto.S
+@@ -0,0 +1,7 @@
++#ifdef __ARM_EABI__
++	
++#include "syscalls.h"
++
++syscall(sendto,sendto)
++
++#endif
+diff --git a/arm/setjmp.S b/arm/setjmp.S
+index 0d7e365..6b850d4 100644
+--- a/arm/setjmp.S
++++ b/arm/setjmp.S
+@@ -12,6 +12,6 @@ sigsetjmp:
+ 	sfm	f4, 4, [r0], #48
+ #endif
+ 	stmia	r0, {r4-r11, sp, lr}
+-	sub	r0, r0, #30
++	sub	r0, r0, #48
+ 	b	__sigjmp_save
+ 
+diff --git a/arm/setsockopt.S b/arm/setsockopt.S
+new file mode 100644
+index 0000000..d56581b
+--- /dev/null
++++ b/arm/setsockopt.S
+@@ -0,0 +1,7 @@
++#ifdef __ARM_EABI__
++	
++#include "syscalls.h"
++
++syscall(setsockopt,setsockopt)
++
++#endif
+diff --git a/arm/shutdown.S b/arm/shutdown.S
+new file mode 100644
+index 0000000..eecac1b
+--- /dev/null
++++ b/arm/shutdown.S
+@@ -0,0 +1,7 @@
++#ifdef __ARM_EABI__
++	
++#include "syscalls.h"
++
++syscall(shutdown,shutdown)
++
++#endif
+diff --git a/arm/socket.S b/arm/socket.S
+new file mode 100644
+index 0000000..f997fd0
+--- /dev/null
++++ b/arm/socket.S
+@@ -0,0 +1,7 @@
++#ifdef __ARM_EABI__
++	
++#include "syscalls.h"
++
++syscall(socket,socket)
++
++#endif
+diff --git a/arm/socketpair.S b/arm/socketpair.S
+new file mode 100644
+index 0000000..9e1f7ed
+--- /dev/null
++++ b/arm/socketpair.S
+@@ -0,0 +1,7 @@
++#ifdef __ARM_EABI__
++	
++#include "syscalls.h"
++
++syscall(socketpair,socketpair)
++
++#endif
+diff --git a/arm/start.S b/arm/start.S
+index fcd3d7c..ccbac48 100644
+--- a/arm/start.S
++++ b/arm/start.S
+@@ -3,12 +3,48 @@
+ #include "syscalls.h"
+ 
+ 	.text
++#ifdef __ARM_EABI__
++	.align 4
++#else
+ 	.align 2
+-
++#endif
++	
+ 	.global _start
+ 	.weak 	exit
+ 	.global _exit
+ 
++
++#ifdef __ARM_EABI__
++
++_start:
++
++	mov	fp, #0			@ clear the frame pointer
++	ldr	a1, [sp], #4		@ argc
++	mov	a2, sp			@ argv
++	ldr	ip, .L3
++	add	a3, a2, a1, lsl #2	@ &argv[argc]
++	add	a3, a3, #4		@ envp	
++	str	a3, [ip, #0]		@ environ = envp
++	bl	main
++		
++@
++@ The exit status from main() is already in r0.
++@ We need to branch to 'exit' in case we have linked with 'atexit'.
++@
++	bl	exit
++
++exit:
++_exit:
++
++	mov	r7, #__NR_exit		
++	swi	0			@ never returns.
++
++.L3:	.word 	environ
++
++	
++#else	
++
++	
+ _start:
+ 
+ #ifdef WANT_DYNAMIC
+@@ -72,4 +108,4 @@ _exit:
+ #endif
+ 
+ 
+-
++#endif
+diff --git a/arm/syscalls.h b/arm/syscalls.h
+index 52be4dc..70d410c 100644
+--- a/arm/syscalls.h
++++ b/arm/syscalls.h
+@@ -1,8 +1,16 @@
+ #ifndef _ARM_SYSCALL_H
+ #define _ARM_SYSCALL_H 1
+ 
+-#define __NR_SYSCALL_BASE	0x900000
++#define __NR_OABI_SYSCALL_BASE	0x900000
+ 
++#if defined(__thumb__) || defined(__ARM_EABI__)
++#define __NR_SYSCALL_BASE	0
++#else
++#define __NR_SYSCALL_BASE	__NR_OABI_SYSCALL_BASE
++#endif
++
++
++#define __NR_restart_syscall		(__NR_SYSCALL_BASE+  0)
+ #define __NR_exit			(__NR_SYSCALL_BASE+  1)
+ #define __NR_fork			(__NR_SYSCALL_BASE+  2)
+ #define __NR_read			(__NR_SYSCALL_BASE+  3)
+@@ -129,10 +137,10 @@
+ #define __NR_adjtimex			(__NR_SYSCALL_BASE+124)
+ #define __NR_mprotect			(__NR_SYSCALL_BASE+125)
+ #define __NR_sigprocmask		(__NR_SYSCALL_BASE+126)
+-#define __NR_create_module		(__NR_SYSCALL_BASE+127)
++					/* 127 was sys_create_module */
+ #define __NR_init_module		(__NR_SYSCALL_BASE+128)
+ #define __NR_delete_module		(__NR_SYSCALL_BASE+129)
+-#define __NR_get_kernel_syms		(__NR_SYSCALL_BASE+130)
++					/* 130 was sys_get_kernel_syms */
+ #define __NR_quotactl			(__NR_SYSCALL_BASE+131)
+ #define __NR_getpgid			(__NR_SYSCALL_BASE+132)
+ #define __NR_fchdir			(__NR_SYSCALL_BASE+133)
+@@ -169,7 +177,7 @@
+ #define __NR_setresuid			(__NR_SYSCALL_BASE+164)
+ #define __NR_getresuid			(__NR_SYSCALL_BASE+165)
+ 					/* 166 was sys_vm86 */
+-#define __NR_query_module		(__NR_SYSCALL_BASE+167)
++					/* 167 was sys_query_module */
+ #define __NR_poll			(__NR_SYSCALL_BASE+168)
+ #define __NR_nfsservctl			(__NR_SYSCALL_BASE+169)
+ #define __NR_setresgid			(__NR_SYSCALL_BASE+170)
+@@ -182,8 +190,8 @@
+ #define __NR_rt_sigtimedwait		(__NR_SYSCALL_BASE+177)
+ #define __NR_rt_sigqueueinfo		(__NR_SYSCALL_BASE+178)
+ #define __NR_rt_sigsuspend		(__NR_SYSCALL_BASE+179)
+-#define __NR_pread			(__NR_SYSCALL_BASE+180)
+-#define __NR_pwrite			(__NR_SYSCALL_BASE+181)
++#define __NR_pread64			(__NR_SYSCALL_BASE+180)
++#define __NR_pwrite64			(__NR_SYSCALL_BASE+181)
+ #define __NR_chown			(__NR_SYSCALL_BASE+182)
+ #define __NR_getcwd			(__NR_SYSCALL_BASE+183)
+ #define __NR_capget			(__NR_SYSCALL_BASE+184)
+@@ -272,7 +280,7 @@
+ #define __NR_fstatfs64			(__NR_SYSCALL_BASE+267)
+ #define __NR_tgkill			(__NR_SYSCALL_BASE+268)
+ #define __NR_utimes			(__NR_SYSCALL_BASE+269)
+-#define __NR_fadvise64			(__NR_SYSCALL_BASE+270)
++#define __NR_arm_fadvise64_64		(__NR_SYSCALL_BASE+270)
+ #define __NR_pciconfig_iobase		(__NR_SYSCALL_BASE+271)
+ #define __NR_pciconfig_read		(__NR_SYSCALL_BASE+272)
+ #define __NR_pciconfig_write		(__NR_SYSCALL_BASE+273)
+@@ -283,10 +291,38 @@
+ #define __NR_mq_notify			(__NR_SYSCALL_BASE+278)
+ #define __NR_mq_getsetattr		(__NR_SYSCALL_BASE+279)
+ #define __NR_waitid			(__NR_SYSCALL_BASE+280)
+-
++#define __NR_socket			(__NR_SYSCALL_BASE+281)
++#define __NR_bind			(__NR_SYSCALL_BASE+282)
++#define __NR_connect			(__NR_SYSCALL_BASE+283)
++#define __NR_listen			(__NR_SYSCALL_BASE+284)
++#define __NR_accept			(__NR_SYSCALL_BASE+285)
++#define __NR_getsockname		(__NR_SYSCALL_BASE+286)
++#define __NR_getpeername		(__NR_SYSCALL_BASE+287)
++#define __NR_socketpair			(__NR_SYSCALL_BASE+288)
++#define __NR_send			(__NR_SYSCALL_BASE+289)
++#define __NR_sendto			(__NR_SYSCALL_BASE+290)
++#define __NR_recv			(__NR_SYSCALL_BASE+291)
++#define __NR_recvfrom			(__NR_SYSCALL_BASE+292)
++#define __NR_shutdown			(__NR_SYSCALL_BASE+293)
++#define __NR_setsockopt			(__NR_SYSCALL_BASE+294)
++#define __NR_getsockopt			(__NR_SYSCALL_BASE+295)
++#define __NR_sendmsg			(__NR_SYSCALL_BASE+296)
++#define __NR_recvmsg			(__NR_SYSCALL_BASE+297)
++#define __NR_semop			(__NR_SYSCALL_BASE+298)
++#define __NR_semget			(__NR_SYSCALL_BASE+299)
++#define __NR_semctl			(__NR_SYSCALL_BASE+300)
++#define __NR_msgsnd			(__NR_SYSCALL_BASE+301)
++#define __NR_msgrcv			(__NR_SYSCALL_BASE+302)
++#define __NR_msgget			(__NR_SYSCALL_BASE+303)
++#define __NR_msgctl			(__NR_SYSCALL_BASE+304)
++#define __NR_shmat			(__NR_SYSCALL_BASE+305)
++#define __NR_shmdt			(__NR_SYSCALL_BASE+306)
++#define __NR_shmget			(__NR_SYSCALL_BASE+307)
++#define __NR_shmctl			(__NR_SYSCALL_BASE+308)
+ #define __NR_add_key			(__NR_SYSCALL_BASE+309)
+ #define __NR_request_key		(__NR_SYSCALL_BASE+310)
+ #define __NR_keyctl			(__NR_SYSCALL_BASE+311)
++#define __NR_semtimedop			(__NR_SYSCALL_BASE+312)
+ #define __NR_vserver			(__NR_SYSCALL_BASE+313)
+ #define __NR_ioprio_set			(__NR_SYSCALL_BASE+314)
+ #define __NR_ioprio_get			(__NR_SYSCALL_BASE+315)
+@@ -316,18 +352,11 @@
+ #define __NR_get_robust_list		(__NR_SYSCALL_BASE+339)
+ #define __NR_splice			(__NR_SYSCALL_BASE+340)
+ #define __NR_arm_sync_file_range	(__NR_SYSCALL_BASE+341)
+-#define __NR_sync_file_range2		__NR_arm_sync_file_range
+ #define __NR_tee			(__NR_SYSCALL_BASE+342)
+ #define __NR_vmsplice			(__NR_SYSCALL_BASE+343)
+ #define __NR_move_pages			(__NR_SYSCALL_BASE+344)
+ #define __NR_getcpu			(__NR_SYSCALL_BASE+345)
+ 					/* 346 for epoll_pwait */
+-#define __NR_kexec_load			(__NR_SYSCALL_BASE+347)
+-#define __NR_utimensat			(__NR_SYSCALL_BASE+348)
+-#define __NR_signalfd			(__NR_SYSCALL_BASE+349)
+-#define __NR_timerfd			(__NR_SYSCALL_BASE+350)
+-#define __NR_eventfd			(__NR_SYSCALL_BASE+351)
+-#define __NR_fallocate			(__NR_SYSCALL_BASE+352)
+ 
+ /*
+  * The following SWIs are ARM private.
+@@ -339,6 +368,25 @@
+ #define __ARM_NR_usr32			(__ARM_NR_BASE+4)
+ #define __ARM_NR_set_tls		(__ARM_NR_BASE+5)
+ 
++/*
++ * The following syscalls are obsolete and no longer available for EABI.
++ */
++#if defined(__ARM_EABI__) && !defined(__KERNEL__)
++#undef __NR_time
++#undef __NR_umount
++#undef __NR_stime
++#undef __NR_alarm
++#undef __NR_utime
++#undef __NR_getrlimit
++#undef __NR_select
++#undef __NR_readdir
++#undef __NR_mmap
++#undef __NR_socketcall
++#undef __NR_syscall
++#undef __NR_ipc
++#endif
++
++
+ /* ok the next few values are for the optimization of the unified syscalls
+  * on arm.
+  * If the syscall has #arguments
+@@ -632,6 +680,35 @@
+ #define __ARGS_mq_getsetattr		0
+ #define __ARGS_waitid			0
+ 
++#define __ARGS_socket			0
++#define __ARGS_bind			0
++#define __ARGS_connect			0
++#define __ARGS_listen			0
++#define __ARGS_accept			0
++#define __ARGS_getsockname		0
++#define __ARGS_getpeername		0
++#define __ARGS_socketpair		0
++#define __ARGS_send			0
++#define __ARGS_sendto			0
++#define __ARGS_recv			0
++#define __ARGS_recvfrom			0
++#define __ARGS_shutdown			0
++#define __ARGS_setsockopt		0
++#define __ARGS_getsockopt		0
++#define __ARGS_sendmsg			0
++#define __ARGS_recvmsg			0
++#define __ARGS_semop			0
++#define __ARGS_semget			0
++#define __ARGS_semctl			0
++#define __ARGS_msgsnd			0
++#define __ARGS_msgrcv			0
++#define __ARGS_msgget			0
++#define __ARGS_msgctl			0
++#define __ARGS_shmat			0
++#define __ARGS_shmdt			0
++#define __ARGS_shmget			0
++#define __ARGS_shmctl			0
++
+ #define __ARGS_add_key			1
+ #define __ARGS_request_key		1
+ #define __ARGS_keyctl			0
+@@ -671,15 +748,46 @@
+ #define __ARGS_move_pages		1
+ #define __ARGS_getcpu			0
+ 					/* 346 for epoll_pwait */
+-#define __ARGS_kexec_load		0
+-#define __ARGS_utimensat		0
+-#define __ARGS_signalfd			0
+-#define __ARGS_timerfd			0
+-#define __ARGS_eventfd			0
+-#define __ARGS_fallocate		0
+ 
+ 
+ #ifdef __ASSEMBLER__
++
++#ifdef __ARM_EABI__
++
++#define syscall_weak(name,wsym,sym) __syscall_weak __NR_##name, wsym, sym, __ARGS_##name
++.macro __syscall_weak name wsym sym typ
++.text
++.type \wsym,function
++.weak \wsym
++\wsym:
++.type \sym,function
++.global \sym
++\sym:
++        stmfd	sp!,{r4,r5,r7,lr}
++	ldr	r4, [sp,#16]
++	ldr	r5, [sp,#20]
++        ldr     r7, =\name
++	swi	0
++	b	__unified_syscall
++.endm
++
++
++#define syscall(name,sym) __syscall __NR_##name, sym, __ARGS_##name
++.macro __syscall name sym typ
++.text
++.type \sym,function
++.global \sym
++\sym:
++        stmfd	sp!,{r4,r5,r7,lr}
++	ldr	r4, [sp,#16]
++	ldr	r5, [sp,#20]
++        ldr     r7, =\name
++	swi	0
++	b	__unified_syscall
++.endm
++
++#else
++
+ #define syscall_weak(name,wsym,sym) __syscall_weak $__NR_##name, wsym, sym, __ARGS_##name
+ .macro __syscall_weak name wsym sym typ
+ .text
+@@ -723,3 +831,5 @@
+ 
+ #endif
+ #endif
++
++#endif
+diff --git a/arm/unified.S b/arm/unified.S
+index 5e5ec6e..3023032 100644
+--- a/arm/unified.S
++++ b/arm/unified.S
+@@ -2,11 +2,35 @@
+ #include <dietfeatures.h>
+ 
+ 	.text
++#ifdef __ARM_EABI__
++	.align 4
++#else
+ 	.align 2
+-	
++#endif 	
+ 	.global __unified_syscall
+ 	.global __unified_syscall4
+ 
++
++#ifdef __ARM_EABI__
++
++__unified_syscall4:
++__unified_syscall:
++	
++        cmn     r0, #4096
++        rsbcs   r2, r0, #0
++        ldrcs   r3, 1f
++        mvncs   r0, #0
++        strcs   r2, [r3]
++        ldmfd   sp!,{r4,r5,r7,pc}
++	.balign 4
++1:
++        .word   errno
++	
++/* here we go and "reuse" the return for weak-void functions */
++#include "dietuglyweaks.h"
++
++#else	
++	
+ __unified_syscall4:
+ 	ldmia	sp!, {r4, r5, r6}
+ __unified_syscall:
+@@ -32,3 +56,5 @@ __unified_syscall:
+ #ifndef WANT_THREAD_SAFE
+ .L0:	.long 	errno
+ #endif
++
++#endif
+diff --git a/arm/waitpid.S b/arm/waitpid.S
+index d090e49..2c3a75b 100644
+--- a/arm/waitpid.S
++++ b/arm/waitpid.S
+@@ -1,5 +1,9 @@
+ .text
++#ifdef __ARM_EABI__
++.align	4
++#else	
+ .align	2
++#endif
+ .weak	waitpid
+ .type	waitpid, %function
+ waitpid:
+diff --git a/diet.c b/diet.c
+index 9864a2c..7a9c05f 100644
+--- a/diet.c
++++ b/diet.c
+@@ -32,7 +32,11 @@ static const char* Os[] = {
+   "sparc","-Os","-mcpu=supersparc",0,
+   "sparc64","-Os","-m64","-mhard-quad-float",0,
+   "alpha","-Os","-fomit-frame-pointer",0,
++#ifdef __ARM_EABI__
++  "arm","-Os","-fomit-frame-pointer","-mfloat-abi=soft","-meabi=4",0,
++#else
+   "arm","-Os","-fomit-frame-pointer",0,
++#endif 
+   "mips","-Os","-fomit-frame-pointer","-mno-abicalls","-fno-pic","-G","0",0,
+   "mipsel","-Os","-fomit-frame-pointer","-mno-abicalls","-fno-pic","-G","0",0,
+   "ppc","-Os","-fomit-frame-pointer","-mpowerpc-gpopt","-mpowerpc-gfxopt",0,
+diff --git a/include/elf.h b/include/elf.h
+index a79d948..6bfd3d6 100644
+--- a/include/elf.h
++++ b/include/elf.h
+@@ -2078,6 +2078,7 @@ typedef Elf32_Addr Elf32_Conflict;
+ #define EF_ARM_EABI_UNKNOWN  0x00000000
+ #define EF_ARM_EABI_VER1     0x01000000
+ #define EF_ARM_EABI_VER2     0x02000000
++#define EF_ARM_EABI_VER4     0x04000000
+ 
+ /* Additional symbol types for Thumb */
+ #define STT_ARM_TFUNC      0xd
+diff --git a/x86_64/strcpy.S b/x86_64/strcpy.S
+index 1b78d90..90c013c 100644
+--- a/x86_64/strcpy.S
++++ b/x86_64/strcpy.S
+@@ -7,8 +7,8 @@ strcpy:
+ 
+ .Lloop:
+ 	lodsb
++	test %al, %al
+ 	stosb
+-	or %al, %al
+ 	jnz .Lloop
+ 
+ 	mov %rdx,%rax
+-- 
+1.6.0
+

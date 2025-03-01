@@ -1,0 +1,150 @@
+Create new packages binutils-for-build and binutils-for-host.
+
+Source packages are supposed to depend on these if necessary. By annotating
+their dependencies with -for-build or -for-host, they can disambiguate the
+purpose of their dependencies and thus fix cross compilation.
+
+Since binary-arch redirects the main build and install targets when building
+targeted cross binutils, add a new target binary-for-host. It ensures that
+binutils-for-host is built for native and cross binutils.
+
+Index: debian/control.in
+===================================================================
+--- debian.orig/control.in
++++ debian/control.in
+@@ -11,6 +11,28 @@
+ Vcs-Bzr: http://bazaar.launchpad.net/~doko/binutils/pkg-2.25-debian
+ XS-Testsuite: autopkgtest
+ 
++Package: binutils-for-host
++Architecture: any
++Depends: @binutils_native@ (= ${binary:Version})
++Multi-Arch: same
++Description: GNU assembler, linker and binary utilities for the host architecture
++ The programs in this package are used to assemble, link and manipulate
++ binary and object files for the architecture of this package.  They may be
++ used in conjunction with a matching compiler and various libraries to build
++ programs. When using binutils through this metapackage, all tools must be
++ used with an architecture prefix.
++
++Package: binutils-for-build
++Architecture: all
++Depends: binutils (>= ${source:Version}), binutils-common (= ${source:Version})
++Multi-Arch: foreign
++Description: GNU assembler, linker and binary utilities for the build architecture
++ The programs in this package are used to assemble, link and manipulate
++ binary and object files for the native architecture.  They may be used in
++ conjunction with a build architecture compiler and various libraries to build
++ programs. When using binutils through this metapackage, tools without an
++ architecture prefix must be used.
++
+ Package: binutils
+ Architecture: any
+ Depends: ${shlibs:Depends}, binutils-common (= ${source:Version}),
+Index: debian/rules
+===================================================================
+--- debian.orig/rules
++++ debian/rules
+@@ -43,6 +43,7 @@
+ p_bin = binutils
+ p_lib = lib$(p_bin)
+ p_nat = $(p_bin)-$(subst _,-,$(DEB_HOST_GNU_TYPE))
++p_hst = $(p_bin)-for-host
+ p_dev = $(p_bin)-dev
+ p_mul = $(p_bin)-multiarch
+ p_mdev = $(p_mul)-dev
+@@ -50,6 +51,7 @@
+ p_hppa64 = $(p_bin)-hppa64-linux-gnu
+ p_src = $(p_bin)-source
+ p_com = $(p_bin)-common
++p_bld = $(p_bin)-for-build
+ 
+ distribution := $(shell lsb_release -is)
+ distrelease  := $(shell lsb_release -cs)
+@@ -70,6 +72,7 @@
+ d_bin = $(d)
+ d_lib = debian/$(p_lib)
+ d_nat = debian/$(p_nat)
++d_hst = debian/$(p_hst)
+ d_dev = debian/$(p_dev)
+ d_mul = debian/$(p_mul)
+ d_mdev = debian/$(p_mdev)
+@@ -77,6 +80,7 @@
+ d_hppa64 = debian/$(p_hppa64)
+ d_src = debian/$(p_src)
+ d_com = debian/$(p_com)
++d_bld = debian/$(p_bld)
+ 
+ install_dir    = install -d -m 755
+ install_file   = install -m 644
+@@ -521,7 +525,7 @@
+ 	rm -rf stamps
+ 	find . -name \*.gmo -o -name \*~ -o -name \*.info ! -name sysroff.info | xargs -r rm -f
+ 	rm -f $(pwd)/test-summary*
+-	rm -rf $(d_bin) $(d_lib) $(d_nat) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_hppa64) $(d_src) $(d_com)
++	rm -rf $(d_bin) $(d_lib) $(d_nat) $(d_hst) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_hppa64) $(d_src) $(d_com) $(d_bld)
+ 	$(foreach ca,$(CROSS_ARCHS), rm -rf debian/binutils-$(shell echo $(call _gnu_type,$(ca)) | sed 's/_/-/g;s/i586/i686/'); )
+ 	rm -rf debian/patched debian/tmp debian/files* debian/substvars
+ 	rm -f debian/*.orig debian/*.rej
+@@ -540,7 +544,7 @@
+ 
+ stamps/control: debian/control.in $(if $(TARGET),debian/control.cross.in) $(if $(filter yes, $(with_cross)),debian/control.cross.in)
+ ifneq (,$(TARGET))
+-	sed "s/@dpkg_dev@/$(DPKG_DEV)/;/^$$/ q" < debian/control.in > debian/control
++	sed -n -e 's/@dpkg_dev/$(DPKG_DEV)/;/^Package: binutils-for-build$$/q;p' < debian/control.in > debian/control
+ 	sed -e "s/@target@/$$(echo -n $(TARGET) | sed s/_/-/g)/" \
+ 		-e "s/@host_archs@/any/" \
+ 		-e 's/@binutils_alt_triplet@//' \
+@@ -935,8 +939,8 @@
+ stamps/install: checkroot stamps/build $(install_stamps) $(if $(CROSS),debian/strip.cross)
+ 	$(checkdir)
+ 
+-	rm -fr $(d_bin) $(d_lib) $(d_nat) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_src) $(d_com)
+-	$(install_dir) $(d_bin) $(d_lib) $(d_nat) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_src) $(d_com)
++	rm -fr $(d_bin) $(d_lib) $(d_nat) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_src) $(d_com) $(d_bld)
++	$(install_dir) $(d_bin) $(d_lib) $(d_nat) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_src) $(d_com) $(d_bld)
+ 
+ 	: # install binutils and -dev stuff
+ 	env MAKE="$(MAKE) VERSION=$(SINGLE_VERSION)" \
+@@ -1369,6 +1373,15 @@
+ 	find $(d_com) -depth -newermt '$(BUILD_DATE)' -print0 | \
+ 		xargs -0r touch --no-dereference --date='$(BUILD_DATE)'
+ 	dpkg --build $(d_com) ..
++
++	$(install_dir) $(d_bld)/DEBIAN $(d_bld)/$(PF)/share/doc/
++	ln -sf $(p_com) $(d_bld)/$(PF)/share/doc/$(p_bld)
++	dpkg-gencontrol -P$(d_bld) -p$(p_bld)
++	chown -R root:root $(d_bld)
++	chmod -R go=rX $(d_bld)
++	find $(d_bld) -depth -newermt '$(BUILD_DATE)' -print0 | \
++		xargs -0r touch --no-dereference --date='$(BUILD_DATE)'
++	dpkg --build $(d_bld) ..
+ endif
+ 
+ ###############################################################################
+@@ -1428,7 +1441,24 @@
+ 		xargs -0r touch --no-dereference --date='$(BUILD_DATE)'
+ 	dpkg --build $(D_CROSS) ..
+ 
+-binary-arch: checkroot build install \
++binary-for-host: checkroot
++	$(checkdir)
++
++	rm -fr $(d_hst)
++	$(install_dir) $(d_hst)/DEBIAN/ $(d_hst)/$(PF)/share/doc/
++	ln -sf $(p_nat) $(d_hst)/$(PF)/share/doc/$(p_hst)
++
++	rm -f debian/substvars
++	dpkg-gencontrol -P$(d_hst) -p$(p_hst)
++
++	chown -R root:root $(d_hst)
++	chmod -R go=rX $(d_hst)
++
++	find $(d_hst) -depth -newermt '$(BUILD_DATE)' -print0 | \
++		xargs -0r touch --no-dereference --date='$(BUILD_DATE)'
++	dpkg --build $(d_hst) ..
++
++binary-arch: checkroot build install binary-for-host \
+     $(if $(filter yes, $(with_cross)),$(foreach ca,$(CROSS_ARCHS), binary.$(ca)))
+ 	$(checkdir)
+ 

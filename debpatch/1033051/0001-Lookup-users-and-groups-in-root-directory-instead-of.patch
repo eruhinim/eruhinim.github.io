@@ -1,0 +1,105 @@
+From ff817f5e83c11e5d6657134a7b35f05c2be870a8 Mon Sep 17 00:00:00 2001
+From: Daan De Meyer <daan.j.demeyer@gmail.com>
+Date: Tue, 7 Mar 2023 12:49:17 +0100
+Subject: [PATCH] Lookup users and groups in root directory instead of on host
+
+If a root directory is configured by the user, lookup users and groups
+in the /etc/passwd and /etc/group of that root directory instead of the
+host's /etc/passwd and /etc/group.
+
+This is especially important when building Debian chroots on distros
+that are not Debian based and where the host's /etc/passwd and /etc/group
+is using passwd and group entries that differ wildly from those shipped
+by Debian or its derivatives, causing dpkg stat-overrides to fail because
+a group or user cannot be found in the host's passwd or group entries.
+---
+ lib/dpkg/db-fsys-override.c | 64 +++++++++++++++++++++++++++++++------
+ 1 file changed, 54 insertions(+), 10 deletions(-)
+
+diff --git a/lib/dpkg/db-fsys-override.c b/lib/dpkg/db-fsys-override.c
+index e079c5ffb..29adaf134 100644
+--- a/lib/dpkg/db-fsys-override.c
++++ b/lib/dpkg/db-fsys-override.c
+@@ -58,12 +58,34 @@ statdb_parse_uid(const char *str)
+ 			ohshit(_("invalid statoverride uid %s"), str);
+ 		uid = (uid_t)value;
+ 	} else {
+-		struct passwd *pw = getpwnam(str);
++		char *passwd;
++		FILE *file;
++
++		uid = (uid_t)-1;
++		passwd = dpkg_fsys_get_path("etc/passwd");
++
++		file = fopen(passwd, "r");
++		free(passwd);
++		if (!file) {
++			if (errno != ENOENT)
++				ohshite(_("failed to open etc/passwd file"));
++		} else {
++			struct passwd *pw;
++
++			errno = 0;
++			while ((pw = fgetpwent(file))) {
++				if (strcmp(pw->pw_name, str) == 0)
++					break;
++			}
+ 
+-		if (pw == NULL)
+-			uid = (uid_t)-1;
+-		else
+-			uid = pw->pw_uid;
++			fclose(file);
++
++			if (errno > 0)
++				ohshite(_("failed to read passwd entry"));
++
++			if (pw)
++				uid = pw->pw_uid;
++		}
+ 	}
+ 
+ 	return uid;
+@@ -84,12 +106,34 @@ statdb_parse_gid(const char *str)
+ 			ohshit(_("invalid statoverride gid %s"), str);
+ 		gid = (gid_t)value;
+ 	} else {
+-		struct group *gr = getgrnam(str);
++		char *group;
++		FILE *file;
++
++		gid = (gid_t)-1;
++		group = dpkg_fsys_get_path("etc/group");
++
++		file = fopen(group, "r");
++		free(group);
++		if (!file) {
++			if (errno != ENOENT)
++				ohshite(_("failed to open etc/group file"));
++		} else {
++			struct group *gr;
++
++			errno = 0;
++			while ((gr = fgetgrent(file))) {
++				if (strcmp(gr->gr_name, str) == 0)
++					break;
++			}
+ 
+-		if (gr == NULL)
+-			gid = (gid_t)-1;
+-		else
+-			gid = gr->gr_gid;
++			fclose(file);
++
++			if (errno > 0)
++				ohshite(_("failed to read group entry"));
++
++			if (gr)
++				gid = gr->gr_gid;
++		}
+ 	}
+ 
+ 	return gid;
+-- 
+2.39.2
+

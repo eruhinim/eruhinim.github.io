@@ -1,0 +1,2573 @@
+Index: test/uri.cc
+===================================================================
+--- test/uri.cc (.../tags/apt-debian-0.5.9)	(revision 43)
++++ test/uri.cc (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -15,6 +15,7 @@
+    // Basic stuff
+    Test("http://www.debian.org:90/temp/test");
+    Test("http://jgg:foo@ualberta.ca/blah");
++   Test("https://jgg:foo@ualberta.ca/blah");
+    Test("file:/usr/bin/foo");
+    Test("cdrom:Moo Cow Rom:/debian");
+    Test("gzip:./bar/cow");
+Index: debian/changelog
+===================================================================
+--- debian/changelog (.../tags/apt-debian-0.5.9)	(revision 43)
++++ debian/changelog (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -1,3 +1,11 @@
++apt (0.5.9.0ssl1) unstable; urgency=low
++
++  * NMU.  (Well, sort of; for Progeny use)
++  * Integrated apt-https work from Tomas Pospisek <tpo_deb@sourcepole.ch>.
++  * Merged http and https methods into one.
++
++ -- Jeff Licquia <licquia@progeny.com>  Fri, 26 Sep 2003 15:25:12 -0500
++
+ apt (0.5.9) unstable; urgency=low
+ 
+   * Oh well, apt isn't going to make it into testing anytime soon due to
+@@ -713,13 +721,13 @@
+   * These bugs have been fixed, explanations are in the bug system, read
+     the man pages as well..
+     Closes: #21113, #22507, #22675, #22836, #22892, #32883, #33006, #34121,
+-    	    #23984, #24685, #24799, #25001, #25019, #34223, #34296, #34355,
+-	    #24021, #25022, #25026, #25104, #25176, #31557, #31691, #31853,
+-    	    #25458, #26019, #26433, #26592, #26670, #27100, #27100, #27601,
+-    	    #28184, #28391, #28778, #29293, #29351, #27841, #28172, #30260,
+-    	    #29382, #29441, #29903, #29920, #29983, #30027, #30076, #30112,
+-    	    #31009, #31155, #31381, #31883, #32140, #32395, #32584. #34465,
+-    	    #30383, #30441, #30472, #30643, #30827, #30324, #36425, #34596
++            #23984, #24685, #24799, #25001, #25019, #34223, #34296, #34355,
++            #24021, #25022, #25026, #25104, #25176, #31557, #31691, #31853,
++            #25458, #26019, #26433, #26592, #26670, #27100, #27100, #27601,
++            #28184, #28391, #28778, #29293, #29351, #27841, #28172, #30260,
++            #29382, #29441, #29903, #29920, #29983, #30027, #30076, #30112,
++            #31009, #31155, #31381, #31883, #32140, #32395, #32584. #34465,
++            #30383, #30441, #30472, #30643, #30827, #30324, #36425, #34596
+ 
+  -- Ben Gertzfield <che@debian.org>  Mon, 15 Mar 1999 19:14:25 -0800
+ 
+Index: debian/rules
+===================================================================
+--- debian/rules (.../tags/apt-debian-0.5.9)	(revision 43)
++++ debian/rules (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -195,7 +195,7 @@
+ 	cp $(BLD)/bin/apt-* debian/apt/usr/bin/
+ 
+ 	# Remove the bits that are in apt-utils
+-	rm $(addprefix debian/apt/usr/bin/apt-,$(APT_UTILS))
++	-rm $(addprefix debian/apt/usr/bin/apt-,$(APT_UTILS))
+ 
+ 	# install the shared libs
+ 	find $(BLD)/bin/ -type f -name "libapt-pkg*.so.*" -exec cp -a "{}" debian/apt/usr/lib/ \;
+Index: dselect/desc.apt
+===================================================================
+--- dselect/desc.apt (.../tags/apt-debian-0.5.9)	(revision 43)
++++ dselect/desc.apt (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -1,8 +1,8 @@
+ The APT installation method encompasses most other installation methods
+ under the umbrella of the new Package Acquisition code. This method allows
+-installation from locations in the filesystem, ftp and http URLs, supports
+-full installation ordering and dependency checking as well as multiple 
+-sources. See the man pages apt-get(8) and sources.list(5)
++installation from locations in the filesystem, ftp, http and https URLs,
++supports full installation ordering and dependency checking as well as
++multiple sources. See the man pages apt-get(8) and sources.list(5)
+ 
+ HTTP proxies can be used by setting http_proxy="http://proxy:port/" before
+ running DSelect. FTP proxies require special configuration detailed in
+Index: configure.in
+===================================================================
+--- configure.in (.../tags/apt-debian-0.5.9)	(revision 43)
++++ configure.in (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -17,7 +17,7 @@
+ AC_CONFIG_HEADER(include/config.h:buildlib/config.h.in include/apti18n.h:buildlib/apti18n.h.in)
+ 
+ dnl -- SET THIS TO THE RELEASE VERSION --
+-AC_DEFINE_UNQUOTED(VERSION,"0.5.9")
++AC_DEFINE_UNQUOTED(VERSION,"0.5.9.1")
+ PACKAGE="apt"
+ AC_DEFINE_UNQUOTED(PACKAGE,"$PACKAGE")
+ AC_SUBST(PACKAGE)
+@@ -164,6 +164,7 @@
+ dnl AC_CHECK_PROG(YODL_MAN,yodl2man,"yes","")
+ 
+ ah_NUM_PROCS
++tp_WITH_SSL
+ rc_GLIBC_VER
+ rc_LIBSTDCPP_VER
+ ah_GCC3DEP
+Index: buildlib/tools.m4
+===================================================================
+--- buildlib/tools.m4 (.../tags/apt-debian-0.5.9)	(revision 43)
++++ buildlib/tools.m4 (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -1,3 +1,30 @@
++dnl include ssl by default or if told so otherwise don't
++AC_DEFUN(tp_WITH_SSL,
++	[
++		AC_CHECK_LIB(ssl, SSL_library_init, [HAVE_SSL_LIB=yes])
++		AC_CHECK_HEADER(openssl/ssl.h, [HAVE_SSL_HEADERS=yes])
++		AC_ARG_WITH(ssl,
++[  --with[out]-ssl         Build with[out] HTTPS method support
++                          By default if the library and the headers
++                          are found, the HTTPS method will be built
++],
++					[]
++		)
++		if test "$withval" != "no"; then
++			if test "$HAVE_SSL_LIB" = "yes"; then
++				if test "$HAVE_SSL_HEADERS" = "yes"; then
++					WITH_SSL=yes
++					AC_DEFINE(WITH_SSL)
++				elif test "$withval" = "yes"; then
++					AC_MSG_ERROR("Could not find the ssl headers. Please put them at a place where configure can find them.")
++				fi
++			elif test "$withval" = "yes"; then
++					AC_MSG_ERROR("Could not find the ssl library. Please put it at a place where configure can find them.")
++			fi
++		fi
++		AC_SUBST(WITH_SSL)
++])
++
+ AC_DEFUN(ah_HAVE_GETCONF,
+ 	[AC_ARG_WITH(getconf,
+ 		[  --with-getconf          Enable automagical buildtime configuration],
+Index: buildlib/environment.mak.in
+===================================================================
+--- buildlib/environment.mak.in (.../tags/apt-debian-0.5.9)	(revision 43)
++++ buildlib/environment.mak.in (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -63,4 +63,7 @@
+    # Do not know how to create shared libraries here.
+    ONLYSTATICLIBS = yes
+ endif
+-	
++
++# Build https method
++WITH_SSL = @WITH_SSL@
++
+Index: buildlib/config.h.in
+===================================================================
+--- buildlib/config.h.in (.../tags/apt-debian-0.5.9)	(revision 43)
++++ buildlib/config.h.in (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -43,3 +43,7 @@
+ 
+ /* The package name string */
+ #undef PACKAGE
++
++/* SSL support */
++#undef WITH_SSL
++
+Index: buildlib/program.mak
+===================================================================
+--- buildlib/program.mak (.../tags/apt-debian-0.5.9)	(revision 43)
++++ buildlib/program.mak (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -53,6 +53,13 @@
+ 	$(CXX) -c $(INLINEDEPFLAG) $(CPPFLAGS) $(CXXFLAGS) -o $@ $<
+ 	$(DoDep)
+ 
++# Compilation rules
++vpath %.c $(SUBDIRS)
++$(OBJ)/%.o: %.c
++	echo Compiling $< to $@
++	$(CC) -c $(INLINEDEPFLAG) $(CPPFLAGS) $(CXXFLAGS) -o $@ $<
++	$(DoDep)
++
+ # Include the dependencies that are available
+ The_DFiles = $(wildcard $($(LOCAL)-DEP))
+ ifneq ($(words $(The_DFiles)),0)
+Index: methods/connect.h
+===================================================================
+--- methods/connect.h (.../tags/apt-debian-0.5.9)	(revision 43)
++++ methods/connect.h (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -13,7 +13,7 @@
+ #include <string>
+ #include <apt-pkg/acquire-method.h>
+ 
+-bool Connect(string To,int Port,const char *Service,int DefPort,
++bool Connect(const string &Host,int Port,const char *Service,int DefPort,
+ 	     int &Fd,unsigned long TimeOut,pkgAcqMethod *Owner);
+ void RotateDNS();
+ 
+Index: methods/https.cc
+===================================================================
+--- methods/https.cc (.../tags/apt-debian-0.5.9)	(revision 43)
++++ methods/https.cc (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -0,0 +1,74 @@
++// -*- mode: cpp; mode: fold -*-
++// Description								/*{{{*/
++// $Id: https.cc,v 1.01 2002/05/21 18:01:09 tpo Exp $
++/* ######################################################################
++
++   HTTPS Aquire Method - This is the HTTPS aquire method for APT.
++   
++   The https method opens a SSL tunnel on top of a normal connection and
++   then does http over that.
++
++   You can define various configuration options that determine how server
++   authentification is done. Please refer to the example configuration file
++   for more details. All parameters are passed on to the stunnel code.
++
++   Please refer to http.cc for more info on the http method and to https.h
++   for some more infos on the SSL tunnelling.
++      
++   Written by Tomas Pospisek <tpo_deb@sourcepole.ch>, Copyright (c) 2002
++   Licensed under the GNU General Public License v2
++	  
++   Linking with openssl is permitted.
++
++   Based on code from http.cc.
++
++   The work on https has been made possible by:
++   		AO Media Services	http://www.ao-asif.ch/aoi/media/
++   and
++   		Sourcepole			http://sourcepole.ch
++
++   ##################################################################### */
++									/*}}}*/
++// Include Files							/*{{{*/
++#include <apt-pkg/fileutl.h>
++#include <apt-pkg/acquire-method.h>
++#include <apt-pkg/error.h>
++#include <apt-pkg/hashes.h>
++
++#include <sys/stat.h>
++#include <sys/time.h>
++#include <utime.h>
++#include <unistd.h>
++#include <signal.h>
++#include <stdio.h>
++#include <errno.h>
++#include <string.h>
++#include <iostream>
++
++#include <openssl/ssl.h>
++
++// Internet stuff
++#include <netdb.h>
++
++#include "connect.h"
++#include "rfc2553emu.h"
++#include "http.h"
++#include "https.h"
++#include "connect_ssl.h"
++									/*}}}*/
++using namespace std;
++
++// ConnectionHandleSSL::ConnectionHandleSSL - Constructor			/*{{{*/
++// ---------------------------------------------------------------------
++/* */
++ConnectionHandleSSL::ConnectionHandleSSL(bool PeerVerifyLevel_,int DebugLevel_,
++                    string Pem_,string CertDir_,string CertFile_)
++{
++    Reset();
++    PeerVerifyLevel = PeerVerifyLevel_;
++    DebugLevel = DebugLevel_;
++    Pem = Pem;
++    CertDir = CertDir_;
++    CertFile = CertFile_;
++};
++									/*}}}*/
+Index: methods/stunnel/ssl.c
+===================================================================
+--- methods/stunnel/ssl.c (.../tags/apt-debian-0.5.9)	(revision 43)
++++ methods/stunnel/ssl.c (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -0,0 +1,496 @@
++/*
++ *   stunnel       Universal SSL tunnel
++ *   Copyright (c) 1998-2001 Michal Trojnara <Michal.Trojnara@mirt.net>
++ *                 All Rights Reserved
++ *
++ *   This program is free software; you can redistribute it and/or modify
++ *   it under the terms of the GNU General Public License as published by
++ *   the Free Software Foundation; either version 2 of the License, or
++ *   (at your option) any later version.
++ *
++ *   This program is distributed in the hope that it will be useful,
++ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ *   GNU General Public License for more details.
++ *
++ *   You should have received a copy of the GNU General Public License
++ *   along with this program; if not, write to the Free Software
++ *   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ *
++ *   In addition, as a special exception, Michal Trojnara gives
++ *   permission to link the code of this program with the OpenSSL
++ *   library (or with modified versions of OpenSSL that use the same
++ *   license as OpenSSL), and distribute linked combinations including
++ *   the two.  You must obey the GNU General Public License in all
++ *   respects for all of the code used other than OpenSSL.  If you modify
++ *   this file, you may extend this exception to your version of the
++ *   file, but you are not obligated to do so.  If you do not wish to
++ *   do so, delete this exception statement from your version.
++ */
++
++#include "stunnel.h"
++
++#ifndef NO_RSA
++
++/* Cache temporary keys up to 2048 bits */
++#define KEY_CACHE_LENGTH 2049
++
++/* Cache temporary keys up to 1 hour */
++#define KEY_CACHE_TIME 3600
++
++#endif /* NO_RSA */
++
++#include "common.h"
++#include "prototypes.h"
++
++#ifdef HAVE_OPENSSL
++#include <openssl/lhash.h>
++#include <openssl/ssl.h>
++#include <openssl/err.h>
++#include <openssl/rand.h>
++#else
++#include <lhash.h>
++#include <ssl.h>
++#include <err.h>
++#endif
++
++extern server_options options;
++
++    /* SSL functions */
++static int init_dh();
++static int init_prng();
++static int prng_seeded(int);
++static int add_rand_file(char *);
++#ifndef NO_RSA
++static RSA *tmp_rsa_cb(SSL *, int, int);
++static RSA *make_temp_key(int);
++#endif /* NO_RSA */
++static void verify_init();
++static int verify_callback(int, X509_STORE_CTX *);
++static void info_callback(SSL *, int, int);
++static void print_stats();
++
++SSL_CTX *ctx; /* global SSL context */
++
++void context_init() { /* init SSL */
++
++    if(!init_prng())
++        log_msg(LOG_INFO, "PRNG seeded successfully");
++    SSLeay_add_ssl_algorithms();
++    SSL_load_error_strings();
++    if(options.option&OPT_CLIENT) {
++        ctx=SSL_CTX_new(SSLv3_client_method());
++    } else { /* Server mode */
++        ctx=SSL_CTX_new(SSLv23_server_method());
++#ifndef NO_RSA
++        SSL_CTX_set_tmp_rsa_callback(ctx, tmp_rsa_cb);
++#endif /* NO_RSA */
++        if(init_dh())
++            log_msg(LOG_WARNING, "Diffie-Hellman initialization failed");
++    }
++
++#if SSLEAY_VERSION_NUMBER >= 0x00906000L
++    SSL_CTX_set_mode(ctx,
++        SSL_MODE_ENABLE_PARTIAL_WRITE|SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
++#endif /* OpenSSL-0.9.6 */
++
++    SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_BOTH);
++    SSL_CTX_set_timeout(ctx, options.session_timeout);
++    if(options.option&OPT_CERT) {
++        if(!SSL_CTX_use_certificate_chain_file(ctx, options.pem)) {
++            log_msg(LOG_ERR, "Error reading certificate file: %s", options.pem);
++            sslerror("SSL_CTX_use_certificate_chain_file");
++            exit(1);
++        }
++        log_msg(LOG_DEBUG, "Certificate: %s", options.pem);
++#ifdef NO_RSA
++        if(!SSL_CTX_use_PrivateKey_file(ctx, options.pem,
++                SSL_FILETYPE_PEM)) {
++            sslerror("SSL_CTX_use_PrivateKey_file");
++            exit(1);
++        }
++#else /* NO_RSA */
++        if(!SSL_CTX_use_RSAPrivateKey_file(ctx, options.pem,
++                SSL_FILETYPE_PEM)) {
++            sslerror("SSL_CTX_use_RSAPrivateKey_file");
++            exit(1);
++        }
++#endif /* NO_RSA */
++        if(!SSL_CTX_check_private_key(ctx)) {
++            sslerror("Private key does not match the certificate");
++            exit(1);
++        }
++    }
++
++    verify_init(); /* Initialize certificate verification */
++
++    SSL_CTX_set_info_callback(ctx, info_callback);
++
++    if(options.cipher_list) {
++        if (!SSL_CTX_set_cipher_list(ctx, options.cipher_list)) {
++            sslerror("SSL_CTX_set_cipher_list");
++            exit(1);
++        }
++    }
++}
++
++void context_free() { /* free SSL */
++    SSL_CTX_free(ctx);
++}
++
++static int init_prng() {
++    int totbytes=0;
++    char filename[STRLEN];
++    int bytes;
++    bytes=0; /* avoid warning if #ifdef'd out for windows */
++
++    filename[0]='\0';
++
++    /* If they specify a rand file on the command line we
++       assume that they really do want it, so try it first */
++    if(options.rand_file) {
++        totbytes+=add_rand_file(options.rand_file);
++        if(prng_seeded(totbytes))
++            return 0;
++    }
++
++    /* try the $RANDFILE or $HOME/.rnd files */
++    RAND_file_name(filename, STRLEN);
++    if(filename[0]) {
++        filename[STRLEN-1]='\0';        /* just in case */
++        totbytes+=add_rand_file(filename);
++        if(prng_seeded(totbytes))
++            return 0;
++    }
++
++#ifdef RANDOM_FILE
++    totbytes += add_rand_file( RANDOM_FILE );
++    if(prng_seeded(totbytes))
++        return 0;
++#endif
++
++#ifdef USE_WIN32
++    RAND_screen();
++    if(prng_seeded(totbytes)) {
++        log_msg(LOG_DEBUG, "Seeded PRNG with RAND_screen");
++        return 0;
++    }
++    log_msg(LOG_DEBUG, "RAND_screen failed to sufficiently seed PRNG");
++#else
++
++#if SSLEAY_VERSION_NUMBER >= 0x0090581fL
++    if(options.egd_sock) {
++        if((bytes=RAND_egd(options.egd_sock))==-1) {
++            log_msg(LOG_WARNING, "EGD Socket %s failed", options.egd_sock);
++            bytes=0;
++        } else {
++            totbytes += bytes;
++            log_msg(LOG_DEBUG, "Snagged %d random bytes from EGD Socket %s",
++                bytes, options.egd_sock);
++            return 0; /* OpenSSL always gets what it needs or fails,
++                         so no need to check if seeded sufficiently */
++        }
++    }
++#ifdef EGD_SOCKET
++    if ( (bytes=RAND_egd( EGD_SOCKET )) == -1 ) {
++        log_msg(LOG_WARNING, "EGD Socket %s failed", EGD_SOCKET);
++    } else {
++        totbytes += bytes;
++        log_msg(LOG_DEBUG, "Snagged %d random bytes from EGD Socket %s",
++                bytes, EGD_SOCKET);
++        return 0;
++    }
++#endif /* EGD_SOCKET */
++
++#endif /* OpenSSL-0.9.5a */
++#endif /* USE_WIN32 */
++
++    /* Try the good-old default /dev/urandom, if available  */
++    totbytes+=add_rand_file( "/dev/urandom" );
++    if(prng_seeded(totbytes))
++        return 0;
++
++    /* Random file specified during configure */
++
++    log_msg(LOG_INFO, "PRNG seeded with %d bytes total", totbytes);
++    log_msg(LOG_WARNING, "PRNG may not have been seeded with enough random bytes");
++    return -1; /* FAILED */
++}
++
++static int init_dh() {
++#ifndef NO_DH
++    DH *dh;
++    BIO *bio;
++
++    if(!(bio=BIO_new_file(options.pem, "r"))) {
++        ioerror(options.pem);
++        return -1; /* FAILED */
++    }
++    if((dh=PEM_read_bio_DHparams(bio, NULL, NULL
++#if SSLEAY_VERSION_NUMBER >= 0x00904000L
++            , NULL
++#endif
++            ))) {
++        BIO_free(bio);
++        log_msg(LOG_DEBUG, "Using Diffie-Hellman parameters from %s",
++            options.pem);
++    } else { /* Failed to load DH parameters from file */
++        BIO_free(bio);
++        log_msg(LOG_NOTICE, "Could not load DH parameters from %s", options.pem);
++        return -1; /* FAILED */
++    }
++    SSL_CTX_set_tmp_dh(ctx, dh);
++    log_msg(LOG_INFO, "Diffie-Hellman initialized with %d bit key",
++        8*DH_size(dh));
++    DH_free(dh);
++#endif /* NO_DH */
++    return 0; /* OK */
++}
++
++/* shortcut to determine if sufficient entropy for PRNG is present */
++static int prng_seeded(int bytes) {
++#if SSLEAY_VERSION_NUMBER >= 0x0090581fL
++    if(RAND_status()){
++        log_msg(LOG_DEBUG, "RAND_status claims sufficient entropy for the PRNG");
++        return 1;
++    }
++#else
++    if(bytes>=options.random_bytes) {
++        log_msg(LOG_INFO, "Sufficient entropy in PRNG assumed (>= %d)", options.random_bytes);
++        return 1;
++    }
++#endif
++    return 0;        /* assume we don't have enough */
++}
++
++static int add_rand_file(char *filename) {
++    int readbytes;
++    int writebytes;
++    struct stat sb;
++
++    if(stat(filename, &sb))
++        return 0;
++    if((readbytes=RAND_load_file(filename, options.random_bytes)))
++        log_msg(LOG_DEBUG, "Snagged %d random bytes from %s", readbytes, filename);
++    else
++        log_msg(LOG_INFO, "Unable to retrieve any random data from %s", filename);
++    /* Write new random data for future seeding if it's a regular file */
++    if(options.rand_write && (sb.st_mode & S_IFREG)){
++        writebytes = RAND_write_file(filename);
++        if(writebytes==-1)
++            log_msg(LOG_WARNING, "Failed to write strong random data to %s - "
++                "may be a permissions or seeding problem", filename);
++        else
++            log_msg(LOG_DEBUG, "Wrote %d new random bytes to %s", writebytes, filename);
++    }
++    return readbytes;
++}
++
++#ifndef NO_RSA
++
++static RSA *tmp_rsa_cb(SSL *s, int export, int keylen) {
++    static int initialized=0;
++    static struct keytabstruct {
++        RSA *key;
++        time_t timeout;
++    } keytable[KEY_CACHE_LENGTH];
++    static RSA *longkey=NULL;
++    static int longlen=0;
++    static time_t longtime=0;
++    RSA *oldkey, *retval;
++    time_t now;
++    int i;
++
++    enter_critical_section(CRIT_KEYGEN); /* Only one make_temp_key() at a time */
++    if(!initialized) {
++        for(i=0; i<KEY_CACHE_LENGTH; i++) {
++            keytable[i].key=NULL;
++            keytable[i].timeout=0;
++        }
++        initialized=1;
++    }
++    time(&now);
++    if(keylen<KEY_CACHE_LENGTH) {
++        if(keytable[keylen].timeout<now) {
++            oldkey=keytable[keylen].key;
++            keytable[keylen].key=make_temp_key(keylen);
++            keytable[keylen].timeout=now+KEY_CACHE_TIME;
++            if(oldkey)
++                RSA_free(oldkey);
++        }
++        retval=keytable[keylen].key;
++    } else { /* Temp key > 2048 bits.  Is it possible? */
++        if(longtime<now || longlen!=keylen) {
++            oldkey=longkey;
++            longkey=make_temp_key(keylen);
++            longtime=now+KEY_CACHE_TIME;
++            longlen=keylen;
++            if(oldkey)
++                RSA_free(oldkey);
++        }
++        retval=longkey;
++    }
++    leave_critical_section(CRIT_KEYGEN);
++    return retval;
++}
++
++static RSA *make_temp_key(int keylen) {
++    RSA *result;
++
++    log_msg(LOG_DEBUG, "Generating %d bit temporary RSA key...", keylen);
++#if SSLEAY_VERSION_NUMBER >= 0x0900
++    result=RSA_generate_key(keylen, RSA_F4, NULL, NULL);
++#else
++    result=RSA_generate_key(keylen, RSA_F4, NULL);
++#endif
++    log_msg(LOG_DEBUG, "Temporary RSA key created");
++    return result;
++}
++
++#endif /* NO_RSA */
++
++static void verify_init() {
++    if(options.verify_level<0)
++        return; /* No certificate verification */
++    log_msg(LOG_DEBUG, "cert_defaults is %d", options.cert_defaults);
++    log_msg(LOG_DEBUG, "cert_dir is %s", options.cert_dir);
++    log_msg(LOG_DEBUG, "cert_file is %s", options.cert_file);
++    if (options.cert_defaults & SSL_CERT_DEFAULTS) {
++        log_msg(LOG_DEBUG, "Initializing SSL library verify paths");
++        if(!SSL_CTX_set_default_verify_paths(ctx)) {
++            sslerror("X509_set_default_verify_paths");
++            exit(1);
++        }
++    }
++
++    /* put in defaults (if not set on cmd line) if -S says to */
++    if (options.cert_defaults & STUNNEL_CERT_DEFAULTS) {
++        log_msg(LOG_DEBUG, "installing defaults where not set");
++        if(!options.cert_file[0])
++            safecopy(options.cert_file, CERT_FILE);
++        if(!options.cert_dir[0])
++            safecopy(options.cert_dir, CERT_DIR);
++    }
++    if(options.cert_file[0]) {
++        if(!SSL_CTX_load_verify_locations(ctx, options.cert_file, NULL)) {
++            log_msg(LOG_ERR, "Error loading verify certificates from %s",
++                options.cert_file);
++            sslerror("SSL_CTX_load_verify_locations");
++            exit(1);
++        }
++        SSL_CTX_set_client_CA_list(ctx,
++            SSL_load_client_CA_file(options.cert_file));
++        log_msg(LOG_DEBUG, "Loaded verify certificates from %s",
++            options.cert_file);
++    }
++    if(options.cert_dir[0]) {
++        if (!SSL_CTX_load_verify_locations(ctx, NULL ,options.cert_dir)) {
++            log_msg(LOG_ERR, "Error setting verify directory to %s",
++                options.cert_dir);
++            sslerror("SSL_CTX_load_verify_locations");
++            exit(1);
++        }
++        log_msg(LOG_DEBUG, "Set verify directory to %s", options.cert_dir);
++    }
++
++    SSL_CTX_set_verify(ctx, options.verify_level==SSL_VERIFY_NONE ?
++        SSL_VERIFY_PEER : options.verify_level, verify_callback);
++
++    if (options.verify_use_only_my)
++        log_msg(LOG_NOTICE, "Peer certificate location %s", options.cert_dir);
++}
++
++#if 0
++static void verify_info() {
++    STACK_OF(X509_NAME) *stack;
++    X509_STORE *store;
++
++    stack=SSL_CTX_get_client_CA_list(ctx);
++    log_msg(LOG_DEBUG, "there are %d CA_list things", sk_X509_NAME_num(stack));
++
++    store=SSL_CTX_get_cert_store(ctx);
++    log_msg(LOG_DEBUG, "it's a %p", store);
++}
++#endif
++
++static int verify_callback(int preverify_ok, X509_STORE_CTX *ctx) {
++        /* our verify callback function */
++    char txt[STRLEN];
++    X509_OBJECT ret;
++
++    X509_NAME_oneline(X509_get_subject_name(ctx->current_cert),
++        txt, STRLEN);
++    safestring(txt);
++    if(options.verify_level==SSL_VERIFY_NONE) {
++        log_msg(LOG_NOTICE, "VERIFY IGNORE: depth=%d, %s", ctx->error_depth, txt);
++        return 1; /* Accept connection */
++    }
++    if(!preverify_ok) {
++        /* Remote site specified a certificate, but it's not correct */
++        log_msg(LOG_WARNING, "VERIFY ERROR: depth=%d, error=%s: %s",
++            ctx->error_depth,
++            X509_verify_cert_error_string (ctx->error), txt);
++        return 0; /* Reject connection */
++    }
++    if(options.verify_use_only_my && ctx->error_depth==0 &&
++            X509_STORE_get_by_subject(ctx, X509_LU_X509,
++                X509_get_subject_name(ctx->current_cert), &ret)!=1) {
++        log_msg(LOG_WARNING, "VERIFY ERROR ONLY MY: no cert for %s", txt);
++        return 0; /* Reject connection */
++    }
++    log_msg(LOG_NOTICE, "VERIFY OK: depth=%d, %s", ctx->error_depth, txt);
++    return 1; /* Accept connection */
++}
++
++static void info_callback(SSL *s, int where, int ret) {
++    if(where & SSL_CB_LOOP)
++        log_msg(LOG_DEBUG, "SSL state (%s): %s",
++        where & SSL_ST_CONNECT ? "connect" :
++        where & SSL_ST_ACCEPT ? "accept" :
++        "undefined", SSL_state_string_long(s));
++    else if(where & SSL_CB_ALERT)
++        log_msg(LOG_DEBUG, "SSL alert (%s): %s: %s",
++            where & SSL_CB_READ ? "read" : "write",
++            SSL_alert_type_string_long(ret),
++            SSL_alert_desc_string_long(ret));
++    else if(where==SSL_CB_HANDSHAKE_DONE)
++        print_stats();
++}
++
++static void print_stats() { /* print statistics */
++    log_msg(LOG_DEBUG, "%4ld items in the session cache",
++        SSL_CTX_sess_number(ctx));
++    log_msg(LOG_DEBUG, "%4d client connects (SSL_connect())",
++        SSL_CTX_sess_connect(ctx));
++    log_msg(LOG_DEBUG, "%4d client connects that finished",
++        SSL_CTX_sess_connect_good(ctx));
++#if SSLEAY_VERSION_NUMBER >= 0x0922
++    log_msg(LOG_DEBUG, "%4d client renegotiatations requested",
++        SSL_CTX_sess_connect_renegotiate(ctx));
++#endif
++    log_msg(LOG_DEBUG, "%4d server connects (SSL_accept())",
++        SSL_CTX_sess_accept(ctx));
++    log_msg(LOG_DEBUG, "%4d server connects that finished",
++        SSL_CTX_sess_accept_good(ctx));
++#if SSLEAY_VERSION_NUMBER >= 0x0922
++    log_msg(LOG_DEBUG, "%4d server renegotiatiations requested",
++        SSL_CTX_sess_accept_renegotiate(ctx));
++#endif
++    log_msg(LOG_DEBUG, "%4d session cache hits", SSL_CTX_sess_hits(ctx));
++    log_msg(LOG_DEBUG, "%4d session cache misses", SSL_CTX_sess_misses(ctx));
++    log_msg(LOG_DEBUG, "%4d session cache timeouts", SSL_CTX_sess_timeouts(ctx));
++}
++
++void sslerror(char *txt) { /* SSL Error handler */
++    unsigned long err;
++    char string[120];
++
++    err=ERR_get_error();
++    if(err) {
++        ERR_error_string(err, string);
++        log_msg(LOG_ERR, "%s: %s", txt, string);
++    } else
++        log_msg(LOG_ERR, "%s: Peer suddenly disconnected", txt);
++}
++
++/* End of ssl.c */
+Index: methods/stunnel/README
+===================================================================
+--- methods/stunnel/README (.../tags/apt-debian-0.5.9)	(revision 43)
++++ methods/stunnel/README (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -0,0 +1,12 @@
++Everything here is taken straight from the stunnel distribution and nothing is
++changed there except for the line:
++
++	#include "stunnel.h"
++
++in "ssl.c". This is done to assure that we can allways rip the latest files out
++of the stunnel distribution and reuse their improvements/fixes etc.
++
++"stunnel.h" implements the few functions that are required by "ssl.c". The
++global variables required by "ssl.c" are declared in "connect_ssl.c".
++
++Tomas Pospisek <tpo_deb@sourcepole.ch>
+Index: methods/stunnel/common.h
+===================================================================
+--- methods/stunnel/common.h (.../tags/apt-debian-0.5.9)	(revision 43)
++++ methods/stunnel/common.h (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -0,0 +1,250 @@
++/*
++ *   stunnel       Universal SSL tunnel
++ *   Copyright (c) 1998-2001 Michal Trojnara <Michal.Trojnara@mirt.net>
++ *                 All Rights Reserved
++ *
++ *   This program is free software; you can redistribute it and/or modify
++ *   it under the terms of the GNU General Public License as published by
++ *   the Free Software Foundation; either version 2 of the License, or
++ *   (at your option) any later version.
++ *
++ *   This program is distributed in the hope that it will be useful,
++ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ *   GNU General Public License for more details.
++ *
++ *   You should have received a copy of the GNU General Public License
++ *   along with this program; if not, write to the Free Software
++ *   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++#ifndef COMMON_H
++#define COMMON_H
++
++/* Certificate defaults */
++
++/* let's not use openssl defaults unless told to at compile time. */
++#ifndef SSLLIB_CS
++#define SSLLIB_CS 0
++#endif
++
++#define SSL_CERT_DEFAULTS     1
++#define STUNNEL_CERT_DEFAULTS 2
++
++#define CERT_DEFAULTS ( SSLLIB_CS | STUNNEL_CERT_DEFAULTS )
++
++/* Set some defaults if not set in makefiles */
++#ifndef CERT_DIR
++#define CERT_DIR  ""
++#endif
++#ifndef CERT_FILE
++#define CERT_FILE ""
++#endif
++#ifndef PEM_DIR
++#define PEM_DIR   ""
++#endif
++
++/* define for windows, although ignored */
++#ifndef PIDDIR
++#define PIDDIR ""
++#endif
++
++/* For FormatGuard */
++#define __NO_FORMATGUARD_
++
++#ifndef USE_WIN32
++
++/* POSIX threads */
++#if HAVE_PTHREAD_H && HAVE_LIBPTHREAD
++#define USE_PTHREAD
++#define THREADS
++#define _REENTRANT
++#define _THREAD_SAFE
++#else
++#define USE_FORK
++#endif
++
++/* TCP wrapper */
++#if HAVE_TCPD_H && HAVE_LIBWRAP
++#define USE_LIBWRAP
++#endif
++
++#endif /* USE_WIN32 */
++
++/* Must be included before sys/stat.h for Ultrix */
++#include <sys/types.h>   /* u_short, u_long */
++
++/* General headers */
++#include <stdio.h>
++#include <errno.h>
++#include <stdlib.h>
++#include <stdarg.h>      /* va_ */
++#include <string.h>
++#include <ctype.h>       /* isalnum */
++#include <time.h>
++#include <sys/stat.h>    /* stat */
++
++#ifdef USE_WIN32
++
++#ifndef VERSION
++#define VERSION "3.22"
++#endif
++
++#ifdef __MINGW32__
++#define HOST "x86-pc-mingw32-gnu"
++#else
++#define HOST "x86-pc-unknown"
++#endif
++
++typedef unsigned char u8;
++typedef unsigned short u16;
++typedef unsigned long u32;
++typedef unsigned __int64 u64;
++
++#define HAVE_VSNPRINTF
++#define vsnprintf _vsnprintf
++/*  Already defined for mingw, perhaps others
++int _vsnprintf(char *, int, char *, ...);
++*/
++#define strcasecmp _stricmp
++
++#define get_last_socket_error() WSAGetLastError()
++#define get_last_error()        GetLastError()
++#define readsocket(s,b,n)       recv((s),(b),(n),0)
++#define writesocket(s,b,n)      send((s),(b),(n),0)
++
++#define LOG_EMERG       0
++#define LOG_ALERT       1
++#define LOG_CRIT        2
++#define LOG_ERR         3
++#define LOG_WARNING     4
++#define LOG_NOTICE      5
++#define LOG_INFO        6
++#define LOG_DEBUG       7
++
++#define Win32_Winsock
++#include <windows.h>
++#define ECONNRESET WSAECONNRESET
++#define ENOTSOCK WSAENOTSOCK
++#define ENOPROTOOPT WSAENOPROTOOPT
++#define EINPROGRESS WSAEINPROGRESS
++
++#else /* USE_WIN32 */
++
++#if SIZEOF_UNSIGNED_CHAR == 1
++typedef unsigned char u8;
++#endif
++
++#if SIZEOF_UNSIGNED_SHORT == 2
++typedef unsigned short u16;
++#else
++typedef unsigned int u16;
++#endif
++
++#if SIZEOF_UNSIGNED_INT == 4
++typedef unsigned int u32;
++#else
++typedef unsigned long u32;
++#endif
++
++#if SIZEOF_UNSIGNED_LONG == 8
++typedef unsigned long u64;
++#else
++typedef unsigned long long u64;
++#endif
++
++#define get_last_socket_error() errno
++#define get_last_error()        errno
++#define readsocket(s,b,n)       read((s),(b),(n))
++#define writesocket(s,b,n)      write((s),(b),(n))
++#define closesocket(s)          close(s)
++#define ioctlsocket(a,b,c)      ioctl((a),(b),(c))
++
++    /* Unix-specific headers */
++#include <syslog.h>
++#include <signal.h>      /* signal */
++#include <sys/wait.h>    /* wait */
++#ifdef HAVE_GETOPT_H
++#include <getopt.h>      /* getopt */
++/* Assume that we have getopt() function */
++#define HAVE_GETOPT      1
++#endif
++#ifdef HAVE_SYS_RESOURCE_H
++#include <sys/resource.h> /* getrlimit */
++#endif
++#ifdef HAVE_UNISTD_H
++#include <unistd.h>      /* getpid, fork, execvp, exit */
++#endif
++#ifdef HAVE_STROPTS_H
++#include <stropts.h>
++#endif
++#ifdef HAVE_SYS_SELECT_H
++#include <sys/select.h>  /* for aix */
++#endif
++#ifdef HAVE_SYS_FILIO_H
++#include <sys/filio.h>   /* for FIONBIO */
++#endif
++#include <pwd.h>
++#include <grp.h>
++#include <fcntl.h>
++
++    /* Networking headers */
++#include <netinet/in.h>  /* struct sockaddr_in */
++#include <sys/socket.h>  /* getpeername */
++#include <arpa/inet.h>   /* inet_ntoa */
++#include <sys/time.h>    /* select */
++#include <sys/ioctl.h>   /* ioctl */
++#include <netinet/tcp.h>
++#include <netdb.h>
++#ifndef INADDR_ANY
++#define INADDR_ANY       (u32)0x00000000
++#endif
++#ifndef INADDR_LOOPBACK
++#define INADDR_LOOPBACK  (u32)0x7F000001
++#endif
++
++#if defined(HAVE_WAITPID)
++/* For SYSV systems */
++#define wait_for_pid(a, b, c) waitpid((a), (b), (c))
++#define HAVE_WAIT_FOR_PID 1
++#elif defined(HAVE_WAIT4)
++/* For BSD systems */
++#define wait_for_pid(a, b, c) wait4((a), (b), (c), NULL)
++#define HAVE_WAIT_FOR_PID 1
++#endif
++
++#if defined(sun) && !defined(__svr4__)  /* ie. SunOS 4 */
++#define atexit(a) on_exit((a), NULL)
++extern int sys_nerr;
++extern char *sys_errlist[];
++#define strerror(num) ((num)==0 ? "No error" : \
++    ((num)>=sys_nerr ? "Unknown error" : sys_errlist[num]))
++#endif /* SunOS 4 */
++
++#endif /* USE_WIN32 */
++
++/* Length of strings (including the terminating '\0' character) */
++#define STRLEN       1024
++
++/* How many bytes of random input to read from files for PRNG */
++/* OpenSSL likes at least 128 bits, so 64 bytes seems plenty. */
++#define RANDOM_BYTES 64
++
++/* STDIN/STDOUT used instead of a single file desriptor */
++#define STDIO_FILENO (-2)
++
++/* Safe copy for strings declarated as char[STRLEN] */
++#define safecopy(dst, src) \
++    (dst[STRLEN-1]='\0', strncpy((dst), (src), STRLEN-1))
++#define safeconcat(dst, src) \
++    (dst[STRLEN-1]='\0', strncat((dst), (src), STRLEN-strlen(dst)-1))
++/* change all non-printable characters to '.' */
++#define safestring(s) \
++    do {char *p; for(p=(s); *p; p++) if(!isprint((int)*p)) *p='.';} while(0)
++/* change all unsafe characters to '.' */
++#define safename(s) \
++    do {char *p; for(p=(s); *p; p++) if(!isalnum((int)*p)) *p='.';} while(0)
++
++#endif /* defined COMMON_H */
++
++/* End of common.h */
+Index: methods/stunnel/prototypes.h
+===================================================================
+--- methods/stunnel/prototypes.h (.../tags/apt-debian-0.5.9)	(revision 43)
++++ methods/stunnel/prototypes.h (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -0,0 +1,140 @@
++/*
++ *   stunnel       Universal SSL tunnel
++ *   Copyright (c) 1998-2001 Michal Trojnara <Michal.Trojnara@mirt.net>
++ *                 All Rights Reserved
++ *
++ *   This program is free software; you can redistribute it and/or modify
++ *   it under the terms of the GNU General Public License as published by
++ *   the Free Software Foundation; either version 2 of the License, or
++ *   (at your option) any later version.
++ *
++ *   This program is distributed in the hope that it will be useful,
++ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ *   GNU General Public License for more details.
++ *
++ *   You should have received a copy of the GNU General Public License
++ *   along with this program; if not, write to the Free Software
++ *   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++#ifndef PROTOTYPES_H
++#define PROTOTYPES_H
++
++#include "common.h"
++
++/* Prototypes for stunnel.c */
++
++void ioerror(char *);
++void sockerror(char *);
++void log_error(int, int, char *);
++int set_socket_options(int, int);
++void local_handler(int);
++char *stunnel_info();
++
++/* Prototypes for ssl.c */
++
++void context_init();
++void context_free();
++void sslerror(char *);
++
++/* Prototypes for client.c */
++void *client(void *);
++/* descriptor versions of fprintf/fscanf */
++int fdprintf(int, char *, ...);
++int fdscanf(int, char *, char *);
++
++/* Prototypes for log.c */
++
++void log_open();
++void log_close();
++void log_msg(int, char *, ...);
++
++/* Prototypes for sthreads.c */
++
++typedef enum {
++    CRIT_KEYGEN, CRIT_LIBWRAP, CRIT_NTOA, CRIT_CLIENTS, CRIT_SECTIONS
++} section_code;
++
++void enter_critical_section(section_code);
++void leave_critical_section(section_code);
++void sthreads_init(void);
++unsigned long process_id(void);
++unsigned long thread_id(void);
++int create_client(int, int, void *(*)(void *));
++
++/* Prototypes for pty.c */
++/* Based on Public Domain code by Tatu Ylonen <ylo@cs.hut.fi> */
++
++int pty_allocate(int *ptyfd, int *ttyfd, char *ttyname, int ttynamelen);
++void pty_release(char *ttyname);
++void pty_make_controlling_tty(int *ttyfd, char *ttyname);
++
++/* Prototypes for options.c */
++#define OPT_CLIENT      0x01
++#define OPT_CERT        0x02
++#define OPT_DAEMON      0x04
++#define OPT_FOREGROUND  0x08
++#define OPT_PROGRAM     0x10
++#define OPT_REMOTE      0x20
++#define OPT_TRANSPARENT 0x40
++#define OPT_PTY         0x80
++
++typedef struct {
++    char pem[STRLEN];                        /* pem (priv key/cert) filename */
++    char cert_dir[STRLEN];                     /* directory for hashed certs */
++    char cert_file[STRLEN];              /* file containing bunches of certs */
++    char pidfile[STRLEN];
++    unsigned long dpid;
++    int clients;
++    int option;
++    int foreground;                              /* force messages to stderr */
++    unsigned short localport, remoteport;
++    u32 *localnames, *remotenames;
++    char *execname, **execargs; /* program name and arguments for local mode */
++    char servname[STRLEN];  /* service name for loggin & permission checking */
++    int verify_level;
++    int verify_use_only_my;
++    int debug_level;                               /* debug level for syslog */
++    int facility;                               /* debug facility for syslog */
++    long session_timeout;
++    char *cipher_list;
++    char *username;
++    char *protocol;
++    char *setuid_user;
++    char *setgid_group;
++    char *egd_sock;                       /* entropy gathering daemon socket */
++    char *rand_file;                                /* file with random data */
++    int rand_write; /* overwrite rand_file with new rand data when PRNG seeded */
++    int random_bytes;                       /* how many random bytes to read */
++    char *pid_dir;
++    int cert_defaults;
++    char *output_file;
++    u32 *local_ip;
++} server_options;
++
++typedef enum {
++    TYPE_NONE, TYPE_FLAG, TYPE_INT, TYPE_LINGER, TYPE_TIMEVAL, TYPE_STRING
++} val_type;
++
++typedef union {
++    int            i_val;
++    long           l_val;
++    char           c_val[16];
++    struct linger  linger_val;
++    struct timeval timeval_val;
++} opt_union;
++
++typedef struct {
++    char *opt_str;
++    int  opt_level;
++    int  opt_name;
++    val_type opt_type;
++    opt_union *opt_val[3];
++} sock_opt;
++
++void parse_options(int argc, char *argv[]);
++
++#endif /* defined PROTOTYPES_H */
++
++/* End of prototypes.h */
+Index: methods/stunnel/stunnel.h
+===================================================================
+--- methods/stunnel/stunnel.h (.../tags/apt-debian-0.5.9)	(revision 43)
++++ methods/stunnel/stunnel.h (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -0,0 +1,66 @@
++// -*- mode: cpp; mode: fold -*-
++// Description								/*{{{*//
++// $Id: stunnel.h,v 1.00 2002/05/22 20:59:06 tpo Exp $
++/* ######################################################################
++
++   This is just a wrapper around ssl.c from stunnel which provides some
++   minimal functionality required by ssl.c.
++
++   Written by Tomas Pospisek <tpo_deb@sourcepole.ch>, Copyright (c) 2002
++   Licensed under the GNU General Public License v2
++	  
++   Linking with openssl is permitted.
++
++   Based on code from stunnel.
++
++   ##################################################################### */
++									/*}}}*/
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++//
++// Stuff for interoperation with stunnel's ssl.c:
++#include "common.h"
++#include "prototypes.h"
++
++#define HAVE_OPENSSL
++
++extern server_options options;
++
++void log_msg(int level, char *format, ...) {
++   va_list arglist;
++   char text[256];
++   if(level>options.debug_level)
++      return;
++
++    va_start(arglist, format);
++#ifdef HAVE_VSNPRINTF
++    vsnprintf(text, 256, format, arglist);
++#else
++    vsprintf(text, format, arglist);
++#endif
++    va_end(arglist);
++	
++    fprintf(stderr, "%s\n", text);
++}
++
++void ioerror(char *txt) { /* Input/Output error handler */
++    int error = get_last_error();
++	log(LOG_ERR, "%s: %s (%d)", txt, strerror(error), error);
++}
++
++void enter_critical_section(section_code i) {
++    // pthread_mutex_lock(stunnel_cs+i);
++}
++
++void leave_critical_section(section_code i) {
++    // pthread_mutex_unlock(stunnel_cs+i);
++}
++
++server_options options;
++
++
++#ifdef __cplusplus
++}
++#endif
+Index: methods/https.h
+===================================================================
+--- methods/https.h (.../tags/apt-debian-0.5.9)	(revision 43)
++++ methods/https.h (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -0,0 +1,62 @@
++// -*- mode: cpp; mode: fold -*-
++// Description								/*{{{*/// $Id: https.h,v 1.11 2002/04/04 23:53:56 tpo Exp $
++// $Id: https.h,v 1.11 2002/04/04 23:53:56 tpo Exp $
++/* ######################################################################
++
++   HTTPS Aquire Method - This is the HTTPS aquire method for APT.
++
++   Written by Tomas Pospisek <tpo_deb@sourcepole.ch>, Copyright (c) 2002
++   Licensed under the GNU General Public License v2.
++
++   Linking with openssl is permitted.
++
++   The work on https has been made possible by:
++   		AO Media Services	http://www.ao-asif.ch/aoi/media/
++   and
++   		Sourcepole			http://sourcepole.ch
++
++   ##################################################################### */
++									/*}}}*/
++
++#ifndef APT_HTTPS_H
++#define APT_HTTPS_H
++
++#include "http.h"
++#include "connect_ssl.h"
++
++#include <openssl/ssl.h>
++
++class ConnectionHandleSSL: public ConnectionHandle
++{
++   protected:
++   SSL *Ssl;
++   int PeerVerifyLevel;
++   int DebugLevel;
++   string Pem;
++   string CertDir;
++   string CertFile;
++
++   public:
++   virtual bool Close()
++   {
++	if (IsValid()) { SSL_shutdown(Ssl); Reset(); } return true;
++   };
++   virtual bool Connect(const string &To,int Port,const char *Service,
++                        int DefPort,unsigned long TimeOut, pkgAcqMethod *Owner)
++   {
++	if (ConnectionHandle::Connect(To,Port,Service,DefPort,TimeOut,Owner))
++           return ::ConnectSSL(ServerFd,&Ssl,(long int)TimeOut,PeerVerifyLevel,
++	                       DebugLevel,Pem,CertDir,CertFile);
++	else
++           return false;
++   };
++   virtual bool IsValid() { return ConnectionHandle::IsValid() && Ssl != NULL;};
++   virtual ssize_t Read(void *buf, size_t count) { return SSL_read(Ssl,buf,count);};
++   virtual ssize_t Write(void *buf, size_t count) { return SSL_write(Ssl,buf,count);};
++   virtual void Reset() { ConnectionHandle::Reset(); Ssl = NULL;};
++
++   ConnectionHandleSSL(bool PeerVerifyLevel_,int DebugLevel_,string Pem_,
++                       string CertDir_,string CertFile_);
++};
++
++#endif
+Index: methods/connect_ssl.cc
+===================================================================
+--- methods/connect_ssl.cc (.../tags/apt-debian-0.5.9)	(revision 43)
++++ methods/connect_ssl.cc (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -0,0 +1,140 @@
++// -*- mode: cpp; mode: fold -*-
++// Description								/*{{{*/
++// $Id: connect_ssl.cc,v 1.0 2001/02/20 07:03:18 tpo Exp $
++/* ######################################################################
++
++   ConnectSSL - Replacement connect call
++
++   Create an SSL tunnel and attach the passed filedescriptor to it. Over
++   that tunnel one can then transport whatever protocol one needs
++   (http, ftp, whatever).
++
++   Currently ConnectSSL is only used by https, but it could be used by
++   any other protocol as well, which is why I kept the interface similar
++   to connect.cc's interface.
++   
++   ConnectSSL is only a wapper around stunnel/ssl.c from stunnel.
++   
++   Written by Tomas Pospisek <tpo_deb@sourcepole.ch>, Copyright (c) 2002
++   Licensed under the GNU General Public License v2
++
++   Linking with openssl is permitted.
++
++   Based on code from stunnel and from connect.cc.
++
++   ##################################################################### */
++									/*}}}*/
++// Include Files							/*{{{*/
++#include <iostream>
++#include <apt-pkg/error.h>
++#include <openssl/ssl.h>
++#include <openssl/err.h>
++#include "connect_ssl.h"
++extern "C"
++{
++	#include "stunnel/common.h"
++	#include "stunnel/prototypes.h"
++}
++									/*}}}*/
++using namespace std;
++
++// lenght of the SSL error message buffer
++#define ERROR_BUF_LEN 120
++
++extern SSL_CTX *ctx;	// OpenSSL control stucture - shared with stunnel/ssl.c
++server_options options;	// stunnel's options for the SSL connection
++
++// ConnectSSL - Attempt to establish an SSL tunnel over given connection/*{{{*/
++// ---------------------------------------------------------------------
++/* This helper function attempts to establish an SSL tunnel over a given
++ * connection.
++ */
++bool ConnectSSL(int Fd, SSL **Ssl, long TimeOut, int PeerVerifyLevel,
++				int DebugLevel, string Pem, string CertDir,
++				string CertFile)
++{
++   // set stunnel options
++   options.option=OPT_CLIENT;
++
++   options.verify_level=SSL_VERIFY_NONE;
++   switch(PeerVerifyLevel) {
++      case 3:
++         options.verify_use_only_my=1;
++      case 2:
++         options.verify_level|=SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
++      case 1:
++         options.verify_level|=SSL_VERIFY_PEER;
++      case 0:
++         break;
++      default:
++         clog << "Peer-Verify-Level is wrong: " << PeerVerifyLevel
++              << "use values between 0 and 3." << endl;
++   }
++   options.session_timeout=TimeOut;
++   if (Pem != "") {
++      safecopy(options.pem, Pem.c_str());
++	  options.option|=OPT_CERT;
++   }
++   else {
++      options.pem[0] = '\0';
++   }
++   options.cipher_list=NULL;
++   options.rand_file=NULL;
++   options.egd_sock=NULL;
++   options.random_bytes=RANDOM_BYTES;
++   options.rand_write=1;
++   options.cert_defaults=1;	// use openssl defaults for certs location
++   if (CertDir != "") {
++      safecopy(options.cert_dir, CertDir.c_str());
++   }
++   else {
++      options.cert_dir[0] = '\0';
++   }
++   
++   if (CertFile != "") {
++      safecopy(options.cert_file, CertFile.c_str());
++   }
++   else {
++      options.cert_file[0] = '\0';
++   }
++   options.debug_level=DebugLevel;
++
++   // We do not use these stunnel/SSL features (yet? ;-)
++   options.username=NULL;
++   options.protocol=NULL;
++   options.setuid_user=NULL;
++   options.setgid_group=NULL;
++   options.pid_dir=PIDDIR;
++   options.output_file=NULL;
++   options.local_ip=NULL;
++
++   // Init SSL Connection
++   context_init();
++
++   char ErrorBuf[ERROR_BUF_LEN];
++
++   *Ssl = SSL_new(ctx);
++   if (*Ssl == NULL) {
++      ERR_error_string_n(ERR_get_error(), ErrorBuf,ERROR_BUF_LEN);
++      return _error->Errno("","Could not create a ssl structure. The exact openssl error message is:\n%s",ErrorBuf);
++   }
++
++   SSL_set_connect_state(*Ssl);
++   if (! SSL_set_fd(*Ssl,Fd)) {
++      ERR_error_string_n(ERR_get_error(), ErrorBuf,ERROR_BUF_LEN);
++      return _error->Errno("","Could not connect ssl struct to fd. The exact openssl error message is:\n%s",ErrorBuf);
++   }
++
++   int err = SSL_connect(*Ssl);
++   if (err != 1) {
++      int ssl_err = SSL_get_error(*Ssl, err);
++      // Aparently these errors can be ignored (see "man SSL_get_error")
++      if (ssl_err != SSL_ERROR_WANT_READ &&
++          ssl_err != SSL_ERROR_WANT_WRITE) {
++         ERR_error_string_n(ssl_err, ErrorBuf,ERROR_BUF_LEN);
++         return _error->Errno("","Ssl connection failed. The exact openssl error message is:\n%s",ErrorBuf);
++      }
++   }
++
++   return true;
++}
+Index: methods/connect_ssl.h
+===================================================================
+--- methods/connect_ssl.h (.../tags/apt-debian-0.5.9)	(revision 43)
++++ methods/connect_ssl.h (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -0,0 +1,26 @@
++// -*- mode: cpp; mode: fold -*-
++// Description								/*{{{*/
++// $Id: connect_ssl.h,v 1.3 2001/02/20 07:03:18 tpo Exp $
++/* ######################################################################
++
++   ConnectSSL - Establish SSL tunnel over a given connection
++   
++   Written by Tomas Pospisek <tpo_deb@sourcepole.ch>, Copyright (c) 2002
++   Licensed under the GNU General Public License v2
++	  
++   Linking with openssl is permitted.
++
++   Based on code from connect.h.
++
++   ##################################################################### */
++									/*}}}*/
++#ifndef CONNECT_SSL_H
++#define CONNECT_SSL_H
++
++#include "config.h"
++
++#include <openssl/ssl.h>
++
++bool ConnectSSL(int Fd, SSL **Ssl, long TimeOut, int PeerVerifyLevel,
++				int DebugLevel, string Pem, string CertDir, string CertFile);
++#endif
+Index: methods/http.cc
+===================================================================
+--- methods/http.cc (.../tags/apt-debian-0.5.9)	(revision 43)
++++ methods/http.cc (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -25,6 +25,8 @@
+    ##################################################################### */
+ 									/*}}}*/
+ // Include Files							/*{{{*/
++#include "config.h"
++
+ #include <apti18n.h>
+ #include <apt-pkg/fileutl.h>
+ #include <apt-pkg/acquire-method.h>
+@@ -48,6 +50,12 @@
+ #include "rfc2553emu.h"
+ #include "http.h"
+ 
++// SSL stuff - only include if configured
++#ifdef WITH_SSL
++#include "connect_ssl.h"
++#include "https.h"
++#endif
++
+ 									/*}}}*/
+ using namespace std;
+ 
+@@ -57,6 +65,7 @@
+ unsigned long PipelineDepth = 10;
+ unsigned long TimeOut = 120;
+ bool Debug = false;
++URI Proxy;
+ 
+ // CircleBuf::CircleBuf - Circular input buffer				/*{{{*/
+ // ---------------------------------------------------------------------
+@@ -88,7 +97,7 @@
+ // ---------------------------------------------------------------------
+ /* This fills up the buffer with as much data as is in the FD, assuming it
+    is non-blocking.. */
+-bool CircleBuf::Read(int Fd)
++bool CircleBuf::Read(ConnectionHandle *Connection)
+ {
+    while (1)
+    {
+@@ -98,7 +107,7 @@
+       
+       // Write the buffer segment
+       int Res;
+-      Res = read(Fd,Buf + (InP%Size),LeftRead());
++      Res = Connection->Read(Buf + (InP%Size),LeftRead());
+       
+       if (Res == 0)
+ 	 return false;
+@@ -193,6 +202,44 @@
+    }
+ }
+ 									/*}}}*/
++
++// CircleBuf::Write - Write from the buffer into a Connection  /*{{{*/
++// ---------------------------------------------------------------------
++/* This empties the buffer into the Connection. */
++bool CircleBuf::Write(ConnectionHandle *Connection)
++{
++   while (1)
++   {
++      FillOut();
++      
++      // Woops, buffer is empty
++      if (OutP == InP)
++        return true;
++      
++      if (OutP == MaxGet)
++        return true;
++      
++      // Write the buffer segment
++      int Res;
++      Res = Connection->Write(Buf + (OutP%Size),LeftWrite());
++
++      if (Res == 0)
++        return false;
++      if (Res < 0)
++      {
++        if (errno == EAGAIN)
++           return true;
++        
++        return false;
++      }
++      
++      if (Hash != 0)
++        Hash->Add(Buf + (OutP%Size),Res);
++      
++      OutP += Res;
++   }
++}
++                                                                        /*}}}*/
+ // CircleBuf::WriteTillEl - Write from the buffer to a string		/*{{{*/
+ // ---------------------------------------------------------------------
+ /* This copies till the first empty line */
+@@ -251,31 +298,75 @@
+ // ---------------------------------------------------------------------
+ /* */
+ ServerState::ServerState(URI Srv,HttpMethod *Owner) : Owner(Owner),
+-                        In(64*1024), Out(4*1024),
+                         ServerName(Srv)
+ {
++   In = new CircleBuf(64*1024);
++   Out = new CircleBuf(4*1024);
++
++#ifdef WITH_SSL
++   if (!stringcmp(Srv.Access, "https"))
++      Connection = new ConnectionHandleSSL(
++         _config->FindI("Acquire::https::Peer-Verify-Level",1),
++         _config->FindI("Acquire::https::Debug-Level",4),
++         _config->Find( "Acquire::https::Pem","/etc/ssl/certs/apt.pem"),
++         _config->Find( "Acquire::https::CertDir","/etc/ssl/certs/"),
++         _config->Find( "Acquire::https::CertFile"));
++   else
++#endif
++      Connection = new ConnectionHandle();
++
+    Reset();
+ }
+ 									/*}}}*/
++// ServerState::GetAccessParams - Get connection parameters	       	/*{{{*/
++// ---------------------------------------------------------------------
++/* Returns the proper parameters depending on whether we're using 
++   SSL or not. */
++void ServerState::GetAccessParams(string &AcquireStr, int &DefaultPort, 
++                                  const char *& ProxyStr) 
++{
++#ifdef WITH_SSL
++   if (!stringcmp(ServerName.Access, "https"))
++   {
++      AcquireStr = "Acquire::https::Proxy";
++      DefaultPort = 443;
++      ProxyStr = "https_proxy";
++   }
++   else
++#endif
++   {
++      AcquireStr = "Acquire::http::Proxy";
++      DefaultPort = 80;
++      ProxyStr = "http_proxy";
++   }
++}
++									/*}}}*/
+ // ServerState::Open - Open a connection to the server			/*{{{*/
+ // ---------------------------------------------------------------------
+ /* This opens a connection to the server. */
+ bool ServerState::Open()
+ {
+    // Use the already open connection if possible.
+-   if (ServerFd != -1)
++   if (Connection->IsValid())
+       return true;
+    
+-   Close();
+-   In.Reset();
+-   Out.Reset();
++   string Acquire;
++   int DefaultPort;
++   const char * ProxyStr;
++
++   GetAccessParams(Acquire, DefaultPort, ProxyStr);
++   
++   Connection->Close();
++   In->Reset();
++   Out->Reset();
++
+    Persistent = true;
+    
+    // Determine the proxy setting
+-   if (getenv("http_proxy") == 0)
++   if (getenv(ProxyStr) == 0)
+    {
+-      string DefProxy = _config->Find("Acquire::http::Proxy");
+-      string SpecificProxy = _config->Find("Acquire::http::Proxy::" + ServerName.Host);
++      string DefProxy = _config->Find(Acquire);
++      string SpecificProxy = _config->Find(Acquire + "::" + ServerName.Host);
+       if (SpecificProxy.empty() == false)
+       {
+ 	 if (SpecificProxy == "DIRECT")
+@@ -287,7 +378,7 @@
+ 	 Proxy = DefProxy;
+    }
+    else
+-      Proxy = getenv("http_proxy");
++      Proxy = getenv(ProxyStr);
+    
+    // Parse no_proxy, a , separated list of domains
+    if (getenv("no_proxy") != 0)
+@@ -313,25 +404,16 @@
+    }
+    
+    // Connect to the remote server
+-   if (Connect(Host,Port,"http",80,ServerFd,TimeOut,Owner) == false)
++   if (Connection->Connect(Host,Port,ServerName.Access.c_str(),
++       DefaultPort,TimeOut,Owner) == false)
+       return false;
+    
+    return true;
+ }
+ 									/*}}}*/
+-// ServerState::Close - Close a connection to the server		/*{{{*/
+-// ---------------------------------------------------------------------
+-/* */
+-bool ServerState::Close()
+-{
+-   close(ServerFd);
+-   ServerFd = -1;
+-   return true;
+-}
+-									/*}}}*/
+ // ServerState::RunHeaders - Get the headers before the data		/*{{{*/
+ // ---------------------------------------------------------------------
+-/* Returns 0 if things are OK, 1 if an IO error occursed and 2 if a header
++/* Returns 0 if things are OK, 1 if an IO error occurred and 2 if a header
+    parse error occured */
+ int ServerState::RunHeaders()
+ {
+@@ -351,7 +433,7 @@
+    do
+    {
+       string Data;
+-      if (In.WriteTillEl(Data) == false)
++      if (In->WriteTillEl(Data) == false)
+ 	 continue;
+ 
+       if (Debug == true)
+@@ -396,10 +478,10 @@
+ 	 // Grab the block size
+ 	 bool Last = true;
+ 	 string Data;
+-	 In.Limit(-1);
++	 In->Limit(-1);
+ 	 do
+ 	 {
+-	    if (In.WriteTillEl(Data,true) == true)
++	    if (In->WriteTillEl(Data,true) == true)
+ 	       break;
+ 	 }
+ 	 while ((Last = Owner->Go(false,this)) == true);
+@@ -411,13 +493,13 @@
+ 	 unsigned long Len = strtol(Data.c_str(),0,16);
+ 	 if (Len == 0)
+ 	 {
+-	    In.Limit(-1);
++	    In->Limit(-1);
+ 	    
+ 	    // We have to remove the entity trailer
+ 	    Last = true;
+ 	    do
+ 	    {
+-	       if (In.WriteTillEl(Data,true) == true && Data.length() <= 2)
++	       if (In->WriteTillEl(Data,true) == true && Data.length() <= 2)
+ 		  break;
+ 	    }
+ 	    while ((Last = Owner->Go(false,this)) == true);
+@@ -427,21 +509,21 @@
+ 	 }
+ 	 
+ 	 // Transfer the block
+-	 In.Limit(Len);
++	 In->Limit(Len);
+ 	 while (Owner->Go(true,this) == true)
+-	    if (In.IsLimit() == true)
++	    if (In->IsLimit() == true)
+ 	       break;
+ 	 
+ 	 // Error
+-	 if (In.IsLimit() == false)
++	 if (In->IsLimit() == false)
+ 	    return false;
+ 	 
+ 	 // The server sends an extra new line before the next block specifier..
+-	 In.Limit(-1);
++	 In->Limit(-1);
+ 	 Last = true;
+ 	 do
+ 	 {
+-	    if (In.WriteTillEl(Data,true) == true)
++	    if (In->WriteTillEl(Data,true) == true)
+ 	       break;
+ 	 }
+ 	 while ((Last = Owner->Go(false,this)) == true);
+@@ -454,17 +536,17 @@
+       /* Closes encoding is used when the server did not specify a size, the
+          loss of the connection means we are done */
+       if (Encoding == Closes)
+-	 In.Limit(-1);
++	 In->Limit(-1);
+       else
+-	 In.Limit(Size - StartPos);
++	 In->Limit(Size - StartPos);
+       
+       // Just transfer the whole block.
+       do
+       {
+-	 if (In.IsLimit() == false)
++	 if (In->IsLimit() == false)
+ 	    continue;
+ 	 
+-	 In.Limit(-1);
++	 In->Limit(-1);
+ 	 return !_error->PendingError();
+       }
+       while (Owner->Go(true,this) == true);
+@@ -603,7 +685,7 @@
+    URI Uri = Itm->Uri;
+ 
+    // The HTTP server expects a hostname with a trailing :port
+-   char Buf[1000];
++   char Buf[4096];
+    string ProperHost = Uri.Host;
+    if (Uri.Port != 0)
+    {
+@@ -689,44 +771,37 @@
+ bool HttpMethod::Go(bool ToFile,ServerState *Srv)
+ {
+    // Server has closed the connection
+-   if (Srv->ServerFd == -1 && (Srv->In.WriteSpace() == false || 
+-			       ToFile == false))
++   if (! Srv->Connection->IsValid() && (Srv->In->WriteSpace() == false || 
++				        ToFile == false))
+       return false;
+    
+-   fd_set rfds,wfds;
+-   FD_ZERO(&rfds);
+-   FD_ZERO(&wfds);
++   ConnectionHandleSet ConnectionSet;
+    
+    /* Add the server. We only send more requests if the connection will 
+       be persisting */
+-   if (Srv->Out.WriteSpace() == true && Srv->ServerFd != -1 
++   if (Srv->Out->WriteSpace() == true && Srv->Connection->IsValid() 
+        && Srv->Persistent == true)
+-      FD_SET(Srv->ServerFd,&wfds);
+-   if (Srv->In.ReadSpace() == true && Srv->ServerFd != -1)
+-      FD_SET(Srv->ServerFd,&rfds);
++         ConnectionSet.AddWriteConnection(Srv->Connection);
++   if (Srv->In->ReadSpace() == true && Srv->Connection->IsValid())
++         ConnectionSet.AddReadConnection(Srv->Connection);
+    
+    // Add the file
+    int FileFD = -1;
+    if (File != 0)
+       FileFD = File->Fd();
+    
+-   if (Srv->In.WriteSpace() == true && ToFile == true && FileFD != -1)
+-      FD_SET(FileFD,&wfds);
++   if (Srv->In->WriteSpace() == true && ToFile == true && FileFD != -1)
++      ConnectionSet.AddWriteFd(FileFD);
+    
+    // Add stdin
+-   FD_SET(STDIN_FILENO,&rfds);
++   ConnectionSet.AddReadFd(STDIN_FILENO);
+ 	  
+-   // Figure out the max fd
+-   int MaxFd = FileFD;
+-   if (MaxFd < Srv->ServerFd)
+-      MaxFd = Srv->ServerFd;
+-
+    // Select
+    struct timeval tv;
+    tv.tv_sec = TimeOut;
+    tv.tv_usec = 0;
+    int Res = 0;
+-   if ((Res = select(MaxFd+1,&rfds,&wfds,0,&tv)) < 0)
++   if ((Res = ConnectionSet.Select(&tv)) < 0)
+    {
+       if (errno == EINTR)
+ 	 return true;
+@@ -740,29 +815,29 @@
+    }
+    
+    // Handle server IO
+-   if (Srv->ServerFd != -1 && FD_ISSET(Srv->ServerFd,&rfds))
++   if (Srv->Connection->IsValid() && ConnectionSet.IsReadSet(Srv->Connection))
+    {
+       errno = 0;
+-      if (Srv->In.Read(Srv->ServerFd) == false)
++      if (Srv->In->Read(Srv->Connection) == false)
+ 	 return ServerDie(Srv);
+    }
+ 	 
+-   if (Srv->ServerFd != -1 && FD_ISSET(Srv->ServerFd,&wfds))
++   if (Srv->Connection->IsValid() && ConnectionSet.IsWriteSet(Srv->Connection))
+    {
+       errno = 0;
+-      if (Srv->Out.Write(Srv->ServerFd) == false)
++      if (Srv->Out->Write(Srv->Connection) == false)
+ 	 return ServerDie(Srv);
+    }
+ 
+    // Send data to the file
+-   if (FileFD != -1 && FD_ISSET(FileFD,&wfds))
++   if (FileFD != -1 && ConnectionSet.IsWriteSet(FileFD))
+    {
+-      if (Srv->In.Write(FileFD) == false)
++      if (Srv->In->Write(FileFD) == false)
+ 	 return _error->Errno("write",_("Error writing to output file"));
+    }
+ 
+    // Handle commands from APT
+-   if (FD_ISSET(STDIN_FILENO,&rfds))
++   if (ConnectionSet.IsReadSet(STDIN_FILENO))
+    {
+       if (Run(true) != -1)
+ 	 exit(100);
+@@ -780,18 +855,18 @@
+    if (File != 0)
+    {
+       SetNonBlock(File->Fd(),false);
+-      if (Srv->In.WriteSpace() == false)
++      if (Srv->In->WriteSpace() == false)
+ 	 return true;
+       
+-      while (Srv->In.WriteSpace() == true)
++      while (Srv->In->WriteSpace() == true)
+       {
+-	 if (Srv->In.Write(File->Fd()) == false)
++	 if (Srv->In->Write(File->Fd()) == false)
+ 	    return _error->Errno("write",_("Error writing to file"));
+-	 if (Srv->In.IsLimit() == true)
++	 if (Srv->In->IsLimit() == true)
+ 	    return true;
+       }
+ 
+-      if (Srv->In.IsLimit() == true || Srv->Encoding == ServerState::Closes)
++      if (Srv->In->IsLimit() == true || Srv->Encoding == ServerState::Closes)
+ 	 return true;
+    }
+    return false;
+@@ -808,19 +883,19 @@
+    if (Srv->State == ServerState::Data)
+    {
+       SetNonBlock(File->Fd(),false);
+-      while (Srv->In.WriteSpace() == true)
++      while (Srv->In->WriteSpace() == true)
+       {
+-	 if (Srv->In.Write(File->Fd()) == false)
++	 if (Srv->In->Write(File->Fd()) == false)
+ 	    return _error->Errno("write",_("Error writing to the file"));
+ 
+ 	 // Done
+-	 if (Srv->In.IsLimit() == true)
++	 if (Srv->In->IsLimit() == true)
+ 	    return true;
+       }
+    }
+    
+    // See if this is because the server finished the data stream
+-   if (Srv->In.IsLimit() == false && Srv->State != ServerState::Header && 
++   if (Srv->In->IsLimit() == false && Srv->State != ServerState::Header && 
+        Srv->Encoding != ServerState::Closes)
+    {
+       Srv->Close();
+@@ -831,10 +906,10 @@
+    }
+    else
+    {
+-      Srv->In.Limit(-1);
++      Srv->In->Limit(-1);
+ 
+       // Nothing left in the buffer
+-      if (Srv->In.WriteSpace() == false)
++      if (Srv->In->WriteSpace() == false)
+ 	 return false;
+       
+       // We may have got multiple responses back in one packet..
+@@ -900,14 +975,14 @@
+    // Set the start point
+    lseek(File->Fd(),0,SEEK_END);
+ 
+-   delete Srv->In.Hash;
+-   Srv->In.Hash = new Hashes;
++   delete Srv->In->Hash;
++   Srv->In->Hash = new Hashes;
+    
+    // Fill the Hash if the file is non-empty (resume)
+    if (Srv->StartPos > 0)
+    {
+       lseek(File->Fd(),0,SEEK_SET);
+-      if (Srv->In.Hash->AddFD(File->Fd(),Srv->StartPos) == false)
++      if (Srv->In->Hash->AddFD(File->Fd(),Srv->StartPos) == false)
+       {
+ 	 _error->Errno("read",_("Problem hashing file"));
+ 	 return 5;
+@@ -965,7 +1040,7 @@
+       if (Tail == true)
+       {
+ 	 QueueBack = I->Next;
+-	 SendReq(I,Server->Out);
++	 SendReq(I,*(Server->Out));
+ 	 continue;
+       }
+    }
+@@ -1022,7 +1097,7 @@
+       if (Server == 0 || Server->Comp(Queue->Uri) == false)
+       {
+ 	 delete Server;
+-	 Server = new ServerState(Queue->Uri,this);
++	 Server = NewServerState(Queue->Uri,this);
+       }
+       
+       /* If the server has explicitly said this is the last connection
+@@ -1034,7 +1109,7 @@
+ 	 Server->Close();
+       
+       // Reset the pipeline
+-      if (Server->ServerFd == -1)
++      if (! Server->Connection->IsValid())
+ 	 QueueBack = Queue;	 
+ 	 
+       // Connnect to the host
+@@ -1096,7 +1171,7 @@
+ 
+ 	    // Run the data
+ 	    bool Result =  Server->RunData();
+-
++	    
+ 	    /* If the server is sending back sizeless responses then fill in
+ 	       the size now */
+ 	    if (Res.Size == 0)
+@@ -1117,7 +1192,7 @@
+ 	    // Send status to APT
+ 	    if (Result == true)
+ 	    {
+-	       Res.TakeHashes(*Server->In.Hash);
++	       Res.TakeHashes(*Server->In->Hash);
+ 	       URIDone(Res);
+ 	    }
+ 	    else
+@@ -1152,7 +1227,8 @@
+ 	    break;
+ 	 }
+ 
+-	 // We need to flush the data, the header is like a 404 w/ error text
++	 /* We need to flush the data, the header is like a 404 w/ 
++	    error text */
+ 	 case 4:
+ 	 {
+ 	    Fail();
+@@ -1176,11 +1252,10 @@
+    return 0;
+ }
+ 									/*}}}*/
+-
+-int main()
++int main(int argc, char *argv[])
+ {
+    HttpMethod Mth;
+-   
++
+    return Mth.Loop();
+ }
+ 
+Index: methods/http.h
+===================================================================
+--- methods/http.h (.../tags/apt-debian-0.5.9)	(revision 43)
++++ methods/http.h (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -11,17 +11,78 @@
+ #ifndef APT_HTTP_H
+ #define APT_HTTP_H
+ 
+-#define MAXLEN 360
++#define MAXLEN 2048
+ 
++#include <apt-pkg/hashes.h>
++#include <apt-pkg/acquire-method.h>
++#include <apt-pkg/fileutl.h>
++
++#include <unistd.h>
+ #include <iostream>
+ 
++#include "connect.h"
++
+ using std::cout;
+ using std::endl;
+ 
+ class HttpMethod;
++class ConnectionHandleSet;
+ 
++class ConnectionHandle
++{
++   protected:
++   int ServerFd;
++
++   friend class ConnectionHandleSet;
++
++   public:
++   virtual bool Close()
++      { if (IsValid()) { close(ServerFd); Reset(); } return true;};
++   virtual bool Connect(const string &To,int Port,const char *Service,
++                        int DefPort,unsigned long TimeOut, pkgAcqMethod *Owner)
++      { return ::Connect(To,Port,Service,DefPort,ServerFd,TimeOut,Owner);};
++   virtual bool IsValid() { return ServerFd != -1;};
++   virtual ssize_t Read(void *buf, size_t count)
++      { return read(ServerFd,buf,count);};
++   virtual ssize_t Write(void *buf, size_t count)
++      { return write(ServerFd,buf,count);};
++   virtual void Reset() { ServerFd = -1;};
++
++   ConnectionHandle() { Reset();};
++   ~ConnectionHandle() { Close();};
++};
++
++class ConnectionHandleSet
++{
++   fd_set rfds,wfds;
++   int MaxFd;
++ 
++   public:
++   void AddReadFd(int Fd) { FD_SET(Fd,&rfds); if (Fd > MaxFd) MaxFd = Fd;};
++   void AddWriteFd(int Fd) { FD_SET(Fd,&wfds); if (Fd > MaxFd) MaxFd = Fd;};
++   void AddWriteConnection(ConnectionHandle *Connection)
++			{ AddWriteFd(Connection->ServerFd); };
++   void AddReadConnection(ConnectionHandle *Connection)
++			{ AddReadFd(Connection->ServerFd); };
++   bool IsReadSet(ConnectionHandle *Connection)
++			{ return FD_ISSET(Connection->ServerFd,&rfds);};
++   bool IsWriteSet(ConnectionHandle *Connection)
++			{ return FD_ISSET(Connection->ServerFd,&wfds);};
++   bool IsReadSet(int Fd)
++			{ return FD_ISSET(Fd,&rfds);};
++   bool IsWriteSet(int Fd)
++			{ return FD_ISSET(Fd,&wfds);};
++   void Reset()
++			{ FD_ZERO(&rfds); FD_ZERO(&wfds); MaxFd = -1;};
++   int Select(struct timeval * timeout)
++			{ return select(MaxFd+1,&rfds,&wfds,NULL,timeout); }
++   ConnectionHandleSet()
++   			{ Reset();};
++};
++
+ class CircleBuf
+ {
++   protected:
+    unsigned char *Buf;
+    unsigned long Size;
+    unsigned long InP;
+@@ -50,14 +111,15 @@
+    void FillOut();
+    
+    public:
+-   
++
+    Hashes *Hash;
+    
+    // Read data in
+-   bool Read(int Fd);
++   virtual bool Read(ConnectionHandle *Connection);
+    bool Read(string Data);
+    
+    // Write data out
++   virtual bool Write(ConnectionHandle *Connection);
+    bool Write(int Fd);
+    bool WriteTillEl(string &Data,bool Single = false);
+    
+@@ -78,8 +140,9 @@
+    ~CircleBuf() {delete [] Buf; delete Hash;};
+ };
+ 
+-struct ServerState
++class ServerState
+ {
++   public:
+    // This is the last parsed Header Line
+    unsigned int Major;
+    unsigned int Minor;
+@@ -101,24 +164,29 @@
+    HttpMethod *Owner;
+    
+    // This is the connection itself. Output is data FROM the server
+-   CircleBuf In;
+-   CircleBuf Out;
+-   int ServerFd;
++   CircleBuf *In;
++   CircleBuf *Out;
++   ConnectionHandle *Connection;
+    URI ServerName;
+   
+    bool HeaderLine(string Line);
+-   bool Comp(URI Other) {return Other.Host == ServerName.Host && Other.Port == ServerName.Port;};
++   bool Comp(URI Other) {return (Other.Access == ServerName.Access &&
++                                 Other.Host == ServerName.Host && 
++                                 Other.Port == ServerName.Port);};
++   void GetAccessParams(string &AcquireStr, int &DefaultPort,
++                        const char *& ProxyStr);
+    void Reset() {Major = 0; Minor = 0; Result = 0; Size = 0; StartPos = 0;
+-                 Encoding = Closes; time(&Date); ServerFd = -1; 
++                 Encoding = Closes; time(&Date); 
++                 Connection->Reset();
+                  Pipeline = true;};
+    int RunHeaders();
+    bool RunData();
+    
+    bool Open();
+-   bool Close();
++   bool Close() { Connection->Close(); }
+    
+    ServerState(URI Srv,HttpMethod *Owner);
+-   ~ServerState() {Close();};
++   ~ServerState() {Close(); delete In; delete Out; delete Connection; };
+ };
+ 
+ class HttpMethod : public pkgAcqMethod
+@@ -132,6 +200,9 @@
+    virtual bool Fetch(FetchItem *);
+    virtual bool Configuration(string Message);
+    
++   virtual ServerState * NewServerState(URI Srv,HttpMethod *Owner) {
++      return new ServerState(Srv,Owner);};
++
+    // In the event of a fatal signal this file will be closed and timestamped.
+    static string FailFile;
+    static int FailFd;
+@@ -145,14 +216,13 @@
+    ServerState *Server;
+    
+    int Loop();
+-   
+-   HttpMethod() : pkgAcqMethod("1.2",Pipeline | SendConfig) 
++
++   HttpMethod() : pkgAcqMethod("1.2",Pipeline | SendConfig | NeedsCleanup) 
+    {
+       File = 0;
+       Server = 0;
+    };
++   ~HttpMethod() { delete Server; }
+ };
+ 
+-URI Proxy;
+-
+ #endif
+Index: methods/connect.cc
+===================================================================
+--- methods/connect.cc (.../tags/apt-debian-0.5.9)	(revision 43)
++++ methods/connect.cc (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -30,6 +30,7 @@
+ 									/*}}}*/
+ 
+ static string LastHost;
++static string LastService;
+ static int LastPort = 0;
+ static struct addrinfo *LastHostAddr = 0;
+ static struct addrinfo *LastUsed = 0;
+@@ -111,8 +112,8 @@
+ // Connect - Connect to a server					/*{{{*/
+ // ---------------------------------------------------------------------
+ /* Performs a connection to the server */
+-bool Connect(string Host,int Port,const char *Service,int DefPort,int &Fd,
+-	     unsigned long TimeOut,pkgAcqMethod *Owner)
++bool Connect(const string &Host,int Port,const char *Service,int DefPort,
++             int &Fd,unsigned long TimeOut,pkgAcqMethod *Owner)
+ {
+    if (_error->PendingError() == true)
+       return false;
+@@ -127,7 +128,7 @@
+    /* We used a cached address record.. Yes this is against the spec but
+       the way we have setup our rotating dns suggests that this is more
+       sensible */
+-   if (LastHost != Host || LastPort != Port)
++   if (LastHost != Host || LastPort != Port || LastService != Service)
+    {
+       Owner->Status(_("Connecting to %s"),Host.c_str());
+ 
+@@ -174,6 +175,7 @@
+       
+       LastHost = Host;
+       LastPort = Port;
++      LastService = Service;
+    }
+ 
+    // When we have an IP rotation stay with the last IP.
+Index: methods/makefile
+===================================================================
+--- methods/makefile (.../tags/apt-debian-0.5.9)	(revision 43)
++++ methods/makefile (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -1,11 +1,21 @@
+ # -*- make -*-
+ BASE=..
+ SUBDIR=methods
++SUBDIRS=stunnel
+ 
+ # Bring in the default rules
+ include ../buildlib/defaults.mak
+ BIN := $(BIN)/methods
+ 
++# Set special settings for SSL/non-SSL
++ifdef WITH_SSL
++SSL_LIBS = -lssl
++SSL_SOURCE = https.cc connect_ssl.cc stunnel/ssl.c
++else
++SSL_LIBS = ""
++SSL_SOURCE = ""
++endif
++
+ # FIXME..
+ LIB_APT_PKG_MAJOR = 3.3
+ APT_DOMAIN := libapt-pkg$(LIB_APT_PKG_MAJOR)
+@@ -40,9 +50,9 @@
+ 
+ # The http method
+ PROGRAM=http
+-SLIBS = -lapt-pkg $(SOCKETLIBS)
++SLIBS = -lapt-pkg $(SOCKETLIBS) $(SSL_LIBS)
+ LIB_MAKES = apt-pkg/makefile
+-SOURCE = http.cc rfc2553emu.cc connect.cc
++SOURCE = http.cc rfc2553emu.cc connect.cc $(SSL_SOURCE)
+ include $(PROGRAM_H)
+ 
+ # The ftp method
+@@ -59,9 +69,15 @@
+ SOURCE = rsh.cc
+ include $(PROGRAM_H)
+ 
+-# SSH and vzip2 method symlink
++# SSH, bzip2, and https method symlink
++ifdef WITH_SSL
++all: $(BIN)/ssh $(BIN)/bzip2 $(BIN)/https
++veryclean: clean-$(BIN)/ssh clean-$(BIN)/bzip2 clean-$(BIN)/https
++else
+ all: $(BIN)/ssh $(BIN)/bzip2
+ veryclean: clean-$(BIN)/ssh clean-$(BIN)/bzip2
++endif
++
+ $(BIN)/ssh:
+ 	echo "Installing ssh method link"
+ 	ln -fs rsh $(BIN)/ssh
+@@ -73,3 +89,11 @@
+ 	ln -fs gzip $(BIN)/bzip2
+ clean-$(BIN)/bzip2:
+ 	-rm $(BIN)/bzip2
++
++ifdef WITH_SSL
++$(BIN)/https:
++	echo "Installing https method link"
++	ln -fs http $(BIN)/https
++clean-$(BIN)/https:
++	-rm $(BIN)/https
++endif
+Index: doc/apt.conf.5.sgml
+===================================================================
+--- doc/apt.conf.5.sgml (.../tags/apt-debian-0.5.9)	(revision 43)
++++ doc/apt.conf.5.sgml (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -209,6 +209,46 @@
+      require this are in violation of RFC 2068.     
+      </VarListEntry>
+ 
++     <VarListEntry><Term>https</Term>
++     <ListItem><Para>
++     The https group of options control the behaveour of the https method,
++	 which is responsible for downloads over the https protocol. Since https
++	 is http over SSL, options set through the http options will be honoured.
++	 The https method reuses code from stunnel. &stunnel; and
++	 <filename>/usr/share/doc/stunnel</> will provide you with further
++	 documentation on the options discussed here. Consult &openssl; and &ssl;
++	 manpages and the documentation under <filename>/usr/share/doc/openssl</>
++	 for information on certificat management.
++     <para>
++	 https:Peer-Verify-Level defines how your peer will be authenticated.
++	 Default is "1".
++     <para>
++	 https:Peer-Verify-Level "0" means that certificates will be ignored and
++	 there will be no verification.
++     <para>
++	 https:Peer-Verify-Level "1" means that certificates will be verified if
++	 present.
++     <para>
++	 https:Peer-Verify-Level "2" verification will be enforced.
++     <para>
++	 https:Peer-Verify-Level "3" verification against locally installed
++	 certificates will be enforced.
++     <para>
++	 https:Debug-Level defines the level of feedback you get from the SSL
++	 connection negotiations. The following levels are supported: emerg "0",
++	 alert "1", crit "2", err "3", warning "4", notice "5", info "6" or
++	 debug "7". Default is "4".
++     <para>
++	 https:Pem sets the filename of the client certificate. Default is
++	 <filename>/etc/ssl/certs/apt.pem</>.
++     <para>
++	 https:CertDir defines the directory where https is looking for
++	 certificates. Default is <filename>/etc/ssl/certs/</>.
++     <para>
++	 https:CertFile is the filename of the server cerificate. This option is
++	 without a default.
++     </VarListEntry>
++
+      <VarListEntry><Term>ftp</Term>
+      <ListItem><Para>
+      FTP URIs; ftp::Proxy is the default proxy server to use. It is in the 
+@@ -405,7 +445,8 @@
+  
+  <RefSect1><Title>See Also</>
+    <para>
+-   &apt-cache;, &apt-config;<!-- ? reading apt.conf -->, &apt-preferences;.
++   &apt-cache;, &apt-config;<!-- ? reading apt.conf -->, &apt-preferences;,
++   &stunnel;, &ssl;, &openssl;.
+  </RefSect1>
+ 
+  &manbugs;
+Index: doc/sources.list.5.sgml
+===================================================================
+--- doc/sources.list.5.sgml (.../tags/apt-debian-0.5.9)	(revision 43)
++++ doc/sources.list.5.sgml (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -93,7 +93,7 @@
+ 
+  <RefSect1><title>URI specification</title>
+    <para>
+-   The currently recognized URI types are cdrom, file, http, and ftp.
++   The currently recognized URI types are cdrom, file, http, https and ftp.
+    <VariableList>
+     <VarListEntry><term>file</term>
+     <ListItem><Para>
+@@ -119,6 +119,15 @@
+     Note that this is an insecure method of authentication.
+     </VarListEntry>
+ 
++    <VarListEntry><term>https</term>
++    <ListItem><Para>
++    The https scheme specifies an HTTPS server for the archive. Obviously
++	you'll first need to find a server that is offering Debian archive access
++	through HTTPS. The https protocol recognizes http-method style URLs and
++	settings. Please check &apt-conf; for further documentation on SSL
++	authentication.
++    </VarListEntry>
++
+     <VarListEntry><term>ftp</term>
+     <ListItem><Para>
+     The ftp scheme specifies an FTP server for the archive. APT's FTP behavior
+Index: doc/apt.ent
+===================================================================
+--- doc/apt.ent (.../tags/apt-debian-0.5.9)	(revision 43)
++++ doc/apt.ent (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -78,6 +78,21 @@
+     <ManVolNum/8/
+   </CiteRefEntry>">
+     
++<!ENTITY stunnel "<CiteRefEntry>
++    <RefEntryTitle><command/stunnel/</RefEntryTitle>
++    <ManVolNum/1/
++  </CiteRefEntry>">
++    
++<!ENTITY openssl "<CiteRefEntry>
++    <RefEntryTitle><command/openssl/</RefEntryTitle>
++    <ManVolNum/1/
++  </CiteRefEntry>">
++    
++<!ENTITY ssl "<CiteRefEntry>
++    <RefEntryTitle><command/openssl/</RefEntryTitle>
++    <ManVolNum/3/
++  </CiteRefEntry>">
++    
+ <!-- Boiler plate docinfo section -->
+ <!ENTITY apt-docinfo "
+  <docinfo>
+Index: doc/examples/configure-index
+===================================================================
+--- doc/examples/configure-index (.../tags/apt-debian-0.5.9)	(revision 43)
++++ doc/examples/configure-index (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -91,6 +91,32 @@
+     No-Store "false";    // Prevent the cache from storing archives    
+   };
+ 
++  // HTTPS method configuration
++  //
++  // since HTTPS is HTTP over a SSL connection we are honoring the
++  // http method configuration settings!!!
++  //
++  https {
++    // Peer-Verify-Level "0";  // no verification
++    // Peer-Verify-Level "1";  // verify peer certificate if present - default
++    // Peer-Verify-Level "2";  // verify peer certificate
++    // Peer-Verify-Level "3";  // verify peer with locally installed
++
++    // Debug-Level "0";        // emergency
++    // Debug-Level "1";        // alert
++    // Debug-Level "2";        // critical
++    // Debug-Level "3";        // error
++    // Debug-Level "4";        // warning - default
++    // Debug-Level "5";        // notice
++    // Debug-Level "6";        // info
++    // Debug-Level "7";        // debug
++
++    // Pem "/etc/ssl/certs/apt.pem" // - default
++
++    // CertDir "/etc/ssl/certs/"    // - default
++    // CertFile "/etc/ssl/certs/some_deb_server.pem"
++  };
++  
+   ftp
+   {
+     Proxy "ftp://127.0.0.1/";
+Index: TODO.tpo
+===================================================================
+--- TODO.tpo (.../tags/apt-debian-0.5.9)	(revision 43)
++++ TODO.tpo (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -0,0 +1,5 @@
++* restore ftparchive in Makefile and in debian/rules
++* restore db2 dependency in debian/control
++* remove this file
++* port to 0.5.5
++* fix sgml conflicts
+Index: COPYING
+===================================================================
+--- COPYING (.../tags/apt-debian-0.5.9)	(revision 43)
++++ COPYING (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -140,3 +140,16 @@
+ INCLUDING THE WARRANTY OF DESIGN, MERCHANTABILITY AND FITNESS FOR A
+ PARTICULAR PURPOSE.
+       _______________________________________________________________
++
++The https method of apt is linked against openssl. This is herewith permitted.
++
++That means that the copyright in /usr/share/doc/openssl/copyright applies
++to the https method as well.
++
++The following applies to the https method:
++
++This product includes software developed by the OpenSSL Project for use in
++the OpenSSL Toolkit. (http://www.openssl.org/). This product includes
++cryptographic software written by Eric Young (eay@cryptsoft.com). This
++product includes software written by Tim Hudson (tjh@cryptsoft.com).
++
+Index: drive
+===================================================================
+--- drive (.../tags/apt-debian-0.5.9)	(revision 43)
++++ drive (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -0,0 +1,27 @@
++#!/usr/bin/expect -f
++set env(LD_LIBRARY_PATH) 'build/bin'
++spawn gdb build/bin/methods/http
++expect "(gdb)"
++send "b 'CookieJar::WriteCookies'\r"
++expect "(gdb)"
++send "r\r"
++expect "\r\n\r\n"
++send "601\r"
++send "Config-Item: Acquire::https::Peer-Verify-Level=0\r\r"
++
++expect "\r\n\r\n"
++
++send "600\r"
++send "URI: http://moya.progeny.com/protection-zone/Release\r"
++send "Filename: /var/tmp/Release\r\r"
++#send "600\r"
++#send "URI: http://moya.progeny.com/protection-zone/Packages.gz\r"
++#send "Filename: /var/tmp/Packages.gz\r\r"
++
++expect "404*\r\n\r\n"
++send "604\r"
++send "User: test\r"
++send "Password: coke\$pepsi\r\r"
++
++interact
++
+Index: cmdline/apt-extracttemplates.cc
+===================================================================
+--- cmdline/apt-extracttemplates.cc (.../tags/apt-debian-0.5.9)	(revision 43)
++++ cmdline/apt-extracttemplates.cc (.../branches/apt-resolve-0.5.9-ssl)	(revision 43)
+@@ -40,9 +40,9 @@
+ #include <apti18n.h>
+ #include "apt-extracttemplates.h"
+ 									/*}}}*/
+-
+ using namespace std;
+ 
++
+ #define TMPDIR		"/tmp"
+ 
+ pkgCache *DebFile::Cache = 0;

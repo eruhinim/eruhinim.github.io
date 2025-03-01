@@ -1,0 +1,103 @@
+From db50a8666253c506f8361c92611ccb0682441aab Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Sun, 16 Feb 2014 23:30:48 +0100
+Subject: [PATCH 3/3] Add support for data.tar, control.tar and control.tar.xz
+
+Sync the deb(5) format support with latest dpkg, by allowing
+uncompressed tar members and xz compressed control.tar. This
+also refactors the control.tar member extraction by using
+ExtractTarMember(), which also means future changes only need
+to be implemented in a single place.
+---
+ apt-inst/deb/debfile.cc         | 21 ++++++++++-----------
+ cmdline/apt-extracttemplates.cc | 18 ++++--------------
+ 2 files changed, 14 insertions(+), 25 deletions(-)
+
+diff --git a/apt-inst/deb/debfile.cc b/apt-inst/deb/debfile.cc
+index 15db1a7..a811bbe 100644
+--- a/apt-inst/deb/debfile.cc
++++ b/apt-inst/deb/debfile.cc
+@@ -42,12 +42,15 @@ debDebFile::debDebFile(FileFd &File) : File(File), AR(File)
+       return;
+    }
+ 
+-   if (!CheckMember("control.tar.gz")) {
+-      _error->Error(_("This is not a valid DEB archive, missing '%s' member"), "control.tar.gz");
++   if (!CheckMember("control.tar") &&
++       !CheckMember("control.tar.gz") &&
++       !CheckMember("control.tar.xz")) {
++      _error->Error(_("This is not a valid DEB archive, missing '%s' member"), "control.tar");
+       return;
+    }
+ 
+-   if (!CheckMember("data.tar.gz") &&
++   if (!CheckMember("data.tar") &&
++       !CheckMember("data.tar.gz") &&
+        !CheckMember("data.tar.bz2") &&
+        !CheckMember("data.tar.lzma") &&
+        !CheckMember("data.tar.xz")) {
+@@ -109,6 +112,9 @@ bool debDebFile::ExtractTarMember(pkgDirStream &Stream,const char *Name)
+    }
+ 
+    if (Member == NULL)
++      Member = AR.FindMember(std::string(Name).c_str());
++
++   if (Member == NULL)
+    {
+       std::string ext = std::string(Name) + ".{";
+       for (std::vector<APT::Configuration::Compressor>::const_iterator c = compressor.begin();
+@@ -201,14 +207,7 @@ bool debDebFile::MemControlExtract::Process(Item &Itm,const unsigned char *Data,
+    it parses it into a tag section parser. */
+ bool debDebFile::MemControlExtract::Read(debDebFile &Deb)
+ {
+-   // Get the archive member and positition the file 
+-   const ARArchive::Member *Member = Deb.GotoMember("control.tar.gz");
+-   if (Member == 0)
+-      return false;
+-
+-   // Extract it.
+-   ExtractTar Tar(Deb.GetFile(),Member->Size,"gzip");
+-   if (Tar.Go(*this) == false)
++   if (Deb.ExtractTarMember(*this, "control.tar") == false)
+       return false;
+ 
+    if (Control == 0)
+diff --git a/cmdline/apt-extracttemplates.cc b/cmdline/apt-extracttemplates.cc
+index 8e19371..2408a7d 100644
+--- a/cmdline/apt-extracttemplates.cc
++++ b/cmdline/apt-extracttemplates.cc
+@@ -24,8 +24,7 @@
+ #include <apt-pkg/pkgcachegen.h>
+ #include <apt-pkg/version.h>
+ #include <apt-pkg/tagfile.h>
+-#include <apt-pkg/extracttar.h>
+-#include <apt-pkg/arfile.h>
++#include <apt-pkg/debfile.h>
+ #include <apt-pkg/deblistparser.h>
+ #include <apt-pkg/error.h>
+ #include <apt-pkg/strutl.h>
+@@ -91,18 +90,9 @@ string DebFile::GetInstalledVer(const string &package)
+ /* */
+ bool DebFile::Go()
+ {
+-	ARArchive AR(File);
+-	if (_error->PendingError() == true)
+-		return false;
+-		
+-	const ARArchive::Member *Member = AR.FindMember("control.tar.gz");
+-	if (Member == 0)
+-		return _error->Error(_("%s not a valid DEB package."),File.Name().c_str());
+-	
+-	if (File.Seek(Member->Start) == false)
+-		return false;
+-	ExtractTar Tar(File, Member->Size,"gzip");
+-	return Tar.Go(*this);
++	debDebFile Deb(File);
++
++	return Deb.ExtractTarMember(*this, "control.tar");
+ }
+ 									/*}}}*/
+ // DebFile::DoItem examine element in package and mark			/*{{{*/
+-- 
+1.9.0.rc3.244.g3497008
+

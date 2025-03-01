@@ -1,0 +1,187 @@
+Index: utils/start-stop-daemon.c
+===================================================================
+--- utils/start-stop-daemon.c	(révision 650)
++++ utils/start-stop-daemon.c	(copie de travail)
+@@ -88,6 +88,9 @@
+ #include <limits.h>
+ #include <assert.h>
+ #include <ctype.h>
++#include <sys/wait.h>
++#include <security/pam_appl.h>
++#include <security/pam_misc.h>
+ 
+ #ifdef HAVE_SYS_CDEFS_H
+ #include <sys/cdefs.h>
+@@ -140,6 +143,14 @@
+ static int nicelevel = 0;
+ static int umask_value = -1;
+ 
++static pam_handle_t *pamh = NULL;
++static char *pam = NULL;
++
++static struct pam_conv conv = {
++	misc_conv,
++	NULL
++};
++
+ static struct stat exec_stat;
+ #if defined(OSHURD)
+ static struct proc_stat_list *procset = NULL;
+@@ -224,6 +235,10 @@
+ {
+ 	va_list arglist;
+ 
++	if (pamh) {
++		int retcode = pam_close_session(pamh,0);
++		pam_end(pamh,retcode);
++	}
+ 	fprintf(stderr, "%s: ", progname);
+ 	va_start(arglist, format);
+ 	vfprintf(stderr, format, arglist);
+@@ -306,6 +321,7 @@
+ "  -r|--chroot <directory>       chroot to <directory> before starting\n"
+ "  -d|--chdir <directory>        change to <directory> (default is /)\n"
+ "  -N|--nicelevel <incr>         add incr to the process's nice level\n"
++"  -P|--pam <service>            open a session with this PAM service\n"
+ "  -k|--umask <mask>             change the umask to <mask> before starting\n"
+ "  -b|--background               force the process to detach\n"
+ "  -m|--make-pidfile             create the pidfile before starting\n"
+@@ -512,6 +528,7 @@
+ 		{ "make-pidfile", 0, NULL, 'm'},
+  		{ "retry",        1, NULL, 'R'},
+ 		{ "chdir",        1, NULL, 'd'},
++		{ "pam",	  1, NULL, 'P'},
+ 		{ NULL,		0, NULL, 0}
+ 	};
+ 	const char *umask_str = NULL;
+@@ -598,6 +615,9 @@
+ 		case 'd':  /* --chdir /new/dir */
+ 			changedir = optarg;
+ 			break;
++		case 'P':  /* --pam <service> */
++			pam = optarg;
++			break;
+ 		default:
+ 			badusage(NULL);  /* message printed by getopt */
+ 		}
+@@ -1326,6 +1346,62 @@
+ #endif
+ 		devnull_fd=open("/dev/null", O_RDWR);
+ 	}
++	if (pam) {
++		int retcode;
++		char **envcp;
++
++		char *pam_user;
++		struct passwd *pw;
++		pw = getpwuid((-1==runas_uid)?getuid():runas_uid);
++		if (!pw) {
++			fatal("user ID `%d' not found\n",
++			      (-1==runas_uid)?getuid():runas_uid);
++		}
++		else {
++			pam_user = strdup(pw->pw_name);
++			if (!pam_user)
++				fatal("Unable to allocate memory: %s", strerror(errno));
++		}
++
++		retcode = pam_start (pam, pam_user, &conv, &pamh);
++		if (PAM_SUCCESS != retcode) {
++			fprintf(stderr, "%s\n", pam_strerror(pamh, retcode));
++			pam_end(pamh, retcode);
++			exit(2);
++		}
++
++		/* Some PAM modules may rely on PAM_RUSER */
++		if (pam_user) {
++			int retcode = pam_set_item(pamh, PAM_RUSER, pam_user);
++			if (PAM_SUCCESS != retcode) {
++				fprintf(stderr,
++				        "%s\n",
++				        pam_strerror(pamh, retcode));
++				pam_end(pamh, retcode);
++				exit(2);
++			}
++		}
++		/* FIXME: set some other PAM variables?
++		 */
++
++		retcode = pam_open_session(pamh, 0);
++		if (PAM_SUCCESS != retcode) {
++			fprintf(stderr, "%s\n", pam_strerror(pamh, retcode));
++			pam_end(pamh, retcode);
++			exit(2);
++		}
++
++		/* Copy the environment variables set by the PAM modules. */
++		envcp = pam_getenvlist (pamh);
++		if (envcp) {
++			while (*envcp) {
++				int err = putenv(*envcp);
++				if (err)
++					fatal("Unable to set the '%s' environment variable: %s", *envcp, strerror(errno));
++				envcp++;
++			}
++		}
++	}
+ 	if (nicelevel) {
+ 		errno=0;
+ 		if ((nice(nicelevel)==-1) && (errno!=0))
+@@ -1386,6 +1462,30 @@
+ 		setpgid(0,0);
+ #endif
+ 	}
++	if (NULL != pam) {
++		int parent = fork();
++		if (parent < 0) {
++			fatal("Unable to fork.\n");
++		}
++		if (parent) {
++			/* parent: wait for child to finish,
++			 *         then cleanup the PAM session.
++			 */
++			int retcode;
++			int status = 1;
++			(void) wait(&status);
++
++			retcode = pam_close_session(pamh,0);
++			pam_end(pamh,retcode);
++
++			if (WIFSIGNALED(status))
++				status = 1;
++			else
++				status = WEXITSTATUS(status);
++			exit(status);
++		}
++		/* Only child continue */
++	}
+ 	execv(startas, argv);
+ 	fatal("Unable to start %s: %s", startas, strerror(errno));
+ }
+Index: utils/Makefile.am
+===================================================================
+--- utils/Makefile.am	(révision 650)
++++ utils/Makefile.am	(copie de travail)
+@@ -13,7 +13,7 @@
+   start_stop_daemon_SOURCES = \
+ 	start-stop-daemon.c
+ 
+-  start_stop_daemon_LDADD = ../getopt/libopt.a $(SSD_LIBS)
++  start_stop_daemon_LDADD = ../getopt/libopt.a $(SSD_LIBS) -lpam -lpam_misc
+ endif
+ 
+ 
+Index: man/start-stop-daemon.8
+===================================================================
+--- man/start-stop-daemon.8	(révision 650)
++++ man/start-stop-daemon.8	(copie de travail)
+@@ -227,6 +227,9 @@
+ \fB\-N\fP|\fB\-\-nicelevel\fP \fIint\fP
+ This alters the priority of the process before starting it.
+ .TP
++\fB\-P\fP|\fB\-\-pam\fP \fIpam_service\fP
++Start a PAM session, using the given PAM service.
++.TP
+ \fB\-k\fP|\fB\-\-umask\fP \fImask\fP
+ This sets the umask of the process before starting it.
+ .TP

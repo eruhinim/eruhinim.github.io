@@ -1,0 +1,81 @@
+From 66b3ef148afe774e20d3555814d9634e25ce793a Mon Sep 17 00:00:00 2001
+From: Christian Kastner <ckk@kvr.at>
+Date: Sun, 8 Feb 2015 18:54:37 +0100
+Subject: [PATCH] adt-virt-qemu: Ensure that python is installed
+
+One of either python or python3 is needed for the helper within the VM,
+otherwise file transfers from the guest to the host will not work.
+
+Document this requirement in adt-virt-qemu(1), and modify adt-setup-vm to
+automatically install python3 if neither package is already available.
+---
+ tools/adt-setup-vm           |  4 ++++
+ virt-subproc/adt-virt-qemu   |  9 +++++++++
+ virt-subproc/adt-virt-qemu.1 | 12 +++++++++---
+ 3 files changed, 22 insertions(+), 3 deletions(-)
+
+diff --git a/tools/adt-setup-vm b/tools/adt-setup-vm
+index 5acb5c4..a62d8ce 100755
+--- a/tools/adt-setup-vm
++++ b/tools/adt-setup-vm
+@@ -103,6 +103,10 @@ if [ "${mirror_rel%ubuntu*}" != "$mirror_rel" ]; then
+     # provides kmods like scsi_debug or mac80211_hwsim
+     chroot "$root" apt-get install -y linux-generic
+ fi
++# either python or python3 is required to execute our helpers
++# check for either, in case the user forced one with vmdebootstrap --package
++chroot "$root" dpkg -l python python3 | grep -q '^ii  python' || \
++    chroot "$root" apt-get install -y python3
+ # some tests use a lot of /dev/random, avoid hangs
+ chroot "$root" apt-get install -y haveged
+ 
+diff --git a/virt-subproc/adt-virt-qemu b/virt-subproc/adt-virt-qemu
+index 9fab65f..64fae10 100755
+--- a/virt-subproc/adt-virt-qemu
++++ b/virt-subproc/adt-virt-qemu
+@@ -219,6 +219,15 @@ def setup_config(shared_dir):
+         else:
+             adtlog.debug('Could not determine host timezone')
+ 
++    # ensure that we can execute the helpers we are going to create
++    term.send(b'dpkg -l python python3\n')
++    try:
++        VirtSubproc.expect(term, b'ii  python', 5)
++    except VirtSubproc.Timeout:
++        VirtSubproc.bomb('Neither python nor python3 is installed in the VM,'
++                         ' however at least one of them is required by the'
++                         ' autopkgtest helpers.')
++
+     # create helper for runcmd: cat data from its stdin (from a file) to stdout
+     # eternally (like tail -f), but stop once either an "EOF" file exists and
+     # we copied at least as many bytes as given in that EOF file (the first
+diff --git a/virt-subproc/adt-virt-qemu.1 b/virt-subproc/adt-virt-qemu.1
+index 3e22539..05cab24 100644
+--- a/virt-subproc/adt-virt-qemu.1
++++ b/virt-subproc/adt-virt-qemu.1
+@@ -30,13 +30,19 @@ primary image, and add all other images as read-only.
+ .B adt-virt-qemu
+ assumes that you have already prepared a suitable Debian based QEMU image (see
+ .B BUILDING IMAGES
+-below for how to create them). but you can use any VM which satisfies one of:
++below for how to create them). But you can use any VM which satisfies the
++following conditions:
+ 
+ .IP * 4
+-They open a root shell on ttyS1, or
++It has at least one of packages ``python'' and ``python3'' installed, and
++
++.RS 4
++
++.IP * 4
++It either opens a root shell on ttyS1, or
+ 
+ .IP * 4
+-They have a serial console on ttyS0 where you can log in (getty or similar)
++It has a serial console on ttyS0 where you can log in (getty or similar)
+ with specified user and password. This will then be used to start a root
+ shell on ttyS1, to reduce this to the first case and to not assume that
+ ttyS0 stays operational throughout the whole test.
+-- 
+2.1.4
+

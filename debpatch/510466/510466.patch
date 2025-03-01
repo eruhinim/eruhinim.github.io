@@ -1,0 +1,167 @@
+only in patch2:
+unchanged:
+--- at-3.1.14.orig/Makefile.in
++++ at-3.1.14/Makefile.in
+@@ -40,6 +40,7 @@
+ LIBOBJS		= @LIBOBJS@
+ INSTALL		= @INSTALL@
+ PAMLIB          = @PAMLIB@
++SELINUXLIB      = @SELINUXLIB@
+ 
+ CLONES		= atq atrm
+ ATOBJECTS	= at.o panic.o perm.o posixtm.o y.tab.o lex.yy.o
+@@ -73,7 +74,7 @@
+ 	$(LN_S) -f at atrm
+ 
+ atd: $(RUNOBJECTS)
+-	$(CC) $(LDFLAGS) -o atd $(RUNOBJECTS) $(LIBS) $(PAMLIB)
++	$(CC) $(LDFLAGS) -o atd $(RUNOBJECTS) $(LIBS) $(PAMLIB) $(SELINUXLIB)
+ 
+ y.tab.c y.tab.h: parsetime.y
+ 	$(YACC) -d parsetime.y
+only in patch2:
+unchanged:
+--- at-3.1.14.orig/atd.c
++++ at-3.1.14/atd.c
+@@ -83,6 +83,14 @@
+ #include "getloadavg.h"
+ #endif
+ 
++#ifdef WITH_SELINUX
++#include <selinux/selinux.h>
++#include <selinux/get_context_list.h>
++int selinux_enabled=0;
++#include <selinux/flask.h>
++#include <selinux/av_permissions.h>
++#endif
++
+ /* Macros */
+ 
+ #define BATCH_INTERVAL_DEFAULT 60
+@@ -195,6 +203,68 @@
+ #define fork myfork
+ #endif
+ 
++#ifdef WITH_SELINUX
++static int set_selinux_context(const char *name, const char *filename) {
++       security_context_t user_context=NULL;
++       security_context_t  file_context=NULL;
++       struct av_decision avd;
++       int retval=-1;
++       char *seuser=NULL;
++       char *level=NULL;
++
++       if (getseuserbyname(name, &seuser, &level) == 0) {
++               retval=get_default_context_with_level(seuser, level, NULL, &user_context);
++               free(seuser);
++               free(level);
++               if (retval) {
++                       if (security_getenforce()==1) {
++                               perr("execle: couldn't get security context for user %s\n", name);
++                       } else {
++                               syslog(LOG_ERR, "execle: couldn't get security context for user %s\n", name);
++                               return -1;
++                       }
++               }
++       }
++
++       /*
++       * Since crontab files are not directly executed,
++       * crond must ensure that the crontab file has
++       * a context that is appropriate for the context of
++       * the user cron job.  It performs an entrypoint
++       * permission check for this purpose.
++       */
++       if (fgetfilecon(STDIN_FILENO, &file_context) < 0)
++               perr("fgetfilecon FAILED %s", filename);
++
++       retval = security_compute_av(user_context,
++                                    file_context,
++                                    SECCLASS_FILE,
++                                    FILE__ENTRYPOINT,
++                                    &avd);
++       freecon(file_context);
++       if (retval || ((FILE__ENTRYPOINT & avd.allowed) != FILE__ENTRYPOINT)) {
++               if (security_getenforce()==1) {
++                       perr("Not allowed to set exec context to %s for user  %s\n", user_context,name);
++               } else {
++                       syslog(LOG_ERR, "Not allowed to set exec context to %s for user  %s\n", user_context,name);
++                       retval = -1;
++                       goto err;
++               }
++       }
++       if (setexeccon(user_context) < 0) {
++               if (security_getenforce()==1) {
++                       perr("Could not set exec context to %s for user  %s\n", user_context,name);
++                       retval = -1;
++               } else {
++                       syslog(LOG_ERR, "Could not set exec context to %s for user  %s\n", user_context,name);
++               }
++       }
++  err:
++       freecon(user_context);
++       return 0;
++}
++#endif
++
+ static void
+ run_file(const char *filename, uid_t uid, gid_t gid)
+ {
+@@ -424,6 +494,13 @@
+ 
+ 	    nice((tolower((int) queue) - 'a' + 1) * 2);
+ 
++#ifdef WITH_SELINUX
++	    if (selinux_enabled > 0) {
++	        if (set_selinux_context(pentry->pw_name, filename) < 0)
++	               perr("SELinux Failed to set context\n");
++	    }
++#endif
++
+ 	    if (initgroups(pentry->pw_name, pentry->pw_gid))
+ 		perr("Cannot initialize the supplementary group access list");
+ 
+@@ -707,6 +784,10 @@
+     struct passwd *pwe;
+     struct group *ge;
+ 
++#ifdef WITH_SELINUX
++    selinux_enabled=is_selinux_enabled();
++#endif
++
+ /* We don't need root privileges all the time; running under uid and gid
+  * daemon is fine.
+  */
+only in patch2:
+unchanged:
+--- at-3.1.14.orig/config.h.in
++++ at-3.1.14/config.h.in
+@@ -192,6 +192,9 @@
+    <sys/cpustats.h>. */
+ #undef UMAX4_3
+ 
++/* Define if you are building with_selinux */
++#undef WITH_SELINUX
++
+ /* Define to 1 if `lex' declares `yytext' as a `char *' by default, not a
+    `char[]'. */
+ #undef YYTEXT_POINTER
+only in patch2:
+unchanged:
+--- at-3.1.14.orig/configure.ac
++++ at-3.1.14/configure.ac
+@@ -239,6 +239,14 @@
+ )
+ AC_SUBST(DAEMON_USERNAME)
+ 
++AC_ARG_WITH(selinux,
++[ --with-selinux       Define to run with selinux],
++AC_DEFINE(WITH_SELINUX, 1, [Define if you are building with_selinux]),
++)
++AC_CHECK_LIB(selinux, is_selinux_enabled, SELINUXLIB=-lselinux)
++AC_SUBST(SELINUXLIB)
++AC_SUBST(WITH_SELINUX)
++
+ AC_MSG_CHECKING(groupname to run under)
+ AC_ARG_WITH(daemon_groupname,
+ [ --with-daemon_groupname=DAEMON_GROUPNAME	Groupname to run under (default daemon) ],

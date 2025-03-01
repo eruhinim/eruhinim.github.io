@@ -1,0 +1,366 @@
+From 1cff6de8db2174ec7373433bfabd7df42736c193 Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Wed, 19 May 2010 12:41:28 +0200
+Subject: [PATCH] dpkg: Add two new dpkg options --path-exclude and --path-include
+
+This provides support for filtering paths on package installation. This
+allows embedded systems to skip /usr/share/doc, manpages, etc.
+
+dpkg does not lose track of excluded paths during filtering, and they
+get checked for file conflicts as usual, so filters are not a way to
+avoid file conflict situations.
+
+Based-on-patch-by: Tollef Fog Heen <tfheen@err.no>
+Signed-off-by: Martin Pitt <martin.pitt@ubuntu.com>
+Signed-off-by: Guillem Jover <guillem@debian.org>
+---
+ debian/changelog |    4 ++
+ man/dpkg.1       |   37 +++++++++++++++-
+ src/Makefile.am  |    1 +
+ src/archives.c   |    8 +++
+ src/filters.c    |  128 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/filters.h    |   37 ++++++++++++++++
+ src/main.c       |   15 ++++++-
+ 7 files changed, 228 insertions(+), 2 deletions(-)
+ create mode 100644 src/filters.c
+ create mode 100644 src/filters.h
+
+diff --git a/debian/changelog b/debian/changelog
+index 16ddb25..5adf01c 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -33,6 +33,10 @@ dpkg (1.15.8) UNRELEASED; urgency=low
+       installed by autopoint for all po/ directories.
+     - Add versioned Build-Depends.
+   * Fix variable usage after delete in dselect.
++  * Add two new dpkg options --path-exclude and --path-include for filtering
++    files on package installation. This allows embedded systems to skip
++    /usr/share/doc, manpages, etc. Based on work from Tollef Fog Heen and
++    Martin Pitt, thanks!
+ 
+   [ Updated programs translations ]
+   * Russian (Yuri Kozlov). Closes: #579149
+diff --git a/man/dpkg.1 b/man/dpkg.1
+index 880fbaf..d0d6326 100644
+--- a/man/dpkg.1
++++ b/man/dpkg.1
+@@ -1,4 +1,4 @@
+-.TH dpkg 1 "2010-03-07" "Debian Project" "dpkg suite"
++.TH dpkg 1 "2010-06-02" "Debian Project" "dpkg suite"
+ .SH NAME
+ dpkg \- package manager for Debian
+ .
+@@ -520,6 +520,41 @@ The environment variable \fBDPKG_HOOK_ACTION\fP is set for the hooks to the
+ current dpkg action. Note: front-ends might call dpkg several times per
+ invocation, which might run the hooks more times than expected.
+ .RE
++.P
++.BI \-\-path\-exclude= glob-pattern
++.br
++.BI \-\-path\-include= glob-pattern
++.RS
++Set \fIglob-pattern\fP as a path filter, either by excluding or re-including
++previously excluded paths matching the specified patterns during install.
++
++\fIWarning: take into account that depending on the excluded paths you
++might completely break your system, use with caution.\fP
++
++The glob patterns use the same wildcards used in the shell, were '*' matches
++any sequence of characters, including the empty string and also '/'. For
++example, \fI'/usr/*/READ*'\fP matches \fI'/usr/share/doc/package/README'\fP.
++As usual, '?' matches any single character (again, including '/'). And '['
++starts a character class, which can contain a list of characters, ranges
++and complementations. See \fBglob\fP(7) for detailed information about
++globbing. Note: the current implementation might re-include more directories
++and symlinks than needed, to be on the safe side and avoid possible unpack
++failures, future work might fix this.
++
++This can be used to remove all paths except some particular ones; a typical
++case is:
++
++.nf
++.B \-\-path\-exclude=/usr/share/doc/*
++.B \-\-path\-include=/usr/share/doc/*/copyright
++.fi
++
++to remove all documentation files except the copyright files.
++
++These two options can be specified multiple times, and interleaved with
++each other. Both are processed in the given order, with the last rule that
++matches a file name making the decision.
++.RE
+ .TP
+ \fB\-\-status\-fd \fR\fIn\fR
+ Send machine-readable package status and progress information to file
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 5af70c5..414755f 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -26,6 +26,7 @@ dpkg_SOURCES = \
+ 	enquiry.c \
+ 	errors.c \
+ 	filesdb.c filesdb.h \
++	filters.c filters.h \
+ 	divertdb.c \
+ 	statdb.c \
+ 	help.c \
+diff --git a/src/archives.c b/src/archives.c
+index b8f6a45..630c289 100644
+--- a/src/archives.c
++++ b/src/archives.c
+@@ -57,6 +57,7 @@
+ #include "filesdb.h"
+ #include "main.h"
+ #include "archives.h"
++#include "filters.h"
+ 
+ #define MAXCONFLICTORS 20
+ 
+@@ -623,6 +624,13 @@ int tarobject(struct TarInfo *ti) {
+     return 0;
+   }
+ 
++  if (filter_should_skip(ti)) {
++    nifd->namenode->flags &= ~fnnf_new_inarchive;
++    tarfile_skip_one_forward(ti);
++
++    return 0;
++  }
++
+   /* Now, at this stage we want to make sure neither of .dpkg-new and .dpkg-tmp
+    * are hanging around.
+    */
+diff --git a/src/filters.c b/src/filters.c
+new file mode 100644
+index 0000000..874eb60
+--- /dev/null
++++ b/src/filters.c
+@@ -0,0 +1,128 @@
++/*
++ * dpkg - main program for package management
++ * filters.c - filtering routines for excluding bits of packages
++ *
++ * Copyright © 2007, 2008 Tollef Fog Heen <tfheen@err.no>
++ * Copyright © 2008, 2010 Guillem Jover <guillem@debian.org>
++ * Copyright © 2010 Canonical Ltd.
++ *   written by Martin Pitt <martin.pitt@canonical.com>
++ *
++ * This is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <config.h>
++#include <compat.h>
++
++#include <fnmatch.h>
++
++#include <dpkg/i18n.h>
++#include <dpkg/dpkg.h>
++#include <dpkg/dpkg-db.h>
++
++#include "main.h"
++#include "filesdb.h"
++#include "filters.h"
++
++struct filter_node {
++	struct filter_node *next;
++	char *pattern;
++	bool include;
++};
++
++static struct filter_node *filter_head = NULL;
++static struct filter_node **filter_tail = &filter_head;
++
++void
++filter_add(const char *pattern, bool include)
++{
++	struct filter_node *filter;
++
++	debug(dbg_general, "adding %s filter for '%s'\n",
++	      include ? "include" : "exclude", pattern);
++
++	filter = m_malloc(sizeof(*filter));
++	filter->pattern = m_strdup(pattern);
++	filter->include = include;
++	filter->next = NULL;
++
++	*filter_tail = filter;
++	filter_tail = &filter->next;
++}
++
++bool
++filter_should_skip(struct TarInfo *ti)
++{
++	struct filter_node *f;
++	bool remove = false;
++
++	if (!filter_head)
++		return false;
++
++	/* Last match wins. */
++	for (f = filter_head; f != NULL; f = f->next) {
++		debug(dbg_eachfile, "filter comparing '%s' and '%s'",
++		      &ti->Name[1], f->pattern);
++
++		if (fnmatch(f->pattern, &ti->Name[1], 0) == 0) {
++			if (f->include) {
++				remove = false;
++				debug(dbg_eachfile, "filter including %s",
++				      ti->Name);
++			} else {
++				remove = true;
++				debug(dbg_eachfile, "filter removing %s",
++				      ti->Name);
++			}
++		}
++	}
++
++	/* We need to keep directories (or symlinks to directories) if a
++	 * glob excludes them, but a more specific include glob brings back
++	 * files; XXX the current implementation will probably include more
++	 * directories than necessary, but better err on the side of caution
++	 * than failing with “no such file or directory” (which would leave
++	 * the package in a very bad state). */
++	if (remove && (ti->Type == Directory || ti->Type == SymbolicLink)) {
++		debug(dbg_eachfile,
++		      "filter seeing if '%s' needs to be reincluded",
++		      &ti->Name[1]);
++
++		for (f = filter_head; f != NULL; f = f->next) {
++			const char *wildcard;
++			int path_len;
++
++			if (!f->include)
++				continue;
++
++			/* Calculate the offset of the first wildcard
++			 * character in the pattern. */
++			wildcard = strpbrk(f->pattern, "*?[\\");
++			if (wildcard)
++				path_len = wildcard - f->pattern;
++			else
++				path_len = strlen(f->pattern);
++
++			debug(dbg_eachfiledetail,
++			      "filter subpattern '%*.s'", path_len, f->pattern);
++
++			if (strncmp(&ti->Name[1], f->pattern, path_len) == 0) {
++				debug(dbg_eachfile, "filter reincluding %s",
++				      ti->Name);
++				return false;
++			}
++		}
++	}
++
++	return remove;
++}
+diff --git a/src/filters.h b/src/filters.h
+new file mode 100644
+index 0000000..5d3dea0
+--- /dev/null
++++ b/src/filters.h
+@@ -0,0 +1,37 @@
++/*
++ * dpkg - main program for package management
++ * filters.h - external definitions for filter handling
++ *
++ * Copyright © 2007, 2008 Tollef Fog Heen <tfheen@err.no>
++ * Copyright © 2008, 2010 Guillem Jover <guillem@debian.org>
++ *
++ * This is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef DPKG_FILTERS_H
++#define DPKG_FILTERS_H
++
++#include <stdbool.h>
++
++#include <dpkg/macros.h>
++#include <dpkg/tarfn.h>
++
++DPKG_BEGIN_DECLS
++
++void filter_add(const char *glob, bool include);
++bool filter_should_skip(struct TarInfo *ti);
++
++DPKG_END_DECLS
++
++#endif
+diff --git a/src/main.c b/src/main.c
+index b902406..e32cfa0 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -3,7 +3,9 @@
+  * main.c - main program
+  *
+  * Copyright © 1994,1995 Ian Jackson <ian@chiark.greenend.org.uk>
+- * Copyright © 2006-2009 Guillem Jover <guillem@debian.org>
++ * Copyright © 2006-2010 Guillem Jover <guillem@debian.org>
++ * Copyright © 2010 Canonical Ltd.
++ *   written by Martin Pitt <martin.pitt@canonical.com>
+  *
+  * This is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
+@@ -49,6 +51,7 @@
+ 
+ #include "main.h"
+ #include "filesdb.h"
++#include "filters.h"
+ 
+ static void DPKG_ATTR_NORET
+ printversion(const struct cmdinfo *ci, const char *value)
+@@ -122,6 +125,8 @@ usage(const struct cmdinfo *ci, const char *value)
+ "  --admindir=<directory>     Use <directory> instead of %s.\n"
+ "  --root=<directory>         Install on a different root directory.\n"
+ "  --instdir=<directory>      Change installation dir without changing admin dir.\n"
++"  --path-exclude=<pattern>   Do not install paths which match a shell pattern.\n"
++"  --path-include=<pattern>   Re-include a pattern after a previous exclusion.\n"
+ "  -O|--selected-only         Skip packages not selected for install/upgrade.\n"
+ "  -E|--skip-same-version     Skip packages whose same version is installed.\n"
+ "  -G|--refuse-downgrade      Skip packages with earlier version than installed.\n"
+@@ -255,6 +260,12 @@ static void setdebug(const struct cmdinfo *cpi, const char *value) {
+   if (value == endp || *endp) badusage(_("--debug requires an octal argument"));
+ }
+ 
++static void
++setfilter(const struct cmdinfo *cip, const char *value)
++{
++  filter_add(value, cip->arg);
++}
++
+ static void setroot(const struct cmdinfo *cip, const char *value) {
+   char *p;
+   instdir= value;
+@@ -491,6 +502,8 @@ static const struct cmdinfo cmdinfos[]= {
+   
+   { "pre-invoke",        0,   1, NULL,          NULL,      set_invoke_hook, 0, &pre_invoke_hooks_tail },
+   { "post-invoke",       0,   1, NULL,          NULL,      set_invoke_hook, 0, &post_invoke_hooks_tail },
++  { "path-exclude",      0,   1, NULL,          NULL,      setfilter,     0 },
++  { "path-include",      0,   1, NULL,          NULL,      setfilter,     1 },
+   { "status-fd",         0,   1, NULL,          NULL,      setpipe, 0, &status_pipes },
+   { "log",               0,   1, NULL,          &log_file, NULL,    0 },
+   { "pending",           'a', 0, &f_pending,    NULL,      NULL,    1 },
+-- 
+1.7.1
+

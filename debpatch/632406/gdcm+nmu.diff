@@ -1,0 +1,56 @@
+diff -Nru gdcm-2.0.17/debian/changelog gdcm-2.0.17/debian/changelog
+--- gdcm-2.0.17/debian/changelog	2011-05-09 04:28:57.000000000 +0000
++++ gdcm-2.0.17/debian/changelog	2011-07-04 12:54:29.000000000 +0000
+@@ -1,3 +1,14 @@
++gdcm (2.0.17-3.1) unstable; urgency=high
++
++  * Non-maintainer upload.
++  * Nastily work around FTBFS (Closes: #632406):
++    - Call cmake twice. For some reasons the first run fails while the second is OK.
++    - Walk through the build.make files; detect /usr/lib/lib*.so references; check
++      for their presence; if not found, blindly replace with the multiarch path.
++  * Set urgency to “high” for RC bugfix.
++
++ -- Cyril Brulebois <kibi@debian.org>  Mon, 04 Jul 2011 12:46:57 +0000
++
+ gdcm (2.0.17-3) unstable; urgency=low
+ 
+   * patches/ptrdiff.patch: New.  Include stddef.h, to define ptrdiff_t.
+diff -Nru gdcm-2.0.17/debian/rules gdcm-2.0.17/debian/rules
+--- gdcm-2.0.17/debian/rules	2011-05-07 14:59:58.000000000 +0000
++++ gdcm-2.0.17/debian/rules	2011-07-04 12:48:05.000000000 +0000
+@@ -37,6 +37,7 @@
+ DEB_BUILD_GNU_TYPE  ?= $(shell dpkg-architecture -qDEB_BUILD_GNU_TYPE)
+ DEB_BUILD_ARCH := $(shell dpkg-architecture -qDEB_BUILD_ARCH)
+ DEB_HOST_ARCH := $(shell dpkg-architecture -qDEB_HOST_ARCH)
++DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
+ 
+ CFLAGS = -g
+ ifneq (,$(findstring noopt,$(DEB_BUILD_OPTIONS)))
+@@ -76,6 +77,8 @@
+ debian/configure-python%-stamp: $(QUILT_STAMPFN)
+ 	dh_testdir
+ 	[ -d $(BUILD)-python$* ] || mkdir $(BUILD)-python$*
++	# For some reasons, the first attempt may fail. Try twice:
++	for i in 1 2; do \
+ 	cd $(BUILD)-python$* && cmake $(CURDIR) -DCMAKE_INSTALL_PREFIX="/usr" \
+ 		-DCMAKE_SKIP_RPATH=ON \
+ 		-DGDCM_NO_EXECUTABLE_PROPERTIES=ON \
+@@ -98,7 +101,16 @@
+ 		-DGDCM_USE_SYSTEM_OPENSSL:BOOL=ON \
+ 		-DGDCM_USE_SYSTEM_POPPLER:BOOL=ON \
+ 		-DGDCM_VTK_JAVA_JAR:FILEPATH=/usr/share/java/vtk.jar \
+-		-DGDCM_USE_VTK:BOOL=ON
++		-DGDCM_USE_VTK:BOOL=ON; \
++	done
++	# Stupid hardcoded paths to the .so's! Let's switch to the
++	# multiarch library if not found under /usr/lib, and cross
++	# fingers:
++	for i in `find debian/build-python$* -name build.make -type f`; do \
++	  for j in `egrep -o '/usr/lib/lib.*\.so' $$i|sort -u|sed 's,/usr/lib/,,'`; do \
++	    if [ ! -e /usr/lib/$$j ]; then \
++	     sed -i "s,/usr/lib/$$j,/usr/lib/$(DEB_HOST_MULTIARCH)/$$j," $$i; \
++	fi; done; done
+ 	touch $@
+ 
+ build: debian/build-stamp

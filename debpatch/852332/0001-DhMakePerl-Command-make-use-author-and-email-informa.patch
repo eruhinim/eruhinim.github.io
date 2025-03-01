@@ -1,0 +1,157 @@
+From 1a477bd83d2d6137c2f184bafd4aa759b64feef5 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Carn=C3=AB=20Draug?= <carandraug+dev@gmail.com>
+Date: Tue, 24 Jan 2017 15:50:02 +0000
+Subject: [PATCH] DhMakePerl::Command::make: use author and email information
+ for git commits.
+
+DhMakePerl::Command::make (git_import_upstream__init_debian): use
+email and author from dh-make-perl on git commits.
+(git_add_debian): idem, but also define the required variables when
+calling pristine-tar because pristine-tar does not have options to
+support it.
+
+DhMakePerl::Command::Packaging (get_name, get_email): two new methods
+to retrieve only email and name because git handles them separate.
+
+Closes: #852332
+---
+ Changes                             |  6 ++++++
+ lib/DhMakePerl/Command/Packaging.pm | 36 +++++++++++++++++++++++-------------
+ lib/DhMakePerl/Command/make.pm      | 22 +++++++++++++++++-----
+ 3 files changed, 46 insertions(+), 18 deletions(-)
+
+diff --git a/Changes b/Changes
+index 9c47553..590adeb 100644
+--- a/Changes
++++ b/Changes
+@@ -1,4 +1,10 @@
+ 0.93 (201x-xx-xx)
++  [ Carnë Draug ]
++  * Use dh-make-perl email and name information for git commits,
++    including git commits done by pristine-tar.
++    (Closes: #852332)
++  * DhMakePerl::Command::Packaging: add two new methods: get_email
++    and get_name.
+ 
+ 0.92 (2016-09-20)
+ 
+diff --git a/lib/DhMakePerl/Command/Packaging.pm b/lib/DhMakePerl/Command/Packaging.pm
+index d759b66..e560abd 100644
+--- a/lib/DhMakePerl/Command/Packaging.pm
++++ b/lib/DhMakePerl/Command/Packaging.pm
+@@ -119,14 +119,27 @@ sub makefile_pl {
+     return $self->main_file('Makefile.PL');
+ }
+ 
+-sub get_developer {
++sub get_email {
+     my $self = shift;
+-
+     my $email = $self->cfg->email;
+ 
+-    my ( $user, $pwnam, $name, $mailh );
+-    $user = $ENV{LOGNAME} || $ENV{USER};
+-    $pwnam = getpwuid($<);
++    $email ||= ( $ENV{DEBEMAIL} || $ENV{EMAIL} );
++    unless ($email) {
++	my $mailh;
++        chomp( $mailh = `cat /etc/mailname` );
++        $email = $self->get_user . '@' . $mailh;
++    }
++
++    $email =~ s/^(.*)\s+<(.*)>$/$2/;
++    return $email;
++}
++
++sub get_name {
++    my $self = shift;
++
++    my $name;
++    my $user = $ENV{LOGNAME} || $ENV{USER};
++    my $pwnam = getpwuid($<);
+     die "Cannot determine current user\n" unless $pwnam;
+     if ( defined $ENV{DEBFULLNAME} ) {
+         $name = $ENV{DEBFULLNAME};
+@@ -137,15 +150,12 @@ sub get_developer {
+     }
+     $user ||= $pwnam->name;
+     $name ||= $user;
+-    $email ||= ( $ENV{DEBEMAIL} || $ENV{EMAIL} );
+-    unless ($email) {
+-        chomp( $mailh = `cat /etc/mailname` );
+-        $email = $user . '@' . $mailh;
+-    }
+-
+-    $email =~ s/^(.*)\s+<(.*)>$/$2/;
++    return $name;
++}
+ 
+-    return "$name <$email>";
++sub get_developer {
++    my $self = shift;
++    return $self->get_name . " <" . $self->get_email . ">";
+ }
+ 
+ sub fill_maintainer {
+diff --git a/lib/DhMakePerl/Command/make.pm b/lib/DhMakePerl/Command/make.pm
+index 31db889..8cbfd8e 100644
+--- a/lib/DhMakePerl/Command/make.pm
++++ b/lib/DhMakePerl/Command/make.pm
+@@ -744,11 +744,13 @@ sub git_import_upstream__init_debian {
+     $self->reset_git_environment();
+ 
+     Git::command( 'init', $self->main_dir );
++    my @git_config = ( '-c', 'user.name=' . $self->get_name,
++                       '-c', 'user.email=' . $self->get_email);
+ 
+     my $git = Git->repository( $self->main_dir );
+     $git->command( qw(symbolic-ref HEAD refs/heads/upstream) );
+     $git->command( 'add', '.' );
+-    $git->command( 'commit', '-m',
++    $git->command( @git_config, 'commit', '-m',
+               "Import original source of "
+             . $self->perlname . ' '
+             . $self->version );
+@@ -762,7 +764,7 @@ sub git_import_upstream__init_debian {
+       # debian/ directory from the working tree; git has the history, so I don't
+       # need the debian.bak
+       $git->command( 'rm', '-r', $self->debian_dir );
+-      $git->command( 'commit', '-m',
++      $git->command( @git_config, 'commit', '-m',
+                      'Removed debian directory embedded in upstream source' );
+     }
+ }
+@@ -776,8 +778,12 @@ sub git_add_debian {
+     $self->reset_git_environment;
+ 
+     my $git = Git->repository( $self->main_dir );
++    my $name = $self->get_name;
++    my $email = $self->get_email;
++    my @git_config = ( '-c', "user.name=$name",
++                       '-c', "user.email=$email");
+     $git->command( 'add', 'debian' );
+-    $git->command( 'commit', '-m',
++    $git->command( @git_config, 'commit', '-m',
+         "Initial packaging by dh-make-perl $VERSION" );
+     $git->command(
+         qw( remote add origin ),
+@@ -788,8 +794,14 @@ sub git_add_debian {
+     if ( File::Which::which('pristine-tar') ) {
+         if ( $tarball and -f $tarball ) {
+             $ENV{GIT_DIR} = File::Spec->catdir( $self->main_dir, '.git' );
+-            system( 'pristine-tar', 'commit', $tarball, "upstream/".$self->version ) >= 0
+-                or warn "error running pristine-tar: $!\n";
++            my %backup_ENV = %ENV;
++            $ENV{GIT_COMMITTER_NAME} = $name;
++            $ENV{GIT_COMMITTER_EMAIL} = $email;
++            $ENV{GIT_AUTHOR_NAME} = $name;
++            $ENV{GIT_AUTHOR_EMAIL} = $email;
++            my $status = system( 'pristine-tar', 'commit', $tarball, "upstream/".$self->version );
++            %ENV = %backup_ENV;
++            warn "error running pristine-tar: $!\n" if $status < 0;
+         }
+         else {
+             die "No tarball found to handle with pristine-tar. Bailing out."
+-- 
+2.11.0
+

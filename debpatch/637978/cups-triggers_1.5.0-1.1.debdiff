@@ -1,0 +1,139 @@
+diff -Nru cups-1.5.0/debian/changelog cups-1.5.0/debian/changelog
+--- cups-1.5.0/debian/changelog	2011-08-07 12:53:28.000000000 +0200
++++ cups-1.5.0/debian/changelog	2011-08-16 13:57:21.000000000 +0200
+@@ -1,3 +1,11 @@
++cups (1.5.0-1.1) experimental; urgency=low
++
++  * Non-maintainer upload.
++  * Add a dpkg trigger to update the queues' PPDs on (cooperative) driver
++    upgrades (Closes: #637978).
++
++ -- Didier Raboud <odyx@debian.org>  Tue, 16 Aug 2011 13:56:00 +0200
++
+ cups (1.5.0-1) experimental; urgency=low
+ 
+   [ Till Kamppeter ]
+diff -Nru cups-1.5.0/debian/cups.postinst cups-1.5.0/debian/cups.postinst
+--- cups-1.5.0/debian/cups.postinst	2011-08-07 12:53:28.000000000 +0200
++++ cups-1.5.0/debian/cups.postinst	2011-08-16 13:51:27.000000000 +0200
+@@ -189,45 +189,64 @@
+ 
+ #DEBHELPER#
+ 
++# ppd_updater is supposed to be launched only with a running CUPS.
++ppd_updater () {
++	driverregexp=$1
++	gennicknameregexp=$2
++
++	[ ! -z "$gennicknameregexp" ] && \
++	    gennicknameregexp="; $gennicknameregexp"
++	gennicknameregexp='s/\s*\(recommended\)//'"$gennicknameregexp"
++	tmpfile1=`mktemp -t updateppds.XXXXXX`
++	tempfiles="$tempfiles $tmpfile1"
++	grep -E $driverregexp $tmpfile0 > $tmpfile1
++	cd /etc/cups/ppd
++	for ppd in *.ppd; do
++	    [ -r "$ppd" ] || continue
++	    queue=${ppd%.ppd}
++	    lpstat -h /var/run/cups/cups.sock -p "$queue" >/dev/null 2>&1 || continue
++	    nickname=`grep '\*NickName:' "$ppd" | cut -d '"' -f 2 | perl -p -e 's/\n$//' | perl -p -e "$gennicknameregexp" | perl -p -e 's/(\W)/\\\\$1/g'`
++	    lang=`grep '\*LanguageVersion:' "$ppd" | cut -d ' ' -f 2 | perl -e 'print lc(<>)' | perl -p -e 's/[\r\n]//gs'`
++	    ppdfound="0"
++	    englishppduri=""
++	    tmpfile2=`mktemp -t updateppds.XXXXXX`
++	    tempfiles="$tempfiles $tmpfile2"
++	    cat $tmpfile1 | perl -p -e "$gennicknameregexp" | grep -E '^\S+\s+.*'"$nickname"'$' | cut -d ' ' -f 1 > $tmpfile2
++	    while read newppduri; do
++		[ "$ppdfound" = "0" ] && lpadmin -h /var/run/cups/cups.sock -p "$queue" -m $newppduri 2>/dev/null || continue
++		newlang=`grep '\*LanguageVersion:' "$ppd" | cut -d ' ' -f 2 | perl -e 'print lc(<>)' | perl -p -e 's/[\r\n]//gs'`
++		[ "$newlang" = "$lang" ] && ppdfound="1"
++		[ "$newlang" = "english" ] && englishppduri="$newppduri"
++	    done < $tmpfile2
++	    [ "$ppdfound" = "0" ] && [ ! -z "$englishppduri" ] && lpadmin -h /var/run/cups/cups.sock -p "$queue" -m $englishppduri 2>/dev/null && ppdfound="1"
++	    [ "$ppdfound" = "1" ] && echo PPD for printer $queue updated >&2
++	done
++}
++
+ # Do the following only if CUPS is running and the needed CUPS tools
+ # are available
+-if [ "$1" = configure ] && \
+-	which lpstat > /dev/null 2>&1 && \
++if which lpstat > /dev/null 2>&1 && \
+ 	which lpinfo > /dev/null 2>&1 && \
+ 	which lpadmin > /dev/null 2>&1 && \
+-    LC_ALL=C lpstat -h /var/run/cups/cups.sock -r | grep -v not > /dev/null 2>&1; then
+-    # Update the PPD files of all already installed print queues
+-    driverregexp='lsb/usr/cups-included/|drv:///sample.drv/'
+-    gennicknameregexp='s/,\s*\d+\.\d+[\d\.]*$//i'
+-    [ ! -z "$gennicknameregexp" ] && \
+-	gennicknameregexp="; $gennicknameregexp"
+-    gennicknameregexp='s/\s*\(recommended\)//'"$gennicknameregexp"
+-    tempfiles=
+-    trap 'rm -f $tempfiles; exit 0' 0 HUP INT QUIT ILL ABRT PIPE TERM
+-    tmpfile1=`mktemp -t updateppds.XXXXXX`
+-    tempfiles="$tempfiles $tmpfile1"
+-    lpinfo -h /var/run/cups/cups.sock -m | grep -E $driverregexp > $tmpfile1
+-    cd /etc/cups/ppd
+-    for ppd in *.ppd; do
+-	[ -r "$ppd" ] || continue
+-	queue=${ppd%.ppd}
+-	lpstat -h /var/run/cups/cups.sock -p "$queue" >/dev/null 2>&1 || continue
+-	nickname=`grep '\*NickName:' "$ppd" | cut -d '"' -f 2 | perl -p -e 's/\n$//' | perl -p -e "$gennicknameregexp" | perl -p -e 's/(\W)/\\\\$1/g'`
+-	lang=`grep '\*LanguageVersion:' "$ppd" | cut -d ' ' -f 2 | perl -e 'print lc(<>)' | perl -p -e 's/[\r\n]//gs'`
+-	ppdfound="0"
+-	englishppduri=""
+-	tmpfile2=`mktemp -t updateppds.XXXXXX`
+-	tempfiles="$tempfiles $tmpfile2"
+-	cat $tmpfile1 | perl -p -e "$gennicknameregexp" | grep -i "$nickname"'$' | cut -d ' ' -f 1 > $tmpfile2
+-	while read newppduri; do
+-	    [ "$ppdfound" = "0" ] && lpadmin -h /var/run/cups/cups.sock -p "$queue" -m $newppduri 2>/dev/null || continue
+-	    newlang=`grep '\*LanguageVersion:' "$ppd" | cut -d ' ' -f 2 | perl -e 'print lc(<>)' | perl -p -e 's/[\r\n]//gs'`
+-	    [ "$newlang" = "$lang" ] && ppdfound="1"
+-	    [ "$newlang" = "english" ] && englishppduri="$newppduri"
+-	done < $tmpfile2
+-	[ "$ppdfound" = "0" ] && [ ! -z "$englishppduri" ] && lpadmin -h /var/run/cups/cups.sock -p "$queue" -m $englishppduri 2>/dev/null && ppdfound="1"
+-	[ "$ppdfound" = "1" ] && echo PPD for printer $queue updated >&2
+-    done
++	LC_ALL=C lpstat -h /var/run/cups/cups.sock -r | grep -v not > /dev/null 2>&1; then
++
++	tempfiles=
++	trap 'rm -f $tempfiles; exit 0' 0 HUP INT QUIT ILL ABRT PIPE TERM
++	tmpfile0=`mktemp -t updateppds.XXXXXX`
++	tempfiles="$tempfiles $tmpfile0"
++
++	lpinfo -h /var/run/cups/cups.sock -m > $tmpfile0
++
++	if [ "$1" = configure ] ; then
++		# Update CUPS included drivers' queues
++		ppd_updater 'lsb/usr/cups-included/|drv:///sample.drv/' 's/,\s*\d+\.\d+[\d\.]*$//i'
++	elif [ "$1" = triggered ] && [ "$2" = /usr/share/cups/ppd-updaters ] ; then
++		# Update external drivers' queues.
++		for driver in `ls /usr/share/cups/ppd-updaters`; do
++			. /usr/share/cups/ppd-updaters/${driver};
++			ppd_updater "${DRIVER_REGEXP}" "${GENNICKNAME_REGEXP}"
++		done
++	fi
+ fi
+ 
+ db_stop
+diff -Nru cups-1.5.0/debian/cups.triggers cups-1.5.0/debian/cups.triggers
+--- cups-1.5.0/debian/cups.triggers	1970-01-01 01:00:00.000000000 +0100
++++ cups-1.5.0/debian/cups.triggers	2011-08-16 13:20:21.000000000 +0200
+@@ -0,0 +1,4 @@
++# Trigger is activated when a driver touches a file named after the binary
++# package name containing proper DRIVER_REGEXP and GENNICKNAME_REGEXP shell
++# variables in the /usr/share/cups/ppd-updaters/ directory
++interest /usr/share/cups/ppd-updaters
+diff -Nru cups-1.5.0/debian/rules cups-1.5.0/debian/rules
+--- cups-1.5.0/debian/rules	2011-08-07 12:53:28.000000000 +0200
++++ cups-1.5.0/debian/rules	2011-08-16 13:52:31.000000000 +0200
+@@ -97,6 +97,9 @@
+ 	# PPD directories
+ 	mkdir -p "$(DEB_DESTDIR)/../cups/usr/share/ppd/cups-included/"
+ 
++	# PPD-updating triggers directory
++	mkdir -p "$(DEB_DESTDIR)/../cups/usr/share/cups/ppd-updaters/"
++
+ 	dh_usrlocal
+ 
+ 	# Install AppArmor, ufw profile, and Apport hook on Ubuntu

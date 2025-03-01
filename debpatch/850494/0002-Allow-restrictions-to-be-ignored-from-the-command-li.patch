@@ -1,0 +1,321 @@
+From 37b9bec8625b1cadb9f9894e787b468e93a7477a Mon Sep 17 00:00:00 2001
+From: Simon McVittie <smcv@debian.org>
+Date: Mon, 16 Jan 2017 00:15:49 +0000
+Subject: [PATCH 2/2] Allow restrictions to be ignored from the command line
+
+This can be used to let autopkgtest know that an environment is more
+capable or isolated than it first appears, or to experiment with new
+restrictions.
+
+The syntax is compatible with sadt(1) from devscripts (but we also allow
+repeating the option here, where sadt doesn't).
+---
+ lib/adt_run_args.py     |  3 +++
+ lib/autopkgtest_args.py | 12 ++++++++++++
+ lib/testdesc.py         | 31 +++++++++++++++++++------------
+ runner/autopkgtest      |  9 ++++++---
+ runner/autopkgtest.1    | 16 ++++++++++++++++
+ tests/autopkgtest       | 24 ++++++++++++++++++++++++
+ tests/autopkgtest_args  |  7 ++++++-
+ tests/testdesc          |  3 +++
+ 8 files changed, 89 insertions(+), 16 deletions(-)
+
+diff --git a/lib/adt_run_args.py b/lib/adt_run_args.py
+index a34a59a..d9e9296 100644
+--- a/lib/adt_run_args.py
++++ b/lib/adt_run_args.py
+@@ -410,6 +410,9 @@ details.'''
+             with open(c, encoding='UTF-8') as f:
+                 args.setup_commands[i] = f.read().strip()
+ 
++    # this frontend doesn't support some newer options: use a stub version
++    args.ignore_restrictions = []
++
+     # parse --copy arguments
+     copy_pairs = []
+     for arg in args.copy:
+diff --git a/lib/autopkgtest_args.py b/lib/autopkgtest_args.py
+index 8f28443..d49fea3 100644
+--- a/lib/autopkgtest_args.py
++++ b/lib/autopkgtest_args.py
+@@ -167,6 +167,13 @@ class ArgumentParser(argparse.ArgumentParser):
+         return [arg_line.strip()]
+ 
+ 
++class AppendCommaSeparatedArg(argparse.Action):
++    def __call__(self, parser, args, value, option_string=None):
++        result = getattr(args, self.dest, [])
++        result.extend(value.split(','))
++        setattr(args, self.dest, result)
++
++
+ def parse_args(arglist=None):
+     '''Parse autopkgtest command line arguments.
+ 
+@@ -272,6 +279,11 @@ for details.'''
+     g_setup.add_argument('--env', metavar='VAR=value',
+                          action='append', default=[],
+                          help='Set arbitrary environment variable for builds and test')
++    g_setup.add_argument('--ignore-restrictions', default=[],
++                         metavar='RESTRICTION[,RESTRICTION...]',
++                         action=AppendCommaSeparatedArg,
++                         help='Run tests even if these restrictions would '
++                         'normally prevent it')
+ 
+     # privileges
+     g_priv = parser.add_argument_group('user/privilege handling options')
+diff --git a/lib/testdesc.py b/lib/testdesc.py
+index ac80d7a..6630b85 100644
+--- a/lib/testdesc.py
++++ b/lib/testdesc.py
+@@ -128,41 +128,43 @@ class Test:
+         self.result = False
+         adtlog.report(self.name, 'FAIL ' + reason)
+ 
+-    def check_testbed_compat(self, caps):
++    def check_testbed_compat(self, caps, ignore_restrictions=()):
+         '''Check for restrictions incompatible with test bed capabilities.
+ 
+         Raise Unsupported exception if there are any.
+         '''
+-        for r in self.restrictions:
++        effective = set(self.restrictions) - set(ignore_restrictions)
++
++        for r in effective:
+             if r not in known_restrictions:
+                 raise Unsupported(self.name, 'unknown restriction %s' % r)
+ 
+-        if 'isolation-container' in self.restrictions and \
++        if 'isolation-container' in effective and \
+            'isolation-container' not in caps and \
+            'isolation-machine' not in caps:
+             raise Unsupported(self.name,
+                               'Test requires container-level isolation but '
+                               'testbed does not provide that')
+ 
+-        if 'isolation-machine' in self.restrictions and \
++        if 'isolation-machine' in effective and \
+            'isolation-machine' not in caps:
+             raise Unsupported(self.name,
+                               'Test requires machine-level isolation but '
+                               'testbed does not provide that')
+ 
+-        if 'breaks-testbed' in self.restrictions and \
++        if 'breaks-testbed' in effective and \
+            'revert-full-system' not in caps:
+             raise Unsupported(self.name,
+                               'Test breaks testbed but testbed does not '
+                               'provide revert-full-system')
+ 
+-        if 'needs-root' in self.restrictions and \
++        if 'needs-root' in effective and \
+            'root-on-testbed' not in caps:
+             raise Unsupported(self.name,
+                               'Test needs root on testbed which is not '
+                               'available')
+ 
+-        if 'needs-reboot' in self.restrictions and \
++        if 'needs-reboot' in effective and \
+            'reboot' not in caps:
+             raise Unsupported(self.name,
+                               'Test needs to reboot testbed but testbed does '
+@@ -356,9 +358,12 @@ def _autodep8(srcdir):
+ 
+ 
+ def parse_debian_source(srcdir, testbed_caps, testbed_arch, control_path=None,
+-                        auto_control=True):
++                        auto_control=True, ignore_restrictions=()):
+     '''Parse test descriptions from a Debian DEP-8 source dir
+ 
++    @ignore_restrictions: If we would skip the test due to these restrictions,
++                          run it anyway
++
+     You can specify an alternative path for the control file (default:
+     srcdir/debian/tests/control).
+ 
+@@ -428,7 +433,7 @@ def parse_debian_source(srcdir, testbed_caps, testbed_arch, control_path=None,
+                 for n in test_names:
+                     test = Test(n, os.path.join(test_dir, n), None,
+                                 restrictions, features, depends, [], [])
+-                    test.check_testbed_compat(testbed_caps)
++                    test.check_testbed_compat(testbed_caps, ignore_restrictions)
+                     tests.append(test)
+             elif 'Test-command' in record:
+                 command = record['Test-command']
+@@ -444,7 +449,7 @@ def parse_debian_source(srcdir, testbed_caps, testbed_arch, control_path=None,
+                 _debian_check_unknown_fields(name, record)
+                 test = Test(name, None, command, restrictions, features,
+                             depends, [], [])
+-                test.check_testbed_compat(testbed_caps)
++                test.check_testbed_compat(testbed_caps, ignore_restrictions)
+                 tests.append(test)
+             else:
+                 raise InvalidControl('*', 'missing "Tests" or "Test-Command"'
+@@ -461,7 +466,7 @@ def parse_debian_source(srcdir, testbed_caps, testbed_arch, control_path=None,
+ #
+ 
+ def parse_click_manifest(manifest, testbed_caps, clickdeps, use_installed,
+-                         srcdir=None):
++                         srcdir=None, ignore_restrictions=()):
+     '''Parse test descriptions from a click manifest.
+ 
+     @manifest: String with the click manifest
+@@ -469,6 +474,8 @@ def parse_click_manifest(manifest, testbed_caps, clickdeps, use_installed,
+     @clickdeps: paths of click packages that these tests need
+     @use_installed: True if test expects the described click to be installed
+                     already
++    @ignore_restrictions: If we would skip the test due to these restrictions,
++                          run it anyway
+ 
+     Return (source_dir, list of Test objects, some_skipped). If this encounters
+     any invalid restrictions, fields, or test restrictions which cannot be met
+@@ -534,7 +541,7 @@ def parse_click_manifest(manifest, testbed_caps, clickdeps, use_installed,
+             test = Test(name, desc.get('path'), desc.get('command'),
+                         desc.get('restrictions', []), desc.get('features', []),
+                         desc.get('depends', []), clickdeps, installed_clicks)
+-            test.check_testbed_compat(testbed_caps)
++            test.check_testbed_compat(testbed_caps, ignore_restrictions)
+             tests.append(test)
+         except Unsupported as u:
+             u.report()
+diff --git a/runner/autopkgtest b/runner/autopkgtest
+index daabdba..4bed5cb 100755
+--- a/runner/autopkgtest
++++ b/runner/autopkgtest
+@@ -579,7 +579,8 @@ def process_actions():
+                     clicks.append(arg)
+                     use_installed = True
+                 (srcdir, tests, skipped) = testdesc.parse_click_manifest(
+-                    manifest, testbed.caps, clicks, use_installed, pending_click_source)
++                    manifest, testbed.caps, clicks, use_installed, pending_click_source,
++                    opts.ignore_restrictions)
+ 
+             elif os.path.exists(arg):
+                 # local .click package file
+@@ -593,7 +594,8 @@ def process_actions():
+                     u = []
+                 manifest = testbed.check_exec(['click', 'info'] + u + [arg], stdout=True)
+                 (srcdir, tests, skipped) = testdesc.parse_click_manifest(
+-                    manifest, testbed.caps, [], True, pending_click_source)
++                    manifest, testbed.caps, [], True, pending_click_source,
++                    opts.ignore_restrictions)
+ 
+             if not srcdir:
+                 adtlog.bomb('No click source available for %s' % arg)
+@@ -608,7 +610,8 @@ def process_actions():
+                 (tests, skipped) = testdesc.parse_debian_source(
+                     tests_tree.host, testbed.caps, testbed.dpkg_arch,
+                     control_path=control_override,
+-                    auto_control=opts.auto_control)
++                    auto_control=opts.auto_control,
++                    ignore_restrictions=opts.ignore_restrictions)
+             except testdesc.InvalidControl as e:
+                 adtlog.badpkg(str(e))
+ 
+diff --git a/runner/autopkgtest.1 b/runner/autopkgtest.1
+index 4c48f72..a095bbe 100644
+--- a/runner/autopkgtest.1
++++ b/runner/autopkgtest.1
+@@ -289,6 +289,22 @@ thus you can use these files in the setup commands.
+ Set arbitrary environment variable in the build and test. Can be specified
+ multiple times.
+ 
++.TP
++.BI \-\-ignore\-restrictions= RESTRICTION , RESTRICTION...
++If a test would normally be skipped because it has
++.BI "Restrictions: " RESTRICTION\fR,
++run it anyway. Can be specified multiple times.
++
++For example, you might ignore the restriction
++.B isolation\-machine
++when using the
++.B null
++virtualization server if you know that
++.B autopkgtest
++itself is running on an expendable virtual machine. These options also
++work for unknown restrictions, so they can be used when experimenting
++with new restrictions.
++
+ .SH USER/PRIVILEGE HANDLING OPTIONS
+ 
+ .TP
+diff --git a/tests/autopkgtest b/tests/autopkgtest
+index 27c8361..eeab02e 100755
+--- a/tests/autopkgtest
++++ b/tests/autopkgtest
+@@ -1329,6 +1329,30 @@ if ($pid) { # parent
+         self.assertEqual(code, 2, err)
+         self.assertRegex(out, 'command1\s+SKIP Test needs to reboot testbed but testbed does not provide reboot capability')
+ 
++    def test_unknown_restriction(self):
++        '''test with unknown restriction gets skipped'''
++
++        p = self.build_src('Test-Command: true\nDepends:\nRestrictions: needs-reassurance', {})
++        (code, out, err) = self.runtest(['-d', '-B', p])
++        self.assertEqual(code, 2, err)
++        self.assertRegex(out, 'command1\s+SKIP unknown restriction needs-reassurance')
++
++    def test_unknown_derestriction(self):
++        '''--ignore-restrictions is respected for unknown restrictions'''
++
++        p = self.build_src('Test-Command: true\nDepends:\nRestrictions: needs-reassurance', {})
++        (code, out, err) = self.runtest(['-d', '-B', '--ignore-restrictions=needs-reassurance', p])
++        self.assertEqual(code, 0, out + err)
++        self.assertRegex(out, 'command1\s+PASS', out)
++
++    def test_known_derestriction(self):
++        '''--ignore-restrictions is respected for known restrictions'''
++
++        p = self.build_src('Test-Command: true\nDepends:\nRestrictions: needs-reboot', {})
++        (code, out, err) = self.runtest(['-d', '-B', '--ignore-restrictions=needs-reboot', p])
++        self.assertEqual(code, 0, out + err)
++        self.assertRegex(out, 'command1\s+PASS', out)
++
+ 
+ @unittest.skipIf(os.getuid() > 0,
+                  'NullRunnerRoot tests need to run as root')
+diff --git a/tests/autopkgtest_args b/tests/autopkgtest_args
+index 36d16f8..d18c4aa 100755
+--- a/tests/autopkgtest_args
++++ b/tests/autopkgtest_args
+@@ -227,17 +227,22 @@ Files:
+         self.assertEqual(adt_testbed.timeouts['test'], 10000)
+         self.assertEqual(adt_testbed.timeouts['copy'], 300)
+         self.assertEqual(args.testname, None)
++        self.assertEqual(args.ignore_restrictions, [])
+ 
+     def test_options(self):
+         (args, acts, virt) = self.parse(
+             ['-q', '--shell-fail', '--timeout-copy=5', '--set-lang',
+-             'en_US.UTF-8', 'mypkg',
++             'en_US.UTF-8',
++             '--ignore-restrictions=a,b',
++             '--ignore-restrictions=c',
++             'mypkg',
+              '--', 'foo', '-d', '-s', '--', '-d'])
+         self.assertEqual(args.verbosity, 0)
+         self.assertEqual(args.shell_fail, True)
+         self.assertEqual(adt_testbed.timeouts['copy'], 5)
+         self.assertEqual(args.env, ['LANG=en_US.UTF-8'])
+         self.assertEqual(args.auto_control, True)
++        self.assertEqual(args.ignore_restrictions, ['a', 'b', 'c'])
+ 
+         self.assertEqual(acts, [('apt-source', 'mypkg', False)])
+         self.assertEqual(virt, ['autopkgtest-virt-foo', '-d', '-s', '--', '-d'])
+diff --git a/tests/testdesc b/tests/testdesc
+index 352bdb2..f783e02 100755
+--- a/tests/testdesc
++++ b/tests/testdesc
+@@ -166,6 +166,9 @@ class Test(unittest.TestCase):
+         t.check_testbed_compat(['isolation-container', 'root-on-testbed'])
+         self.assertRaises(testdesc.Unsupported,
+                           t.check_testbed_compat, ['needs-quantum-computer'])
++        t.check_testbed_compat([],
++                               ignore_restrictions=['needs-root',
++                                                    'isolation-container'])
+ 
+ 
+ class Debian(unittest.TestCase):
+-- 
+2.11.0
+

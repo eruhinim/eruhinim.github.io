@@ -1,0 +1,179 @@
+commit d32010483fed74681bf9035a1c81adbcecbf1146
+Author: David Kalnischkies <david@kalnischkies.de>
+Date:   Mon Aug 3 07:00:33 2015 +0200
+
+    mark again deps of pkgs in APT::Never-MarkAuto-Sections as manual
+    
+    In 50ef3344c3afaaf9943142906b2f976a0337d264 (and similar for other
+    branches), while 'fixing' the edgecase of a package being in multiple
+    sections (e.g. moved from libs to oldlibs in newer releases) I
+    accidently broke the feature itself completely by operating on the
+    package itself and no longer on its dependencies…
+    
+    The behaviour isn't ideal in multiple ways, which we are hopefully able
+    to fix with new ideas as mentioned in the buglog, but until then the
+    functionality of this "hack" should be restored.
+    
+    Reported-By: Raphaël Hertzog <hertzog@debian.org>
+    Tested-By: Adam Conrad <adconrad@ubuntu.com>
+    Closes: 793360
+    LP: 1479207
+    Thanks: Raphaël Hertzog and Adam Conrad for detailed reports and initial patches
+
+diff --git a/apt-pkg/depcache.cc b/apt-pkg/depcache.cc
+index 16282df..14c709c 100644
+--- a/apt-pkg/depcache.cc
++++ b/apt-pkg/depcache.cc
+@@ -1103,7 +1103,12 @@ bool pkgDepCache::MarkInstall(PkgIterator const &Pkg,bool AutoInst,
+    if (DebugMarker == true)
+       std::clog << OutputInDepth(Depth) << "MarkInstall " << Pkg << " FU=" << FromUser << std::endl;
+ 
+-   DepIterator Dep = P.InstVerIter(*this).DependsList();
++   VerIterator const PV = P.InstVerIter(*this);
++   if (unlikely(PV.end() == true))
++      return false;
++   bool const PinNeverMarkAutoSection = (PV->Section != 0 && ConfigValueInSubTree("APT::Never-MarkAuto-Sections", PV.Section()));
++
++   DepIterator Dep = PV.DependsList();
+    for (; Dep.end() != true;)
+    {
+       // Grok or groups
+@@ -1226,7 +1231,7 @@ bool pkgDepCache::MarkInstall(PkgIterator const &Pkg,bool AutoInst,
+ 	       continue;
+ 	    }
+ 	    // now check if we should consider it a automatic dependency or not
+-	    if(InstPkg->CurrentVer == 0 && InstVer->Section != 0 && ConfigValueInSubTree("APT::Never-MarkAuto-Sections", InstVer.Section()))
++	    if(InstPkg->CurrentVer == 0 && PinNeverMarkAutoSection)
+ 	    {
+ 	       if(DebugAutoInstall == true)
+ 		  std::clog << OutputInDepth(Depth) << "Setting NOT as auto-installed (direct "
+diff --git a/test/integration/framework b/test/integration/framework
+index 3bfd8e4..2068614 100644
+--- a/test/integration/framework
++++ b/test/integration/framework
+@@ -509,10 +509,12 @@ echo '$NAME says \"Hello!\"'" > ${BUILDDIR}/${NAME}
+ 
+  -- Joe Sixpack <joe@example.org>  $(date -R)" > ${BUILDDIR}/debian/changelog
+ 	echo "Source: $NAME
+-Section: $SECTION
+ Priority: $PRIORITY
+ Maintainer: Joe Sixpack <joe@example.org>
+ Standards-Version: 3.9.3" > ${BUILDDIR}/debian/control
++	if [ "$SECTION" != '<none>' ]; then
++		echo "Section: $SECTION" >> ${BUILDDIR}/debian/control
++	fi
+ 	local BUILDDEPS="$(echo "$DEPENDENCIES" | grep '^Build-')"
+ 	test -z "$BUILDDEPS" || echo "$BUILDDEPS" >> ${BUILDDIR}/debian/control
+ 	echo "
+diff --git a/test/integration/test-apt-never-markauto-sections b/test/integration/test-apt-never-markauto-sections
+new file mode 100755
+index 0000000..6c88c69
+--- /dev/null
++++ b/test/integration/test-apt-never-markauto-sections
+@@ -0,0 +1,106 @@
++#!/bin/sh
++set -e
++
++TESTDIR=$(readlink -f $(dirname $0))
++. $TESTDIR/framework
++setupenvironment
++configarchitecture 'amd64' 'i386'
++
++aptconfig dump --no-empty --format '%v%n' APT::Never-MarkAuto-Sections > nevermarkauto.sections
++testsuccess grep '^metapackages$' nevermarkauto.sections
++
++# this is a very crude regression test, not a "this is how it should be" test:
++# In theory mydesktop-core and texteditor should be marked as manual, but
++# texteditor is installed as a dependency of bad-texteditor, not of
++# mydesktop-core and mydesktop-core is removed while bad-texteditor is
++# installed losing the manual bit as the problem resolver will later decide to
++# drop bad-texteditor and re-instate mydesktop-core which is considered an
++# auto-install at that point (in theory the never-auto handling should be
++# copied to this place – as to the many other places dependencies are resolved
++# 'by hand' instead of via MarkInstall AutoInst…
++#
++# Both could be fixed if apt would figure out early that installing
++# bad-texteditor is a bad idea and eventually it should (as mydesktop-core is
++# a direct descendant of mydesktop which was a user-request mydesktop-core should
++# be as protected from removal as mydesktop is), but this is hard in the general case
++# as with more or-groups and provides you can produce 'legal' examples for this.
++
++buildsimplenativepackage 'mydesktop' 'all' '1' 'unstable' 'Depends: mydesktop-core, foreignpkg
++Recommends: notavailable' '' 'metapackages'
++buildsimplenativepackage 'mydesktop-core' 'amd64' '1' 'unstable' 'Depends: bad-texteditor | texteditor, browser (>= 42), nosection, foreignpkg
++Recommends: notavailable
++Multi-Arch: foreign' '' 'metapackages'
++buildsimplenativepackage 'browser' 'amd64' '41' 'stable'
++buildsimplenativepackage 'browser' 'amd64' '42' 'unstable'
++buildsimplenativepackage 'texteditor' 'amd64' '1' 'stable'
++buildsimplenativepackage 'bad-texteditor' 'amd64' '1' 'stable' 'Depends: texteditor
++Conflicts: mydesktop-core'
++buildsimplenativepackage 'nosection' 'amd64' '1' 'stable' '' '' '<none>'
++buildsimplenativepackage 'foreignpkg' 'i386' '1' 'stable' 'Multi-Arch: foreign'
++setupaptarchive
++
++testsuccess aptcache show nosection
++testfailure grep 'Section' rootdir/tmp/testsuccess.output
++testequal 'dpkg' aptmark showmanual
++
++testsuccess aptget install mydesktop -y -o Debug::pkgProblemResolver=1 -o Debug::pkgDepCache::Marker=1
++
++testequal 'browser
++dpkg
++foreignpkg:i386
++mydesktop
++nosection' aptmark showmanual
++testmarkedauto 'mydesktop-core' 'texteditor'
++
++testequal 'Reading package lists...
++Building dependency tree...
++Reading state information...
++The following packages will be REMOVED:
++  mydesktop mydesktop-core texteditor
++0 upgraded, 0 newly installed, 3 to remove and 0 not upgraded.
++Remv mydesktop [1]
++Remv mydesktop-core [1]
++Remv texteditor [1]' aptget autoremove mydesktop -s
++
++testequal 'Reading package lists...
++Building dependency tree...
++Reading state information...
++The following packages will be REMOVED:
++  mydesktop mydesktop-core texteditor
++0 upgraded, 0 newly installed, 3 to remove and 0 not upgraded.
++Remv mydesktop [1]
++Remv mydesktop-core [1]
++Remv texteditor [1]' aptget autoremove texteditor -s
++testsuccess aptget autoremove texteditor -y
++
++testdpkgnotinstalled mydesktop mydesktop-core texteditor
++testdpkginstalled browser
++
++testequal 'browser
++dpkg
++foreignpkg:i386
++nosection' aptmark showmanual
++testmarkedauto
++
++# test that installed/upgraded auto-pkgs are not set to manual
++
++testsuccess aptget install browser=41 -y --force-yes
++
++testequal 'browser
++dpkg
++foreignpkg:i386
++nosection' aptmark showmanual
++testmarkedauto
++testsuccess aptmark auto browser
++testmarkedauto 'browser'
++testsuccess aptmark auto nosection
++testmarkedauto 'browser' 'nosection'
++testequal 'dpkg
++foreignpkg:i386' aptmark showmanual
++
++testsuccess aptget install mydesktop -y
++
++testequal 'dpkg
++foreignpkg:i386
++mydesktop' aptmark showmanual
++testmarkedauto 'browser' 'nosection' 'mydesktop-core' 'texteditor'

@@ -1,0 +1,775 @@
+From: Modestas Vainius <modestas@vainius.eu>
+Subject: [PATCH] Allow to pass options to buildsystems
+
+Allow to pass first-class build system specific options to dh_auto_* commands.
+The patch also makes necessary changes to the core Dh_Getopt and Dh_Lib modules
+to support "delayed" (i.e. post init()) parsing of extra options.
+
+Additional safeguards are put to ensure that either init() or
+parse_extra_options() gets called without "multipass_options=>1" once to
+fully complete option parsing. If not, such a buggy debhelper program would
+miss non-option arguments (at least).
+
+The patch includes a testsuite for new features.
+
+Signed-off-by: Modestas Vainius <modestas@vainius.eu>
+
+---
+ Debian/Debhelper/Buildsystem.pm                    |    7 +
+ Debian/Debhelper/Dh_Buildsystems.pm                |   10 +-
+ Debian/Debhelper/Dh_Getopt.pm                      |  182 ++++++++++++-----
+ Debian/Debhelper/Dh_Lib.pm                         |   28 +++-
+ debhelper.pod                                      |    6 +
+ debian/changelog                                   |    7 +
+ .../Debian/Debhelper/Buildsystem/test.pm           |   51 +++++
+ t/buildsystems/buildsystem_tests                   |   17 ++-
+ t/getopt                                           |  219 ++++++++++++++++++++
+ 9 files changed, 465 insertions(+), 62 deletions(-)
+
+diff --git a/Debian/Debhelper/Buildsystem.pm b/Debian/Debhelper/Buildsystem.pm
+index 62c45b5..12c2dea 100644
+--- a/Debian/Debhelper/Buildsystem.pm
++++ b/Debian/Debhelper/Buildsystem.pm
+@@ -35,6 +35,13 @@ sub DESCRIPTION {
+ 	error("class lacking a DESCRIPTION");
+ }
+ 
++# List of Getopt::Long style definitions of extra options for
++# the build system. None is defined by default.
++sub OPTIONS {
++	my $this=shift;
++	();
++}
++
+ # Default build directory. Can be overriden in the derived
+ # class if really needed.
+ sub DEFAULT_BUILD_DIRECTORY {
+diff --git a/Debian/Debhelper/Dh_Buildsystems.pm b/Debian/Debhelper/Dh_Buildsystems.pm
+index 4986267..0ce1261 100644
+--- a/Debian/Debhelper/Dh_Buildsystems.pm
++++ b/Debian/Debhelper/Dh_Buildsystems.pm
+@@ -113,7 +113,7 @@ sub buildsystems_init {
+ 	my %options = (
+ 	    "D=s" => \$opt_sourcedir,
+ 	    "sourcedirectory=s" => \$opt_sourcedir,
+-	
++
+ 	    "B:s" => \$opt_builddir,
+ 	    "builddirectory:s" => \$opt_builddir,
+ 
+@@ -124,7 +124,7 @@ sub buildsystems_init {
+ 	    "list" => \$opt_list,
+ 	);
+ 	$args{options}{$_} = $options{$_} foreach keys(%options);
+-	Debian::Debhelper::Dh_Lib::init(%args);
++	Debian::Debhelper::Dh_Lib::init(multipass_options => 1, %args);
+ }
+ 
+ sub buildsystems_list {
+@@ -164,16 +164,22 @@ sub buildsystems_do {
+ 	}
+ 
+ 	if ($opt_list) {
++		parse_extra_options(); # no extra options
+ 		buildsystems_list($step);
+ 		exit 0;
+ 	}
+ 
+ 	my $buildsystem = load_buildsystem($opt_buildsys, $step);
+ 	if (defined $buildsystem) {
++		# Parse build system specific command line options
++		parse_extra_options(options => +{ $buildsystem->OPTIONS() });
+ 		$buildsystem->pre_building_step($step);
+ 		$buildsystem->$step(@_, @{$dh{U_PARAMS}});
+ 		$buildsystem->post_building_step($step);
+ 	}
++	else {
++		parse_extra_options(); # no extra options
++	}
+ 	return 0;
+ }
+ 
+diff --git a/Debian/Debhelper/Dh_Getopt.pm b/Debian/Debhelper/Dh_Getopt.pm
+index edb3be7..8a7dbc5 100644
+--- a/Debian/Debhelper/Dh_Getopt.pm
++++ b/Debian/Debhelper/Dh_Getopt.pm
+@@ -66,41 +66,32 @@ sub NonOption {
+ 	push @{$dh{ARGV}}, @_;
+ }
+ 
+-sub getoptions {
+-	my $array=shift;
+-	my %options=%{shift()} if ref $_[0];
+-	
+-	my $oldwarn;
+-	if ($ENV{DH_IGNORE_UNKNOWN_OPTIONS}) {
+-		$oldwarn=$SIG{__WARN__};
+-		$SIG{__WARN__}=sub {};
+-	}
+-
+-	my $ret=Getopt::Long::GetOptionsFromArray($array,
++sub StandardOptions {
++	(
+ 		"v" => \$dh{VERBOSE},
+ 		"verbose" => \$dh{VERBOSE},
+ 
+ 		"no-act" => \$dh{NO_ACT},
+-	
++
+ 		"i" => \&AddPackage,
+ 		"indep" => \&AddPackage,
+-	
++
+ 		"a" => \&AddPackage,
+ 		"arch" => \&AddPackage,
+-	
++
+ 		"p=s" => \&AddPackage,
+-	        "package=s" => \&AddPackage,
+-		
++		"package=s" => \&AddPackage,
++
+ 		"N=s" => \&ExcludePackage,
+ 		"no-package=s" => \&ExcludePackage,
+-	
++
+ 		"remaining-packages" => \$dh{EXCLUDE_LOGGED},
+-	
++
+ 		"dbg-package=s" => \&AddDebugPackage,
+-		
++
+ 		"s" => \&AddPackage,
+ 		"same-arch" => \&AddPackage,
+-	
++
+ 		"n" => \$dh{NOSCRIPTS},
+ 		"noscripts" => \$dh{NOSCRIPTS},
+ 		"o" => \$dh{ONLYSCRIPTS},
+@@ -108,9 +99,9 @@ sub getoptions {
+ 
+ 		"X=s" => \&AddExclude,
+ 		"exclude=s" => \&AddExclude,
+-		
++
+ 		"d" => \$dh{D_FLAG},
+-	
++
+ 		"k" => \$dh{K_FLAG},
+ 		"keep" => \$dh{K_FLAG},
+ 
+@@ -123,9 +114,9 @@ sub getoptions {
+ 
+ 		"A" => \$dh{PARAMS_ALL},
+ 		"all" => \$dh{PARAMS_ALL},
+-	
++
+ 		"priority=s" => \$dh{PRIORITY},
+-		
++
+ 		"h|help" => \&showhelp,
+ 
+ 		"mainpackage=s" => \$dh{MAINPACKAGE},
+@@ -133,13 +124,37 @@ sub getoptions {
+ 		"name=s" => \$dh{NAME},
+ 
+ 		"error-handler=s" => \$dh{ERROR_HANDLER},
+-		
++
+ 		"ignore=s" => \&AddIgnore,
++	);
++}
+ 
+-		%options,
++sub getoptions {
++	my $array=shift;
++	my %params=@_;
++	my %extraoptions=%{$params{options}} if $params{options};
++	my @config=@{$params{config}} if $params{config};
+ 
+-		"<>" => \&NonOption,
+-	);
++	# Silently succeed on empty array
++	return 1 if @$array == 0;
++
++	# Setup hash of standard options. Silently succeed if there are no options
++	my %options = StandardOptions if !$params{nostandard};
++	# Do not use <> with pass_through. It will "eat" all unrecognized options
++	# at that specific pass.
++	$options{"<>"}=\&NonOption if not grep /^pass_?through$/, @config;
++	return 1 if scalar(keys %options) == 0 && scalar(keys %extraoptions) == 0;
++
++	# Prepare and parse
++	my $oldwarn;
++	if ($ENV{DH_IGNORE_UNKNOWN_OPTIONS}) {
++		$oldwarn=$SIG{__WARN__};
++		$SIG{__WARN__}=sub {};
++	}
++
++	my $prevconfig = Getopt::Long::Configure(@config) if (@config); # save config
++	my $ret=Getopt::Long::GetOptionsFromArray($array, %options, %extraoptions);
++	Getopt::Long::Configure($prevconfig) if (@config); # restore previous config
+ 
+ 	if ($ENV{DH_IGNORE_UNKNOWN_OPTIONS}) {
+ 		$SIG{__WARN__}=$oldwarn;
+@@ -156,17 +171,42 @@ sub split_options_string {
+ 	return split(/\s+/,$str);
+ }
+ 
++my %ARGVs = (
++	int => [],
++	env => [],
++	cli => [],
++);
++
++sub getoptions_ARGVs {
++	my $t=shift;
++	my $ret;
++
++	$ret = getoptions($ARGVs{$t}, @_);
++	if (!$ret) {
++		# No error checking for int type
++		if ($t eq "env") {
++			warning("warning: ignored unknown options in DH_OPTIONS");
++		}
++		elsif ($t eq "cli") {
++			warning("warning: unknown options will be a fatal error in a future debhelper release");
++			#error("unknown option; aborting");
++		}
++	}
++	return $ret;
++}
++
+ # Parse options and set %dh values.
+ sub parseopts {
+-	my $options=shift;
+-	
+-	my @ARGV_extra;
++	my %params=@_;
++	my %getopts=( options => $params{options} );
++	push @{$getopts{config}}, "pass_through" if $params{multipass_options};
+ 
++	my $ret = 1;
+ 	# DH_INTERNAL_OPTIONS is used to pass additional options from
+ 	# dh through an override target to a command.
+ 	if (defined $ENV{DH_INTERNAL_OPTIONS}) {
+-		@ARGV_extra=split(/\x1e/, $ENV{DH_INTERNAL_OPTIONS});
+-		getoptions(\@ARGV_extra, $options);
++		@{$ARGVs{int}}=split(/\x1e/, $ENV{DH_INTERNAL_OPTIONS});
++		$ret &&= getoptions_ARGVs("int", %getopts);
+ 
+ 		# Avoid forcing acting on packages specified in
+ 		# DH_INTERNAL_OPTIONS. This way, -p can be specified
+@@ -189,18 +229,12 @@ sub parseopts {
+ 	# to be parsed like @ARGV, but with unknown options
+ 	# skipped.
+ 	if (defined $ENV{DH_OPTIONS}) {
+-		@ARGV_extra=split_options_string($ENV{DH_OPTIONS});
+-		my $ret=getoptions(\@ARGV_extra, $options);
+-		if (!$ret) {
+-			warning("warning: ignored unknown options in DH_OPTIONS");
+-		}
++		@{$ARGVs{env}}=split_options_string($ENV{DH_OPTIONS});
++		$ret &&= getoptions_ARGVs("env", %getopts);
+ 	}
+ 
+-	my $ret=getoptions(\@ARGV, $options);
+-	if (!$ret) {
+-		warning("warning: unknown options will be a fatal error in a future debhelper release");
+-		#error("unknown option; aborting");
+-	}
++	@{$ARGVs{cli}} = @ARGV;
++	$ret &&= getoptions_ARGVs("cli", %getopts);
+ 
+ 	# Check to see if -V was specified. If so, but no parameters were
+ 	# passed, the variable will be defined but empty.
+@@ -247,17 +281,57 @@ sub parseopts {
+ 	}
+ 
+ 	if (defined $dh{U_PARAMS}) {
+-	        # Split the U_PARAMS up into an array.
+-        	my $u=$dh{U_PARAMS};
+-        	undef $dh{U_PARAMS};
+-                push @{$dh{U_PARAMS}}, split(/\s+/,$u);
+-        }
+-
+-	# Anything left in @ARGV is options that appeared after a --
+-	# These options are added to the U_PARAMS array, while the
+-	# non-option values we collected replace them in @ARGV;
+-	push @{$dh{U_PARAMS}}, @ARGV, @ARGV_extra;
+-	@ARGV=@{$dh{ARGV}} if exists $dh{ARGV};
++		# Split the U_PARAMS up into an array.
++		my $u=$dh{U_PARAMS};
++		undef $dh{U_PARAMS};
++		push @{$dh{U_PARAMS}}, split(/\s+/,$u);
++	}
++
++	# Complete option processing now if no extra options expected
++	if (!$params{multipass_options}) {
++		# Do not execute getoptions() on the ARGVs. That would break U_PARAMS
++		# because ARGVs no longer contain --.
++		parse_extraopts(%params, options => undef, nogetoptions => 1);
++	}
++
++	return $ret;
++}
++
++sub parse_extraopts {
++	my %params=@_;
++	my %getopts=( options => $params{options}, nostandard => 1 );
++	push @{$getopts{config}}, "pass_through" if $params{multipass_options};
++
++	if (scalar(keys %ARGVs) == 0) {
++		# Called without multipass_options twice in a row. Wrong.
++		error("buggy debhelper program: unexpected processing of extra options");
++	}
++
++	# Get extra options from remaining arguments
++	my $ret = 1;
++	if (!$params{nogetoptions}) {
++		$ret &&= getoptions_ARGVs($_, %getopts) foreach qw{int env cli};
++	}
++
++	# Final pass MUST be without 'multipass_options' to parse U_PARAMS
++	# properly.
++	if (!$params{multipass_options}) {
++		# Anything left in ARGVs is options that appeared after a --
++		# These options are added to the U_PARAMS array, while the
++		# non-option values we collected replace them in @ARGV;
++		push @{$dh{U_PARAMS}}, @{$ARGVs{$_}} for qw{int env cli};
++		@ARGV = (exists $dh{ARGV}) ? @{$dh{ARGV}} : ();
++
++		# Reset %ARGVs as indication that it has been fully processed
++		%ARGVs = ();
++	}
++	return $ret;
++}
++
++END {
++	if (scalar(keys %ARGVs) > 0) {
++		error("buggy debhelper program: extra options have never been parsed");
++	}
+ }
+ 
+ sub import {
+diff --git a/Debian/Debhelper/Dh_Lib.pm b/Debian/Debhelper/Dh_Lib.pm
+index 2d1934b..064e41b 100644
+--- a/Debian/Debhelper/Dh_Lib.pm
++++ b/Debian/Debhelper/Dh_Lib.pm
+@@ -16,12 +16,12 @@ use vars qw(@ISA @EXPORT %dh);
+ 	    &compat &addsubstvar &delsubstvar &excludefile &package_arch
+ 	    &is_udeb &udeb_filename &debhelper_script_subst &escape_shell
+ 	    &inhibit_log &load_log &write_log &dpkg_architecture_value
+-	    &sourcepackage);
++	    &sourcepackage &parse_extra_options);
+ 
+ my $max_compat=7;
+ 
+-sub init {
+-	my %params=@_;
++sub Dh_Getopt_run {
++	my $subname=shift;
+ 
+ 	# Check to see if an option line starts with a dash,
+ 	# or DH_OPTIONS is set.
+@@ -32,8 +32,19 @@ sub init {
+ 	    grep /^-/, @ARGV) {
+ 		eval "use Debian::Debhelper::Dh_Getopt";
+ 		error($@) if $@;
+-		Debian::Debhelper::Dh_Getopt::parseopts($params{options});
++		my $sub = eval("*Debian::Debhelper::Dh_Getopt::$subname");
++		return &$sub(@_);
+ 	}
++	return;
++}
++
++sub init {
++	my %params=@_;
++
++	Dh_Getopt_run("parseopts",
++		options => $params{options},
++		multipass_options => $params{multipass_options}
++	);
+ 
+ 	# Another way to set excludes.
+ 	if (exists $ENV{DH_ALWAYS_EXCLUDE} && length $ENV{DH_ALWAYS_EXCLUDE}) {
+@@ -96,6 +107,15 @@ sub init {
+ 	}
+ }
+ 
++# Process remaining program arguments with extra options.
++# Must be run after either init(multipass_options=>1) or
++# parse_extra_options(multipass_options=>1) call. Final
++# call to parse_extra_options() must be done without
++# multipass_options=>1.
++sub parse_extra_options {
++	Dh_Getopt_run("parse_extraopts", @_);
++}
++
+ # Run at exit. Add the command to the log files for the packages it acted
+ # on, if it's exiting successfully.
+ my $write_log=1;
+diff --git a/debhelper.pod b/debhelper.pod
+index de39057..deafa84 100644
+--- a/debhelper.pod
++++ b/debhelper.pod
+@@ -214,6 +214,12 @@ is manually specified with the I<--buildsystem> option.
+ 
+ =back
+ 
++Please note that a build system may accept any number of additional arbitrary
++options which can be passed to all dh_auto_* debhelper programs when the build
++system is either autoselected or manually specified. Consult documentation of
++the build system you intend to use for the list of such options (if any) and
++their effect on the build process.
++
+ =head1 NOTES
+ 
+ =head2 Multiple binary package support
+diff --git a/debian/changelog b/debian/changelog
+index 1c067d1..e80d019 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,3 +1,10 @@
++debhelper (7.4.4) UNRELEASED; urgency=low
++
++  * Add support for build system specific options (to be passed to dh_auto_*
++    commands) (Closes: #543507).
++
++ -- Modestas Vainius <modestas@vainius.eu>  Fri, 23 Oct 2009 00:51:51 +0300
++
+ debhelper (7.4.3) unstable; urgency=low
+ 
+   [ Valery Perrin ]
+diff --git a/t/buildsystems/Debian/Debhelper/Buildsystem/test.pm b/t/buildsystems/Debian/Debhelper/Buildsystem/test.pm
+new file mode 100644
+index 0000000..cc8df83
+--- /dev/null
++++ b/t/buildsystems/Debian/Debhelper/Buildsystem/test.pm
+@@ -0,0 +1,51 @@
++# A build system class for handling Perl Build based projects.
++#
++# Copyright: © 2008-2009 Joey Hess
++#            © 2008-2009 Modestas Vainius
++# License: GPL-2+
++
++package Debian::Debhelper::Buildsystem::test;
++
++use strict;
++use base 'Debian::Debhelper::Buildsystem';
++
++sub DESCRIPTION {
++	"test build system"
++}
++
++sub OPTIONS {
++	my $this=shift;
++	("test-foo=s" => \$this->{opt_foo})
++}
++
++sub new {
++	my $class=shift;
++	my $this= $class->SUPER::new(@_);
++	return $this;
++}
++
++sub configure {
++	my $this=shift;
++	print "Option: ", "--test-foo=", $this->{opt_foo}, "\n"
++		if $this->{opt_foo};
++    print "Param: ", $_, "\n" foreach @_;
++}
++
++sub build {
++	my $this=shift;
++}
++
++sub test {
++	my $this=shift;
++}
++
++sub install {
++	my $this=shift;
++	my $destdir=shift;
++}
++
++sub clean {
++	my $this=shift;
++}
++
++1
+diff --git a/t/buildsystems/buildsystem_tests b/t/buildsystems/buildsystem_tests
+index 8f7a275..f4eb2b3 100755
+--- a/t/buildsystems/buildsystem_tests
++++ b/t/buildsystems/buildsystem_tests
+@@ -1,6 +1,6 @@
+ #!/usr/bin/perl
+ 
+-use Test::More tests => 228;
++use Test::More tests => 233;
+ 
+ use strict;
+ use warnings;
+@@ -13,6 +13,9 @@ use File::Basename ();
+ # is expected to be the one where this test lives in.
+ chdir File::Basename::dirname($0) or die "Unable to chdir to ".File::Basename::dirname($0);
+ 
++# For loading 'test' build system
++push @INC, ".";
++
+ use_ok( 'Debian::Debhelper::Dh_Lib' );
+ use_ok( 'Debian::Debhelper::Buildsystem' );
+ use_ok( 'Debian::Debhelper::Dh_Buildsystems' );
+@@ -362,6 +365,16 @@ ok ( -d $builddir, "testing rmdir_builddir() 3: builddir parent '$builddir' not
+ 
+ cleandir $tmpdir;
+ 
++### Test build system specific options
++is ( system("$TOPDIR/dh_auto_configure --buildsystem=test"), 0, "no buildsys specific option, no fail");
++isnt ( system("$TOPDIR/dh_auto_configure --buildsystem=test | grep -q '^Option: --test-foo=' "),
++	0, "no buildsys specific option, not passed");
++is ( system("$TOPDIR/dh_auto_configure --buildsystem=test --test-foo=bar > /dev/null"), 0, "with buildsys specific option, no fail");
++is ( system("$TOPDIR/dh_auto_configure --buildsystem=test --test-foo=bar | grep -q '^Option: --test-foo=bar\$' "),
++	0, "with buildsys specific option, parsed");
++is ( system("$TOPDIR/dh_auto_configure --buildsystem=test --test-foo=bar -- --external-param | grep -q '^Param: --external-param\$' "),
++	0, "with buildsys specific option, test arguments after --");
++
+ ### Test buildsystems_init() and commandline/env argument handling
+ sub get_load_bs_source {
+ 	my ($system, $step)=@_;
+@@ -373,7 +386,7 @@ use strict;
+ use warnings;
+ use Debian::Debhelper::Dh_Buildsystems;
+ 
+-buildsystems_init();
++buildsystems_init(multipass_options => 0);
+ my \$bs = load_buildsystem($system, $step);
+ if (defined \$bs) {
+ 	print 'NAME=', \$bs->NAME(), "\\n";
+diff --git a/t/getopt b/t/getopt
+new file mode 100755
+index 0000000..0cfb179
+--- /dev/null
++++ b/t/getopt
+@@ -0,0 +1,219 @@
++#!/usr/bin/perl
++
++use Test::More tests => 22;
++
++use strict;
++use warnings;
++
++use IPC::Open2;
++
++sub readlines {
++	my $h=shift;
++	my @lines = <$h>;
++	close $h;
++	chop @lines;
++	return \@lines;
++}
++
++sub process_stdout {
++	my ($cmdline, $stdin) = @_;
++	my ($reader, $writer);
++    my ($pid, $lines);
++
++	$pid = open2($reader, $writer, $cmdline) or die "Unable to exec $cmdline";
++	print $writer $stdin if $stdin;
++	close $writer;
++	$lines = readlines($reader);
++	waitpid($pid, 0);
++	return ($? >> 8, $lines);
++}
++
++sub do_perl {
++	my ($cmdline, $program, $env) = @_;
++	$env = "" if !defined $env;
++	return process_stdout("$env $^X -- - $cmdline", $program);
++}
++
++my ($status, $output);
++my $program;
++
++# This variable affects Dh_Getopt::getoptions() result. We will test it too.
++delete $ENV{DH_IGNORE_UNKNOWN_OPTIONS}
++	if exists $ENV{DH_IGNORE_UNKNOWN_OPTIONS};
++
++# Test standard single-pass option passing
++($status, $output) = do_perl("-ppkg1 --package pkg2 --package=pkg3 abc -- def", <<'EOF');
++use strict;
++use warnings;
++use Debian::Debhelper::Dh_Lib qw(%dh);
++use Debian::Debhelper::Dh_Getopt;
++
++my $ret;
++if ($ret = Debian::Debhelper::Dh_Getopt::parseopts()) {
++	print 'p=', $_, "\n" foreach @{$dh{DOPACKAGES}};
++	print $_, "\n" foreach @ARGV;
++	print 'u=', $_, "\n" foreach @{$dh{U_PARAMS}};
++}
++exit (($ret)?0:2);
++EOF
++is( $status, 0, "STATUS: single-pass standard option parsing (with --)" );
++is_deeply( $output, [ "p=pkg1", "p=pkg2", "p=pkg3", "abc", "u=def" ],
++	"OUTPUT: single-pass standard option parsing (with --)" );
++
++$program = <<'EOF';
++use strict;
++use warnings;
++use Debian::Debhelper::Dh_Lib qw(%dh);
++use Debian::Debhelper::Dh_Getopt;
++
++my $opt_foo;
++my $ret;
++if ($ret = Debian::Debhelper::Dh_Getopt::parseopts(options => { 'test-foo=s' => \$opt_foo })) {
++	print 'p=', $_, "\n" foreach @{$dh{DOPACKAGES}};
++	print '--test-foo=', $opt_foo, "\n" if $opt_foo;
++	print $_, "\n" foreach @ARGV;
++	print 'u=', $_, "\n" foreach @{$dh{U_PARAMS}};
++}
++exit (($ret)?0:2);
++EOF
++($status, $output) = do_perl("-ppkg1 --package pkg2 --package=pkg3 --test-foo=bar", $program, "DH_OPTIONS=abc");
++is( $status, 0, "STATUS: single-pass custom option parsing + DH_OPTIONS" );
++is_deeply( $output, [ "p=pkg1", "p=pkg2", "p=pkg3", "--test-foo=bar", "abc" ],
++	"OUTPUT: single-pass custom option parsing + DH_OPTIONS" );
++
++($status, $output) = do_perl("-ppkg1 --package pkg2 --test-foo=bar --test-unknownopt abc -- def 2>/dev/null", $program);
++is( $status, 2, "STATUS: single-pass unrecognized option parsing" );
++is_deeply( $output, [ ], "OUTPUT: single-pass unrecognized option parsing" );
++
++($status, $output) = do_perl("-ppkg1 --package pkg2 --test-foo=bar --test-unknownopt abc -- def",
++	$program, "DH_IGNORE_UNKNOWN_OPTIONS=1");
++is( $status, 0, "STATUS: single-pass unrecognized option parsing" );
++is_deeply( $output, [ "p=pkg1", "p=pkg2", "--test-foo=bar", "abc", "u=def" ],
++	"OUTPUT: single-pass unrecognized option parsing" );
++
++# Test multi-pass option passing
++$program = <<'EOF';
++use strict;
++use warnings;
++use Debian::Debhelper::Dh_Lib qw(%dh parse_extra_options);
++use Debian::Debhelper::Dh_Getopt;
++
++my $opt_foo;
++my $ret;
++if ($ret = Debian::Debhelper::Dh_Getopt::parseopts(multipass_options => 1)) {
++	print 'p=', $_, "\n" foreach @{$dh{DOPACKAGES}};
++	if ($ret = parse_extra_options(options => { 'test-foo=s' => \$opt_foo })) {
++		print '--test-foo=', $opt_foo, "\n" if $opt_foo;
++	}
++	print $_, "\n" foreach @ARGV;
++	print 'u=', $_, "\n" foreach @{$dh{U_PARAMS}};
++}
++exit (($ret)?0:2);
++EOF
++($status, $output) = do_perl("-ppkg1 --package pkg2 --package=pkg3 abc def", $program);
++is( $status, 0, "STATUS: multi-pass standard option parsing" );
++is_deeply( $output, [ "p=pkg1", "p=pkg2", "p=pkg3", "abc", "def" ], "OUTPUT: multi-pass standard option parsing" );
++
++($status, $output) = do_perl("-ppkg1 --package pkg2 --package=pkg3 --test-foo=bar -- abc", $program);
++is( $status, 0, "STATUS: multi-pass extra option parsing (with --)" );
++is_deeply( $output, [ "p=pkg1", "p=pkg2", "p=pkg3", "--test-foo=bar", "u=abc" ],
++	"OUTPUT: multi-pass extra option parsing (with --)" );
++
++($status, $output) = do_perl("-ppkg1 --package pkg2 --package=pkg3 --test-unkownopt=bar abc -- def 2>/dev/null", $program);
++is( $status, 2, "STATUS: multi-pass unrecognized option parsing" );
++is_deeply( [ @$output[0..2] ], [ "p=pkg1", "p=pkg2", "p=pkg3" ],
++	"OUTPUT: multi-pass unrecognized option parsing" );
++
++($status, $output) = do_perl("-ppkg1 --package pkg2 --package=pkg3 --test-unkownopt=bar abc -- def",
++	$program, "DH_IGNORE_UNKNOWN_OPTIONS=1");
++is( $status, 0, "STATUS: multi-pass unrecognized option ignoring (with --)" );
++is_deeply( $output, [ "p=pkg1", "p=pkg2", "p=pkg3", "abc", "u=def" ],
++	"OUTPUT: multi-pass unrecognized option ignoring (with --)" );
++
++# Test invalid multi-pass
++($status, $output) = do_perl("-ppkg1 --package pkg2 --package=pkg3 abc def 2>/dev/null", <<'EOF');
++use strict;
++use warnings;
++use Debian::Debhelper::Dh_Lib qw(%dh parse_extra_options);
++use Debian::Debhelper::Dh_Getopt;
++
++my $ret;
++if ($ret = Debian::Debhelper::Dh_Getopt::parseopts(multipass_options => 1)) {
++	print 'p=', $_, "\n" foreach @{$dh{DOPACKAGES}};
++	print $_, "\n" foreach @ARGV;
++	print 'u=', $_, "\n" foreach @{$dh{U_PARAMS}};
++}
++exit (($ret)?0:2);
++EOF
++is( $status, 1, "STATUS: multi-pass unterminated" );
++
++($status, $output) = do_perl("abc def 2>/dev/null", <<'EOF');
++use strict;
++use warnings;
++use Debian::Debhelper::Dh_Lib qw(%dh parse_extra_options));
++use Debian::Debhelper::Dh_Getopt;
++
++my $ret;
++if ($ret = Debian::Debhelper::Dh_Getopt::parseopts(multipass_options => 1)) {
++	print 'p=', $_, "\n" foreach @{$dh{DOPACKAGES}};
++	print $_, "\n" foreach @ARGV;
++	print 'u=', $_, "\n" foreach @{$dh{U_PARAMS}};
++}
++parse_extra_options();
++parse_extra_options();
++exit (($ret)?0:2);
++EOF
++isnt( $status, 0, "STATUS: multi-pass terminated twice" );
++
++# Test two levels of multi-pass
++($status, $output) = do_perl("-ppkg1 --test-bar --test-foo abc -- def", <<'EOF');
++use strict;
++use warnings;
++use Debian::Debhelper::Dh_Lib qw(%dh parse_extra_options);
++use Debian::Debhelper::Dh_Getopt;
++
++my ($opt_foo, $opt_bar);
++my $ret;
++if ($ret = Debian::Debhelper::Dh_Getopt::parseopts(multipass_options => 1)) {
++	print 'p=', $_, "\n" foreach @{$dh{DOPACKAGES}};
++	if ($ret = parse_extra_options(options => { 'test-foo' => \$opt_foo }, multipass_options => 1)) {
++		print '--test-foo', "\n" if $opt_foo;
++		if ($ret = parse_extra_options(options => { 'test-bar' => \$opt_bar })) {
++			print '--test-bar', "\n" if $opt_bar;
++		}
++	}
++	print $_, "\n" foreach @ARGV;
++	print 'u=', $_, "\n" foreach @{$dh{U_PARAMS}};
++}
++exit (($ret)?0:2);
++EOF
++is( $status, 0, "STATUS: multi-pass (multi level) option parsing (with --)" );
++is_deeply( $output, [ "p=pkg1", '--test-foo', '--test-bar', "abc", "u=def" ],
++	"OUTPUT: multi-pass (multi level) option parsing (with --)" );
++
++# Finally test Dh_Lib::init() with regard to multi-pass option parsing
++($status, $output) = do_perl("-ppkg1 --test-bar --test-foo abc -- def", <<'EOF');
++use strict;
++use warnings;
++use Debian::Debhelper::Dh_Lib qw(%dh init parse_extra_options);
++
++my ($opt_foo, $opt_bar);
++my $ret;
++init(multipass_options => 1);
++print 'p=', $_, "\n" foreach @{$dh{DOPACKAGES}};
++
++if ($ret = parse_extra_options(options => { 'test-foo' => \$opt_foo, 'test-bar' => \$opt_bar })) {
++	print '--test-foo', "\n" if $opt_foo;
++	print '--test-bar', "\n" if $opt_bar;
++}
++print $_, "\n" foreach @ARGV;
++print 'u=', $_, "\n" foreach @{$dh{U_PARAMS}};
++exit (($ret)?0:2);
++EOF
++is( $status, 0, "STATUS: init() and multi-pass options (with --)" );
++is_deeply( $output, [ "p=pkg1", '--test-foo', '--test-bar', "abc", "u=def" ],
++	"OUTPUT: init() and multi-pass options (with --)" );
++
++END {
++    system("dh_clean -ppkg1 -ppkg2 -ppkg3");
++}
+-- 
+tg: (f2200dc..) patch/buildsystem_options (depends on: master)

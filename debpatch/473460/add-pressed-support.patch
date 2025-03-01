@@ -1,0 +1,277 @@
+diff -Nurwd old/bind9-9.4.2/debian/bind9-default.md5sum new/bind9-9.4.2/debian/bind9-default.md5sum
+--- old/bind9-9.4.2/debian/bind9-default.md5sum	1970-01-01 00:00:00.000000000 +0000
++++ new/bind9-9.4.2/debian/bind9-default.md5sum	2008-04-03 21:04:37.000000000 +0200
+@@ -0,0 +1 @@
++1
+diff -Nurwd old/bind9-9.4.2/debian/bind9.dirs new/bind9-9.4.2/debian/bind9.dirs
+--- old/bind9-9.4.2/debian/bind9.dirs	2008-04-03 20:59:26.000000000 +0200
++++ new/bind9-9.4.2/debian/bind9.dirs	2008-04-03 22:20:09.000000000 +0200
+@@ -4,3 +4,4 @@
+ usr/sbin
+ var/cache/bind
+ var/run/bind/run
++usr/share/bind9/
+diff -Nurwd old/bind9-9.4.2/debian/bind9.postinst new/bind9-9.4.2/debian/bind9.postinst
+--- old/bind9-9.4.2/debian/bind9.postinst	2008-04-03 20:59:26.000000000 +0200
++++ new/bind9-9.4.2/debian/bind9.postinst	2008-04-03 21:04:37.000000000 +0200
+@@ -2,6 +2,8 @@
+ 
+ set -e
+ 
++. /usr/share/debconf/confmodule
++
+ if [ "$1" = configure ]; then
+     lastversion="$2";
+ 
+@@ -21,8 +23,16 @@
+ 	rndc-confgen -r /dev/urandom -a
+     fi
+ 
++    if [ -e /etc/default/bind9 ] && [ "`cat /usr/share/bind9/bind9-default.md5sum`" = "`md5sum /etc/default/bind9`" ]; then
++        config="/etc/default/bind9"
++    elif [ ! -e /etc/default/bind9 ]; then
++        config="/etc/default/bind9"
++    else 
++        config="/etc/default/bind9.dpkg-dist"
++    fi
++
+     localconf=""
+-    if [ ! -f /etc/default/bind9 ]; then
++    if [ ! -f $config ]; then
+ 	for file in /etc/bind/named.conf /etc/bind/named.conf.local; do
+ 	    theirs=$(md5sum $file | sed 's/ .*$//')
+ 	    mine=$(dpkg --status bind9 | grep "^ $file " | sed -n 's/.* //p')
+@@ -31,12 +41,67 @@
+ 	    fi
+ 	done
+ 	if [ -n "$localconf" ]; then
+-	    echo 'OPTIONS=""' >> /etc/default/bind9
++                db_reset bind9/start-as-user
+ 	else
+-	    echo 'OPTIONS="-u bind"' >> /etc/default/bind9
++                db_set bind9/start-as-user bind || true
+ 	fi
+-	echo '# Set RESOLVCONF=no to not run resolvconf' >> /etc/default/bind9
+-	echo 'RESOLVCONF=yes' >> /etc/default/bind9
++   
++        echo '#' 
++        echo '# run resolvconf?' >> $config
++        db_get bind9/run-resolvconf
++        if [ ! -z "$RET" ] && [ "$RET" = "true" ]; then
++                echo "RESOLVCONF=yes" >> $config
++        else
++                echo "RESOLVCONF=no" >> $config
++        fi
++
++        db_get bind9/start-as-user
++        USER=$RET
++        db_get bind9/different-configuration-file
++        CONFFILE=$RET
++        
++        echo '' >> /etc/default/bind9
++        echo '# startup options for the server' >> $config
++        if [ ! -z "$USER" ] && [ ! -z "$CONFFILE" ]; then
++                echo "OPTIONS=\"-u $USER -c $CONFFILE\"" >> $config
++        elif [ ! -z "$USER" ]; then
++                echo "OPTIONS=\"-u $USER\"" >> $config
++        elif [ ! -z "$CONFFILE" ]; then
++                echo "OPTIONS=\"-c $CONFFILE\"" >> $config
++        else
++                echo "OPTIONS=\"\"" >> $config
++        fi
++    else
++        db_get bind9/run-resolvconf
++         if [ ! -z "$RET" ] && [ "$RET" = "true" ]; then
++	        sed -e "s#^\([[:space:]]*\)\(RESOLVCONF=[[:space:]]*\)[^ ]*#\1\2yes#g" -i $config
++        else
++	        sed -e "s#^\([[:space:]]*\)\(RESOLVCONF=[[:space:]]*\)[^ ]*#\1\2no#g" -i $config
++        fi
++        db_get bind9/run-as-user
++        if [ ! -z "$RET" ]; then
++            if [ ! -z "`grep OPTIONS $config`" ]; then
++                if [ ! -z "`grep OPTIONS $config | grep '\-u'`" ]; then
++                        sed -e "s#\([[:space:]]*OPTIONS[[:space:]]*\)=\"\([^\"]*\)-u[[:space:]]*[^\" ]*\([^\"]*\)\"#\1=\"\2-u $RET\3\"#g" -i $config
++                else 
++                        sed -e "s#\([[:space:]]*OPTIONS[[:space:]]*\)=\"\([^\"]*\)\"#\1=\"\2 -u $RET\"#g" -i $config
++                fi
++            else
++                echo "OPTIONS=\"-u $RET\""
++            fi
++        fi
++        db_get bind9/dfferent-configuration-file
++        if [ ! -z "$RET" ]; then
++            if [ ! -z "`grep OPTIONS $config | grep '\-c'`" ]; then
++                sed -e "s#\([[:space:]]*OPTIONS[[:space:]]*\)=\"\([^\"]*\)-c[[:space:]]*[^\" ]*\([^\"]*\)\"#\1=\"\2-c $RET\3\"#g" -i $config
++            else 
++                sed -e "s#\([[:space:]]*OPTIONS[[:space:]]*\)=\"\([^\"]*\)\"#\1=\"\2 -c $RET\"#g" -i $config
++            fi
++        fi
++    fi
++
++    if [ "$config" = "/etc/default/bind9" ]; then
++        md5sum /etc/default/bind9 > /usr/share/bind9/bind9-default.md5sum
+     fi
+ 
+     # Deal with the aftermath of 9.2.1-5  - it's a hack, but hey..
+@@ -66,4 +131,6 @@
+     fi
+ fi
+ 
++db_stop
++
+ #DEBHELPER#
+diff -Nurwd old/bind9-9.4.2/debian/config new/bind9-9.4.2/debian/config
+--- old/bind9-9.4.2/debian/config	1970-01-01 00:00:00.000000000 +0000
++++ new/bind9-9.4.2/debian/config	2008-04-03 21:04:37.000000000 +0200
+@@ -0,0 +1,14 @@
++#!/bin/sh
++
++set -e 
++
++. /usr/share/debconf/confmodule
++
++db_input low bind9/different-configuration-file || true
++db_go
++
++db_input low bind9/start-as-user || true
++db_go
++
++db_input low bind9/run-resolvconf || true
++db_go
+diff -Nurwd old/bind9-9.4.2/debian/control new/bind9-9.4.2/debian/control
+--- old/bind9-9.4.2/debian/control	2008-04-03 20:59:26.000000000 +0200
++++ new/bind9-9.4.2/debian/control	2008-04-03 21:04:37.000000000 +0200
+@@ -3,14 +3,14 @@
+ Priority: optional
+ Maintainer: LaMont Jones <lamont@debian.org>
+ Uploaders: Bdale Garbee <bdale@gag.com>
+-Build-Depends: debhelper (>=5), libssl-dev, libtool, bison
++Build-Depends: debhelper (>=5), libssl-dev, libtool, bison, po-debconf
+ Standards-Version: 3.7.2.0
+ XS-Vcs-Browser: http://git.debian.org/?p=users/lamont/bind9.git
+ XS-Vcs-Git: git://git.debian.org/~lamont/bind9.git
+ 
+ Package: bind9
+ Architecture: any
+-Depends: ${shlibs:Depends}, netbase, adduser, libdns32 (=${binary:Version}), libisccfg30 (=${binary:Version}), libisc32 (=${binary:Version}), libisccc30 (=${binary:Version}), lsb-base (>=3.0-6)
++Depends: debconf | debconf-2.0, ${shlibs:Depends}, netbase, adduser, libdns32 (=${binary:Version}), libisccfg30 (=${binary:Version}), libisc32 (=${binary:Version}), libisccc30 (=${binary:Version}), lsb-base (>=3.0-6)
+ Conflicts: bind, apparmor-profiles (<< 2.1+1075-0ubuntu4)
+ Replaces: bind, dnsutils (<< 1:9.1.0-3), apparmor-profiles (<< 2.1+1075-0ubuntu4)
+ Suggests: dnsutils, bind9-doc, resolvconf
+diff -Nurwd old/bind9-9.4.2/debian/po/POTFILES.in new/bind9-9.4.2/debian/po/POTFILES.in
+--- old/bind9-9.4.2/debian/po/POTFILES.in	1970-01-01 00:00:00.000000000 +0000
++++ new/bind9-9.4.2/debian/po/POTFILES.in	2008-04-03 21:04:37.000000000 +0200
+@@ -0,0 +1 @@
++[type: gettext/rfc822deb] templates
+diff -Nurwd old/bind9-9.4.2/debian/po/templates.pot new/bind9-9.4.2/debian/po/templates.pot
+--- old/bind9-9.4.2/debian/po/templates.pot	1970-01-01 00:00:00.000000000 +0000
++++ new/bind9-9.4.2/debian/po/templates.pot	2008-04-03 21:04:37.000000000 +0200
+@@ -0,0 +1,57 @@
++# SOME DESCRIPTIVE TITLE.
++# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
++# This file is distributed under the same license as the PACKAGE package.
++# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
++#
++#, fuzzy
++msgid ""
++msgstr ""
++"Project-Id-Version: PACKAGE VERSION\n"
++"Report-Msgid-Bugs-To: bind9@packages.debian.org\n"
++"POT-Creation-Date: 2008-04-03 11:03+0200\n"
++"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
++"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
++"Language-Team: LANGUAGE <LL@li.org>\n"
++"MIME-Version: 1.0\n"
++"Content-Type: text/plain; charset=CHARSET\n"
++"Content-Transfer-Encoding: 8bit\n"
++
++#. Type: string
++#. Description
++#: ../templates:1001
++msgid "Options that should be passed at startup to bind9"
++msgstr ""
++
++#. Type: string
++#. Description
++#: ../templates:1001
++msgid ""
++"Please enter here the options which should be passed to the bind9-daemon on "
++"startup."
++msgstr ""
++
++#. Type: string
++#. Description
++#: ../templates:2001
++msgid "which user should bind9 run as?"
++msgstr ""
++
++#. Type: string
++#. Description
++#: ../templates:2001
++msgid ""
++"The default is to start bind9 as bind user, if you would  like to change "
++"that, please give here the username as which  bind9 should start as."
++msgstr ""
++
++#. Type: boolean
++#. Description
++#: ../templates:3001
++msgid "Should resolvconf be executed on startup?"
++msgstr ""
++
++#. Type: boolean
++#. Description
++#: ../templates:3001
++msgid "Should resolvconf run when bind9 starts up?"
++msgstr ""
+diff -Nurwd old/bind9-9.4.2/debian/rules new/bind9-9.4.2/debian/rules
+--- old/bind9-9.4.2/debian/rules	2008-04-03 20:59:26.000000000 +0200
++++ new/bind9-9.4.2/debian/rules	2008-04-03 21:04:37.000000000 +0200
+@@ -60,6 +60,7 @@
+ 	find . -name \*.o -exec rm {} \;
+ 	rm -f build-stamp configure-stamp
+ 	dh_clean
++	debconf-updatepo
+ 
+ ETCBIND=debian/bind9/etc/bind
+ ETCAPP=debian/bind9/etc/apparmor.d
+@@ -79,6 +80,7 @@
+ 	install -c -o bin -g bin -m 440 debian/named.conf ${ETCBIND}
+ 	install -c -o bin -g bin -m 440 debian/named.conf.local ${ETCBIND}
+ 	install -c -o bin -g bin -m 440 debian/named.conf.options ${ETCBIND}
++	install -c -o bin -g bin -m 644 debian/bind9-default.md5sum debian/bind9/usr/share/bind9/
+ 	cp doc/arm/*.html debian/bind9-doc/usr/share/doc/bind9-doc/arm
+ 	install -m 644 -o root -g root debian/apparmor-profile ${ETCAPP}/usr.sbin.named
+ 
+@@ -113,6 +115,7 @@
+ 	dh_installinit -a -- defaults 15 85
+ 	dh_installcron -a
+ 	dh_installmanpages -pbind9 runmdn.1 mdnconv.1 zone2ldap.1 nslint.8
++	dh_installdebconf -pbind9
+ 	dh_installinfo -a
+ 	dh_installchangelogs -a # CHANGES # upstream changelog only in bind9-doc
+ 	dh_movefiles --sourcedir=debian/bind9 -a
+diff -Nurwd old/bind9-9.4.2/debian/templates new/bind9-9.4.2/debian/templates
+--- old/bind9-9.4.2/debian/templates	1970-01-01 00:00:00.000000000 +0000
++++ new/bind9-9.4.2/debian/templates	2008-04-03 21:04:37.000000000 +0200
+@@ -0,0 +1,20 @@
++Template: bind9/different-configuration-file
++Type: string
++Default:  
++_Description: Options that should be passed at startup to bind9
++ Please enter here the options which should be passed to the
++ bind9-daemon on startup.
++
++Template: bind9/start-as-user
++Type: string
++Default: bind
++_Description: which user should bind9 run as?
++ The default is to start bind9 as bind user, if you would 
++ like to change that, please give here the username as which 
++ bind9 should start as.
++
++Template: bind9/run-resolvconf
++Type: boolean
++Default: true
++_Description: Should resolvconf be executed on startup?
++ Should resolvconf run when bind9 starts up?

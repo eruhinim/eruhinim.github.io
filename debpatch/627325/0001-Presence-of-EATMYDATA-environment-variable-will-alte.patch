@@ -1,0 +1,99 @@
+From f340e0fd04576331a9dd33f2d612e1c9126c5a81 Mon Sep 17 00:00:00 2001
+From: Vincent Bernat <bernat@luffy.cx>
+Date: Sat, 21 May 2011 10:46:12 +0200
+Subject: [PATCH] Presence of EATMYDATA environment variable will alter
+ eatmydata behavior.
+
+If the variable environment exists and point to a file that exists,
+eatmydata will suppress all sync() and related calls. However, when
+the file does not exist, eatmydata will keep them.
+---
+ debian/eatmydata.1 |    6 ++++++
+ eatmydata.c        |   18 ++++++------------
+ eatmydatatest.c    |    5 +++++
+ 3 files changed, 17 insertions(+), 12 deletions(-)
+
+diff --git a/debian/eatmydata.1 b/debian/eatmydata.1
+index b192755..c72cf4d 100644
+--- a/debian/eatmydata.1
++++ b/debian/eatmydata.1
+@@ -18,6 +18,12 @@ command line. In order to use symlink mode, create a symlink to
+ in the PATH and execute \fBeatmydata\fR via that symlink. Then \fBeatmydata\fR
+ will find that program in the PATH and run it in the libeatmydata environment
+ repassing all command line options.
++.P
++\fBeathmydata\fR also looks for \fIEATMYDATA\fR environment
++variable. If it does exist, it should point to a file that will enable
++\fBeatmydata\fR if present or disable it if absent. This way,
++\fBeatmydata\fR can be enabled dynamically depending on some external
++condition.
+ .SH OPTIONS
+ .P
+ Please note that \fBeatmydata\fR does not process any command line options in
+diff --git a/eatmydata.c b/eatmydata.c
+index ab943c3..0579616 100644
+--- a/eatmydata.c
++++ b/eatmydata.c
+@@ -13,16 +13,13 @@
+     along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+ 
+-/* 
+-#define CHECK_FILE "/tmp/eatmydata"
+-*/
+-
+ #ifndef RTLD_NEXT
+ #  define _GNU_SOURCE
+ #endif
+ 
+ #include <sys/types.h>
+ #include <unistd.h>
++#include <stdlib.h>
+ #include <errno.h>
+ #include <sys/stat.h>
+ #include <fcntl.h>
+@@ -59,20 +56,17 @@ int eatmydata_is_hungry(void)
+ 	if(!libc_open)
+ 		eatmydata_init();
+ 
+-#ifdef CHECK_FILE
+ 	static struct stat buf;
+ 	int old_errno, stat_ret;
++	char *check_file;
+ 
+ 	old_errno= errno;
+-	stat_ret= stat(CHECK_FILE, &buf);
++	if (check_file= getenv("EATMYDATA"))
++		stat_ret= stat(check_file, &buf);
+ 	errno= old_errno;
+ 
+-	/* Treat any error as if file doesn't exist, for safety */
+-	return !stat_ret;
+-#else
+-	/* Always hungry! */
+-	return 1;
+-#endif
++	/* Hungry when no variable environment or when the file does exist */
++	return (!check_file || !stat_ret);
+ }
+ 
+ int fsync(int fd)
+diff --git a/eatmydatatest.c b/eatmydatatest.c
+index 82303fa..4e149f0 100644
+--- a/eatmydatatest.c
++++ b/eatmydatatest.c
+@@ -76,6 +76,11 @@ int main(int argc, char** argv)
+     TESTCASE(fdatasync(fd), 0, "system fdatasync() was not overriden");
+     TESTCASE(msync(0, 1, 1), 0, "system msync() was not overriden");
+ 
++    // Test with inexistent EATMYDATA variable
++    setenv("EATMYDATA", "/empty/doesnotexist", 1);
++    TESTCASE(fsync(fd), -1, "system fsync() was overriden despite EATMYDATA check file");
++    setenv("EATMYDATA", "/etc/passwd", 1);
++    TESTCASE(fsync(fd), 0, "system fsync() was not overriden with EATMYDATA inexistent env");
+     if (failed_tests > 0) {
+         fprintf(stderr, "%d test cases failed\n", failed_tests);
+         return 2;
+-- 
+1.7.5.1
+

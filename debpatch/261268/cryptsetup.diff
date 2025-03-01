@@ -1,0 +1,368 @@
+diff -Nru cryptsetup-0.1.orig/debian/cryptdisks cryptsetup-0.1/debian/cryptdisks
+--- cryptsetup-0.1.orig/debian/cryptdisks	2004-07-24 16:15:27.000000000 -0300
++++ cryptsetup-0.1/debian/cryptdisks	1969-12-31 21:00:00.000000000 -0300
+@@ -1,134 +0,0 @@
+-#! /bin/sh
+-#
+-# cryptodisks	Now that all block devices should be available, setup
+-#		encrypted block devices
+-
+-CRYPTCMD=/sbin/cryptsetup
+-DEVMAPCMD=/sbin/dmsetup
+-TABFILE=/etc/crypttab
+-MAPPER=/dev/mapper
+-
+-test -x $CRYPTCMD  || exit 0
+-test -x $DEVMAPCMD || exit 0
+-test -f $TABFILE   || exit 0             
+-
+-$DEVMAPCMD mknodes
+-
+-case "$1" in
+-start)
+-	echo -n "Starting crypto disks:"
+-	grep -v '^#' < $TABFILE | while read dst src key opt; do
+-		echo -n " $dst"
+-		if test -b $MAPPER/$dst; then
+-			echo -n "(running)"
+-		else
+-			echo -n "(starting)"
+-			if [ "x$key" != "x" ] && [ "x$key" != "xnone" ]; then
+-				INTERACTIVE="no"
+-				if test -e "$key" ; then
+-					MODE=`ls -l $key | sed 's/^....\(......\).*/\1/'`
+-					OWNER=`ls -l $key | sed 's/^.\{16\}\(.\{8\}\).*/\1/'`
+-					if test "$MODE" != "------" && \
+-					   test "$key" != "/dev/urandom"  && \
+-					   test "$key" != "/dev/hwrandom" && \
+-					   test "$key" != "/dev/random"; then
+-						echo " - INSECURE MODE FOR $key" >&2
+-					fi
+-					if test $OWNER != root; then
+-						echo " - INSECURE OWNER FOR $key" >&2
+-					fi
+-				else
+-					echo " - Keyfile for $dst not found, skipping" >&2
+-					continue
+-				fi
+-			else
+-				INTERACTIVE="yes"
+-				echo "..."
+-			fi
+-			
+-			PARAMS=""
+-			MAKESWAP=""
+-			SKIP=""
+-
+-			# Parse the options field, convert to cryptsetup parameters
+-                        # and contruct the command line
+-			while test "x$opt" != "x" ; do
+-				ARG=`echo $opt | sed "s/,.*//"`
+-				opt=${opt##$ARG}
+-				opt=${opt##,}
+-				PARAM=`echo $ARG | sed "s/=.*//"`
+-				VALUE=${ARG##$PARAM=}
+-				
+-				case "$PARAM" in 
+-					cipher)
+-						PARAM=-c
+-						if test "x$VALUE" = "x" ; then
+-							echo " - no value for cipher option, skipping" >&2
+-							SKIP="yes"
+-						fi
+-						;;
+-					size)
+-						PARAM=-s
+-						if test "x$VALUE" = "x" ; then
+-							echo " - no value for size option, skipping" >&2
+-							SKIP="yes"
+-						fi
+-						;;
+-					hash)
+-						PARAM=-h
+-						if test "x$VALUE" = "x" ; then
+-							echo " - no value for hash option, skipping" >&2
+-							SKIP=yes
+-						fi
+-						;;
+-					verify)
+-						PARAM=-y
+-						VALUE=""
+-						;;
+-					swap)
+-						MAKESWAP=yes
+-						PARAM=""
+-						VALUE=""
+-				esac
+-				PARAMS="$PARAMS $PARAM $VALUE"
+-			done
+-
+-			if test "x$SKIP" = "xyes" ; then
+-				continue
+-			fi
+-
+-			if test "x$INTERACTIVE" = "xyes" ; then
+-				$CRYPTCMD $PARAMS create $dst $src <&1
+-			else
+-				$CRYPTCMD $PARAMS -d $key create $dst $src
+-			fi
+-
+-			if test "x$MAKESWAP" = "xyes" && test -b $MAPPER/$dst; then
+-				mkswap $MAPPER/$dst 2>/dev/null >/dev/null
+-			fi
+-		fi
+-	done
+-	echo "."
+-	;;
+-stop)
+-	echo -n "Stopping crypto disks:"
+-	grep -v '^#' < $TABFILE | while read dst src key; do
+-		echo -n " $dst"
+-		if test -b $MAPPER/$dst; then
+-			if $DEVMAPCMD info $dst | grep -q '^Open count: *0$'; then
+-				echo -n "(stopping)"
+-				$CRYPTCMD remove $dst
+-			else
+-				echo -n "(busy)"
+-			fi
+-		else
+-			echo -n "(stopped)"
+-		fi
+-	done
+-	echo "."
+-	;;
+-restart|reload|force-reload)
+-	$0 stop
+-	$0 start
+-	;;
+-esac
+diff -Nru cryptsetup-0.1.orig/debian/cryptsetup.cryptdisks.default cryptsetup-0.1/debian/cryptsetup.cryptdisks.default
+--- cryptsetup-0.1.orig/debian/cryptsetup.cryptdisks.default	1969-12-31 21:00:00.000000000 -0300
++++ cryptsetup-0.1/debian/cryptsetup.cryptdisks.default	2004-07-24 14:57:21.000000000 -0300
+@@ -0,0 +1,2 @@
++# Run cryptdisks at startup ?
++CRYPTDISKS_ENABLE=Yes
+diff -Nru cryptsetup-0.1.orig/debian/cryptsetup.cryptdisks.init cryptsetup-0.1/debian/cryptsetup.cryptdisks.init
+--- cryptsetup-0.1.orig/debian/cryptsetup.cryptdisks.init	1969-12-31 21:00:00.000000000 -0300
++++ cryptsetup-0.1/debian/cryptsetup.cryptdisks.init	2004-07-24 15:01:47.000000000 -0300
+@@ -0,0 +1,143 @@
++#! /bin/sh
++#
++# cryptodisks	Now that all block devices should be available, setup
++#		encrypted block devices
++
++CRYPTCMD=/sbin/cryptsetup
++DEVMAPCMD=/sbin/dmsetup
++TABFILE=/etc/crypttab
++MAPPER=/dev/mapper
++
++test -x $CRYPTCMD  || exit 0
++test -x $DEVMAPCMD || exit 0
++test -f $TABFILE   || exit 0             
++
++[ -r /etc/default/cryptdisks ] && . /etc/default/cryptdisks
++
++case "$CRYPTDISKS_ENABLE" in
++        [Nn]*)
++                exit 0
++                ;;
++esac
++
++
++$DEVMAPCMD mknodes
++
++case "$1" in
++start)
++	echo -n "Starting crypto disks:"
++	grep -v '^#' < $TABFILE | while read dst src key opt; do
++		echo -n " $dst"
++		if test -b $MAPPER/$dst; then
++			echo -n "(running)"
++		else
++			echo -n "(starting)"
++			if [ "x$key" != "x" ] && [ "x$key" != "xnone" ]; then
++				INTERACTIVE="no"
++				if test -e "$key" ; then
++					MODE=`ls -l $key | sed 's/^....\(......\).*/\1/'`
++					OWNER=`ls -l $key | sed 's/^.\{16\}\(.\{8\}\).*/\1/'`
++					if test "$MODE" != "------" && \
++					   test "$key" != "/dev/urandom"  && \
++					   test "$key" != "/dev/hwrandom" && \
++					   test "$key" != "/dev/random"; then
++						echo " - INSECURE MODE FOR $key" >&2
++					fi
++					if test $OWNER != root; then
++						echo " - INSECURE OWNER FOR $key" >&2
++					fi
++				else
++					echo " - Keyfile for $dst not found, skipping" >&2
++					continue
++				fi
++			else
++				INTERACTIVE="yes"
++				echo "..."
++			fi
++			
++			PARAMS=""
++			MAKESWAP=""
++			SKIP=""
++
++			# Parse the options field, convert to cryptsetup parameters
++                        # and contruct the command line
++			while test "x$opt" != "x" ; do
++				ARG=`echo $opt | sed "s/,.*//"`
++				opt=${opt##$ARG}
++				opt=${opt##,}
++				PARAM=`echo $ARG | sed "s/=.*//"`
++				VALUE=${ARG##$PARAM=}
++				
++				case "$PARAM" in 
++					cipher)
++						PARAM=-c
++						if test "x$VALUE" = "x" ; then
++							echo " - no value for cipher option, skipping" >&2
++							SKIP="yes"
++						fi
++						;;
++					size)
++						PARAM=-s
++						if test "x$VALUE" = "x" ; then
++							echo " - no value for size option, skipping" >&2
++							SKIP="yes"
++						fi
++						;;
++					hash)
++						PARAM=-h
++						if test "x$VALUE" = "x" ; then
++							echo " - no value for hash option, skipping" >&2
++							SKIP=yes
++						fi
++						;;
++					verify)
++						PARAM=-y
++						VALUE=""
++						;;
++					swap)
++						MAKESWAP=yes
++						PARAM=""
++						VALUE=""
++				esac
++				PARAMS="$PARAMS $PARAM $VALUE"
++			done
++
++			if test "x$SKIP" = "xyes" ; then
++				continue
++			fi
++
++			if test "x$INTERACTIVE" = "xyes" ; then
++				$CRYPTCMD $PARAMS create $dst $src <&1
++			else
++				$CRYPTCMD $PARAMS -d $key create $dst $src
++			fi
++
++			if test "x$MAKESWAP" = "xyes" && test -b $MAPPER/$dst; then
++				mkswap $MAPPER/$dst 2>/dev/null >/dev/null
++			fi
++		fi
++	done
++	echo "."
++	;;
++stop)
++	echo -n "Stopping crypto disks:"
++	grep -v '^#' < $TABFILE | while read dst src key; do
++		echo -n " $dst"
++		if test -b $MAPPER/$dst; then
++			if $DEVMAPCMD info $dst | grep -q '^Open count: *0$'; then
++				echo -n "(stopping)"
++				$CRYPTCMD remove $dst
++			else
++				echo -n "(busy)"
++			fi
++		else
++			echo -n "(stopped)"
++		fi
++	done
++	echo "."
++	;;
++restart|reload|force-reload)
++	$0 stop
++	$0 start
++	;;
++esac
+diff -Nru cryptsetup-0.1.orig/debian/cryptsetup.postinst cryptsetup-0.1/debian/cryptsetup.postinst
+--- cryptsetup-0.1.orig/debian/cryptsetup.postinst	2004-07-24 16:15:27.000000000 -0300
++++ cryptsetup-0.1/debian/cryptsetup.postinst	1969-12-31 21:00:00.000000000 -0300
+@@ -1,19 +0,0 @@
+-#! /bin/sh -e
+-
+-case "$1" in
+-	configure)
+-	update-rc.d cryptdisks start 27 S . start 49 0 6 .
+-	;;
+-	
+-	abort-upgrade|abort-remove|abort-deconfigure)
+-	;;
+-	
+-	*)
+-	echo "postinst called with unknown argument '$1'" >&2
+-	exit 1
+-	;;
+-esac
+-
+-#DEBHELPER#
+-
+-exit 0
+diff -Nru cryptsetup-0.1.orig/debian/cryptsetup.postrm cryptsetup-0.1/debian/cryptsetup.postrm
+--- cryptsetup-0.1.orig/debian/cryptsetup.postrm	2004-07-24 16:15:27.000000000 -0300
++++ cryptsetup-0.1/debian/cryptsetup.postrm	1969-12-31 21:00:00.000000000 -0300
+@@ -1,22 +0,0 @@
+-#! /bin/sh -e
+-
+-case "$1" in
+-	remove)
+-	;;
+-	
+-	purge)
+-	update-rc.d cryptdisks remove > /dev/null
+-	;;
+-	
+-	upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+-	;;
+-	
+-	*)
+-	echo "postrm called with unknown argument '$1'" >&2
+-	exit 1
+-	;;
+-esac
+-
+-#DEBHELPER#
+-
+-exit 0
+diff -Nru cryptsetup-0.1.orig/debian/dirs cryptsetup-0.1/debian/dirs
+--- cryptsetup-0.1.orig/debian/dirs	2004-07-24 16:15:27.000000000 -0300
++++ cryptsetup-0.1/debian/dirs	2004-07-24 15:12:33.000000000 -0300
+@@ -1,3 +1,4 @@
+ /sbin
+ /etc/init.d
++/etc/default
+ /usr/share/man/man8
+diff -Nru cryptsetup-0.1.orig/debian/rules cryptsetup-0.1/debian/rules
+--- cryptsetup-0.1.orig/debian/rules	2004-07-24 16:15:27.000000000 -0300
++++ cryptsetup-0.1/debian/rules	2004-07-24 15:55:19.000000000 -0300
+@@ -60,7 +60,6 @@
+ 	dh_installdirs
+ 
+ 	install $(INSTALL_PROGRAM) src/cryptsetup $(CURDIR)/debian/cryptsetup/sbin
+-	install debian/cryptdisks $(CURDIR)/debian/cryptsetup/etc/init.d
+ 	install -m 0644 debian/cryptsetup.8 $(CURDIR)/debian/cryptsetup/usr/share/man/man8
+ 
+ binary-indep: build install
+@@ -79,7 +78,7 @@
+ #	dh_installemacsen
+ #	dh_installpam
+ #	dh_installmime
+-#	dh_installinit
++	dh_installinit --name=cryptdisks
+ #	dh_installcron
+ #	dh_installinfo
+ 	dh_installman

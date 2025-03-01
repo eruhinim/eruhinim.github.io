@@ -1,0 +1,81 @@
+--- ./debian/acpi-support/usr/share/acpi-support/state-funcs.orig	2010-12-14 11:37:17.000000000 +0100
++++ ./debian/acpi-support/usr/share/acpi-support/state-funcs	2010-12-14 18:24:51.000000000 +0100
+@@ -2,14 +2,13 @@
+ # Luca Niccoli <lultimouomo@gmail.com>, 2010-06-23
+ # Library functions to check/change status of wireless
+ 
+-WLAN_RFKILLS=`for RFKILL in /sys/class/rfkill/rfkill*; do if [ $(cat $RFKILL/type) = wlan ]; then echo $RFKILL/state; fi; done`
++WLAN_RFKILLS=`for RFKILL in /sys/class/rfkill/rfkill*; do if read t <$RFKILL/type && [ "$t" = wlan ]; then echo $RFKILL/state; fi; done`
+ 
+ haveDevRfkill()
+ {
+   [ -c /dev/rfkill ] && [ -x /usr/sbin/rfkill ]
+ }
+ 
+-# Return 0 if there is, allowing you to write   if isAnyWirelessPoweredOn; then ...
+ isAnyWirelessPoweredOn()
+ {
+     if haveDevRfkill; then
+@@ -17,9 +16,7 @@ isAnyWirelessPoweredOn()
+         return $?
+     else
+         for RFKILL in $WLAN_RFKILLS ; do
+-            if [ -r "$RFKILL" ] && [ "$(cat "$RFKILL")" -eq 1 ]; then
+-                return 0
+-            fi
++	    [ ! -r "$RFKILL" ] || ! read s <$RFKILL || [ "$s" -ne 1 ] || return 0
+         done
+     fi
+     # otherwise return failure  
+@@ -29,12 +26,23 @@ isAnyWirelessPoweredOn()
+ # Takes no parameters, toggles all wireless devices.
+ toggleAllWirelessStates()
+ {
++    local WIFACE RFKILL get_wifaces zzz=0 max_zzz=7
++
++    if [ -x /sbin/iwconfig ]; then
++	get_wifaces='iwconfig 2>/dev/null | grep -o "^[[:alnum:]]*"'
++    elif [ -x /usr/sbin/iw ]; then
++	get_wifaces='iw dev | sed -rne "s|^[[:blank:]]+Interface[[:blank:]]+([[:alnum:]]+).*$|\1|p"'
++    else
++	logger -t${0##*/} -perr -- toggleAllWirelessStates: no way to pick up wireless interfaces
++	exit 1
++    fi
++
+     # If rfkill is handled by the kernel, don't touch it
+     if ! grep -q '^H.*\brfkill\b' /proc/bus/input/devices; then
+         if isAnyWirelessPoweredOn; then
+             # ifconfig down wireless interfaces, helps with some buggy driver            
+-            for WIFACE in `iwconfig 2>/dev/null |grep -o '^[[:alnum:]]*'`; do
+-                ifconfig $WIFACE down || :
++	    for WIFACE in $(eval $get_wifaces); do
++		ifconfig $WIFACE down 2>/dev/null || :
+             done
+             if haveDevRfkill; then
+                 rfkill block wlan
+@@ -54,10 +62,14 @@ toggleAllWirelessStates()
+         fi
+     fi
+     # Is wireless on now? Set the interfaces up and poke wicd
+-    sleep 5
+-    if isAnyWirelessPoweredOn; then
+-        for WIFACE in `iwconfig 2>/dev/null |grep -o '^[[:alnum:]]*'`; do
+-            ifconfig $WIFACE up || :
++    # XXX: What's the magic about 5?  I like 7 better :)
++    while ! isAnyWirelessPoweredOn && [ $zzz -lt $max_zzz ]; do
++	sleep 1
++	zzz=$(($zzz + 1))
++    done
++    if [ $zzz -lt $max_zzz ]; then
++	for WIFACE in $(eval $get_wifaces); do
++	    ifconfig $WIFACE up 2>/dev/null || :
+         done
+         [ -x /usr/share/wicd/daemon/autoconnect.py ] &&  /usr/share/wicd/daemon/autoconnect.py 
+     fi
+@@ -67,5 +79,5 @@ toggleAllWirelessStates()
+ setLEDThinkpadSuspending()
+ {
+     action=`test "$1" -ne 0 && echo blink || echo off`
+-    test -w /proc/acpi/ibm/led && echo -n 7 "$action" > /proc/acpi/ibm/led
++    test -w /proc/acpi/ibm/led && printf '7 %s' $action > /proc/acpi/ibm/led
+ }

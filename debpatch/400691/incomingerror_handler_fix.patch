@@ -1,0 +1,79 @@
+--- a/src/debarchiver.pl	2006-07-20 08:08:17.000000000 +0000
++++ b/src/debarchiver.pl	2006-11-25 16:31:10.000000000 +0000
+@@ -1188,6 +1188,12 @@
+ #  2005-05-06 Daniel Leidert <daniel.leidert@wgdd.de>
+ #       Add arg to handle signature verification in inputdir and distinput-dirs
+ #       independetly.
++#  2006-11-24 HÃ¥kon Stordahl <haastord@online.no>
++#       Substituted the call to rejectChangesFile with a call to pdebug,
++#       to explicitly trigger the error handler incomingError, which
++#       itself contains a call to rejectChangesFile. This is in order
++#       to avoid a situation in which an error in rejectChangesFile
++#       causes rejectChangesFile to be called again.
+ ###############################################################################
+ 
+ sub findAndSortChangesFiles($;$) {
+@@ -1207,8 +1213,11 @@
+ 		uploaderIsChangesFileOwner($cfile);
+ 		my ($verify, $reason) = verifyChangesFile($cfile, $verify);
+ 		if ($verify =~ /^reject$/) {
+-		    # Reject .changes file.
+-		    rejectChangesFile();
++		    # Reject .changes file by calling pdebug with error
++                    # level 2, which in turn calls the error handler
++                    # for this function, incomingError, which calls
++                    # rejectChangesFile.
++                    pdebug(2, "Rejecting $cfile.");
+ 		}
+ 		elsif ($verify =~ /^incomplete$/) {
+ 		    # Handle incomplete .changes file.
+@@ -1696,6 +1705,29 @@
+ ###############################################################################
+ ######################### LOCK HANDLERS #######################################
+ ###############################################################################
++# Changelog:
++#  2006-11-24 HÃ¥kon Stordahl <haastord@online.no>
++#       Tried to fix the error handler functions incomingError and
++#       rejectError, by removing the lock file in rejectError instead
++#       of incomingError, so the lock file is not removed immediately
++#       after an error, but rather if another error occurs while
++#       handling the error. Also added a call to exit in rejectError
++#       so the program will terminate in this case.
++#
++#       Because of the chdir in handleSorting, the lock file name
++#       needs to prefixed by $inputdir in the functions incomingError
++#       and rejectError.
++#
++#       Restored the error handler in incomingError so subsequent
++#       errors are treated in the same way.
++#
++#       Also moved the call to mailReject from the function rejectError
++#       to the function incomingError, so a mail is sent each time
++#       a .changes file is rejected. When called from rejectError,
++#       which actually is the error handler of incomingError, which
++#       itself is an error handler and calls rejectChangesFile, a mail
++#       would only be sent if there was a problem with the rejection.
++###############################################################################
+ 
+ sub incomingLock() {
+     &createLockExit("$lockfile");
+@@ -1708,15 +1740,16 @@
+ }
+ 
+ sub incomingError() {
+-    &setErrorHandler(undef);
+-    &removeLockfile("$lockfile");    
+     &setErrorHandler(\&rejectError);    
+     &rejectChangesFile();
++    &mailReject();
++    &setErrorHandler(\&incomingError);
+ }
+ 
+ sub rejectError() {
+     &setErrorHandler(undef);
+-    &mailReject();
++    &removeLockfile("$inputdir/$lockfile");    
++    exit;
+ }
+ 
+ sub destinationLock() {

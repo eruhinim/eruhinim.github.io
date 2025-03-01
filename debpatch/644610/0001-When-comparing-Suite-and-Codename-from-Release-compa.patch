@@ -1,0 +1,89 @@
+From 5e79d6113c3a262cd91bc78d53371db90ba9042a Mon Sep 17 00:00:00 2001
+From: Lukas Anzinger <lukas@lukasanzinger.at>
+Date: Fri, 21 Mar 2014 12:18:11 +0100
+Subject: [PATCH] When comparing Suite and Codename from Release compare untransformed dist first.
+
+A suite or codename entry in the Release file is checked against the
+distribution field in the sources.list entry that lead to the download of that
+Release file. This distribution entry can contain slashes in the distribution
+field:
+
+    deb http://security.debian.org/debian wheezy/updates main
+
+However, the Release file may only contain "wheezy" in the Codename field and
+not "wheezy/updates". So a transformation needs to take place that removes the
+last / and everything that comes after (e.g. "/updates"). This fails, however,
+for valid cases like a reprepro snapshot where the given Codename contains
+slashes but is perfectly fine and doesn't need to be transformed. Since that
+transformation is essentially just a workaround for special cases like the
+security repository, it should be checked if the literal Codename without any
+transformations happened is valid and only if isn't the dist should be checked
+against the transformated one.
+
+This way special cases like security.debian.org are handled and reprepro
+snapshots work too.
+---
+ apt-pkg/acquire-item.cc | 8 ++++++--
+ apt-pkg/indexrecords.cc | 6 ++++++
+ apt-pkg/indexrecords.h  | 1 +
+ 3 files changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/apt-pkg/acquire-item.cc b/apt-pkg/acquire-item.cc
+index 30743ad..bd524b4 100644
+--- a/apt-pkg/acquire-item.cc
++++ b/apt-pkg/acquire-item.cc
+@@ -1684,7 +1684,10 @@ bool pkgAcqMetaIndex::VerifyVendor(string Message)			/*{{{*/
+       std::cerr << "Transformed Dist: " << Transformed << std::endl;
+    }
+ 
+-   if (MetaIndexParser->CheckDist(Transformed) == false)
++   // Only compare with transformed dist if check with untransformed expected
++   // dist fails.
++   if (MetaIndexParser->CheckExpectedDist() == false &&
++           MetaIndexParser->CheckDist(Transformed) == false)
+    {
+       // This might become fatal one day
+ //       Status = StatAuthError;
+@@ -1694,8 +1697,9 @@ bool pkgAcqMetaIndex::VerifyVendor(string Message)			/*{{{*/
+ //       return false;
+       if (!Transformed.empty())
+       {
+-         _error->Warning(_("Conflicting distribution: %s (expected %s but got %s)"),
++         _error->Warning(_("Conflicting distribution: %s (expected %s or %s but got %s)"),
+                          Desc.Description.c_str(),
++                         MetaIndexParser->GetExpectedDist().c_str(),
+                          Transformed.c_str(),
+                          MetaIndexParser->GetDist().c_str());
+       }
+diff --git a/apt-pkg/indexrecords.cc b/apt-pkg/indexrecords.cc
+index 5353d10..e7fb1c8 100644
+--- a/apt-pkg/indexrecords.cc
++++ b/apt-pkg/indexrecords.cc
+@@ -37,6 +37,12 @@ APT_PURE string indexRecords::GetSuite() const
+    return this->Suite;
+ }
+ 
++APT_PURE bool indexRecords::CheckExpectedDist() const
++{
++   return (this->Dist == this->ExpectedDist
++	   || this->Suite == this->ExpectedDist);
++}
++
+ APT_PURE bool indexRecords::CheckDist(const string MaybeDist) const
+ {
+    return (this->Dist == MaybeDist
+diff --git a/apt-pkg/indexrecords.h b/apt-pkg/indexrecords.h
+index e31f889..12d4971 100644
+--- a/apt-pkg/indexrecords.h
++++ b/apt-pkg/indexrecords.h
+@@ -51,6 +51,7 @@ class indexRecords
+    std::string GetSuite() const;
+    time_t GetValidUntil() const;
+    virtual bool CheckDist(const std::string MaybeDist) const;
++   virtual bool CheckExpectedDist() const;
+    std::string GetExpectedDist() const;
+    virtual ~indexRecords(){};
+ };
+-- 
+1.8.5.3
+

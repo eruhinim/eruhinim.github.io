@@ -1,0 +1,100 @@
+From cd5f2c47f8aa60e19a7906d3e38b6e53b899a51d Mon Sep 17 00:00:00 2001
+From: Johannes Schauer Marin Rodrigues <josch@mister-muffin.de>
+Date: Fri, 27 May 2022 01:33:19 +0200
+Subject: [PATCH] dpkg-genbuildinfo: Add new can-execute-cross-built-programs
+ tainted flag
+
+[guillem@debian.org:
+ - Use File::Temp instead of tmpnam() and push_exit_handler().
+ - Set a taint flag instead of a new field.
+ - Refactor into a function.
+ - Honor CC environment variable.
+ - Style fixes. ]
+
+Closes: #1011191
+---
+ scripts/dpkg-genbuildinfo.pl | 48 ++++++++++++++++++++++++++++++++++--
+ 1 file changed, 46 insertions(+), 2 deletions(-)
+
+diff --git a/scripts/dpkg-genbuildinfo.pl b/scripts/dpkg-genbuildinfo.pl
+index e05fce048..81e4636e5 100755
+--- a/scripts/dpkg-genbuildinfo.pl
++++ b/scripts/dpkg-genbuildinfo.pl
+@@ -28,13 +28,15 @@ use warnings;
+ use List::Util qw(any);
+ use Cwd;
+ use File::Basename;
++use File::Temp;
+ use POSIX qw(:fcntl_h :locale_h strftime);
+ 
+ use Dpkg ();
+ use Dpkg::Gettext;
+ use Dpkg::Checksums;
+ use Dpkg::ErrorHandling;
+-use Dpkg::Arch qw(get_build_arch get_host_arch debarch_eq);
++use Dpkg::IPC;
++use Dpkg::Arch qw(get_build_arch get_host_arch debarch_eq debarch_to_gnutriplet);
+ use Dpkg::Build::Types;
+ use Dpkg::Build::Info qw(get_build_env_allowed);
+ use Dpkg::BuildOptions;
+@@ -247,6 +249,48 @@ sub collect_installed_builddeps {
+     return $installed_deps;
+ }
+ 
++sub get_tainted_by {
++    my @tainted = run_vendor_hook('build-tainted-by');
++
++    my $host_arch = get_host_arch();
++    my $build_arch = get_build_arch();
++    if ($host_arch ne $build_arch) {
++        # If we are cross-compiling, record whether it was possible to execute
++        # the host architecture by cross-compiling and executing a small
++        # host-arch binary.
++        my $CC = $ENV{CC} || debarch_to_gnutriplet($host_arch) . '-gcc';
++        my $crossprog = 'int main() { write(1, "ok", 2); return 0; }';
++        my ($stdout, $stderr) = ('', '');
++        my $tmpfh = File::Temp->new();
++        spawn(
++            exec => [ $CC, '-x', 'c', '-o', $tmpfh->filename, '-' ],
++            from_string => \$crossprog,
++            to_string => \$stdout,
++            error_to_string => \$stderr,
++            wait_child => 1,
++            nocheck => 1,
++        );
++        if ($?) {
++           print { *STDOUT } $stdout;
++           print { *STDERR } $stderr;
++           subprocerr("$CC -x c -");
++        }
++        close $tmpfh;
++        spawn(
++            exec => [ $tmpfh->filename ],
++            error_to_file => '/dev/null',
++            to_string => \$stdout,
++            wait_child => 1,
++            nocheck => 1,
++        );
++        if ($? == 0 && $stdout eq 'ok') {
++            push @tainted, 'can-execute-cross-built-programs';
++        }
++    }
++
++    return @tainted;
++}
++
+ sub cleansed_environment {
+     # Consider only allowed variables which are not supposed to leak
+     # local user information.
+@@ -447,7 +491,7 @@ if ($use_feature{path}) {
+     }
+ }
+ 
+-$fields->{'Build-Tainted-By'} = "\n" . join "\n", run_vendor_hook('build-tainted-by');
++$fields->{'Build-Tainted-By'} = "\n" . join "\n", get_tainted_by();
+ 
+ $checksums->export_to_control($fields);
+ 
+-- 
+2.36.1
+

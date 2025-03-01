@@ -1,0 +1,325 @@
+>From 13a9076393bddbc9689069a0ff1dd6803691bf0c Mon Sep 17 00:00:00 2001
+From: Yaroslav Halchenko <debian@onerussian.com>
+Date: Thu, 20 Aug 2015 10:49:45 +0200
+Subject: [PATCH] RF: diffoscope.py -> diffoscope  (implementation language is
+ irrelevant)
+
+---
+ README                   |   4 +-
+ debian/rules             |   6 +--
+ diffoscope.py            | 118 -----------------------------------------------
+ diffoscope/diffoscope.py | 118 +++++++++++++++++++++++++++++++++++++++++++++++
+ setup.py                 |   2 +-
+ 5 files changed, 122 insertions(+), 126 deletions(-)
+ delete mode 100755 diffoscope.py
+ create mode 100755 diffoscope/diffoscope.py
+ mode change 100644 => 100755 setup.py
+
+diff --git a/README b/README
+index c08d152..7bad538 100644
+--- a/README
++++ b/README
+@@ -24,7 +24,7 @@ debbindiff.
+ Example
+ -------
+ 
+-    $ ./diffoscope.py --html output.html build1.changes build2.changes
++    $ ./diffoscope --html output.html build1.changes build2.changes
+ 
+ This will compare `build1.changes` and `build2.changes` and create
+ `output.html` if there are differences between the two files.
+@@ -35,7 +35,7 @@ External dependencies
+ The various comparators rely on external commands being available. To
+ get a list of them, please run:
+ 
+-    $ ./diffoscope.py --list-tools
++    $ ./diffoscope --list-tools
+ 
+ Contributors
+ ------------
+diff --git a/debian/rules b/debian/rules
+index 78ea5ce..8236beb 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -13,14 +13,10 @@ override_dh_auto_build:
+ 	dh_auto_build -O--buildsystem=pybuild
+ 
+ override_dh_gencontrol:
+-	echo "diffoscope:Recommends=$$(./diffoscope.py --list-tools | tail -n 1 | \
++	echo "diffoscope:Recommends=$$(./diffoscope --list-tools | tail -n 1 | \
+ 		sed -e 's/\(^\| \)\(coreutils\|diffutils\|e2fsprogs\|findutils\|gzip\)\(,\|$$\)//g')" >> debian/diffoscope.substvars
+ 	dh_gencontrol -O--buildsystem=pybuild
+ 
+-override_dh_install:
+-	dh_install -O--buildsystem=pybuild
+-	mv debian/diffoscope/usr/bin/diffoscope.py debian/diffoscope/usr/bin/diffoscope
+-
+ debian/diffoscope.1: debian/diffoscope.1.rst
+ 	rst2man $< $@
+ 
+diff --git a/diffoscope.py b/diffoscope.py
+deleted file mode 100755
+index a1a8ccc..0000000
+--- a/diffoscope.py
++++ /dev/null
+@@ -1,118 +0,0 @@
+-#!/usr/bin/env python
+-# -*- coding: utf-8 -*-
+-#
+-# diffoscope: in-depth comparison of files, archives, and directories
+-#
+-# Copyright © 2014-2015 Jérémy Bobbio <lunar@debian.org>
+-#
+-# diffoscope is free software: you can redistribute it and/or modify
+-# it under the terms of the GNU General Public License as published by
+-# the Free Software Foundation, either version 3 of the License, or
+-# (at your option) any later version.
+-#
+-# diffoscope is distributed in the hope that it will be useful,
+-# but WITHOUT ANY WARRANTY; without even the implied warranty of
+-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-# GNU General Public License for more details.
+-#
+-# You should have received a copy of the GNU General Public License
+-# along with diffoscope.  If not, see <http://www.gnu.org/licenses/>.
+-
+-from __future__ import print_function
+-
+-import argparse
+-from contextlib import contextmanager
+-import logging
+-import codecs
+-import os
+-import sys
+-import traceback
+-from diffoscope import logger, VERSION, set_locale
+-import diffoscope.comparators
+-from diffoscope.config import Config
+-from diffoscope.presenters.html import output_html
+-from diffoscope.presenters.text import output_text
+-
+-
+-def create_parser():
+-    parser = argparse.ArgumentParser(
+-        description='Highlight differences between two builds '
+-                    'of Debian packages')
+-    parser.add_argument('--version', action='version',
+-                        version='diffoscope %s' % VERSION)
+-    parser.add_argument('--list-tools', nargs=0, action=ListToolsAction,
+-                        help='show external tools required and exit')
+-    parser.add_argument('--debug', dest='debug', action='store_true',
+-                        default=False, help='display debug messages')
+-    parser.add_argument('--html', metavar='output', dest='html_output',
+-                        help='write HTML report to given file (use - for stdout)')
+-    parser.add_argument('--text', metavar='output', dest='text_output',
+-                        help='write plain text output to given file (use - for stdout)')
+-    parser.add_argument('--max-report-size', metavar='BYTES',
+-                        dest='max_report_size', type=int,
+-                        help='maximum bytes written in report')
+-    parser.add_argument('--max-diff-block-lines', dest='max_diff_block_lines', type=int,
+-                        help='maximum number of lines per diff block')
+-    parser.add_argument('--max-diff-input-lines', dest='max_diff_input_lines', type=int,
+-                        help='maximum number of lines fed to diff')
+-    parser.add_argument('--css', metavar='url', dest='css_url',
+-                        help='link to an extra CSS for the HTML report')
+-    parser.add_argument('file1', help='first file to compare')
+-    parser.add_argument('file2', help='second file to compare')
+-    return parser
+-
+-
+-@contextmanager
+-def make_printer(path):
+-    if path == '-':
+-        output = sys.stdout
+-        if not sys.stdout.isatty():
+-            output = codecs.getwriter(sys.stdin.encoding)(sys.stdout)
+-    else:
+-        output = codecs.open(path, 'w', encoding='utf-8')
+-    def print_func(*args, **kwargs):
+-        kwargs['file'] = output
+-        print(*args, **kwargs)
+-    yield print_func
+-    if path != '-':
+-        output.close()
+-
+-
+-class ListToolsAction(argparse.Action):
+-    def __call__(self, parser, namespace, values, option_string=None):
+-        from diffoscope import tool_required, RequiredToolNotFound
+-        print("External tools required:")
+-        print(', '.join(tool_required.all))
+-        print()
+-        print("Available in packages:")
+-        print(', '.join(sorted(set([RequiredToolNotFound.PROVIDERS[k]["debian"] for k in tool_required.all]))))
+-        sys.exit(0)
+-
+-
+-def main():
+-    parser = create_parser()
+-    parsed_args = parser.parse_args(sys.argv[1:])
+-    Config.config().max_diff_block_lines = parsed_args.max_diff_block_lines
+-    Config.config().max_diff_input_lines = parsed_args.max_diff_input_lines
+-    Config.config().max_report_size = parsed_args.max_report_size
+-    if parsed_args.debug:
+-        logger.setLevel(logging.DEBUG)
+-    set_locale()
+-    difference = diffoscope.comparators.compare_root_paths(
+-        parsed_args.file1, parsed_args.file2)
+-    if difference:
+-        if parsed_args.html_output:
+-            with make_printer(parsed_args.html_output) as print_func:
+-                output_html(difference, css_url=parsed_args.css_url, print_func=print_func)
+-        if (parsed_args.text_output and parsed_args.text_output != parsed_args.html_output) or not parsed_args.html_output:
+-            with make_printer(parsed_args.text_output or '-') as print_func:
+-                output_text(difference, print_func=print_func)
+-        return 1
+-    return 0
+-
+-if __name__ == '__main__':
+-    try:
+-        sys.exit(main())
+-    except (Exception, KeyboardInterrupt):
+-        traceback.print_exc()
+-        sys.exit(2)
+diff --git a/diffoscope/diffoscope.py b/diffoscope/diffoscope.py
+new file mode 100755
+index 0000000..a1a8ccc
+--- /dev/null
++++ b/diffoscope/diffoscope.py
+@@ -0,0 +1,118 @@
++#!/usr/bin/env python
++# -*- coding: utf-8 -*-
++#
++# diffoscope: in-depth comparison of files, archives, and directories
++#
++# Copyright © 2014-2015 Jérémy Bobbio <lunar@debian.org>
++#
++# diffoscope is free software: you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation, either version 3 of the License, or
++# (at your option) any later version.
++#
++# diffoscope is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with diffoscope.  If not, see <http://www.gnu.org/licenses/>.
++
++from __future__ import print_function
++
++import argparse
++from contextlib import contextmanager
++import logging
++import codecs
++import os
++import sys
++import traceback
++from diffoscope import logger, VERSION, set_locale
++import diffoscope.comparators
++from diffoscope.config import Config
++from diffoscope.presenters.html import output_html
++from diffoscope.presenters.text import output_text
++
++
++def create_parser():
++    parser = argparse.ArgumentParser(
++        description='Highlight differences between two builds '
++                    'of Debian packages')
++    parser.add_argument('--version', action='version',
++                        version='diffoscope %s' % VERSION)
++    parser.add_argument('--list-tools', nargs=0, action=ListToolsAction,
++                        help='show external tools required and exit')
++    parser.add_argument('--debug', dest='debug', action='store_true',
++                        default=False, help='display debug messages')
++    parser.add_argument('--html', metavar='output', dest='html_output',
++                        help='write HTML report to given file (use - for stdout)')
++    parser.add_argument('--text', metavar='output', dest='text_output',
++                        help='write plain text output to given file (use - for stdout)')
++    parser.add_argument('--max-report-size', metavar='BYTES',
++                        dest='max_report_size', type=int,
++                        help='maximum bytes written in report')
++    parser.add_argument('--max-diff-block-lines', dest='max_diff_block_lines', type=int,
++                        help='maximum number of lines per diff block')
++    parser.add_argument('--max-diff-input-lines', dest='max_diff_input_lines', type=int,
++                        help='maximum number of lines fed to diff')
++    parser.add_argument('--css', metavar='url', dest='css_url',
++                        help='link to an extra CSS for the HTML report')
++    parser.add_argument('file1', help='first file to compare')
++    parser.add_argument('file2', help='second file to compare')
++    return parser
++
++
++@contextmanager
++def make_printer(path):
++    if path == '-':
++        output = sys.stdout
++        if not sys.stdout.isatty():
++            output = codecs.getwriter(sys.stdin.encoding)(sys.stdout)
++    else:
++        output = codecs.open(path, 'w', encoding='utf-8')
++    def print_func(*args, **kwargs):
++        kwargs['file'] = output
++        print(*args, **kwargs)
++    yield print_func
++    if path != '-':
++        output.close()
++
++
++class ListToolsAction(argparse.Action):
++    def __call__(self, parser, namespace, values, option_string=None):
++        from diffoscope import tool_required, RequiredToolNotFound
++        print("External tools required:")
++        print(', '.join(tool_required.all))
++        print()
++        print("Available in packages:")
++        print(', '.join(sorted(set([RequiredToolNotFound.PROVIDERS[k]["debian"] for k in tool_required.all]))))
++        sys.exit(0)
++
++
++def main():
++    parser = create_parser()
++    parsed_args = parser.parse_args(sys.argv[1:])
++    Config.config().max_diff_block_lines = parsed_args.max_diff_block_lines
++    Config.config().max_diff_input_lines = parsed_args.max_diff_input_lines
++    Config.config().max_report_size = parsed_args.max_report_size
++    if parsed_args.debug:
++        logger.setLevel(logging.DEBUG)
++    set_locale()
++    difference = diffoscope.comparators.compare_root_paths(
++        parsed_args.file1, parsed_args.file2)
++    if difference:
++        if parsed_args.html_output:
++            with make_printer(parsed_args.html_output) as print_func:
++                output_html(difference, css_url=parsed_args.css_url, print_func=print_func)
++        if (parsed_args.text_output and parsed_args.text_output != parsed_args.html_output) or not parsed_args.html_output:
++            with make_printer(parsed_args.text_output or '-') as print_func:
++                output_text(difference, print_func=print_func)
++        return 1
++    return 0
++
++if __name__ == '__main__':
++    try:
++        sys.exit(main())
++    except (Exception, KeyboardInterrupt):
++        traceback.print_exc()
++        sys.exit(2)
+diff --git a/setup.py b/setup.py
+old mode 100644
+new mode 100755
+index 7ffac88..ba229a2
+--- a/setup.py
++++ b/setup.py
+@@ -32,7 +32,7 @@ setup(name='diffoscope',
+       packages=find_packages(),
+       tests_require=['pytest'],
+       cmdclass = {'test': PyTest},
+-      scripts=['diffoscope.py'],
++      scripts=['diffoscope'],
+       install_requires=[
+           'python-debian',
+           'magic',
+-- 
+2.4.3.573.g4eafbef
+

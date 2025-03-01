@@ -1,0 +1,82 @@
+--- a/bfd/elfxx-mips.c
++++ b/bfd/elfxx-mips.c
+@@ -743,6 +743,8 @@ static struct mips_got_entry *mips_elf_create_local_got_entry
+    struct mips_elf_link_hash_entry *, int);
+ static bfd_boolean mips_elf_sort_hash_table_f
+   (struct mips_elf_link_hash_entry *, void *);
++static bfd_boolean mips_elf_sort_hash_table_local_f
++  (struct mips_elf_link_hash_entry *, void *);
+ static bfd_vma mips_elf_high
+   (bfd_vma);
+ static bfd_boolean mips_elf_create_dynamic_relocation
+@@ -3850,6 +3852,11 @@ mips_elf_sort_hash_table (bfd *abfd, struct bfd_link_info *info)
+     = hsd.min_got_dynindx
+     = (elf_hash_table (info)->dynsymcount - g->reloc_only_gotno);
+   hsd.max_non_got_dynindx = count_section_dynsyms (abfd, info) + 1;
++
++  mips_elf_link_hash_traverse (((struct mips_elf_link_hash_table *)
++                    elf_hash_table (info)),
++                    mips_elf_sort_hash_table_local_f,
++                    &hsd);
+   mips_elf_link_hash_traverse (((struct mips_elf_link_hash_table *)
+ 				elf_hash_table (info)),
+ 			       mips_elf_sort_hash_table_f,
+@@ -3879,28 +3886,40 @@ mips_elf_sort_hash_table_f (struct mips_elf_link_hash_entry *h, void *data)
+ {
+   struct mips_elf_hash_sort_data *hsd = data;
+ 
+-  /* Symbols without dynamic symbol table entries aren't interesting
+-     at all.  */
+-  if (h->root.dynindx == -1)
++  /* Only interested in global symbols with dynamic symbol table entries */
++  if (h->root.dynindx == -1 || h->root.forced_local)
+     return TRUE;
+ 
+-  switch (h->global_got_area)
+-    {
+-    case GGA_NONE:
++  if (h->global_got_area == GGA_NONE) {
+       h->root.dynindx = hsd->max_non_got_dynindx++;
+-      break;
++  } else {
++      if (h->global_got_area == GGA_NORMAL)
++          h->root.dynindx = --hsd->min_got_dynindx;
++      else
++          h->root.dynindx = hsd->max_unref_got_dynindx++;
+ 
+-    case GGA_NORMAL:
+-      h->root.dynindx = --hsd->min_got_dynindx;
+-      hsd->low = (struct elf_link_hash_entry *) h;
+-      break;
++      if (hsd->low == NULL || h->root.dynindx < hsd->low->dynindx)
++          hsd->low = (struct elf_link_hash_entry *) h;
++  }
+ 
+-    case GGA_RELOC_ONLY:
+-      if (hsd->max_unref_got_dynindx == hsd->min_got_dynindx)
+-	hsd->low = (struct elf_link_hash_entry *) h;
+-      h->root.dynindx = hsd->max_unref_got_dynindx++;
+-      break;
+-    }
++  return TRUE;
++}
++
++/* All local symbols must be appear before global symbols in the dynamic symbol
++   table so they're assigned indexs first. */
++
++static bfd_boolean
++mips_elf_sort_hash_table_local_f (struct mips_elf_link_hash_entry *h, void *data)
++{
++  struct mips_elf_hash_sort_data *hsd = data;
++
++  /* Only interested in local symbols with dynamic symbol table entries */
++  if (h->root.dynindx == -1 || !h->root.forced_local)
++    return TRUE;
++
++  h->root.dynindx = hsd->max_non_got_dynindx++;
++  if (h->global_got_area != GGA_NONE && hsd->low == NULL)
++      hsd->low = (struct elf_link_hash_entry *) h;
+ 
+   return TRUE;
+ }
+

@@ -1,0 +1,154 @@
+From 2b53a78ff7e63652835628418b8d1d55c7835a74 Mon Sep 17 00:00:00 2001
+From: "Bernhard R. Link" <brlink@debian.org>
+Date: Fri, 16 Mar 2012 10:23:38 +0100
+Subject: [PATCH 2/4] Dpkg::BuildFlags: record environment variables looked at
+
+Record environment variables looked at by Dpkg::BuildFlags and
+the vendor hooks and make them available via the new
+get_used_environment().
+
+Signed-off-by: Bernhard R. Link <brlink@debian.org>
+---
+ scripts/Dpkg/BuildFlags.pm    |   40 ++++++++++++++++++++++++++++++++++++++++
+ scripts/Dpkg/Vendor/Debian.pm |    1 +
+ scripts/Dpkg/Vendor/Ubuntu.pm |    1 +
+ 3 files changed, 42 insertions(+), 0 deletions(-)
+
+diff --git a/scripts/Dpkg/BuildFlags.pm b/scripts/Dpkg/BuildFlags.pm
+index 0c7b190..654f755 100644
+--- a/scripts/Dpkg/BuildFlags.pm
++++ b/scripts/Dpkg/BuildFlags.pm
+@@ -69,7 +69,9 @@ sub load_vendor_defaults {
+     $self->{'options'} = {};
+     $self->{'source'} = {};
+     $self->{'features'} = {};
++    $self->{'used_envs'} = {};
+     my $build_opts = Dpkg::BuildOptions->new();
++    $self->mark_used_envvar("DEB_BUILD_OPTIONS");
+     my $default_flags = $build_opts->has("noopt") ? "-g -O0" : "-g -O2";
+     $self->{flags} = {
+ 	CPPFLAGS => '',
+@@ -87,6 +89,8 @@ sub load_vendor_defaults {
+     };
+     # The Debian vendor hook will add hardening build flags
+     run_vendor_hook("update-buildflags", $self);
++    # run_vendor_hook looked at DEB_VENDOR
++    $self->mark_used_envvar("DEB_VENDOR");
+ }
+ 
+ =item $bf->load_system_config()
+@@ -126,18 +130,22 @@ sub load_environment_config {
+     my ($self) = @_;
+     foreach my $flag (keys %{$self->{flags}}) {
+ 	my $envvar = "DEB_" . $flag . "_SET";
++	$self->mark_used_envvar($envvar);
+ 	if (exists $ENV{$envvar}) {
+ 	    $self->set($flag, $ENV{$envvar}, "env");
+ 	}
+ 	$envvar = "DEB_" . $flag . "_STRIP";
++	$self->mark_used_envvar($envvar);
+ 	if (exists $ENV{$envvar}) {
+ 	    $self->strip($flag, $ENV{$envvar}, "env");
+ 	}
+ 	$envvar = "DEB_" . $flag . "_APPEND";
++	$self->mark_used_envvar($envvar);
+ 	if (exists $ENV{$envvar}) {
+ 	    $self->append($flag, $ENV{$envvar}, "env");
+ 	}
+ 	$envvar = "DEB_" . $flag . "_PREPEND";
++	$self->mark_used_envvar($envvar);
+ 	if (exists $ENV{$envvar}) {
+ 	    $self->prepend($flag, $ENV{$envvar}, "env");
+ 	}
+@@ -155,18 +163,22 @@ sub load_maintainer_config {
+     my ($self) = @_;
+     foreach my $flag (keys %{$self->{flags}}) {
+ 	my $envvar = "DEB_" . $flag . "_MAINT_SET";
++	$self->mark_used_envvar($envvar);
+ 	if (exists $ENV{$envvar}) {
+ 	    $self->set($flag, $ENV{$envvar}, undef);
+ 	}
+ 	$envvar = "DEB_" . $flag . "_MAINT_STRIP";
++	$self->mark_used_envvar($envvar);
+ 	if (exists $ENV{$envvar}) {
+ 	    $self->strip($flag, $ENV{$envvar}, undef);
+ 	}
+ 	$envvar = "DEB_" . $flag . "_MAINT_APPEND";
++	$self->mark_used_envvar($envvar);
+ 	if (exists $ENV{$envvar}) {
+ 	    $self->append($flag, $ENV{$envvar}, undef);
+ 	}
+ 	$envvar = "DEB_" . $flag . "_MAINT_PREPEND";
++	$self->mark_used_envvar($envvar);
+ 	if (exists $ENV{$envvar}) {
+ 	    $self->prepend($flag, $ENV{$envvar}, undef);
+ 	}
+@@ -390,6 +402,31 @@ sub list {
+     return sort keys %{$self->{'flags'}};
+ }
+ 
++=item $bf->mark_used_envvar($envvar)
++
++Records that the given environment variable had influenced
++or could have influenced (if it had existed or had a different
++value) the calculated flags.
++
++=cut
++
++sub mark_used_envvar {
++    my ($self, $envvar) = @_;
++    $self->{'used_envs'}{$envvar} = 1;
++}
++
++=item my @list = $bf->list_used_envvars()
++
++Returns a list of all environment variables that had a
++possible influence.
++
++=cut
++
++sub list_used_envvars {
++    my ($self) = @_;
++    return sort keys $self->{'used_envs'};
++}
++
+ =back
+ 
+ =head1 CHANGES
+@@ -411,6 +448,9 @@ New methods: $bf->get_features(), $bf->has_features(), $bf->set_feature().
+ New method:  $bf->get_feature_areas() to list possible values for
+ $bf->get_features.
+ 
++New methods: $bf->mark_used_envvar(), $bf->list_used_envvars().
++Remember and list influencal environment variables.
++
+ =head1 AUTHOR
+ 
+ Raphaël Hertzog <hertzog@debian.org>
+diff --git a/scripts/Dpkg/Vendor/Debian.pm b/scripts/Dpkg/Vendor/Debian.pm
+index b4ce4cf..ab4ddf2 100644
+--- a/scripts/Dpkg/Vendor/Debian.pm
++++ b/scripts/Dpkg/Vendor/Debian.pm
+@@ -100,6 +100,7 @@ sub add_hardening_flags {
+ 
+     # Adjust features based on Maintainer's desires.
+     my $opts = Dpkg::BuildOptions->new(envvar => "DEB_BUILD_MAINT_OPTIONS");
++    $flags->mark_used_envvar("DEB_BUILD_MAINT_OPTIONS");
+     foreach my $feature (split(",", $opts->get("hardening") // "")) {
+ 	$feature = lc($feature);
+ 	if ($feature =~ s/^([+-])//) {
+diff --git a/scripts/Dpkg/Vendor/Ubuntu.pm b/scripts/Dpkg/Vendor/Ubuntu.pm
+index 7e60fcf..17648bd 100644
+--- a/scripts/Dpkg/Vendor/Ubuntu.pm
++++ b/scripts/Dpkg/Vendor/Ubuntu.pm
+@@ -108,6 +108,7 @@ sub run_hook {
+ 	$self->SUPER::run_hook($hook, $flags);
+ 
+ 	# Allow control of hardening-wrapper via dpkg-buildpackage DEB_BUILD_OPTIONS
++	$flags->mark_used_envvar("DEB_BUILD_OPTIONS");
+ 	my $build_opts = Dpkg::BuildOptions->new();
+ 	my $hardening;
+ 	if ($build_opts->has("hardening")) {
+-- 
+1.7.9.1
+

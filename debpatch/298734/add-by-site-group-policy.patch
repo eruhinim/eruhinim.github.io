@@ -1,0 +1,145 @@
+diff --git a/src/load_grouppolicy.cc b/src/load_grouppolicy.cc
+index a75e21e..e47b764 100644
+--- a/src/load_grouppolicy.cc
++++ b/src/load_grouppolicy.cc
+@@ -548,6 +548,18 @@ public:
+   }
+ };
+ 
++class site_policy_parser : public string_policy_parser
++{
++public:
++  group_policy_parse_node *create_node(const vector<string> &args)
++  {
++    if(args.size()!=0)
++      throw GroupParseException(_("Too many arguments to by-site grouping policy"));
++
++    return new policy_node0<pkg_grouppolicy_site_factory>;
++  }
++};
++
+ class ver_policy_parser : public string_policy_parser
+ {
+   group_policy_parse_node *create_node(const vector<string> &args)
+@@ -771,6 +783,7 @@ static void init_parse_types()
+       parse_types["filter"]=new filter_policy_parser;
+       parse_types["firstchar"]=new firstchar_policy_parser;
+       parse_types["source"]=new source_policy_parser;
++      parse_types["site"]=new site_policy_parser;
+ 
+       parse_types["versions"]=new ver_policy_parser;
+       parse_types["deps"]=new dep_policy_parser;
+diff --git a/src/pkg_grouppolicy.cc b/src/pkg_grouppolicy.cc
+index 29eee4b..258040d 100644
+--- a/src/pkg_grouppolicy.cc
++++ b/src/pkg_grouppolicy.cc
+@@ -49,6 +49,8 @@
+ #include <sigc++/functors/mem_fun.h>
+ #include <sigc++/trackable.h>
+ 
++#include <boost/tuple/tuple.hpp>
++
+ using namespace std;
+ 
+ namespace cw = cwidget;
+@@ -1723,3 +1725,77 @@ pkg_grouppolicy *pkg_grouppolicy_source_factory::instantiate(pkg_signal *sig,
+ {
+   return new pkg_grouppolicy_source(chain, sig, desc_sig);
+ }
++
++
++/*****************************************************************************/
++
++// Groups packages by site (origin server)
++class pkg_grouppolicy_site:public pkg_grouppolicy
++{
++  typedef map<string,
++	      boost::tuple<pkg_grouppolicy *, pkg_subtree *, bool> > childmap;
++
++  childmap children;
++  pkg_grouppolicy_factory *chain;
++  pkg_grouppolicy *spillover;
++
++public:
++  pkg_grouppolicy_site(pkg_grouppolicy_factory *_chain,
++		       pkg_signal *_sig, desc_signal *_desc_sig)
++    :pkg_grouppolicy(_sig, _desc_sig),
++     chain(_chain),
++     spillover(_chain->instantiate(get_sig(), get_desc_sig()))
++  {
++  }
++
++  ~pkg_grouppolicy_site()
++  {
++    for(childmap::iterator i = children.begin(); i != children.end(); ++i)
++      delete i->second.get<0>();
++  }
++
++  void add_package(const pkgCache::PkgIterator &pkg, pkg_subtree *root)
++  {
++    // Keep track of which children we have added pkg to.  Need to do
++    // this otherwise packages with multiple versions available from
++    // a single site will appear there more than once.
++    for(childmap::iterator i = children.begin(); i != children.end(); ++i)
++      i->second.get<2>() = false;
++
++    for(pkgCache::VerIterator v = pkg.VersionList(); !v.end(); ++v)
++      {
++	std::string origin_site = v.FileList().File().Site();
++	if(origin_site == "")
++	  origin_site = "Local";
++
++	childmap::iterator found = children.find(origin_site);
++	if(found != children.end())
++	  {
++	    if(found->second.get<2>() == false)
++	      {
++		found->second.get<0>()->add_package(pkg, found->second.get<1>());
++		found->second.get<2>() = true;
++	      }
++	  }
++	else
++	  {
++	    pkg_subtree *newtree = new pkg_subtree(cw::util::transcode(origin_site),
++						   L"", get_desc_sig());
++	    pkg_grouppolicy *newchild = chain->instantiate(get_sig(),
++							   get_desc_sig());
++	    children[origin_site].get<0>() = newchild;
++	    children[origin_site].get<1>() = newtree;
++	    children[origin_site].get<2>() = true;
++	    root->add_child(newtree);
++	    newtree->set_num_packages_parent(root);
++	    newchild->add_package(pkg, newtree);
++	  }
++      }
++  }
++};
++
++pkg_grouppolicy *pkg_grouppolicy_site_factory::instantiate(pkg_signal *sig,
++							   desc_signal *desc_sig)
++{
++  return new pkg_grouppolicy_site(chain, sig, desc_sig);
++}
+diff --git a/src/pkg_grouppolicy.h b/src/pkg_grouppolicy.h
+index f9169e2..f57d9fb 100644
+--- a/src/pkg_grouppolicy.h
++++ b/src/pkg_grouppolicy.h
+@@ -391,4 +391,18 @@ public:
+   {delete chain;}
+ };
+ 
++// Groups by origin site
++class pkg_grouppolicy_site_factory:public pkg_grouppolicy_factory
++{
++  pkg_grouppolicy_factory *chain;
++public:
++  pkg_grouppolicy_site_factory(pkg_grouppolicy_factory *_chain):chain(_chain) {}
++
++  pkg_grouppolicy *instantiate(pkg_signal *_sig,
++			       desc_signal *_desc_sig);
++
++  virtual ~pkg_grouppolicy_site_factory()
++  {delete chain;}
++};
++
+ #endif

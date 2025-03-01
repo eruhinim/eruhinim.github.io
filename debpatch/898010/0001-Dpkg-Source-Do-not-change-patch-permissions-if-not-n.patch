@@ -1,0 +1,120 @@
+From c91fe9599ce41a15d8acf2f69c9db0e36000a2cf Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Fri, 8 Jun 2018 03:22:36 +0200
+Subject: [PATCH] Dpkg::Source: Do not change patch permissions if not
+ necessary
+
+To be able to build a source tree, a user needs write permisions on it,
+but not necessarily ownership of those files. We check the existing file
+permissions and avoid changing them if not necessary, which helps in the
+case where the user does not have ownership of those files, and they
+were already present.
+
+Closes: #898010
+---
+ scripts/Dpkg/Source/Functions.pm        | 13 +++++++++++++
+ scripts/Dpkg/Source/Package/V2.pm       |  4 ++--
+ scripts/Dpkg/Source/Package/V3/Quilt.pm |  4 ++--
+ scripts/Dpkg/Source/Quilt.pm            |  4 ++--
+ 4 files changed, 19 insertions(+), 6 deletions(-)
+
+diff --git a/scripts/Dpkg/Source/Functions.pm b/scripts/Dpkg/Source/Functions.pm
+index 0a940463e..a2f81bc29 100644
+--- a/scripts/Dpkg/Source/Functions.pm
++++ b/scripts/Dpkg/Source/Functions.pm
+@@ -22,6 +22,7 @@ our $VERSION = '0.01';
+ our @EXPORT_OK = qw(
+     erasedir
+     fixperms
++    tactful_chmod
+     fs_time
+     is_binary
+ );
+@@ -70,6 +71,18 @@ sub fixperms {
+     subprocerr("chmod -R -- $modes_set $dir") if $?;
+ }
+ 
++# Only change the pathname permissions if they differ from the desired.
++#
++# To be able to build a source tree, a user needs write permisions on it,
++# but not necessarily ownership of those files.
++sub tactful_chmod {
++    my ($newperms, $pathname) = @_;
++    my $oldperms = (stat $pathname)[2] & 07777;
++
++    return 1 if $oldperms == $newperms;
++    return chmod $newperms, $pathname;
++}
++
+ # Touch the file and read the resulting mtime.
+ #
+ # If the file doesn't exist, create it, read the mtime and unlink it.
+diff --git a/scripts/Dpkg/Source/Package/V2.pm b/scripts/Dpkg/Source/Package/V2.pm
+index 13e5d7456..4479c2f0b 100644
+--- a/scripts/Dpkg/Source/Package/V2.pm
++++ b/scripts/Dpkg/Source/Package/V2.pm
+@@ -38,7 +38,7 @@ use Dpkg::Compression;
+ use Dpkg::Source::Archive;
+ use Dpkg::Source::Patch;
+ use Dpkg::Exit qw(push_exit_handler pop_exit_handler);
+-use Dpkg::Source::Functions qw(erasedir is_binary fs_time);
++use Dpkg::Source::Functions qw(erasedir tactful_chmod is_binary fs_time);
+ use Dpkg::Vendor qw(run_vendor_hook);
+ use Dpkg::Control;
+ use Dpkg::Changelog::Parse;
+@@ -673,7 +673,7 @@ sub register_patch {
+     if (-s $patch_file) {
+         copy($patch_file, $patch)
+             or syserr(g_('failed to copy %s to %s'), $patch_file, $patch);
+-        chmod(0666 & ~ umask(), $patch)
++        tactful_chmod(0666 & ~ umask(), $patch)
+             or syserr(g_("unable to change permission of '%s'"), $patch);
+         my $applied = File::Spec->catfile($dir, 'debian', 'patches', '.dpkg-source-applied');
+         open(my $applied_fh, '>>', $applied)
+diff --git a/scripts/Dpkg/Source/Package/V3/Quilt.pm b/scripts/Dpkg/Source/Package/V3/Quilt.pm
+index 9718ffa2d..796b2f956 100644
+--- a/scripts/Dpkg/Source/Package/V3/Quilt.pm
++++ b/scripts/Dpkg/Source/Package/V3/Quilt.pm
+@@ -28,7 +28,7 @@ use Dpkg::Gettext;
+ use Dpkg::ErrorHandling;
+ use Dpkg::Version;
+ use Dpkg::Source::Patch;
+-use Dpkg::Source::Functions qw(erasedir fs_time);
++use Dpkg::Source::Functions qw(erasedir tactful_chmod fs_time);
+ use Dpkg::Source::Quilt;
+ use Dpkg::Exit;
+ 
+@@ -249,7 +249,7 @@ sub register_patch {
+     if (-s $tmpdiff) {
+         copy($tmpdiff, $patch)
+             or syserr(g_('failed to copy %s to %s'), $tmpdiff, $patch);
+-        chmod(0666 & ~ umask(), $patch)
++        tactful_chmod(0666 & ~ umask(), $patch)
+             or syserr(g_("unable to change permission of '%s'"), $patch);
+     } elsif (-e $patch) {
+         unlink($patch) or syserr(g_('cannot remove %s'), $patch);
+diff --git a/scripts/Dpkg/Source/Quilt.pm b/scripts/Dpkg/Source/Quilt.pm
+index 55b3fbaf8..b4ac9b7e7 100644
+--- a/scripts/Dpkg/Source/Quilt.pm
++++ b/scripts/Dpkg/Source/Quilt.pm
+@@ -30,7 +30,7 @@ use File::Basename;
+ use Dpkg::Gettext;
+ use Dpkg::ErrorHandling;
+ use Dpkg::Source::Patch;
+-use Dpkg::Source::Functions qw(erasedir fs_time);
++use Dpkg::Source::Functions qw(erasedir tactful_chmod fs_time);
+ use Dpkg::Vendor qw(get_current_vendor);
+ 
+ sub new {
+@@ -374,7 +374,7 @@ sub restore_quilt_backup_files {
+                 unless (link($_, $target)) {
+                     copy($_, $target)
+                         or syserr(g_('failed to copy %s to %s'), $_, $target);
+-                    chmod((stat(_))[2], $target)
++                    tactful_chmod((stat _)[2], $target)
+                         or syserr(g_("unable to change permission of '%s'"), $target);
+                 }
+             } else {
+-- 
+2.18.0.rc1.242.g61856ae69a
+

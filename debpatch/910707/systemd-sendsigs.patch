@@ -1,0 +1,84 @@
+From b8f8bcfa1c447bc0839a84c4f64a551278a33dec Mon Sep 17 00:00:00 2001
+From: Trek <trek00@inbox.ru>
+Date: Sun, 7 Oct 2018 17:59:25 +0200
+Subject: [PATCH] Stop udev before sendsigs to fix a regression of #791944
+
+The start-stop-daemon command with the --background argument returns
+immediately, too soon to trigger events on some systems. The #791944
+patch is partly reverted and a dependency to sendsigs is added in the
+SysV init script at shutdown.
+
+Closes: #908796
+---
+ debian/udev.init | 19 +++++--------------
+ 1 file changed, 5 insertions(+), 14 deletions(-)
+
+diff --git a/debian/udev.init b/debian/udev.init
+index 9c394bb..794373d 100644
+--- a/debian/udev.init
++++ b/debian/udev.init
+@@ -3,6 +3,7 @@
+ # Provides:          udev
+ # Required-Start:    mountkernfs
+ # Required-Stop:     umountroot
++# Should-Stop:       sendsigs
+ # Default-Start:     S
+ # Default-Stop:      0 6
+ # Short-Description: Start systemd-udevd, populate /dev and load drivers.
+@@ -12,9 +13,7 @@ PATH="/sbin:/bin"
+ NAME="systemd-udevd"
+ DAEMON="/lib/systemd/systemd-udevd"
+ DESC="hotplug events dispatcher"
+-PIDFILE="/run/udev.pid"
+ CTRLFILE="/run/udev/control"
+-OMITDIR="/run/sendsigs.omit.d"
+ 
+ # we need to unmount /dev/pts/ and remount it later over the devtmpfs
+ unmount_devpts() {
+@@ -165,11 +164,7 @@ case "$1" in
+     [ -x /sbin/restorecon ] && /sbin/restorecon -R /dev
+ 
+     log_daemon_msg "Starting $DESC" "$NAME"
+-    if start-stop-daemon --start --name $NAME --user root --quiet \
+-        --pidfile $PIDFILE --exec $DAEMON --background --make-pidfile; then
+-        # prevents udevd to be killed by sendsigs (see #791944)
+-        mkdir -p $OMITDIR
+-        ln -sf $PIDFILE $OMITDIR/$NAME
++    if $DAEMON --daemon; then
+         log_end_msg $?
+     else
+         log_warning_msg $?
+@@ -198,7 +193,7 @@ case "$1" in
+     stop)
+     log_daemon_msg "Stopping $DESC" "$NAME"
+     if start-stop-daemon --stop --name $NAME --user root --quiet \
+-        --pidfile $PIDFILE --remove-pidfile --oknodo --retry 5; then
++        --oknodo --retry 5; then
+         # prevents cryptsetup/dmsetup hangs (see #791944)
+         rm -f $CTRLFILE
+         log_end_msg $?
+@@ -210,7 +205,7 @@ case "$1" in
+     restart)
+     log_daemon_msg "Stopping $DESC" "$NAME"
+     if start-stop-daemon --stop --name $NAME --user root --quiet \
+-        --pidfile $PIDFILE --remove-pidfile --oknodo --retry 5; then
++        --oknodo --retry 5; then
+         # prevents cryptsetup/dmsetup hangs (see #791944)
+         rm -f $CTRLFILE
+         log_end_msg $?
+@@ -219,11 +214,7 @@ case "$1" in
+     fi
+ 
+     log_daemon_msg "Starting $DESC" "$NAME"
+-    if start-stop-daemon --start --name $NAME --user root --quiet \
+-        --pidfile $PIDFILE --exec $DAEMON --background --make-pidfile; then
+-        # prevents udevd to be killed by sendsigs (see #791944)
+-        mkdir -p $OMITDIR
+-        ln -sf $PIDFILE $OMITDIR/$NAME
++    if $DAEMON --daemon; then
+         log_end_msg $?
+     else
+         log_end_msg $?
+-- 
+2.1.4
+

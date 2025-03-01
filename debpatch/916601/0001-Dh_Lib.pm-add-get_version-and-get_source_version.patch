@@ -1,0 +1,168 @@
+From 1db220b44db7aca051353673726e31a44ee6ca1a Mon Sep 17 00:00:00 2001
+From: Ivo De Decker <ivodd@debian.org>
+Date: Fri, 21 Dec 2018 15:45:27 +0100
+Subject: [PATCH 1/3] Dh_Lib.pm: add get_version and get_source_version
+
+Also, refactor isnative, to share code and cache with these functions.
+
+Signed-off-by: Ivo De Decker <ivodd@debian.org>
+---
+ lib/Debian/Debhelper/Dh_Lib.pm | 117 +++++++++++++++++++++++++++++------------
+ 1 file changed, 83 insertions(+), 34 deletions(-)
+
+diff --git a/lib/Debian/Debhelper/Dh_Lib.pm b/lib/Debian/Debhelper/Dh_Lib.pm
+index 482e758e..11ff643b 100644
+--- a/lib/Debian/Debhelper/Dh_Lib.pm
++++ b/lib/Debian/Debhelper/Dh_Lib.pm
+@@ -70,6 +70,8 @@ qw(
+ 	# Package related actions
+ qw(
+ 	getpackages
++	get_source_version
++	get_version
+ 	sourcepackage
+ 	tmpdir
+ 	dbgsym_tmpdir
+@@ -1005,58 +1007,105 @@ sub pkgfilename {
+ # As a side effect, sets $dh{VERSION} to the version of this package.
+ {
+ 	# Caches return code so it only needs to run dpkg-parsechangelog once.
+-	my (%isnative_cache, %pkg_version);
+-	
+-	sub isnative {
++	my $pkg_version_cache = {};
++
++	sub _lookup_version_info {
+ 		my ($package) = @_;
+ 		my $cache_key = $package;
+ 
+-		if (exists($isnative_cache{$cache_key})) {
+-			$dh{VERSION} = $pkg_version{$cache_key};
+-			return $isnative_cache{$cache_key};
+-		}
++		return $pkg_version_cache->{$cache_key} if (exists($pkg_version_cache->{$cache_key}));
+ 
+ 		# Make sure we look at the correct changelog.
+-		my $isnative_changelog = pkgfile($package,"changelog");
+-		if (! $isnative_changelog) {
+-			$isnative_changelog = "debian/changelog";
++		my $changelog_file = pkgfile($package,"changelog");
++		if (! $changelog_file) {
++			$changelog_file = "debian/changelog";
+ 			$cache_key = '_source';
+ 			# check if we looked up the default changelog
+-			if (exists($isnative_cache{$cache_key})) {
+-				$dh{VERSION} = $pkg_version{$cache_key};
+-				return $isnative_cache{$cache_key};
+-			}
+-		}
+-
+-		if (not %isnative_cache) {
+-			require Dpkg::Changelog::Parse;
++			return $pkg_version_cache->{$cache_key} if (exists($pkg_version_cache->{$cache_key}));
+ 		}
+ 
+-		my $res = Dpkg::Changelog::Parse::changelog_parse(
+-			file => $isnative_changelog,
+-			compression => 0,
+-		);
+-		if (not defined($res)) {
+-			error("No changelog entries for $package!? (changelog file: ${isnative_changelog})");
+-		}
+-		my $version = $res->{'Version'};
+-		# Do we have a valid version?
+-		if (not defined($version) or not $version->is_valid) {
+-			error("changelog parse failure; invalid or missing version");
++		my $offset = 0;
++		my ($version, $binonly) = _get_version_from_changelog($package, $changelog_file, $offset);
++		my $source_version = $version;
++		while ($binonly) {
++			$offset++;
++			($source_version, $binonly) = _get_version_from_changelog($package, $changelog_file, $offset);
+ 		}
+-		# Get and cache the package version.
+-		$dh{VERSION} = $pkg_version{$cache_key} = $version->as_string;
+ 
+ 		# Is this a native Debian package?
+-		if (index($dh{VERSION}, '-') > -1) {
+-			return $isnative_cache{$cache_key} = 0;
++		if (index($version, '-') > -1) {
++			$pkg_version_cache->{$cache_key}->{"is_native"} = 0;
+ 		}
+ 		else {
+-			return $isnative_cache{$cache_key} = 1;
++			$pkg_version_cache->{$cache_key}->{"is_native"} = 1;
+ 		}
++
++		# Get and cache the package version.
++		$pkg_version_cache->{$cache_key}->{"version"} = $version->as_string;
++		$pkg_version_cache->{$cache_key}->{"source_version"} = $source_version->as_string;
++
++		return $pkg_version_cache->{$cache_key};
+ 	}
+ }
+ 
++sub _get_version_from_changelog {
++	my ($package, $changelogfile, $offset) = @_;
++	$offset ||= 0;
++
++	require Dpkg::Changelog::Parse;
++
++	my $res = Dpkg::Changelog::Parse::changelog_parse(
++		file => $changelogfile,
++		compression => 0,
++		offset => $offset,
++		count => 1,
++	);
++	if (not defined($res)) {
++		error("No changelog entries for $package!? (changelog file: ${changelogfile})");
++	}
++	my $version = $res->{'Version'};
++	my $binonly = 0;
++	$binonly = 1 if ($res->{'Binary-Only'}||"" eq 'yes');
++	# Do we have a valid version?
++	if (not defined($version) or not $version->is_valid) {
++		error("changelog parse failure; invalid or missing version");
++	}
++
++	return ($version, $binonly);
++}
++
++sub _get_version_info {
++	my ($package) = @_;
++
++	my $vinfo = _lookup_version_info($package);
++
++	$dh{VERSION} = $vinfo->{"version"};
++	$dh{SOURCE_VERSION} = $vinfo->{"source_version"};
++
++	return $vinfo;
++}
++
++sub get_source_version {
++	my ($package) = @_;
++
++	my $vinfo = _get_version_info($package);
++	return $vinfo->{"source_version"};
++}
++
++sub get_version {
++	my ($package) = @_;
++
++	my $vinfo = _get_version_info($package);
++	return $vinfo->{"version"};
++}
++
++sub isnative {
++	my ($package) = @_;
++
++	my $vinfo = _get_version_info($package);
++	return $vinfo->{"is_native"};
++}
++
+ sub _tool_version {
+ 	return $DH_TOOL_VERSION if defined($DH_TOOL_VERSION);
+ 	if (defined($main::VERSION)) {
+-- 
+2.11.0
+

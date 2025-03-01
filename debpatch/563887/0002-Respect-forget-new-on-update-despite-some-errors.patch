@@ -1,0 +1,87 @@
+From 89f1e5d2685c9219b50f8ce0c4c74170268fa34f Mon Sep 17 00:00:00 2001
+From: Daniel Hartwig <mandyke@gmail.com>
+Date: Thu, 29 Dec 2011 04:46:52 +0800
+Subject: [PATCH 2/2] Respect forget-new-on-update despite some errors.
+
+---
+ src/generic/apt/download_update_manager.cc |   26 ++++++++++++++++++--------
+ src/generic/apt/download_update_manager.h  |    8 ++++++++
+ 2 files changed, 26 insertions(+), 8 deletions(-)
+
+diff --git a/src/generic/apt/download_update_manager.cc b/src/generic/apt/download_update_manager.cc
+index b6b49ea..004890f 100644
+--- a/src/generic/apt/download_update_manager.cc
++++ b/src/generic/apt/download_update_manager.cc
+@@ -335,7 +335,7 @@ void download_update_manager::finish(pkgAcquire::RunResult res,
+   else if(rval == failure)
+     {
+       _error->Error(_("Some index files failed to download. They have been ignored, or old ones used instead."));
+-      k(failure);
++      finish_maint(rval, transientNetworkFailure, progress, k);
+       return;
+     }
+ 
+@@ -353,12 +353,6 @@ void download_update_manager::finish(pkgAcquire::RunResult res,
+       }
+   }
+ 
+-  bool need_forget_new = 
+-    aptcfg->FindB(PACKAGE "::Forget-New-On-Update", false);
+-
+-  bool need_autoclean =
+-    aptcfg->FindB(PACKAGE "::AutoClean-After-Update", false);
+-
+ #ifdef HAVE_EPT
+   std::string debtags = aptcfg->Find(PACKAGE "::Debtags-Binary", "/usr/bin/debtags");
+ 
+@@ -435,6 +429,23 @@ void download_update_manager::finish(pkgAcquire::RunResult res,
+     }
+ #endif
+ 
++  finish_maint(rval, transientNetworkFailure, progress, k);
++  return;
++}
++
++void download_update_manager::finish_maint(result rval, bool transientNetworkFailure,
++                                           OpProgress *progress,
++                                           const sigc::slot1<void, result> &k)
++{
++  bool need_forget_new = 
++    aptcfg->FindB(PACKAGE "::Forget-New-On-Update", false);
++
++  // No autoclean if there was an error.  That could remove archives
++  // for packages which might otherwise still be available.
++  bool need_autoclean =
++    rval == success && !transientNetworkFailure &&
++    aptcfg->FindB(PACKAGE "::AutoClean-After-Update", false);
++
+   if(need_forget_new || need_autoclean)
+     apt_load_cache(progress, true);
+ 
+@@ -459,4 +470,3 @@ void download_update_manager::finish(pkgAcquire::RunResult res,
+   k(rval);
+   return;
+ }
+-
+diff --git a/src/generic/apt/download_update_manager.h b/src/generic/apt/download_update_manager.h
+index 378bb9f..556f64b 100644
+--- a/src/generic/apt/download_update_manager.h
++++ b/src/generic/apt/download_update_manager.h
+@@ -75,6 +75,14 @@ public:
+ 	      OpProgress *progress,
+ 	      const sigc::slot1<void, result> &k);
+ 
++  /** Perform post-update maintainence which requires the cache file
++   *  to be reloaded.
++   */
++  void finish_maint(result rval,
++                    bool transientNetworkFailure,
++                    OpProgress *progress,
++                    const sigc::slot1<void, result> &k);
++
+   /** A signal that is invoked after an automatic 'forget new'
+    *  operation.
+    */
+-- 
+1.7.5.4
+

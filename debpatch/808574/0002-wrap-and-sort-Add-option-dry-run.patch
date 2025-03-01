@@ -1,0 +1,149 @@
+From 7f3c2bdb31f1066a92f0136ed4a5cbc3215d1943 Mon Sep 17 00:00:00 2001
+From: Ben Wiederhake <BenWiederhake.GitHub@gmx.de>
+Date: Wed, 6 Jan 2016 00:35:53 +0100
+Subject: [PATCH 2/2] wrap-and-sort: Add option --dry-run
+
+---
+ debian/changelog      |  4 ++++
+ scripts/wrap-and-sort | 58 +++++++++++++++++++++++++++++++++++++++------------
+ 2 files changed, 49 insertions(+), 13 deletions(-)
+
+diff --git a/debian/changelog b/debian/changelog
+index 7d158bf..3c7eb9f 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -6,6 +6,10 @@ devscripts (2.15.11) UNRELEASED; urgency=medium
+       Patch by Alex Mestiashvili <mailatgoogl@gmail.com>
+     - fix crash when --rename is passed
+ 
++  [ Ben Wiederhake ]
++  * wrap-and-sort:
++    - New switch --dry-run (Closes: #808574)
++
+  -- Antonio Terceiro <terceiro@debian.org>  Tue, 05 Jan 2016 13:01:05 -0200
+ 
+ devscripts (2.15.10) unstable; urgency=low
+diff --git a/scripts/wrap-and-sort b/scripts/wrap-and-sort
+index 15c8bb0..6a047a2 100755
+--- a/scripts/wrap-and-sort
++++ b/scripts/wrap-and-sort
+@@ -116,11 +116,23 @@ class WrapAndSortControl(Control):
+         else:
+             control[entry] = ", ".join(packages)
+ 
++    def save(self):
++        if self.opts.dry_run:
++            # Copied from control.py (1 line):
++            content = "\n".join([x.dump() for x in self.paragraphs])
++            control_file = open(self.filename, "r")
++            if content != control_file.read():
++                self.opts.modified_files.append(self.filename);
++            control_file.close()
++        else:
++            super().save()
++
+ 
+ class Install(object):
+-    def __init__(self, filename):
++    def __init__(self, filename, options):
+         self.content = None
+         self.filename = None
++        self.opts = options
+         self.open(filename)
+ 
+     def open(self, filename):
+@@ -128,29 +140,37 @@ class Install(object):
+         self.filename = filename
+         self.content = list(filter(None, [l.strip() for l in open(filename).readlines()]))
+ 
+-    def save(self, filename=None):
+-        if filename:
+-            self.filename = filename
+-        install_file = open(self.filename, "w")
+-        install_file.write("\n".join(self.content) + "\n")
++    def save(self):
++        to_write = "\n".join(self.content) + "\n"
++        install_file = open(self.filename, "w" if not self.opts.dry_run else "r")
++        if self.opts.dry_run:
++            if to_write != install_file.read():
++                self.opts.modified_files.append(self.filename)
++        else:
++            install_file.write(to_write)
+         install_file.close()
+ 
+     def sort(self):
+         self.content = sorted(self.content)
+ 
+ 
+-def remove_trailing_whitespaces(filename):
++def remove_trailing_whitespaces(filename, options):
+     assert os.path.isfile(filename), "%s does not exist." % (filename)
+     content = open(filename).read()
+     if len(content) == 0:
+         return
++    old_content = content
+     content = content.rstrip() + "\n"
+     lines = content.split("\n")
+     lines = [l.rstrip() for l in lines]
+-    new_content = "\n".join(lines)
+-    f = open(filename, "w")
+-    f.write(new_content)
+-    f.close()
++    content = "\n".join(lines)
++    if options.dry_run:
++        if content != old_content:
++            options.modified_files.append(filename)
++    else:
++        f = open(filename, "w")
++        f.write(content)
++        f.close()
+ 
+ 
+ def sort_list(unsorted_list):
+@@ -175,14 +195,14 @@ def wrap_and_sort(options):
+     for copyright_file in copyright_files:
+         if options.verbose:
+             print(copyright_file)
+-        remove_trailing_whitespaces(copyright_file)
++        remove_trailing_whitespaces(copyright_file, options)
+ 
+     pattern = "(dirs|docs|examples|info|install|links|maintscript|manpages)$"
+     install_files = [f for f in options.files if re.search(pattern, f)]
+     for install_file in sorted(install_files):
+         if options.verbose:
+             print(install_file)
+-        install = Install(install_file)
++        install = Install(install_file, options)
+         install.sort()
+         install.save()
+ 
+@@ -235,8 +255,12 @@ def main():
+                       dest="verbose", action="store_true", default=False)
+     parser.add_option("--max-line-length", type='int', default=79,
+                       help="set maximum allowed line length before wrapping (default: %default)")
++    parser.add_option("--dry-run", help="do not modify any file, instead only"
++                      "print the files that would be modified",
++                      dest="dry_run", action="store_true", default=False)
+ 
+     (options, args) = parser.parse_args()
++    options.modified_files = []
+ 
+     if len(args) != 0:
+         parser.error("Unsupported additional parameters specified: %s" %
+@@ -255,5 +279,13 @@ def main():
+ 
+     wrap_and_sort(options)
+ 
++    # Only report at the end, to avoid potential clash with --verbose
++    if options.modified_files:
++        print("--- Would modify the following files: ---")
++        print("\n".join(options.modified_files))
++    elif options.dry_run:
++        print("--- No files need modification ---")
++
++
+ if __name__ == "__main__":
+     main()
+-- 
+2.6.4
+

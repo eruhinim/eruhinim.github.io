@@ -1,0 +1,125 @@
+diff -Nru cups-1.7.1/debian/changelog cups-1.7.1/debian/changelog
+--- cups-1.7.1/debian/changelog	2014-03-20 14:06:33.000000000 -0700
++++ cups-1.7.1/debian/changelog	2014-03-29 21:45:03.000000000 -0700
+@@ -1,3 +1,10 @@
++cups (1.7.1-10.1) UNRELEASED; urgency=medium
++
++  * Non-maintainer upload.
++  * Added Upstart support
++
++ -- Cameron Norman <cameron@cameron-probook>  Tue, 25 Mar 2014 19:06:28 -0700
++
+ cups (1.7.1-10) unstable; urgency=medium
+ 
+   [ Till Kamppeter ]
+diff -Nru cups-1.7.1/debian/control cups-1.7.1/debian/control
+--- cups-1.7.1/debian/control	2014-03-12 03:55:25.000000000 -0700
++++ cups-1.7.1/debian/control	2014-03-29 21:45:04.000000000 -0700
+@@ -203,7 +203,7 @@
+ Depends: ${shlibs:Depends},
+  ${misc:Depends},
+  procps,
+- lsb-base (>= 3),
++ lsb-base (>= 4.1+Debian3),
+  libcups2 (= ${binary:Version}),
+  ssl-cert (>= 1.0.11),
+  adduser,
+diff -Nru cups-1.7.1/debian/cups-daemon.avahi-reload-cups.upstart cups-1.7.1/debian/cups-daemon.avahi-reload-cups.upstart
+--- cups-1.7.1/debian/cups-daemon.avahi-reload-cups.upstart	1969-12-31 16:00:00.000000000 -0800
++++ cups-1.7.1/debian/cups-daemon.avahi-reload-cups.upstart	2014-03-29 21:45:03.000000000 -0700
+@@ -0,0 +1,8 @@
++description "Reload CUPS to ensure remote queues are populated"
++author "Dimitri John Ledkov <dimitrijs.ledkovs@canonicol.com>"
++
++start on started avahi-daemon
++
++task
++
++exec reload cups
+diff -Nru cups-1.7.1/debian/cups-daemon.cups.init cups-1.7.1/debian/cups-daemon.cups.init
+--- cups-1.7.1/debian/cups-daemon.cups.init	2014-03-12 03:55:18.000000000 -0700
++++ cups-1.7.1/debian/cups-daemon.cups.init	2014-03-29 21:45:03.000000000 -0700
+@@ -53,6 +53,17 @@
+     fi
+ }
+ 
++if init_is_upstart; then
++    case "$1" in
++        stop)
++            exit 0
++            ;;
++        *)
++            exit 1
++            ;;
++    esac
++fi
++
+ case "$1" in
+   start)
+ 	log_daemon_msg "Starting $DESC" "$NAME"
+diff -Nru cups-1.7.1/debian/cups-daemon.cups.upstart cups-1.7.1/debian/cups-daemon.cups.upstart
+--- cups-1.7.1/debian/cups-daemon.cups.upstart	1969-12-31 16:00:00.000000000 -0800
++++ cups-1.7.1/debian/cups-daemon.cups.upstart	2014-03-29 21:45:03.000000000 -0700
+@@ -0,0 +1,30 @@
++description "CUPS - Common Unix Printing Service"
++
++start on filesystem
++stop on runlevel [016]
++
++expect fork
++respawn
++
++pre-start script
++    [ -x /usr/sbin/cupsd ] || { stop; exit 0; }
++
++    # load modules for parallel port support
++    [ -r /etc/default/cups ] && . /etc/default/cups || true 
++    if [ "$LOAD_LP_MODULE" = "yes" -a \
++         -f /usr/lib/cups/backend/parallel -a \
++         -f /proc/modules -a \
++         -x /sbin/modprobe ]; then
++        modprobe -q -b lp || true
++        modprobe -q -b ppdev || true
++        modprobe -q -b parport_pc || true
++    fi
++
++    mkdir -p /var/run/cups/certs
++
++    if [ -x /lib/init/apparmor-profile-load ]; then 
++        /lib/init/apparmor-profile-load usr.sbin.cupsd
++    fi
++end script
++
++exec /usr/sbin/cupsd
+diff -Nru cups-1.7.1/debian/rules cups-1.7.1/debian/rules
+--- cups-1.7.1/debian/rules	2014-03-12 03:55:18.000000000 -0700
++++ cups-1.7.1/debian/rules	2014-03-29 21:45:03.000000000 -0700
+@@ -71,8 +71,8 @@
+ 
+ override_dh_install:
+ ifeq ($(derives_from_ubuntu),yes)
+-	# Use upstart script on Ubuntu; we need to hide it away for Debian
+-	# builds, as dh_installinit does not have a --sysvinit-only
++	# Delete Debian's Upstart jobs and copy Ubuntu's over
++	rm -f debian/*.upstart
+ 	cp debian/local/*.upstart debian
+ endif
+ 	dh_install
+@@ -133,7 +133,8 @@
+ ifeq ($(derives_from_ubuntu),yes)
+ 	dh_installinit --name=cups --upstart-only
+ else
+-	dh_installinit --name=cups
++	# avahi-reload-cups used by Upstart to avoid waiting for Avahi before starting
++	dh_installinit --name=cups --name=avahi-reload-cups
+ endif
+ 
+ override_dh_fixperms:
+@@ -164,7 +165,6 @@
+ 	rm -f man/client.conf.man packaging/cups.list
+ 	rm -f conf/mime.convs conf/snmp.conf init/org.cups.cups-lpd.plist
+ 	[ ! -f Makedefs ] || make distclean
+-	rm -f debian/*.upstart # master copy is in debian/local
+ 
+ override_dh_installdocs:
+ 	dh_installdocs -plibcupsimage2-dev --link-doc=libcupsimage2

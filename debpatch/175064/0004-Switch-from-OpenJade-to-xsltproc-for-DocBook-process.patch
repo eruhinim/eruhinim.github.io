@@ -1,0 +1,332 @@
+From 0d0e39c4e53c02251785a53924112ae36236be9d Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Tue, 28 Mar 2017 03:09:48 +0200
+Subject: [PATCH 4/8] Switch from OpenJade to xsltproc for DocBook processing
+
+OpenJade seems to have stagnated upstream, and xsltproc is considered
+one of the fastest XML processors out there, and more importantly it
+is maintained, and used more widely.
+---
+ copyright-format/Makefile | 11 +----------
+ copyright-format/html.dsl | 29 -----------------------------
+ debconf_spec/Makefile     | 11 +----------
+ debconf_spec/html.dsl     | 29 -----------------------------
+ debian/control            |  6 +++---
+ debian/rules              | 24 +++++++++---------------
+ docbook.mk                | 13 +++++++++++++
+ xsl/common.xsl            | 15 +++++++++++++++
+ xsl/html-chunk.xsl        | 16 ++++++++++++++++
+ xsl/html-single.xsl       | 10 ++++++++++
+ xsl/text.xsl              | 10 ++++++++++
+ 11 files changed, 78 insertions(+), 96 deletions(-)
+ delete mode 100644 copyright-format/html.dsl
+ delete mode 100644 debconf_spec/html.dsl
+ create mode 100644 docbook.mk
+ create mode 100644 xsl/common.xsl
+ create mode 100644 xsl/html-chunk.xsl
+ create mode 100644 xsl/html-single.xsl
+ create mode 100644 xsl/text.xsl
+
+diff --git a/copyright-format/Makefile b/copyright-format/Makefile
+index 31d6e7a..36568e1 100644
+--- a/copyright-format/Makefile
++++ b/copyright-format/Makefile
+@@ -1,15 +1,6 @@
+ all: copyright-format-1.0.txt.gz copyright-format-1.0.html
+ 
+-copyright-format-1.0.html: copyright-format-1.0.xml html.dsl
+-	openjade -V nochunks -t sgml -d html.dsl \
+-		/usr/share/xml/declaration/xml.dcl $< > $@
+-	-tidy -raw -q -i -m -f /dev/null $@
+-
+-copyright-format-1.0.txt: copyright-format-1.0.html
+-	links -dump $< | perl -pe 's/[\r\0]//g' > $@
+-
+-copyright-format-1.0.txt.gz: copyright-format-1.0.txt
+-	gzip -ncf9 $< > $@
++include ../docbook.mk
+ 
+ clean:
+ 	rm -f *.css *.html *.txt *.txt.gz
+diff --git a/copyright-format/html.dsl b/copyright-format/html.dsl
+deleted file mode 100644
+index 2774825..0000000
+--- a/copyright-format/html.dsl
++++ /dev/null
+@@ -1,29 +0,0 @@
+-<!DOCTYPE style-sheet PUBLIC "-//James Clark//DTD DSSSL Style Sheet//EN" [
+-<!ENTITY docbook.dsl PUBLIC "-//Norman Walsh//DOCUMENT DocBook HTML Stylesheet//EN" CDATA dsssl>
+-]>
+-<style-sheet>
+-
+-<style-specification id="html" use="docbook">
+-<style-specification-body> 
+-
+-(define %generate-article-toc% #t)
+-(define %generate-article-titlepage% #t)
+-(define %generate-legalnotice-link% #t)
+-(define (article-titlepage-recto-elements)
+-	(list (normalize "title")
+-	(normalize "subtitle")
+-	(normalize "authorgroup")
+-	(normalize "author")
+-	(normalize "releaseinfo")
+-	(normalize "copyright")
+-	(normalize "pubdate")
+-	(normalize "revhistory")
+-	(normalize "legalnotice")
+-	(normalize "abstract")))
+-
+-</style-specification-body>
+-</style-specification>
+-
+-<external-specification id="docbook" document="docbook.dsl">
+-
+-</style-sheet>
+diff --git a/debconf_spec/Makefile b/debconf_spec/Makefile
+index bc6614d..3e03c49 100644
+--- a/debconf_spec/Makefile
++++ b/debconf_spec/Makefile
+@@ -1,15 +1,6 @@
+ all: debconf_specification.txt.gz debconf_specification.html
+ 
+-%.html: %.xml html.dsl
+-	openjade -V nochunks -t sgml -d html.dsl \
+-		/usr/share/xml/declaration/xml.dcl $< > $@
+-	-tidy -raw -q -i -m -f /dev/null $@
+-
+-%.txt: %.html
+-	links -dump $< | perl -pe 's/[\r\0]//g' > $@
+-
+-%.txt.gz: %.txt
+-	gzip -ncf9 $< > $@
++include ../docbook.mk
+ 
+ clean:
+ 	rm -f *.css *.html *.txt *.txt.gz
+diff --git a/debconf_spec/html.dsl b/debconf_spec/html.dsl
+deleted file mode 100644
+index 2774825..0000000
+--- a/debconf_spec/html.dsl
++++ /dev/null
+@@ -1,29 +0,0 @@
+-<!DOCTYPE style-sheet PUBLIC "-//James Clark//DTD DSSSL Style Sheet//EN" [
+-<!ENTITY docbook.dsl PUBLIC "-//Norman Walsh//DOCUMENT DocBook HTML Stylesheet//EN" CDATA dsssl>
+-]>
+-<style-sheet>
+-
+-<style-specification id="html" use="docbook">
+-<style-specification-body> 
+-
+-(define %generate-article-toc% #t)
+-(define %generate-article-titlepage% #t)
+-(define %generate-legalnotice-link% #t)
+-(define (article-titlepage-recto-elements)
+-	(list (normalize "title")
+-	(normalize "subtitle")
+-	(normalize "authorgroup")
+-	(normalize "author")
+-	(normalize "releaseinfo")
+-	(normalize "copyright")
+-	(normalize "pubdate")
+-	(normalize "revhistory")
+-	(normalize "legalnotice")
+-	(normalize "abstract")))
+-
+-</style-specification-body>
+-</style-specification>
+-
+-<external-specification id="docbook" document="docbook.dsl">
+-
+-</style-sheet>
+diff --git a/debian/control b/debian/control
+index 666ec76..0f59405 100644
+--- a/debian/control
++++ b/debian/control
+@@ -9,17 +9,17 @@ Section: doc
+ Priority: optional
+ Build-Depends:
+  debiandoc-sgml (>= 1.1.47),
+- docbook-dsssl,
+  docbook-xml,
++ docbook-xsl,
+  ghostscript,
+  libtext-multimarkdown-perl,
++ libxml2-utils,
+  links | elinks,
+- openjade,
+  opensp,
+- sgml-data,
+  texlive,
+  texlive-latex-extra,
+  tidy,
++ xsltproc,
+ Standards-Version: 3.9.9
+ Vcs-Browser: https://anonscm.debian.org/git/dbnpolicy/policy.git
+ Vcs-Git: https://anonscm.debian.org/git/dbnpolicy/policy.git
+diff --git a/debian/rules b/debian/rules
+index 88ca46e..d21ef57 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -20,6 +20,8 @@ LIBDIR	:= $(TMPTOP)/usr/share/doc-base
+ # with each of these: validate, build text, HTML, and one-page HTML output.
+ SGML_FILES  := policy menu-policy perl-policy upgrading-checklist
+ 
++XML_VERSION := copyright-format/version.xml debconf_spec/include/version.xml
++
+ # Markdown source files in the top-level directory.  We generate text and
+ # HTML versions from these.
+ MDWN_FILES  := Process README
+@@ -60,9 +62,9 @@ FILES_TO_CLEAN	:= $(SGML_FILES:=.txt) $(SGML_FILES:=.txt.gz)		\
+ 		   $(MDWN_FILES:=.html) $(MDWN_FILES:=.txt)		\
+ 		   policy.pdf.gz policy.ps.gz				\
+ 		   policy.pdf policy.ps policy.tpt policy.txt		\
+-		   copyright-format/version.xml				\
+ 		   autopkgtest/version.txt				\
+-		   debconf_spec/include/version.xml version.ent		\
++		   $(XML_VERSION)					\
++		   version.ent						\
+ 		   debian/files
+ 
+ # Install files and directories with the correct ownership and permissions.
+@@ -74,16 +76,15 @@ all build build-indep: stamp-build
+ build-arch:
+ stamp-build: $(MDWN_FILES:=.md)				\
+ 	     $(SGML_FILES:=.sgml)			\
++	     $(XML_VERSION)				\
+ 	     version.ent				\
+ 	     copyright-format/copyright-format-1.0.xml	\
+-	     copyright-format/version.xml		\
+ 	     autopkgtest/autopkgtest.md			\
+ 	     autopkgtest/version.txt			\
+ 	     debconf_spec/include/commands.xml		\
+ 	     debconf_spec/include/priorities.xml	\
+ 	     debconf_spec/include/statuscodes.xml	\
+-	     debconf_spec/include/types.xml		\
+-	     debconf_spec/include/version.xml
++	     debconf_spec/include/types.xml
+ 	$(MAKE) $(SGML_FILES:=.sgml.validate) \
+ 		$(SGML_FILES:=.html.tar.gz) \
+                 $(SGML_FILES:=-1.html) \
+@@ -99,21 +100,14 @@ stamp-build: $(MDWN_FILES:=.md)				\
+ # Create the version files for inclusion in the various documents.  We want
+ # to put the Policy version and date in each document, even if they
+ # separately have their own versions.
+-configure: version.ent copyright-format/version.xml \
+-	   autopkgtest/version.txt \
+-	   debconf_spec/include/version.xml
++configure: version.ent $(XML_VERSION) autopkgtest/version.txt
+ version.ent: debian/changelog
+ 	rm -f $@
+ 	echo "<!entity version \"$(version)\">" >> $@
+ 	echo "<!entity date    \"$(date)\">"	>> $@
+-copyright-format/version.xml: debian/changelog
+-	rm -f $@
+-	echo '<?xml version="1.0" standalone="no"?>' >  $@
+-	echo '<!ENTITY version "$(version)">'        >> $@
+-	echo '<!ENTITY date    "$(date)">'           >> $@
+-debconf_spec/include/version.xml: debian/changelog
++$(XML_VERSION): debian/changelog
+ 	rm -f $@
+-	echo '<?xml version="1.0" standalone="no"?>' >  $@
++	echo '<?xml version="1.0" encoding="utf-8"?>' > $@
+ 	echo '<!ENTITY version "$(version)">'        >> $@
+ 	echo '<!ENTITY date    "$(date)">'           >> $@
+ autopkgtest/version.txt: debian/changelog
+diff --git a/docbook.mk b/docbook.mk
+new file mode 100644
+index 0000000..18e09b7
+--- /dev/null
++++ b/docbook.mk
+@@ -0,0 +1,13 @@
++XSLDIR   ?= ../xsl
++XSLTPROC = xsltproc --nonet --xinclude
++
++%.html: %.xml $(XSLDIR)/html-single.xsl
++	$(XSLTPROC) $(XSLPARAMS) $(XSLDIR)/html-single.xsl $< > $@
++
++%.txt: %.xml $(XSLDIR)/text.xsl
++	$(XSLTPROC) $(XSLPARAMS) $(XSLDIR)/text.xsl $< > $@.html
++	links -dump $@.html | perl -pe 's/[\r\0]//g' > $@
++	rm -f $@.html
++
++%.txt.gz: %.txt
++	gzip -ncf9 $< > $@
+diff --git a/xsl/common.xsl b/xsl/common.xsl
+new file mode 100644
+index 0000000..cfa406d
+--- /dev/null
++++ b/xsl/common.xsl
+@@ -0,0 +1,15 @@
++<?xml version="1.0" encoding="utf-8"?>
++
++<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="1.0">
++
++  <xsl:param name="header.navigation">1</xsl:param>
++  <xsl:param name="footer.navigation">1</xsl:param>
++
++  <xsl:param name="generate.consistent.ids">1</xsl:param>
++
++  <xsl:param name="section.autolabel">1</xsl:param>
++  <xsl:param name="section.label.includes.component.label">1</xsl:param>
++
++  <xsl:param name="make.valid.html">1</xsl:param>
++
++</xsl:stylesheet>
+diff --git a/xsl/html-chunk.xsl b/xsl/html-chunk.xsl
+new file mode 100644
+index 0000000..eb29f5d
+--- /dev/null
++++ b/xsl/html-chunk.xsl
+@@ -0,0 +1,16 @@
++<?xml version="1.0" encoding="utf-8"?>
++
++<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="1.0">
++
++  <xsl:import href="http://docbook.sourceforge.net/release/xsl/current/xhtml/chunk.xsl"/>
++  <xsl:include href="common.xsl"/>
++
++  <xsl:output method="html" encoding="UTF-8"/>
++
++  <xsl:param name="use.id.as.filename">1</xsl:param>
++
++  <xsl:param name="chunk.section.depth">0</xsl:param>
++  <xsl:param name="chunker.output.indent">yes</xsl:param>
++  <xsl:param name="chunker.output.encoding" select="'utf-8'"/>
++
++</xsl:stylesheet>
+diff --git a/xsl/html-single.xsl b/xsl/html-single.xsl
+new file mode 100644
+index 0000000..14e711e
+--- /dev/null
++++ b/xsl/html-single.xsl
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="utf-8"?>
++
++<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="1.0">
++
++  <xsl:import href="http://docbook.sourceforge.net/release/xsl/current/xhtml/docbook.xsl"/>
++  <xsl:include href="common.xsl"/>
++
++  <xsl:output method="html" encoding="UTF-8" indent="yes"/>
++
++</xsl:stylesheet>
+diff --git a/xsl/text.xsl b/xsl/text.xsl
+new file mode 100644
+index 0000000..46d8c6f
+--- /dev/null
++++ b/xsl/text.xsl
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="utf-8"?>
++
++<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="1.0">
++
++  <xsl:import href="http://docbook.sourceforge.net/release/xsl/current/xhtml/docbook.xsl"/>
++  <xsl:include href="common.xsl"/>
++
++  <xsl:param name="preferred.mediaobject.role">text</xsl:param>
++
++</xsl:stylesheet>
+-- 
+2.12.2.564.g063fe858b8
+

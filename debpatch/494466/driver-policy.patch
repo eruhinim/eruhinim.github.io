@@ -1,0 +1,90 @@
+Index: debian/bootstrap-base.templates
+===================================================================
+--- debian/bootstrap-base.templates	(revision 54931)
++++ debian/bootstrap-base.templates	(working copy)
+@@ -62,6 +62,23 @@
+  The package ${GENERATOR} that was selected to generate the
+  initrd is not supported.
+ 
++Template: base-installer/initramfs-tools/driver-policy
++Type: select
++Choices-C: most, dep
++# :sl3:
++__Choices: generic: include all available drivers, targeted: only include drivers needed for this system
++# :sl3:
++_Description: Drivers to include in the initrd:
++ The primairy function of an initrd is to allow the kernel to mount the
++ root file system. It therefore needs to contain all drivers and supporting
++ programs required to do that.
++ .
++ A generic initrd is much larger than a targeted one and may even be so
++ large that some bootloaders are unable to load it but has the advantage that
++ it can be used to boot the target system on almost any hardware. With the
++ smaller targeted initrd there is a very small chance that not all needed
++ drivers are included.
++
+ Template: base-installer/kernel/failed-install
+ Type: error
+ _Description: Unable to install the selected kernel
+Index: debian/templates-arch
+===================================================================
+--- debian/templates-arch	(revision 54931)
++++ debian/templates-arch	(working copy)
+@@ -18,6 +18,14 @@
+ Description: for internal use; can be preseeded
+  Package to use to generate initramfs
+ 
++Template: base-installer/kernel/linux/initramfs-tools/driver-policy
++Type: string
++Default: most
++Default[amd64]: dep
++Default[i386]: dep
++Description: for internal use
++ Default driver inclusion policy for initramfs-tools
++
+ Template: base-installer/kernel/linux/extra-packages
+ Type: string
+ Default:
+Index: library.sh
+===================================================================
+--- library.sh	(revision 54931)
++++ library.sh	(working copy)
+@@ -512,7 +512,7 @@
+ 
+ 		# initramfs-tools needs busybox pre-installed (and only
+ 		# recommends it)
+-		if [ "$rd_generator" = "initramfs-tools" ]; then
++		if [ "$rd_generator" = initramfs-tools ]; then
+ 			if ! log-output -t base-installer apt-install busybox; then
+ 				db_subst base-installer/kernel/failed-package-install PACKAGE busybox
+ 				exit_error base-installer/kernel/failed-package-install
+@@ -549,6 +549,29 @@
+ 			rm $QUEUEFILE
+ 			FIRSTMODULE=0
+ 		done
++
++		# Select and set driver inclusion policy for initramfs-tools
++		if [ "$rd_generator" = initramfs-tools ]; then
++			if db_get base-installer/initramfs-tools/driver-policy && \
++			   [ "$RET" = "" ]; then
++				# Get default for architecture
++				db_get base-installer/kernel/linux/initramfs-tools/driver-policy
++				db_set base-installer/initramfs-tools/driver-policy "$RET"
++			fi
++			db_input medium base-installer/initramfs-tools/driver-policy || true
++			if ! db_go; then
++				db_progress stop
++				exit 10
++			fi
++
++			db_get base-installer/initramfs-tools/driver-policy
++			cat > /target/etc/initramfs-tools/conf.d/driver-policy <<EOF
++# Driver inclusion policy selected during installation
++# Note: this setting overrides the value set in the file
++# /etc/initramfs-tools/initramfs.conf
++MODULES=$RET
++EOF
++		fi
+ 	else
+ 		info "Not installing an initrd generator."
+ 	fi

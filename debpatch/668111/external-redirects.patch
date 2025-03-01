@@ -1,0 +1,76 @@
+diff --git a/apt-0.8.15.10/methods/http.cc b/apt-0.8.15.10.wip/methods/http.cc
+index 65a0cbb..cbc6c69 100644
+--- a/apt-0.8.15.10/methods/http.cc
++++ b/apt-0.8.15.10.wip/methods/http.cc
+@@ -967,7 +967,10 @@ HttpMethod::DealWithHeaders(FetchResult &Res,ServerState *Srv)
+       else
+       {
+          NextURI = DeQuoteString(Srv->Location);
+-         return TRY_AGAIN_OR_REDIRECT;
++         URI tmpURI = NextURI;
++         // Do not allow a redirection to switch protocol
++         if (tmpURI.Access == "http")
++            return TRY_AGAIN_OR_REDIRECT;
+       }
+       /* else pass through for error message */
+    }
+diff --git a/apt-0.8.15.10/apt-pkg/acquire-worker.cc b/apt-0.8.15.10.wip/apt-pkg/acquire-worker.cc
+index 75e0323..4c14daf 100644
+--- a/apt-0.8.15.10/apt-pkg/acquire-worker.cc
++++ b/apt-0.8.15.10.wip/apt-pkg/acquire-worker.cc
+@@ -242,6 +242,18 @@ bool pkgAcquire::Worker::RunMessages()
+  
+             string NewURI = LookupTag(Message,"New-URI",URI.c_str());
+             Itm->URI = NewURI;
++
++	    pkgAcquire::Item *Owner = Itm->Owner;
++	    pkgAcquire::ItemDesc Desc = *Itm;
++
++            // Change the status so that it can be dequeued
++            Owner->Status = pkgAcquire::Item::StatIdle;
++            // Since it is going to be put on the queue again with
++            // Enqueue, and that increases a counter, it must be
++            // dequeued with Dequeue, to keep the counter in sync
++            OwnerQ->Owner->Dequeue(Owner);
++            OwnerQ->Owner->Enqueue(Desc);
++            OwnerQ->Cycle();
+             break;
+          }
+    
+diff --git a/apt-0.8.15.10/apt-pkg/acquire-method.cc b/apt-0.8.15.10.wip/apt-pkg/acquire-method.cc
+index 294d78f..eddf443 100644
+--- a/apt-0.8.15.10/apt-pkg/acquire-method.cc
++++ b/apt-0.8.15.10.wip/apt-pkg/acquire-method.cc
+@@ -417,26 +417,19 @@ void pkgAcqMethod::Status(const char *Format,...)
+ 									/*}}}*/
+ // AcqMethod::Redirect - Send a redirect message                       /*{{{*/
+ // ---------------------------------------------------------------------
+-/* This method sends the redirect message and also manipulates the queue
+-   to keep the pipeline synchronized. */
++/* This method sends the redirect message and dequeues the item. */
+ void pkgAcqMethod::Redirect(const string &NewURI)
+ {
+    std::cout << "103 Redirect\nURI: " << Queue->Uri << "\n"
+ 	     << "New-URI: " << NewURI << "\n"
+ 	     << "\n" << std::flush;
+ 
+-   // Change the URI for the request.
+-   Queue->Uri = NewURI;
+-
+-   /* To keep the pipeline synchronized, move the current request to
+-      the end of the queue, past the end of the current pipeline. */
+-   FetchItem *I;
+-   for (I = Queue; I->Next != 0; I = I->Next) ;
+-   I->Next = Queue;
++   // Dequeue
++   FetchItem *Tmp = Queue;
+    Queue = Queue->Next;
+-   I->Next->Next = 0;
+-   if (QueueBack == 0)
+-      QueueBack = I->Next;
++   delete Tmp;
++   if (Tmp == QueueBack)
++      QueueBack = Queue;
+ }
+                                                                         /*}}}*/
+ // AcqMethod::FetchResult::FetchResult - Constructor			/*{{{*/

@@ -1,0 +1,121 @@
+From 8e035834f083ad232be3ad180edd7be02015c31b Mon Sep 17 00:00:00 2001
+From: Simon McVittie <smcv@debian.org>
+Date: Sun, 29 Apr 2018 11:47:47 +0100
+Subject: [PATCH] qemu, lxc, lxd: Try to use a user account in the 1000-59999
+ range
+
+Some autopkgtests, such as the ones for dbus, require an ordinary user
+account with a non-trivial home directory. Debian Policy says we are
+most likely to find such accounts in the 1000-59999 range, and the
+vmdebootstrap invocation suggested in autopkgtest-virt-qemu(1)
+creates one.
+
+These virt providers look for uids >= 500, which is usually OK,
+because adduser --system creates system users in the range 100-999,
+starting from the bottom and working upwards.
+
+However, some system users for systemd daemons are now allocated
+dynamically by systemd-sysusers, which allocates uids in the system
+range 100-999 from the top down: on my test VM, the offending user
+account was systemd-coredump, which is used by systemd-coredump but
+currently created by /usr/lib/sysusers.d/systemd.conf in systemd.
+This is not a suitable account for automated testing, because it
+cannot write to its home directory '/' and has the nologin shell.
+
+Signed-off-by: Simon McVittie <smcv@debian.org>
+Closes: #897170
+---
+ virt/autopkgtest-virt-lxc  | 17 ++++++++++++++++-
+ virt/autopkgtest-virt-lxd  | 15 +++++++++++++++
+ virt/autopkgtest-virt-qemu | 21 ++++++++++++++++++++-
+ 3 files changed, 51 insertions(+), 2 deletions(-)
+
+diff --git a/virt/autopkgtest-virt-lxc b/virt/autopkgtest-virt-lxc
+index 2dceb72..b47f27b 100755
+--- a/virt/autopkgtest-virt-lxc
++++ b/virt/autopkgtest-virt-lxc
+@@ -139,7 +139,22 @@ def determine_normal_user(lxc_name):
+ 
+     global capabilities, normal_user
+ 
+-    # get the first UID >= 500
++    # get the first UID in the Debian Policy §9.2.2 "dynamically allocated
++    # user account" range
++    cmd = ['lxc-attach', '--name', lxc_name, '--', 'sh', '-c',
++           'getent passwd | sort -t: -nk3 | '
++           "awk -F: '{if ($3 >= 1000 && $3 <= 59999) { print $1; exit } }'"]
++    out = VirtSubproc.execute_timeout(None, 10, sudoify(cmd),
++                                      stdout=subprocess.PIPE)[1].strip()
++    if out:
++        normal_user = out
++        capabilities.append('suggested-normal-user=' + normal_user)
++        adtlog.debug('determine_normal_user: got user "%s"' % normal_user)
++        return
++    else:
++        adtlog.debug('determine_normal_user: no uid in [1000,59999] available')
++
++    # failing that, get the first UID >= 500
+     cmd = ['lxc-attach', '--name', lxc_name, '--', 'sh', '-c',
+            'getent passwd | sort -t: -nk3 | '
+            "awk -F: '{if ($3 >= 500) { print $1; exit } }'"]
+diff --git a/virt/autopkgtest-virt-lxd b/virt/autopkgtest-virt-lxd
+index a79316f..30e6666 100755
+--- a/virt/autopkgtest-virt-lxd
++++ b/virt/autopkgtest-virt-lxd
+@@ -115,6 +115,21 @@ def determine_normal_user():
+ 
+     global capabilities, normal_user
+ 
++    # get the first UID in the Debian Policy §9.2.2 "dynamically allocated
++    # user account" range
++    cmd = ['lxc', 'exec', container_name, '--', 'sh', '-c',
++           'getent passwd | sort -t: -nk3 | '
++           "awk -F: '{if ($3 >= 1000 && $3 <= 59999) { print $1; exit } }'"]
++    out = VirtSubproc.execute_timeout(None, 10, cmd,
++                                      stdout=subprocess.PIPE)[1].strip()
++    if out:
++        normal_user = out
++        capabilities.append('suggested-normal-user=' + normal_user)
++        adtlog.debug('determine_normal_user: got user "%s"' % normal_user)
++        return
++    else:
++        adtlog.debug('determine_normal_user: no uid in [1000,59999] available')
++
+     # get the first UID >= 500
+     cmd = ['lxc', 'exec', container_name, '--', 'sh', '-c',
+            'getent passwd | sort -t: -nk3 | '
+diff --git a/virt/autopkgtest-virt-qemu b/virt/autopkgtest-virt-qemu
+index afb82e7..37b5db5 100755
+--- a/virt/autopkgtest-virt-qemu
++++ b/virt/autopkgtest-virt-qemu
+@@ -494,7 +494,26 @@ def determine_normal_user(shared_dir):
+         normal_user = args.user
+         return
+ 
+-    # get the first UID >= 500
++    # get the first UID in the Debian Policy §9.2.2 "dynamically allocated
++    # user account" range
++    term = VirtSubproc.get_unix_socket(os.path.join(workdir, 'ttyS1'))
++    term.send(b"getent passwd | sort -t: -nk3 | "
++              b"awk -F: '{if ($3 >= 1000 && $3 <= 59999) { print $1; exit } }'"
++              b"> /run/autopkgtest/shared/normal_user\n")
++    with VirtSubproc.timeout(5, 'timed out on determining normal user'):
++        outfile = os.path.join(shared_dir, 'normal_user')
++        while not os.path.exists(outfile):
++            time.sleep(0.2)
++    with open(outfile) as f:
++        out = f.read()
++        if out:
++            normal_user = out.strip()
++            adtlog.debug('determine_normal_user: got user "%s"' % normal_user)
++            return
++        else:
++            adtlog.debug('determine_normal_user: no uid in [1000,59999] available')
++
++    # failing that, get the first UID >= 500
+     term = VirtSubproc.get_unix_socket(os.path.join(workdir, 'ttyS1'))
+     term.send(b"getent passwd | sort -t: -nk3 | "
+               b"awk -F: '{if ($3 >= 500) { print $1; exit } }'"
+-- 
+2.17.0
+

@@ -1,0 +1,113 @@
+commit f492255b508655a291704076879f39ee82322bfb
+Author: Guillem Jover <guillem@debian.org>
+Date:   Thu May 21 21:10:45 2015 +0200
+
+    dpkg-statoverride: Fix setting the SE Linux context on --update
+    
+    We need to pass the file type in the mode so that the SE labelling
+    function does anything at all.
+    
+    Closes: #786435
+
+diff --git a/debian/changelog b/debian/changelog
+index 081f62e..fa16040 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -5,6 +5,8 @@ dpkg (1.18.1) UNRELEASED; urgency=low
+     This fixes build failures on armel, armhf, ppc64el and s390x.
+   * Do not allow pathnames with embedded newlines in dpkg-deb and dpkg.
+     Closes: #720761
++  * Fix setting the SE Linux context on «dpkg-statoverride --update».
++    Closes: #786435
+ 
+   [ Updated programs translations ]
+   * German (Sven Joachim).
+diff --git a/src/archives.c b/src/archives.c
+index d9b35cf..c59b909 100644
+--- a/src/archives.c
++++ b/src/archives.c
+@@ -649,7 +649,7 @@ tarobject(void *ctx, struct tar_entry *ti)
+   int statr;
+   ssize_t r;
+   struct stat stab, stabtmp;
+-  struct file_stat *st;
++  struct file_stat nodestat;
+   struct fileinlist *nifd, **oldnifd;
+   struct pkgset *divpkgset;
+   struct pkginfo *otherpkg;
+@@ -698,10 +698,12 @@ tarobject(void *ctx, struct tar_entry *ti)
+     }
+   }
+ 
+-  if (nifd->namenode->statoverride)
+-    st = nifd->namenode->statoverride;
+-  else
+-    st = &ti->stat;
++  if (nifd->namenode->statoverride) {
++    nodestat = *nifd->namenode->statoverride;
++    nodestat.mode |= ti->stat.mode & S_IFMT;
++  } else {
++    nodestat = ti->stat;
++  }
+ 
+   usenode = namenodetouse(nifd->namenode, tc->pkg, &tc->pkg->available);
+   usename = usenode->name;
+@@ -958,7 +960,7 @@ tarobject(void *ctx, struct tar_entry *ti)
+      */
+ 
+     /* Extract whatever it is as .dpkg-new ... */
+-    tarobject_extract(tc, ti, fnamenewvb.buf, st, nifd->namenode);
++    tarobject_extract(tc, ti, fnamenewvb.buf, &nodestat, nifd->namenode);
+   }
+ 
+   /* For shared files, check now if the object matches. */
+@@ -970,9 +972,9 @@ tarobject(void *ctx, struct tar_entry *ti)
+   if (refcounting && !fc_overwrite)
+     return 0;
+ 
+-  tarobject_set_perms(ti, fnamenewvb.buf, st);
++  tarobject_set_perms(ti, fnamenewvb.buf, &nodestat);
+   tarobject_set_mtime(ti, fnamenewvb.buf);
+-  tarobject_set_se_context(fnamevb.buf, fnamenewvb.buf, st->mode);
++  tarobject_set_se_context(fnamevb.buf, fnamenewvb.buf, nodestat.mode);
+ 
+   /*
+    * CLEANUP: Now we have extracted the new object in .dpkg-new (or,
+diff --git a/src/statcmd.c b/src/statcmd.c
+index fd93c28..011bc49 100644
+--- a/src/statcmd.c
++++ b/src/statcmd.c
+@@ -163,7 +163,7 @@ statdb_node_apply(const char *filename, struct file_stat *filestat)
+ {
+ 	if (chown(filename, filestat->uid, filestat->gid) < 0)
+ 		ohshite(_("error setting ownership of '%.255s'"), filename);
+-	if (chmod(filename, filestat->mode))
++	if (chmod(filename, filestat->mode & ~S_IFMT))
+ 		ohshite(_("error setting permissions of '%.255s'"), filename);
+ 
+ 	dpkg_selabel_load();
+@@ -197,7 +197,7 @@ statdb_node_print(FILE *out, struct filenamenode *file)
+ 	else
+ 		fprintf(out, "#%d ", filestat->gid);
+ 
+-	fprintf(out, "%o %s\n", filestat->mode, file->name);
++	fprintf(out, "%o %s\n", filestat->mode & ~S_IFMT, file->name);
+ }
+ 
+ static void
+@@ -261,11 +261,13 @@ statoverride_add(const char *const *argv)
+ 	if (opt_update) {
+ 		struct stat st;
+ 
+-		if (stat(filename, &st) == 0)
++		if (stat(filename, &st) == 0) {
++			(*filestat)->mode |= st.st_mode & S_IFMT;
+ 			statdb_node_apply(filename, *filestat);
+-		else if (opt_verbose)
++		} else if (opt_verbose) {
+ 			warning(_("--update given but %s does not exist"),
+ 			        filename);
++		}
+ 	}
+ 
+ 	statdb_write();

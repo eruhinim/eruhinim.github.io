@@ -1,0 +1,208 @@
+From 13666455fe3ef5d2aa1d926969fce431ffe42e4c Mon Sep 17 00:00:00 2001
+From: "Guilherme G. Piccoli" <gpiccoli@canonical.com>
+Date: Wed, 8 Jul 2020 09:54:25 -0300
+Subject: [PATCH] d/initramfs/cryptroot-script: Allow some retries on
+ local-block stage
+
+Currently, cryptsetup try mounting encrypted rootfs only in local-top,
+failing if not possible. Hence cases like LUKS on top of RAID1 (if the
+array is degraded) cannot work properly.
+
+This patch allows cryptsetup to retry on local-block stage, relying in
+a heuristic based on ROOTDELAY and on initramfs looping at local-block
+phase. We also added a script to local-bottom stage in order to clean
+some control files used to track progress in local-block.
+
+The tests with Debian Buster were successful; we created RAID1 and a
+LUKS volume on top of it, to hold the rootfs. By removing one disk of
+RAID1, we fail to boot without the patch (initramfs-tools drops into a
+shell), whereas with the patch we have the boot succeeding.
+
+Signed-off-by: Guilherme G. Piccoli <gpiccoli@canonical.com>
+---
+ debian/cryptsetup-initramfs.install           |  1 +
+ debian/functions                              |  2 +
+ .../initramfs/scripts/local-block/cryptroot   |  4 ++
+ .../initramfs/scripts/local-bottom/cryptroot  | 23 ++++++
+ debian/initramfs/scripts/local-top/cryptroot  | 70 +++++++++++++------
+ 5 files changed, 80 insertions(+), 20 deletions(-)
+ create mode 100644 debian/initramfs/scripts/local-bottom/cryptroot
+
+diff --git a/debian/cryptsetup-initramfs.install b/debian/cryptsetup-initramfs.install
+index 026ea37c0ff4..6780893ac2d2 100644
+--- a/debian/cryptsetup-initramfs.install
++++ b/debian/cryptsetup-initramfs.install
+@@ -5,5 +5,6 @@ debian/initramfs/hooks/*                            /usr/share/initramfs-tools/h
+ debian/initramfs/scripts/local-block/cryptroot      /usr/share/initramfs-tools/scripts/local-block/
+ debian/initramfs/scripts/local-bottom/cryptgnupg-sc /usr/share/initramfs-tools/scripts/local-bottom/
+ debian/initramfs/scripts/local-bottom/cryptopensc   /usr/share/initramfs-tools/scripts/local-bottom/
++debian/initramfs/scripts/local-bottom/cryptroot     /usr/share/initramfs-tools/scripts/local-bottom/
+ debian/initramfs/scripts/local-top/cryptopensc      /usr/share/initramfs-tools/scripts/local-top/
+ debian/initramfs/scripts/local-top/cryptroot        /usr/share/initramfs-tools/scripts/local-top/
+diff --git a/debian/functions b/debian/functions
+index 54c7630b9649..673e94305251 100644
+--- a/debian/functions
++++ b/debian/functions
+@@ -9,6 +9,8 @@ else
+     TABFILE="${TABFILE-/etc/crypttab}"
+ fi
+ export DM_DEFAULT_NAME_MANGLING_MODE=hex # for dmsetup(8)
++export CRYPTR_LOCAL_BLOCK="/run/cryptroot.local-block"
++export CRYPTR_CNT_FILE="/run/cryptroot.initrd.cnt"
+ 
+ # Logging helpers. Send the argument list to plymouth(1), or fold it
+ # and print it to the standard error.
+diff --git a/debian/initramfs/scripts/local-block/cryptroot b/debian/initramfs/scripts/local-block/cryptroot
+index 8a9b4c02c54d..8719fb6b4801 100644
+--- a/debian/initramfs/scripts/local-block/cryptroot
++++ b/debian/initramfs/scripts/local-block/cryptroot
+@@ -15,6 +15,10 @@ prereqs)
+ 	;;
+ esac
+ 
++[ -f /lib/cryptsetup/functions ] || return 0
++. /lib/cryptsetup/functions
++
+ if [ -x /scripts/local-top/cryptroot ]; then
++	touch ${CRYPTR_LOCAL_BLOCK}
+ 	exec /scripts/local-top/cryptroot
+ fi
+diff --git a/debian/initramfs/scripts/local-bottom/cryptroot b/debian/initramfs/scripts/local-bottom/cryptroot
+new file mode 100644
+index 000000000000..4f44d38c9cd5
+--- /dev/null
++++ b/debian/initramfs/scripts/local-bottom/cryptroot
+@@ -0,0 +1,23 @@
++#!/bin/sh
++set +x
++PREREQ=""
++
++prereqs()
++{
++	echo "$PREREQ"
++}
++
++case $1 in
++prereqs)
++	prereqs
++	exit 0
++	;;
++esac
++
++# If we reached this stage, we do have a rootfs mounted
++# so let's clean-up cryptroot setup mess...
++[ -f /lib/cryptsetup/functions ] || return 0
++. /lib/cryptsetup/functions
++
++rm -f ${CRYPTR_LOCAL_BLOCK}
++rm -f ${CRYPTR_CNT_FILE}
+diff --git a/debian/initramfs/scripts/local-top/cryptroot b/debian/initramfs/scripts/local-top/cryptroot
+index 4f36259f80f4..be3d06a18dec 100644
+--- a/debian/initramfs/scripts/local-top/cryptroot
++++ b/debian/initramfs/scripts/local-top/cryptroot
+@@ -31,8 +31,8 @@ esac
+ 
+ 
+ # wait_for_source()
+-#   Wait for encrypted $CRYPTTAB_SOURCE for up to 180s.  Set
+-#   $CRYPTTAB_SOURCE to its normalized device name when it shows up;
++#   Wait for encrypted $CRYPTTAB_SOURCE . Set $CRYPTTAB_SOURCE
++#   to its normalized device name when it shows up;
+ #   return 1 if timeout.
+ wait_for_source() {
+     wait_for_udev 10
+@@ -42,17 +42,27 @@ wait_for_source() {
+         return 0
+     fi
+ 
+-    # The lines below has been taken from
+-    # /usr/share/initramfs-tools/scripts/local's local_device_setup(),
+-    # as suggested per https://launchpad.net/bugs/164044
+-
+     # If the source device hasn't shown up yet, give it a little while
+     # to allow for asynchronous device discovery (e.g. USB).
++    #
++    # We also need to take into account RAID or other devices that may
++    # only be available on local-block stage. So, wait 5 seconds upfront,
++    # in local-top; if that fails, end execution relying on local-block
++    # invocations. Allow $ROOTDELAY/4 invocations with 1s sleep times (with
++    # a minimum of 20 invocations), and if after that we still fail, then it's
++    # really time to give-up. Variable $initrd_cnt tracks the re-invocations.
++    #
++    # Part of the lines below has been taken from initramfs-tools
++    # scripts/local's local_device_setup(), as suggested per
++    # https://launchpad.net/bugs/164044 .
++
++    local slumber=1
++    if [ ! -f "${CRYPTR_LOCAL_BLOCK}" ]; then # we are running on local-top
++         slumber=5
++    fi
+ 
+     cryptsetup_message "Waiting for encrypted source device $CRYPTTAB_SOURCE..."
+ 
+-    # Default delay is 180s, cf. initramfs-tools(8)
+-    local slumber="${ROOTDELAY:-180}"
+     while [ $slumber -gt 0 ]; do
+         sleep 1
+ 
+@@ -75,7 +85,21 @@ wait_for_source() {
+ #   Set up a crypttab(5) mapping defined by $CRYPTTAB_NAME,
+ #   $CRYPTTAB_SOURCE, $CRYPTTAB_KEY, $CRYPTTAB_OPTIONS.
+ setup_mapping() {
+-    local dev
++    local dev initrd_cnt
++
++    # We control here the number of re-invocations of this script from
++    # local-block - the heuristic is $ROOTDELAY/4, with a minimum of 20.
++
++    if [ -f "${CRYPTR_CNT_FILE}" ]; then
++	initrd_cnt=$(cat ${CRYPTR_CNT_FILE})
++else
++	initrd_cnt=${ROOTDELAY:-80}
++	initrd_cnt=$((initrd_cnt/4))
++	if [ "${initrd_cnt}" -lt 20 ]; then
++		initrd_cnt=20
++	fi
++	echo ${initrd_cnt} > "${CRYPTR_CNT_FILE}"
++fi
+ 
+     # The same target can be specified multiple times
+     # e.g. root and resume lvs-on-lvm-on-crypto
+@@ -86,17 +110,23 @@ setup_mapping() {
+     crypttab_parse_options --export --missing-path=fail || return 1
+ 
+     if ! wait_for_source; then
+-        # we've given up
+-        if [ -n "$panic" ]; then
+-            panic "ALERT! encrypted source device $CRYPTTAB_SOURCE does not exist, can't unlock $CRYPTTAB_NAME."
+-        else
+-            # let the user fix matters if they can
+-            echo "	ALERT! encrypted source device $CRYPTTAB_SOURCE does not exist, can't unlock $CRYPTTAB_NAME."
+-            echo "	Check cryptopts=source= bootarg: cat /proc/cmdline"
+-            echo "	or missing modules, devices: cat /proc/modules; ls /dev"
+-            panic "Dropping to a shell."
+-        fi
+-        return 1 # can't continue because environment is lost
++	if [ ${initrd_cnt} -eq 0 ]; then
++		# we've given up
++		if [ -n "$panic" ]; then
++			panic "ALERT! encrypted source device $CRYPTTAB_SOURCE does not exist, can't unlock $CRYPTTAB_NAME."
++		else
++			# let the user fix matters if they can
++			echo "	ALERT! encrypted source device $CRYPTTAB_SOURCE does not exist, can't unlock $CRYPTTAB_NAME."
++			echo "	Check cryptopts=source= bootarg: cat /proc/cmdline"
++			echo "	or missing modules, devices: cat /proc/modules; ls /dev"
++			panic "Dropping to a shell."
++		fi
++		return 1 # can't continue because environment is lost
++	else
++		initrd_cnt=$((initrd_cnt - 1))
++		echo ${initrd_cnt} > "${CRYPTR_CNT_FILE}"
++		return 0 # allow some attempts on local-block stage
++	fi
+     fi
+ 
+     # our `cryptroot-unlock` script searches for cryptsetup processes
+-- 
+2.27.0
+

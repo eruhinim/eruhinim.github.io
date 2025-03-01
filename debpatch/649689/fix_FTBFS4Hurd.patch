@@ -1,0 +1,129 @@
+diff -ur e2fsprogs-1.42~WIP-2011-11-20/configure.in e2fsprogs-1.42~WIP-2011-11-20.modified/configure.in
+--- e2fsprogs-1.42~WIP-2011-11-20/configure.in	2011-11-12 03:28:46.000000000 +0100
++++ e2fsprogs-1.42~WIP-2011-11-20.modified/configure.in	2011-11-23 08:27:58.000000000 +0100
+@@ -914,7 +914,7 @@
+   AC_SEARCH_LIBS([blkid_probe_all], [blkid])
+ fi
+ dnl
+-AC_CHECK_FUNCS(chflags getrusage llseek lseek64 open64 fstat64 ftruncate64 getmntinfo strtoull strcasecmp srandom jrand48 fchown mallinfo fdatasync quotactl strnlen strptime strdup sysconf pathconf posix_memalign memalign valloc __secure_getenv prctl mmap utime setresuid setresgid usleep nanosleep getdtablesize getrlimit sync_file_range posix_fadvise fallocate fallocate64 blkid_probe_get_topology mbstowcs backtrace)
++AC_CHECK_FUNCS(chflags getrusage llseek lseek64 open64 fstat64 ftruncate64 getmntinfo strtoull strcasecmp srandom jrand48 fchown mallinfo fdatasync quotactl strnlen strptime strdup sysconf pathconf posix_memalign memalign valloc __secure_getenv prctl mmap utime setresuid setresgid usleep nanosleep getdtablesize getrlimit sync_file_range posix_fadvise fallocate fallocate64 blkid_probe_get_topology mbstowcs backtrace msync)
+ dnl
+ dnl Check to see if -lsocket is required (solaris) to make something
+ dnl that uses socket() to compile; this is needed for the UUID library
+diff -ur e2fsprogs-1.42~WIP-2011-11-20/e2fsck/quota.c e2fsprogs-1.42~WIP-2011-11-20.modified/e2fsck/quota.c
+--- e2fsprogs-1.42~WIP-2011-11-20/e2fsck/quota.c	2011-11-14 16:55:54.000000000 +0100
++++ e2fsprogs-1.42~WIP-2011-11-20.modified/e2fsck/quota.c	2011-11-23 08:50:43.000000000 +0100
+@@ -24,7 +24,7 @@
+ 	ext2_ino_t		ino;
+ 	struct ext2_inode	inode;
+ 	errcode_t		retval;
+-	char			qf_name[255];
++	char			*qf_name;
+ 
+ 	if (ext2fs_read_inode(fs, from_ino, &inode))
+ 		return;
+@@ -38,9 +38,10 @@
+ 
+ 	ext2fs_write_new_inode(fs, to_ino, &inode);
+ 	/* unlink the old inode */
+-	quota_get_qf_name(qtype, QFMT_VFS_V1, qf_name);
++	qf_name = quota_get_qf_name(qtype, QFMT_VFS_V1);
+ 	ext2fs_unlink(fs, EXT2_ROOT_INO, qf_name, from_ino, 0);
+ 	ext2fs_inode_alloc_stats(fs, from_ino, -1);
++	free(qf_name);
+ }
+ 
+ void e2fsck_hide_quota(e2fsck_t ctx)
+diff -ur e2fsprogs-1.42~WIP-2011-11-20/lib/ext2fs/tdb.c e2fsprogs-1.42~WIP-2011-11-20.modified/lib/ext2fs/tdb.c
+--- e2fsprogs-1.42~WIP-2011-11-20/lib/ext2fs/tdb.c	2011-11-05 19:54:22.000000000 +0100
++++ e2fsprogs-1.42~WIP-2011-11-20.modified/lib/ext2fs/tdb.c	2011-11-23 08:44:38.000000000 +0100
+@@ -1752,7 +1752,7 @@
+ 		TDB_LOG((tdb, TDB_DEBUG_FATAL, "tdb_transaction: fsync failed\n"));
+ 		return -1;
+ 	}
+-#ifdef MS_SYNC
++#ifdef HAVE_MSYNC
+ 	if (tdb->map_ptr) {
+ 		tdb_off_t moffset = offset & ~(tdb->page_size-1);
+ 		if (msync(moffset + (char *)tdb->map_ptr,
+diff -ur e2fsprogs-1.42~WIP-2011-11-20/lib/quota/mkquota.c e2fsprogs-1.42~WIP-2011-11-20.modified/lib/quota/mkquota.c
+--- e2fsprogs-1.42~WIP-2011-11-20/lib/quota/mkquota.c	2011-11-14 17:36:12.000000000 +0100
++++ e2fsprogs-1.42~WIP-2011-11-20.modified/lib/quota/mkquota.c	2011-11-23 08:50:57.000000000 +0100
+@@ -67,17 +67,19 @@
+  */
+ int quota_file_exists(ext2_filsys fs, int qtype, int fmt)
+ {
+-	char qf_name[256];
++	char *qf_name;
+ 	errcode_t ret;
+ 	ext2_ino_t ino;
+ 
+ 	if (qtype >= MAXQUOTAS)
+ 		return -EINVAL;
+ 
+-	quota_get_qf_name(qtype, fmt, qf_name);
++	if ((qf_name = quota_get_qf_name(qtype, fmt)) == NULL)
++		return 0;
+ 
+ 	ret = ext2fs_lookup(fs, EXT2_ROOT_INO, qf_name, strlen(qf_name), 0,
+ 			    &ino);
++	free(qf_name);
+ 	if (ret)
+ 		return 0;
+ 
+diff -ur e2fsprogs-1.42~WIP-2011-11-20/lib/quota/mkquota.h e2fsprogs-1.42~WIP-2011-11-20.modified/lib/quota/mkquota.h
+--- e2fsprogs-1.42~WIP-2011-11-20/lib/quota/mkquota.h	2011-11-14 16:58:28.000000000 +0100
++++ e2fsprogs-1.42~WIP-2011-11-20.modified/lib/quota/mkquota.h	2011-11-22 12:53:05.000000000 +0100
+@@ -61,7 +61,7 @@
+ void quota_set_sb_inum(ext2_filsys fs, ext2_ino_t ino, int qtype);
+ 
+ /* In quotaio.c */
+-const char *quota_get_qf_name(int type, int fmt, char *buf);
++char *quota_get_qf_name(int type, int fmt);
+ const char *quota_get_qf_path(const char *mntpt, int qtype, int fmt,
+ 			      char *path_buf, size_t path_buf_size);
+ 
+diff -ur e2fsprogs-1.42~WIP-2011-11-20/lib/quota/quotaio.c e2fsprogs-1.42~WIP-2011-11-20.modified/lib/quota/quotaio.c
+--- e2fsprogs-1.42~WIP-2011-11-20/lib/quota/quotaio.c	2011-11-14 17:37:26.000000000 +0100
++++ e2fsprogs-1.42~WIP-2011-11-20.modified/lib/quota/quotaio.c	2011-11-23 08:52:25.000000000 +0100
+@@ -52,11 +52,15 @@
+ /**
+  * Creates a quota file name for given type and format.
+  */
+-const char *quota_get_qf_name(int type, int fmt, char *buf)
++char *quota_get_qf_name(int type, int fmt)
+ {
+-	if (!buf)
++	int len;
++	char *buf = NULL;
++
++	len = strlen(basenames[fmt]) + 1 + strlen(extensions[type]) + 1;
++	if( (buf = malloc(len)) == NULL)
+ 		return NULL;
+-	snprintf(buf, PATH_MAX, "%s.%s",
++	snprintf(buf, len, "%s.%s",
+ 		 basenames[fmt], extensions[type]);
+ 
+ 	return buf;
+@@ -66,16 +70,19 @@
+ 			      char *path_buf, size_t path_buf_size)
+ {
+ 	struct stat	qf_stat;
+-	char qf_name[PATH_MAX] = {0};
++	char *qf_name = NULL;
+ 
+ 	if (!mntpt || !path_buf || !path_buf_size)
+ 		return NULL;
+ 
+ 	strncpy(path_buf, mntpt, path_buf_size);
+ 	strncat(path_buf, "/", 1);
+-	strncat(path_buf, quota_get_qf_name(qtype, fmt, qf_name),
++	if ((qf_name = quota_get_qf_name(qtype, fmt)) == NULL)
++		return NULL;
++	strncat(path_buf, qf_name,
+ 		path_buf_size - strlen(path_buf));
+ 
++	free(qf_name);
+ 	return path_buf;
+ }
+ 

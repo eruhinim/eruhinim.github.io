@@ -1,0 +1,108 @@
+diff --git a/Makefile b/Makefile
+index 81b6016..4ede618 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,9 +1,12 @@
+-CFLAGS		+=	-O3 -lbz2
+-
++CFLAGS		+=	-O3 -Wall
++LDFLAGS		+=	-lbz2
+ PREFIX		?=	/usr/local
+ INSTALL_PROGRAM	?=	${INSTALL} -c -s -m 555
+ INSTALL_MAN	?=	${INSTALL} -c -m 444
+ 
++%:	%.c
++	$(CC) $(CFLAGS) $? -o $@ $(LDFLAGS)
++
+ all:		bsdiff bspatch
+ bsdiff:		bsdiff.c
+ bspatch:	bspatch.c
+@@ -15,3 +18,7 @@ install-man:
+ 	${INSTALL_MAN} bsdiff.1 bspatch.1 ${PREFIX}/man/man1
+ 
+ install: install-bin install-man
++
++clean:
++	rm -f bsdiff bspatch
++
+diff --git a/bsdiff.c b/bsdiff.c
+index 997c87b..3146ad6 100644
+--- a/bsdiff.c
++++ b/bsdiff.c
+@@ -226,6 +226,8 @@ int main(int argc,char *argv[])
+ 	FILE * pf;
+ 	BZFILE * pfbz2;
+ 	int bz2err;
++	
++	pos=0;
+ 
+ 	if(argc!=4) errx(1,"usage: %s oldfile newfile patchfile\n",argv[0]);
+ 
+diff --git a/bspatch.c b/bspatch.c
+index 5998744..32cc70e 100644
+--- a/bspatch.c
++++ b/bspatch.c
+@@ -35,6 +35,7 @@ __FBSDID("$FreeBSD: src/usr.bin/bsdiff/bspatch/bspatch.c,v 1.1 2005/08/06 01:59:
+ #include <err.h>
+ #include <unistd.h>
+ #include <fcntl.h>
++#include <sys/mman.h>
+ 
+ static off_t offtin(u_char *buf)
+ {
+@@ -132,13 +133,32 @@ int main(int argc,char * argv[])
+ 	if ((epfbz2 = BZ2_bzReadOpen(&ebz2err, epf, 0, 0, NULL, 0)) == NULL)
+ 		errx(1, "BZ2_bzReadOpen, bz2err = %d", ebz2err);
+ 
+-	if(((fd=open(argv[1],O_RDONLY,0))<0) ||
+-		((oldsize=lseek(fd,0,SEEK_END))==-1) ||
+-		((old=malloc(oldsize+1))==NULL) ||
+-		(lseek(fd,0,SEEK_SET)!=0) ||
+-		(read(fd,old,oldsize)!=oldsize) ||
+-		(close(fd)==-1)) err(1,"%s",argv[1]);
+-	if((new=malloc(newsize+1))==NULL) err(1,NULL);
++	fd = open(argv[1], O_RDONLY,0);
++	if (fd < 0)
++		err(1, "Open %s", argv[1]);
++
++	oldsize = lseek(fd, 0, SEEK_END);
++	if (oldsize < 0)
++		err(1, "seek %s", argv[1]);
++
++	old = mmap(NULL, oldsize, PROT_READ, MAP_SHARED | MAP_POPULATE, fd, 0);
++	if (old == MAP_FAILED)
++		err(1, "mmap() %s", argv[1]);
++	close(fd);
++
++	fd = open(argv[2], O_RDWR|O_CREAT|O_TRUNC, S_IWUSR|S_IRUSR|S_IWGRP|S_IRGRP|S_IWOTH|S_IROTH);
++	if (fd < 0)
++		err(1, "open %s", argv[2]);
++	if(newsize > 0){
++		if(lseek(fd, newsize-1, SEEK_SET) < 0)
++			err(1, "seek %s", argv[2]);
++		if(write(fd, "", 1) != 1)
++			err(1, "write %s", argv[2]);
++	}
++	new = mmap(NULL, newsize, PROT_READ|PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, 0);
++	if (new == MAP_FAILED)
++		err(1, "mmap %s", argv[2]);
++	close(fd);
+ 
+ 	oldpos=0;newpos=0;
+ 	while(newpos<newsize) {
+@@ -196,13 +216,8 @@ int main(int argc,char * argv[])
+ 	if (fclose(cpf) || fclose(dpf) || fclose(epf))
+ 		err(1, "fclose(%s)", argv[3]);
+ 
+-	/* Write the new file */
+-	if(((fd=open(argv[2],O_CREAT|O_TRUNC|O_WRONLY,0666))<0) ||
+-		(write(fd,new,newsize)!=newsize) || (close(fd)==-1))
+-		err(1,"%s",argv[2]);
+-
+-	free(new);
+-	free(old);
++	munmap(new, newsize);
++	munmap(old, oldsize);
+ 
+ 	return 0;
+ }

@@ -1,0 +1,319 @@
+From 2e86f33f8439682894441139873cd917ede4736b Mon Sep 17 00:00:00 2001
+From: Joey Hess <joey@kodama.kitenet.net>
+Date: Thu, 19 Jun 2008 18:40:13 -0400
+Subject: [PATCH] noninteractive select handling
+
+  * Add a separate queue for noninteractive questions, so that things can
+    be done when these questions would be displayed. This is a bit hackish;
+    debconf's method of letting questions determine if they are interactive or
+    not is really better. But this doesn't need huge changes to cdebconf.
+  * Handle the special case of a noninteractive select with no (or a bad)
+    default the same as debconf does; when such a question is asked,
+    set the value to the first item in the select list.
+    Closes: #486892, #247744
+---
+ packages/cdebconf/debian/changelog          |   13 ++++
+ packages/cdebconf/src/commands.c            |    3 +
+ packages/cdebconf/src/frontend.c            |   91 ++++++++++++++++++++++++++-
+ packages/cdebconf/src/frontend.h            |    5 ++
+ packages/cdebconf/src/test/select.config    |   58 +++++++++++++++++
+ packages/cdebconf/src/test/select.templates |   22 +++++++
+ 6 files changed, 191 insertions(+), 1 deletions(-)
+ create mode 100755 packages/cdebconf/src/test/select.config
+ create mode 100644 packages/cdebconf/src/test/select.templates
+
+diff --git a/packages/cdebconf/debian/changelog b/packages/cdebconf/debian/changelog
+index c24225b..75ec1df 100644
+--- a/packages/cdebconf/debian/changelog
++++ b/packages/cdebconf/debian/changelog
+@@ -1,3 +1,16 @@
++cdebconf (0.132) UNRELEASED; urgency=low
++
++  * Add a separate queue for noninteractive questions, so that things can
++    be done when these questions would be displayed. This is a bit hackish;
++    debconf's method of letting questions determine if they are interactive or
++    not is really better. But this doesn't need huge changes to cdebconf.
++  * Handle the special case of a noninteractive select with no (or a bad)
++    default the same as debconf does; when such a question is asked,
++    set the value to the first item in the select list. 
++    Closes: #486892, #247744
++
++ -- Joey Hess <joeyh@debian.org>  Thu, 19 Jun 2008 17:18:08 -0400
++
+ cdebconf (0.131) unstable; urgency=low
+ 
+   [ Frans Pop ]
+diff --git a/packages/cdebconf/src/commands.c b/packages/cdebconf/src/commands.c
+index 878e0b2..a5235c2 100644
+--- a/packages/cdebconf/src/commands.c
++++ b/packages/cdebconf/src/commands.c
+@@ -54,6 +54,8 @@ command_input(struct confmodule *mod, char *arg)
+ 
+     if (visible)
+         visible = mod->frontend->methods.add(mod->frontend, q);
++    else
++        mod->frontend->methods.add_noninteractive(mod->frontend, q);
+ 
+     if (q->priority != NULL)
+         free(q->priority);
+@@ -220,6 +222,7 @@ command_go(struct confmodule *mod, char *arg)
+ 	mod->frontend->questions = q;
+     }
+ 
++    mod->frontend->methods.go_noninteractive(mod->frontend);
+     ret = mod->frontend->methods.go(mod->frontend);
+     if (ret == CMDSTATUS_GOBACK || mod->backed_up != 0)
+     {
+diff --git a/packages/cdebconf/src/frontend.c b/packages/cdebconf/src/frontend.c
+index 59d83fe..3a21bf9 100644
+--- a/packages/cdebconf/src/frontend.c
++++ b/packages/cdebconf/src/frontend.c
+@@ -4,6 +4,8 @@
+ #include "database.h"
+ #include "frontend.h"
+ #include "question.h"
++#include "template.h"
++#include "strutl.h"
+ 
+ #include <dlfcn.h>
+ #include <string.h>
+@@ -28,7 +30,7 @@ static int frontend_add(struct frontend *obj, struct question *q)
+ 			qlast = qlast->next;
+ 		}
+ 		/* Question asked twice. debconf ignores the second question and
+-		   will we. */
++		   so will we. */
+ 		if (qlast == q)
+ 			return DC_OK;
+ 		qlast->next = q;
+@@ -40,11 +42,88 @@ static int frontend_add(struct frontend *obj, struct question *q)
+ 	return DC_OK;
+ }
+ 
++static int frontend_add_noninteractive(struct frontend *obj, struct question *q)
++{
++	struct question *qlast;
++	ASSERT(q != NULL);
++	ASSERT(q->prev == NULL);
++	ASSERT(q->next == NULL);
++
++	//INFO(INFO_DEBUG, "adding noninteractive question");
++
++	qlast = obj->questions_noninteractive;
++	if (qlast == NULL)
++	{
++		obj->questions_noninteractive = q;
++	}
++	else
++	{
++		while (qlast != q && qlast->next != NULL)
++		{
++			qlast = qlast->next;
++		}
++		qlast->next = q;
++		q->prev = qlast;
++	}
++
++	question_ref(q);
++
++	return DC_OK;
++}
++
+ static int frontend_go(struct frontend *obj)
+ {
+ 	return DC_OK;
+ }
+ 
++static int frontend_go_noninteractive(struct frontend *obj)
++{
++	struct question *q = obj->questions_noninteractive;
++
++	while (q != NULL) {
++		char *type = q->template->type;
++
++		//INFO(INFO_DEBUG, "frontend_go_noninteractive; type %s", type);
++
++		/* This is a hack to make noninteractive selects be set to
++		 * the first item in the select list if their value is not
++		 * set, or is set to something not in the list. This is for
++		 * consistency with debconf. */
++		if (strcmp(type, "select") == 0) {
++			int i, ok=0;
++			char **choices=NULL;
++			char *val = (char *) question_getvalue(q, "");
++			int count = strgetargc(q_get_choices_vals(obj, q));
++			if (count) {
++				choices = malloc(sizeof(char *) * count);
++				if (strchoicesplit(q_get_choices_vals(obj, q), choices, count) != count)
++					return DC_NOTOK;
++			
++					for (i = 0; i < count; i++) {
++					if (val && strcmp(val, choices[i]) == 0) {
++						ok=1;
++						break;
++					}
++				}
++			}
++
++			if (! ok) {
++				if (count)
++					question_setvalue(q, choices[0]);
++				else
++					question_setvalue(q, "");
++			}
++
++			if (choices)
++				free(choices);
++		}
++
++		q = q->next;
++	}
++
++	return DC_OK;
++}
++
+ static void frontend_clear(struct frontend *obj)
+ {
+ 	struct question *q;
+@@ -56,6 +135,14 @@ static void frontend_clear(struct frontend *obj)
+ 		q->next = q->prev = NULL;
+ 		question_deref(q);
+ 	}
++
++	while (obj->questions_noninteractive != NULL)
++	{
++		q = obj->questions_noninteractive;
++		obj->questions_noninteractive = obj->questions_noninteractive->next;
++		q->next = q->prev = NULL;
++		question_deref(q);
++	}
+ }
+ 
+ static int frontend_initialize(struct frontend *obj, struct configuration *cfg)
+@@ -227,6 +314,8 @@ struct frontend *frontend_new(struct configuration *cfg, struct template_db *tdb
+ 	SETMETHOD(progress_step);
+ 	SETMETHOD(progress_info);
+ 	SETMETHOD(progress_stop);
++	SETMETHOD(add_noninteractive);
++	SETMETHOD(go_noninteractive);
+ 
+ #undef SETMETHOD
+ 
+diff --git a/packages/cdebconf/src/frontend.h b/packages/cdebconf/src/frontend.h
+index 2f8e1aa..04a4dd7 100644
+--- a/packages/cdebconf/src/frontend.h
++++ b/packages/cdebconf/src/frontend.h
+@@ -43,6 +43,9 @@ struct frontend_module {
+     int (*progress_step)(struct frontend *fe, int step);
+     int (*progress_info)(struct frontend *fe, const char *info);
+     void (*progress_stop)(struct frontend *fe);
++   
++    int (*go_noninteractive)(struct frontend *);
++    int (*add_noninteractive)(struct frontend *, struct question *q);
+ };
+ 
+ struct frontend {
+@@ -75,6 +78,8 @@ struct frontend {
+     struct frontend_module methods;
+     /* path to plugins */
+     char *plugin_path;
++    	/* separate list of noninteractive questions */
++	struct question *questions_noninteractive;
+ };
+ 
+ struct frontend *frontend_new(struct configuration *, struct template_db *, struct question_db *);
+diff --git a/packages/cdebconf/src/test/select.config b/packages/cdebconf/src/test/select.config
+new file mode 100755
+index 0000000..ce443c1
+--- /dev/null
++++ b/packages/cdebconf/src/test/select.config
+@@ -0,0 +1,58 @@
++#!/bin/sh -e
++# Testing #486892
++. ../client/confmodule
++
++debug()
++{
++	echo $* >&2
++}
++
++askquestion()
++{
++	question=$1
++	priority=$2
++	db_fset $question seen false
++	db_input $priority $question || true
++	db_go || true
++	db_get $question
++}
++
++ok=1
++
++askquestion test/select/withdefault low
++if [ "$RET" = second ]; then
++	debug "ok withdefault"
++else
++	debug "fail withdefault ($RET)"
++	ok=0
++fi
++
++askquestion test/select/nodefault low
++if [ "$RET" = first ]; then
++	debug "ok nodefault"
++else
++	debug "fail nodefault ($RET)"
++	ok=0
++fi
++
++askquestion test/select/strangedefault low
++if [ "$RET" = first ]; then
++	debug "ok nodefault"
++else
++	debug "fail nodefault ($RET)"
++	ok=0
++fi
++
++askquestion test/select/nochoices low
++if [ "$RET" = "" ]; then
++	debug "ok nochoices"
++else
++	debug "fail nochoices ($RET)"
++	ok=0
++fi
++
++if [ "$ok" ]; then
++	exit 0
++else
++	exit 1
++fi
+diff --git a/packages/cdebconf/src/test/select.templates b/packages/cdebconf/src/test/select.templates
+new file mode 100644
+index 0000000..e2076a4
+--- /dev/null
++++ b/packages/cdebconf/src/test/select.templates
+@@ -0,0 +1,22 @@
++Template: test/select/withdefault
++Type: select
++Default: second
++Choices: first, second, third
++Description: select with a default value
++
++Template: test/select/nodefault
++Type: select
++Choices: first, second, third
++Description: select with no default value
++
++Template: test/select/strangedefault
++Type: select
++Default: fourth
++Choices: first, second, third
++Description: select with a strange default value
++
++Template: test/select/nochoices
++Type: select
++Default: fourth
++Choices: 
++Description: select with no choices
+-- 
+1.5.5.4
+

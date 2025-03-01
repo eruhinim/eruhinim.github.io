@@ -1,0 +1,249 @@
+--- orig/ChangeLog
++++ mod/ChangeLog
+@@ -1,3 +1,32 @@
++2005-04-30  Manoj Srivastava  <srivasta@debian.org>
++
++	* lib/star.c Include <selinux/selinux.h> if compiling with selinux
++	support
++	(ExtractFile): Add code (inside a #ifdef WITH_Se-Linux) to
++	test if Se-Linux is enabled, and, if so, to find out what the
++	security context of a file is, given its path. We only test for
++	SELinux being enabled once, and not for every file.  If we can
++	determine what the security context of the file ought to be, we
++	try and set the security context. If not, let the default security
++	context for the process be applied.
++	(SetModes): ditto.
++
++	* configure.ac: Add a --enable-selinux option, and have it set the
++	WITH_SELINUX cpp var, as well as set LIB_SELINUX.
++
++	* debian/control (Build-Depends): Add libselinux1-dev as a build
++	dependency. 
++
++	* debian/rules: Add --enable-selinux to the configure command.
++
++	* dpkg-deb/Makefile.am (dpkg_deb_LDADD): Add @LIB_SELINUX@ to the binary
++	link command for dpkg_deb
++	* dpkg-split/Makefile.am (dpkg_split_LDADD): ditto for dpkg-split
++	* dselect/Makefile.am (dselect_LDADD): ditto for dselect
++	* src/Makefile.am (dpkg_LDADD): ditto for dpkg
++	(dpkg_query_LDADD): ditto for dpkg_query
++
++
+ 2005-04-03  Scott James Remnant  <scott@netsplit.com>
+ 
+ 	* scripts/dpkg-architecture.pl (gnu_to_debian): Check cputable
+
+
+--- orig/configure.ac
++++ mod/configure.ac
+@@ -11,6 +11,13 @@
+ 
+ AM_INIT_AUTOMAKE([1.8 gnu])
+ 
++dnl Give the chance to enable SELINUX
++AC_ARG_ENABLE(selinux, dnl
++[  --enable-selinux              Enable use of the SELINUX libraries],
++[AC_DEFINE(WITH_SELINUX, 1, [Define if you want to use SELINUX])
++LIB_SELINUX="-lselinux"
++AC_SUBST(LIB_SELINUX)])
++
+ AM_GNU_GETTEXT_VERSION(0.14.1)
+ AM_GNU_GETTEXT()
+ 
+
+
+--- orig/debian/changelog
++++ mod/debian/changelog
+@@ -1,6 +1,12 @@
+ dpkg (1.13.5~) experimental; urgency=low
+ 
+-  * 
++  * Added SELinux awareness to dpkg. This includeas adding libselinux1-dev
++    to the build dependencies, and adding a --enable-selinux switch to
++    configure, and adding -lselinux to the link command for various
++    binaries (anything that uses libdpkg, actually). If the
++    --enable-selinux switch  is not invoked in ./debian/rules, there is no
++    SELinux dependency, and there is no run time performance hit (all the
++    code in lib/star.c would be compiled out).  -- Manoj
+ 
+  --
+ 
+
+
+--- orig/debian/control
++++ mod/debian/control
+@@ -6,7 +6,7 @@
+ Origin: debian
+ Bugs: debbugs://bugs.debian.org
+ Standards-Version: 3.6.1.0
+-Build-Depends: debhelper (>= 4.1.81), libncurses5-dev | libncurses-dev, zlib1g-dev (>= 1:1.1.3-19.1), libbz2-dev
++Build-Depends: debhelper (>= 4.1.81), libncurses5-dev | libncurses-dev, zlib1g-dev (>= 1:1.1.3-19.1), libbz2-dev, libselinux1-dev
+ 
+ Package: dpkg
+ Architecture: any
+
+
+--- orig/debian/rules
++++ mod/debian/rules
+@@ -45,6 +45,7 @@
+ 		--sysconfdir=/etc \
+ 		--localstatedir=/var/lib \
+ 		--with-zlib=static \
++                --enable-selinux \
+ 		--with-bz2=static
+ 
+ # Build the package in build-tree
+
+
+--- orig/dpkg-deb/Makefile.am
++++ mod/dpkg-deb/Makefile.am
+@@ -16,4 +16,4 @@
+ 	info.c \
+ 	main.c
+ 
+-dpkg_deb_LDADD = $(LIBINTL) ../lib/libdpkg.a $(ZLIB_LIBS) $(BZ2_LIBS)
++dpkg_deb_LDADD = $(LIBINTL) ../lib/libdpkg.a $(ZLIB_LIBS) $(BZ2_LIBS) @LIB_SELINUX@
+
+
+--- orig/dpkg-split/Makefile.am
++++ mod/dpkg-split/Makefile.am
+@@ -17,7 +17,7 @@
+ 	queue.c \
+ 	split.c
+ 
+-dpkg_split_LDADD = $(LIBINTL) ../lib/libdpkg.a
++dpkg_split_LDADD = $(LIBINTL) ../lib/libdpkg.a @LIB_SELINUX@
+ 
+ 
+ pkglib_SCRIPTS = mksplit
+
+
+--- orig/dselect/Makefile.am
++++ mod/dselect/Makefile.am
+@@ -31,7 +31,7 @@
+ 	pkgsublist.cc \
+ 	pkgtop.cc
+ 
+-dselect_LDADD = $(LIBINTL) ../lib/libdpkg.a $(CURSES_LIBS)
++dselect_LDADD = $(LIBINTL) ../lib/libdpkg.a $(CURSES_LIBS) @LIB_SELINUX@
+ 
+ 
+ EXTRA_DIST = keyoverride mkcurkeys.pl
+
+
+--- orig/lib/star.c
++++ mod/lib/star.c
+@@ -11,6 +11,10 @@
+ #include <errno.h>
+ #include <string.h>
+ #include <time.h>
++#ifdef WITH_SELINUX
++#include <selinux/selinux.h>
++static int selinux_enabled=-1;
++#endif
+ 
+ static int
+ Read(void * userData, char * buffer, int length)
+@@ -68,6 +72,38 @@
+ 	/* fchown() and fchmod() are cheaper than chown() and chmod(). */
+ 	fchown(fd, i->UserID, i->GroupID);
+ 	fchmod(fd, i->Mode & ~S_IFMT);
++#ifdef WITH_SELINUX
++        /* Set selinux_enabled if it is not already set (singleton) */
++        if(selinux_enabled < 0) {
++           selinux_enabled = (is_selinux_enabled()>0);
++         } /* end of if(selinux_enabled < 0) */
++
++        /* Since selinux is enabled, try and set the context */
++        if(selinux_enabled == 1) {
++           security_context_t scontext = NULL;
++           /*
++            * well, we could use
++            *   void set_matchpathcon_printf(void (*f)(const char *fmt, ...));
++            * to redirect the errors from the following bit, but that
++            * seems too much effort.
++            */
++
++           /*
++            * Do nothing if we can't figure out what the context is,
++            * or if it has no context; in which case the default
++            * context shall be applied.
++            */
++           if( ! ((matchpathcon(i->Name, i->Mode & ~S_IFMT, &scontext) != 0) ||
++                  (strcmp(scontext, "<<none>>") == 0)))
++            {
++              if(fsetfilecon(fd, scontext) < 0)
++               {
++                 perror("Error setting File context:");
++               }
++            }
++           freecon(scontext);
++         } /* end of if(selinux_enabled == 1) */
++#endif  /* WITH_SELINUX */
+ 	close(fd);
+ 	t.actime = time(0);
+ 	t.modtime = i->ModTime;
+@@ -85,6 +121,38 @@
+ 	chown(i->Name, i->UserID, i->GroupID);
+ #endif
+ 	chmod(i->Name, i->Mode & ~S_IFMT);
++#ifdef WITH_SELINUX
++        /* Set selinux_enabled if it is not already set (singleton) */
++        if(selinux_enabled < 0) {
++           selinux_enabled = (is_selinux_enabled()>0);
++         } /* end of if(selinux_enabled < 0) */
++
++        /* Since selinux is enabled, try and set the context */
++        if(selinux_enabled == 1) {
++           security_context_t scontext = NULL;
++           /*
++            * well, we could use
++            *   void set_matchpathcon_printf(void (*f)(const char *fmt, ...));
++            * to redirect the errors from the following bit, but that
++            * seems too much effort.
++            */
++
++           /*
++            * Do nothing if we can't figure out what the context is,
++            * or if it has no context; in which case the default
++            * context shall be applied.
++            */
++           if( ! ((matchpathcon(i->Name, i->Mode & ~S_IFMT, &scontext) != 0) ||
++                  (strcmp(scontext, "<<none>>") == 0)))
++            {
++              if(lsetfilecon(i->Name, scontext) < 0)
++               {
++                 perror("Error setting File context:");
++               }
++            }
++           freecon(scontext);
++         } /* end of if(selinux_enabled == 1) */
++#endif  /* WITH_SELINUX */
+ 	t.actime = time(0);
+ 	t.modtime = i->ModTime;
+ 	utime(i->Name, &t);
+
+
+--- orig/src/Makefile.am
++++ mod/src/Makefile.am
+@@ -25,14 +25,14 @@
+ 	select.c \
+ 	update.c
+ 
+-dpkg_LDADD = $(LIBINTL) ../lib/libdpkg.a $(ZLIB_LIBS) $(BZ2_LIBS)
++dpkg_LDADD = $(LIBINTL) ../lib/libdpkg.a $(ZLIB_LIBS) $(BZ2_LIBS) @LIB_SELINUX@
+ 
+ dpkg_query_SOURCES = \
+ 	errors.c \
+ 	filesdb.c filesdb.h \
+ 	query.c
+ 
+-dpkg_query_LDADD = $(LIBINTL) ../lib/libdpkg.a $(ZLIB_LIBS) $(BZ2_LIBS)
++dpkg_query_LDADD = $(LIBINTL) ../lib/libdpkg.a $(ZLIB_LIBS) $(BZ2_LIBS) @LIB_SELINUX@
+ 
+ 
+ install-data-local:
+
+
+

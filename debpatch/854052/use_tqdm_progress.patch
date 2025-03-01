@@ -1,0 +1,97 @@
+commit fdeba25d31e830aec02921cae2a6264d16ecca6c
+Author: Maximiliano Curia <maxy@gnuservers.com.ar>
+Date:   Thu Feb 9 20:46:31 2017 +0100
+
+    Use tqdm to show a progress bar
+
+diff --git a/decopy/cmdoptions.py b/decopy/cmdoptions.py
+index a348913..ce5bee4 100755
+--- a/decopy/cmdoptions.py
++++ b/decopy/cmdoptions.py
+@@ -90,6 +90,9 @@ class Defaults(object):
+     # Treat all files as text
+     text = False
+ 
++    # Progress bar
++    progress = True
++
+     # output filename, empty for stdout
+     output = ''
+ 
+@@ -141,6 +144,9 @@ def process_options(args=None):
+     _add_boolean_argument(parser, 'split-debian',
+                           Defaults.split_debian)
+ 
++    _add_boolean_argument(parser, 'progress',
++                          Defaults.progress)
++
+     parser.add_argument('-o', '--output', default=Defaults.output)
+ 
+     parser.add_argument('--root', default=Defaults.root,
+diff --git a/decopy/tree.py b/decopy/tree.py
+index 704de28..1d35568 100755
+--- a/decopy/tree.py
++++ b/decopy/tree.py
+@@ -22,6 +22,14 @@ import logging
+ import os
+ import re
+ 
++try:
++    from tqdm import tqdm
++except ImportError:
++    def tqdm(*a, **kw):
++        if a:
++            return a[0]
++        return kw.get('iterable', None)
++
+ from .datatypes import UNKNOWN, UNKNOWN_COPYRIGHTED
+ from .parsers import parse_file
+ 
+@@ -188,6 +196,8 @@ class DirInfo(FileInfo):
+     def __init__(self, parent=None, name=''):
+         super().__init__(parent, name)
+         self.file_list = {}
++        # Total number of files in sub tree
++        self.total = 0
+ 
+     @property
+     def parsed_license(self):
+@@ -197,6 +207,10 @@ class DirInfo(FileInfo):
+         return ''
+ 
+     def add(self, path=None, dirs=None, files=None):
++
++        # Update the total number of files
++        self.total += len(dirs) + len(files)
++
+         if path:
+             name = path[0]
+             if name not in self.file_list:
+@@ -295,7 +309,12 @@ class RootInfo(DirInfo):
+ 
+         tree = RootInfo(root=options.root)
+ 
+-        for root, dirs, files in os.walk(options.root, topdown=True):
++        for root, dirs, files in tqdm(os.walk(options.root, topdown=True),
++                                      desc='Building tree',
++                                      unit='dir',
++                                      dynamic_ncols=True,
++                                      disable=(options.debug or
++                                               not options.progress)):
+             logging.debug('Listing %s', root)
+             to_remove = []
+             for directory in dirs:
+@@ -351,7 +370,12 @@ class RootInfo(DirInfo):
+     def process(self, options):
+         '''Iterate over the full tree processing their licenses.'''
+         seen = set()
+-        for item in self:
++        for item in tqdm(self,
++                         desc='Processing',
++                         total=self.total,
++                         unit='file',
++                         dynamic_ncols=True,
++                         disable=(options.debug or not options.progress)):
+ 
+             if isinstance(item, DirInfo):
+                 # Pre process COPYING files

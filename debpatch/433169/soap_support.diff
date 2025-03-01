@@ -1,0 +1,124 @@
+Index: bts.pl
+===================================================================
+--- bts.pl	(revision 707)
++++ bts.pl	(working copy)
+@@ -73,6 +73,26 @@
+     return $lwp_broken ? 0 : 1;
+ }
+ 
++my $soap_broken;
++sub have_soap {
++     return ($soap_broken ? 0 : 1) if defined $soap_broken;
++     eval {
++	  require SOAP::Lite;
++     };
++
++     if ($@) {
++	  if ($@ =~ m%^Can\'t locate/%) {
++	       $soap_broken="the libsoap-lite-perl package is not installed";
++	  } else {
++	       $soap_broken="couldn't load SOAP::Lite: $@";
++	  }
++     }
++     else {
++	  $soap_broken = 0;
++     }
++     return ($soap_broken ? 0 : 1);
++}
++
+ # Constants
+ sub MIRROR_ERROR      { 0; }
+ sub MIRROR_DOWNLOADED { 1; }
+@@ -758,6 +778,92 @@
+     }
+ }
+ 
++=item select [key:value] [key2:value2] ...
++
++Uses the soap interface to output a list of bugs which match the given
++selection requirements.
++
++The following keys are allowed, and may be given multiple times
++
++=over
++
++=item package -- name of the binary package
++
++=item src -- name of the source package
++
++=item maint -- address of the maintainer
++
++=item submitter -- address of the submitter
++
++=item severity -- severity of the bug
++
++=item status -- status of the bug
++
++=item tag -- bug tag
++
++=item owner -- owner of the bug
++
++=item bugs -- list of bugs to search within
++
++=item users -- users to use to look up usertags
++
++=item archive -- whether to search archived bugs or normal bugs;
++defaults to false. As a special case, if archive is 'both', but
++archived and unarchived bugs are returned.
++
++=back
++
++=cut
++
++sub bts_select {
++     die $soap_broken unless have_soap();
++     my @args = @_;
++     my %valid_keys = (package => 'package',
++		       pkg     => 'package',
++		       src     => 'src',
++		       source  => 'source',
++		       maint   => 'maint',
++		       maintainer => 'maint',
++		       submitter => 'submitter',
++		       status    => 'status',
++		       tag       => 'tag',
++		       owner     => 'owner',
++		       dist      => 'dist',
++		       distribution => 'dist',
++		       bugs       => 'bugs',
++		       archive    => 'archive',
++		      );
++     my %users;
++     my %search_parameters;
++     my $soap = SOAP::Lite->uri('Debbugs/SOAP/1')->proxy('http://bugs.debian.org/cgi-bin/soap.cgi');
++     for my $arg (@args) {
++	  my ($key,$value) = split /:/, $arg, 2;
++	  if (exists $valid_keys{$key}) {
++	       push @{$search_parameters{$valid_keys{$key}}},
++		    $value;
++	  }
++	  elsif ($key =~/users?/) {
++	       $users{$value} = 1;
++	  }
++     }
++     my %usertags;
++     for my $user (keys %users) {
++	  my $ut = $soap->get_usertag($user)->result();
++	  next unless defined $ut;
++	  for my $tag (keys %{$ut}) {
++	       push @{$usertags{$tag}},
++		    @{$ut->{$tag}};
++	  }
++     }
++     my $bugs = $soap->get_bugs(%search_parameters,
++				(keys %usertags)?(usertags=>\%usertags):()
++			       )->result();
++     if (not defined $bugs) {
++	  die "Error while retrieving bugs from soap server";
++     }
++     print map {qq($_\n)} @{$bugs};
++}
++
+ =item clone <bug> [new IDs]
+ 
+ The clone control command allows you to duplicate a bug report. It is useful

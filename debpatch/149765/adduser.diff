@@ -1,0 +1,186 @@
+diff -ur adduser-3.47.orig/adduser adduser-3.47.1/adduser
+--- adduser-3.47.orig/adduser	2002-03-24 17:11:49.000000000 +0100
++++ adduser-3.47.1/adduser	2002-06-20 17:37:44.000000000 +0200
+@@ -39,10 +39,16 @@
+ #
+ #  adduser --group [--gid ID] group
+ #  addgroup [--gid ID] group
+-#      add a system group
+-#      example: addgroup --quiet www-data
++#      add a user group
++#      example: addgroup powerusers
+ #      $action = "addgroup"
+ #
++#  adduser --group --system [--gid GID] group
++#  addgroup --system [--gid GID] group
++#      add a system group
++#      example: addgroup --system --quiet www-data
++#      $action = "addsysgroup"
++#
+ #  adduser --system [--home DIR] [--shell SHELL] [--uid ID] [--group |
+ #  --ingroup GROUP | --gid ID] [--disabled-password] [--disabled-login]
+ #  [--gecos GECOS] [--no-create-home] user
+@@ -99,6 +105,10 @@
+ $config{"last_system_uid"} = 999;
+ $config{"first_uid"} = 1000;
+ $config{"last_uid"} = 29999;
++$config{"first_system_gid"} = 100;
++$config{"last_system_gid"} = 999;
++$config{"first_gid"} = 1000;
++$config{"last_gid"} = 29999;
+ $config{"dhome"} = "/home";
+ $config{"skel"} = "/etc/skel";
+ $config{"usergroups"} = "yes";
+@@ -112,7 +122,7 @@
+ $action = $0 eq "addgroup" ? "addgroup" : "adduser";
+ 
+ while (defined($arg = shift(@ARGV))) {
+-    die "$0: ",_("No options allowed after names.\n") 
++    die "$0: ",_("No options allowed after names.\n")
+ 	if (defined($names[0]) && $arg =~ /^--/);
+     if ($arg eq "--quiet") {
+ 	$verbose = 0;
+@@ -125,7 +135,9 @@
+ 	&version();
+ 	exit 0;
+     } elsif ($arg eq "--system") {
++	$found_sys_opt = 1;
+ 	$action = "addsysuser" if ($action eq "adduser");
++	$action = "addsysgroup" if ($action eq "addgroup");
+     } elsif ($arg eq "--group") {
+ 	$found_group_opt = 1;
+     } elsif ($arg eq "--ingroup") {
+@@ -181,7 +193,7 @@
+ die "$0: ",_("Only root may add a user or group to the system.\n") if ($> != 0);
+ 
+ if (@names == 0) {
+-    if($found_group_opt || $action eq "addgroup")
++    if($found_group_opt || $action eq "addgroup" || $action eq "addsysgroup")
+       {
+ 	  print _("Enter a groupname to add: ");
+       }
+@@ -209,6 +221,9 @@
+     if ($action eq "addsysuser") {
+ 	$make_group_also = 1;
+     }
++    elsif ($found_sys_opt) {
++	$action = "addsysgroup";
++    }
+     else {
+ 	$action = "addgroup";
+     }
+@@ -229,6 +244,9 @@
+ # $action = "addgroup"
+ #    $new_name                - the name of the new group
+ #    $new_gid                 - optional override
++# $action = "addsysgroup"
++#    $new_name                - the name of the new group
++#    $new_gid                 - optional override
+ # $action = "addsysuser"
+ #    $new_name                - the name of the new user
+ #    $make_group_also | $ingroup_name | $new_gid | 0  - which group
+@@ -242,6 +260,36 @@
+ &checkname($new_name) if defined $new_name;
+ $SIG{'INT'} = $SIG{'QUIT'} = $SIG{'HUP'} = 'handler';
+ 
++#################
++## addsysgroup ##
++#################
++if ($action eq "addsysgroup") {
++    dief (_("The group `%s' already exists.\n"),$new_name)
++	if (defined getgrnam($new_name));
++    dief (_("The GID `%s' is already in use.\n"),$new_gid)
++	if (defined($new_gid) && defined(getgrgid($new_gid)));
++    if (!defined($new_gid)) {
++        $new_gid = &first_avail_id($config{"first_system_gid"},
++				   $config{"last_system_gid"},
++				   &get_current_gids);
++
++        if ($new_gid == -1) {
++            print STDERR "$0: ",_("No GID is available in the range "),
++            "$config{\"first_system_gid\"} - $config{\"last_system_gid\"}\n",
++            "(FIRST_SYS_GID - LAST_SYS_GID).  ";
++            dief (_("Group `%s' not created.\n"),$new_name);
++        }
++    }
++
++    printf (_("Adding group %s (%s)...\n"),$new_name,$new_gid) if $verbose;
++    &invalidate_nscd("group");
++    &systemcall('groupadd', '-g', $new_gid, $new_name);
++    &invalidate_nscd("group");
++    print _("Done.\n") if $verbose;
++    exit 0;
++}
++
++
+ ##############
+ ## addgroup ##
+ ##############
+@@ -251,14 +299,14 @@
+     dief (_("The GID `%s' is already in use.\n"),$new_gid)
+ 	if (defined($new_gid) && defined(getgrgid($new_gid)));
+     if (!defined($new_gid)) {
+-        $new_gid = &first_avail_id($config{"first_system_uid"},
+-				   $config{"last_system_uid"},
++        $new_gid = &first_avail_id($config{"first_gid"},
++				   $config{"last_gid"},
+ 				   &get_current_gids);
+-        
++
+         if ($new_gid == -1) {
+             print STDERR "$0: ",_("No GID is available in the range "),
+-            "$config{\"first_system_uid\"} - $config{\"last_system_uid\"}\n",
+-            "(FIRST_SYS_UID - LAST_SYS_UID).  ";
++            "$config{\"first_gid\"} - $config{\"last_gid\"}\n",
++            "(FIRST_GID - LAST_GID).  ";
+             dief (_("Group `%s' not created.\n"),$new_name);
+         }
+     }
+@@ -354,7 +402,7 @@
+ 	elsif ($make_group_also){ $new_gid=$new_uid; $ingroup_name=$new_name; }
+ 	else { die _("Internal error"); }
+     }
+-    
++
+     &invalidate_nscd();
+     if ($make_group_also) {
+ 	print _("Adding new group $new_name ($new_gid).\n") if $verbose;
+diff -ur adduser-3.47.orig/AdduserCommon.pm adduser-3.47.1/AdduserCommon.pm
+--- adduser-3.47.orig/AdduserCommon.pm	2001-07-11 09:45:15.000000000 +0200
++++ adduser-3.47.1/AdduserCommon.pm	2002-06-20 17:33:33.000000000 +0200
+@@ -93,7 +93,7 @@
+ 	    warnf(_("Unknown variable `%s' at %s:%s.\n"),$var,$conf_file,$.);
+ 	    next;
+ 	}
+-		
++
+ 	$val =~ s/^"(.*)"$/$1/;
+ 	$val =~ s/^'(.*)'$/$1/;
+ 
+diff -ur adduser-3.47.orig/adduser.conf adduser-3.47.1/adduser.conf
+--- adduser-3.47.orig/adduser.conf	2001-07-11 09:45:05.000000000 +0200
++++ adduser-3.47.1/adduser.conf	2002-06-20 17:50:45.000000000 +0200
+@@ -24,15 +24,19 @@
+ # copied to the new user's home directory when it is created.
+ SKEL=/etc/skel
+ 
+-# FIRST_SYSTEM_UID to LAST_SYSTEM_UID inclusive is the range for UIDs
+-# for dynamically allocated administrative and system accounts.
++# FIRST_SYSTEM_[GU]ID to LAST_SYSTEM_[GU]ID inclusive is the range for UIDs
++# for dynamically allocated administrative and system accounts/groups.
+ FIRST_SYSTEM_UID=100
+ LAST_SYSTEM_UID=999
++FIRST_SYSTEM_GID=100
++LAST_SYSTEM_GID=999
+ 
+-# FIRST_UID to LAST_UID inclusive is the range of UIDs of dynamically
+-# allocated user accounts.
++# FIRST_[GU]ID to LAST_[GU]ID inclusive is the range of UIDs of dynamically
++# allocated user accounts/groups.
+ FIRST_UID=1000
+ LAST_UID=29999
++FIRST_GID=1000
++LAST_GID=29999
+ 
+ # The USERGROUPS variable can be either "yes" or "no".  If "yes" each
+ # created user will be given their own group to use as a default, and

@@ -1,0 +1,99 @@
+diff --git a/1/rules/buildcore.mk.in b/1/rules/buildcore.mk.in
+index 790cfe0..a9c0c24 100644
+--- a/1/rules/buildcore.mk.in
++++ b/1/rules/buildcore.mk.in
+@@ -77,7 +77,7 @@ done)
+ endif
+ 
+ # Avoid recursive braindamage if we're building autotools-dev
+-ifeq (, $(shell grep -x 'Package: autotools-dev' debian/control))
++ifeq (, $(shell grep -x 'Package: autotools-dev' $(DEB_ROOT)/debian/control))
+ config_guess		:= $(shell find $(DEB_SRCDIR) \( -type f -or -type l \) -name config.guess)
+ config_sub		:= $(shell find $(DEB_SRCDIR) \( -type f -or -type l \) -name config.sub)
+ ifneq (, $(config_all_tar))
+@@ -86,7 +86,7 @@ config_sub_tar		:= $(filter %/config.sub, $(config_all_tar))
+ endif
+ endif
+ # Ditto for gnulib
+-ifeq (, $(shell grep -x 'Package: gnulib' debian/control))
++ifeq (, $(shell grep -x 'Package: gnulib' $(DEB_ROOT)/debian/control))
+ config_rpath		:= $(shell find $(DEB_SRCDIR) \( -type f -or -type l \) -name config.rpath)
+ ifneq (, $(config_all_tar))
+ config_rpath_tar	:= $(filter %/config.rpath, $(config_all_tar))
+diff --git a/1/rules/buildvars.mk.in b/1/rules/buildvars.mk.in
+index 1d5bb6a..09e3f49 100644
+--- a/1/rules/buildvars.mk.in
++++ b/1/rules/buildvars.mk.in
+@@ -23,12 +23,14 @@ _cdbs_rules_buildvars = 1
+ 
+ CDBS_VERSION = @PACKAGE_VERSION@
+ 
++DEB_ROOT ?= .
++
+ # Common useful variables
+-DEB_SOURCE_PACKAGE := $(strip $(shell egrep '^Source: ' debian/control | cut -f 2 -d ':'))
+-DEB_VERSION := $(shell dpkg-parsechangelog | egrep '^Version:' | cut -f 2 -d ' ')
++DEB_SOURCE_PACKAGE := $(strip $(shell egrep '^Source: ' '$(DEB_ROOT)'/debian/control | cut -f 2 -d ':'))
++DEB_VERSION := $(shell dpkg-parsechangelog -l'$(DEB_ROOT)'/debian/changelog | egrep '^Version:' | cut -f 2 -d ' ')
+ DEB_NOEPOCH_VERSION := $(shell echo $(DEB_VERSION) | cut -d: -f2-)
+ DEB_UPSTREAM_VERSION := $(shell echo $(DEB_NOEPOCH_VERSION) | sed 's/-[^-]*$$//')
+-DEB_ISNATIVE := $(shell dpkg-parsechangelog | egrep '^Version:' | perl -ne 'print if not /^Version:\s*.*-/;')
++DEB_ISNATIVE := $(shell dpkg-parsechangelog -l'$(DEB_ROOT)'/debian/changelog | egrep '^Version:' | perl -ne 'print if not /^Version:\s*.*-/;')
+ 
+ # Split into arch/indep packages
+ ifneq ($(DEB_INDEP_PACKAGES),cdbs)
+@@ -37,11 +39,11 @@ ifdef _cdbs_rules_debhelper
+ # "I have no package to build" while preserving genuine error messages.
+ # This was in fact an error before debhelper 5.0.30.
+ # FIXME: revert: debhelper 5.0.30 is in stable!
+-DEB_INDEP_PACKAGES := $(strip $(shell dh_listpackages -i 2>/dev/null || dh_listpackages -i))
+-DEB_ARCH_PACKAGES := $(filter-out $(DEB_INDEP_PACKAGES),$(strip $(shell dh_listpackages -s 2>/dev/null || dh_listpackages -s)))
++DEB_INDEP_PACKAGES := $(strip $(shell (cd $(DEB_ROOT) && dh_listpackages -i 2>/dev/null) || (cd $(DEB_ROOT) && dh_listpackages -i)))
++DEB_ARCH_PACKAGES := $(filter-out $(DEB_INDEP_PACKAGES),$(strip $(shell (cd $(DEB_ROOT) && dh_listpackages -s 2>/dev/null) || (cd $(DEB_ROOT) && dh_listpackages -s))))
+ else
+-DEB_INDEP_PACKAGES := $(strip $(shell $(_cdbs_scripts_path)/list-packages indep))
+-DEB_ARCH_PACKAGES := $(filter-out $(DEB_INDEP_PACKAGES),$(strip $(shell $(_cdbs_scripts_path)/list-packages same)))
++DEB_INDEP_PACKAGES := $(strip $(shell $(_cdbs_scripts_path)/list-packages indep '$(DEB_ROOT)'/debian/control))
++DEB_ARCH_PACKAGES := $(filter-out $(DEB_INDEP_PACKAGES),$(strip $(shell $(_cdbs_scripts_path)/list-packages same '$(DEB_ROOT)'/debian/control)))
+ endif
+ endif
+ # Split into normal and udeb packages
+diff --git a/scripts/list-packages b/scripts/list-packages
+index f6641f5..b86caca 100755
+--- a/scripts/list-packages
++++ b/scripts/list-packages
+@@ -42,15 +42,17 @@ sub buildarch {
+ 
+ sub GetPackages {
+ 	my $type=shift;
++	my $control_file=shift;
+ 
+ 	$type="" if ! defined $type;
++	$control_file="debian/control" if ! defined $control_file;
+ 
+ 	my $package="";
+ 	my $arch="";
+ 	my @list=();
+ 	my %seen;
+-	open (CONTROL, 'debian/control') ||
+-		error("cannot read debian/control: $!\n");
++	open (CONTROL, $control_file) ||
++		error("cannot read $control_file: $!\n");
+ 	while (<CONTROL>) {
+ 		chomp;
+ 		s/\s+$//;
+@@ -61,7 +63,7 @@ sub GetPackages {
+ 				$seen{$package}=1;
+ 			}
+ 			else {
+-				error("debian/control has a duplicate entry for $package");
++				error("$control_file has a duplicate entry for $package");
+ 			}
+ 		}
+ 		if (/^Architecture:\s*(.*)/) {
+@@ -90,4 +92,4 @@ sub GetPackages {
+ 	return @list;
+ }
+ 
+-print join(' ', GetPackages($ARGV[0])) . "\n";
++print join(' ', GetPackages($ARGV[0], $ARGV[1])) . "\n";

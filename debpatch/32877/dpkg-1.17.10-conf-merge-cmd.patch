@@ -1,0 +1,258 @@
+diff --git a/src/configure.c b/src/configure.c
+index e4dfa8a..f72938a 100644
+--- a/src/configure.c
++++ b/src/configure.c
+@@ -82,12 +82,16 @@ static int conffoptcells[2][2] = {
+ 	{ CFO_KEEP,		CFO_PROMPT_KEEP },	/* User edited. */
+ };
+ 
++static void run_merge_cmd(const char *cmd, const char *confold, const char *confnew);
++
+ static int
+ show_prompt(const char *cfgfile, const char *realold, const char *realnew,
+             int useredited, int distedited, enum conffopt what)
+ {
+ 	const char *s;
+ 	int c, cc;
++	unsigned int ind;
++	unsigned int num_cmds;
+ 
+ 	/* Flush the terminal's input in case the user involuntarily
+ 	 * typed some characters. */
+@@ -151,6 +155,13 @@ show_prompt(const char *cfgfile, const char *realold, const char *realnew,
+ 	          "      D     : show the differences between the versions\n"
+ 	          "      Z     : start a shell to examine the situation\n"));
+ 
++	/* output the available custom merge commands */
++	num_cmds = sizeof(confmergecmds) / sizeof(confmergecmds[0]);
++	for (ind = 0; ind < num_cmds && confmergecmds[ind].key; ++ind) {
++		fprintf(stderr, _("      %c     : %s\n"), confmergecmds[ind].key,
++				confmergecmds[ind].label);
++	}
++
+ 	if (what & CFOF_KEEP)
+ 		fprintf(stderr,
+ 		        _(" The default action is to keep your current version.\n"));
+@@ -159,7 +170,14 @@ show_prompt(const char *cfgfile, const char *realold, const char *realnew,
+ 		        _(" The default action is to install the new version.\n"));
+ 
+ 	s = path_basename(cfgfile);
+-	fprintf(stderr, "*** %s (Y/I/N/O/D/Z) %s ? ", s,
++	fprintf(stderr, "*** %s (Y/I/N/O/D/Z", s);
++
++	/* output the keys to execute custom merge commands */
++	for(ind = 0; ind < num_cmds && confmergecmds[ind].key; ++ind) {
++		fprintf(stderr, _("/%c"), confmergecmds[ind].key);
++	}
++
++	fprintf(stderr, ") %s ? ",
+ 	        (what & CFOF_KEEP) ? _("[default=N]") :
+ 	        (what & CFOF_INSTALL) ? _("[default=Y]") :
+ 	        _("[no default]"));
+@@ -275,6 +293,8 @@ promptconfaction(struct pkginfo *pkg, const char *cfgfile,
+                  int useredited, int distedited, enum conffopt what)
+ {
+ 	int cc;
++	unsigned int ind;
++	unsigned int num_cmds;
+ 
+ 	if (!(what & CFOF_PROMPT))
+ 		return what;
+@@ -287,6 +307,14 @@ promptconfaction(struct pkginfo *pkg, const char *cfgfile,
+ 		cc = show_prompt(cfgfile, realold, realnew,
+ 		                 useredited, distedited, what);
+ 
++		num_cmds = sizeof(confmergecmds)/sizeof(confmergecmds[0]);
++		for(ind = 0; ind < num_cmds && confmergecmds[ind].key; ++ind) {
++			if(cc == tolower(confmergecmds[ind].key)) {
++				run_merge_cmd(confmergecmds[ind].command, realold, realnew);
++				break;
++			}
++		}
++
+ 		/* FIXME: Say something if silently not install. */
+ 		if (cc == 'd')
+ 			show_diff(realold, realnew);
+@@ -836,3 +864,67 @@ md5hash(struct pkginfo *pkg, char *hashbuf, const char *fn)
+ 		strcpy(hashbuf, EMPTYHASHFLAG);
+ 	}
+ }
++
++static int
++replace_token(char *text, const char *token, const char *replacement, unsigned int max_size)
++{
++	unsigned int token_len, replacement_len, text_len;
++	char *tmp;
++	char *after_token;
++
++	token_len = strlen(token);
++	replacement_len = strlen(replacement);
++	text_len = strlen(text);
++
++	tmp = text;
++	while((tmp = strstr(tmp, token))) {
++		if(text_len + replacement_len - token_len > max_size)
++			return -1;
++
++		after_token = tmp + token_len;
++
++		/* copy everything after the replacement */
++		memmove(tmp + replacement_len, after_token, strlen(after_token) + 1);
++
++		/* replace the token occurence */
++		strncpy(tmp, replacement, replacement_len);
++
++		tmp += replacement_len;
++	}
++
++	return 0;
++}
++
++static void
++run_merge_cmd(const char *cmd, const char *confold, const char *confnew)
++{
++	char buf[PATH_MAX];
++	int rc;
++	pid_t pid;
++
++	strncpy(buf, cmd, sizeof(buf));
++
++	rc = replace_token(buf, "%O", confold, sizeof(buf));
++	if (rc < 0) ohshit(_("path %s too long"), confold);
++
++	replace_token(buf, "%N", confnew, sizeof(buf));
++	if (rc < 0) ohshit(_("path %s too long"), confnew);
++
++
++	fprintf(stderr, "Executing: %s\n", buf);
++
++	pid = subproc_fork();
++	if (!pid) {
++		/* Child process */
++		setenv("DPKG_SHELL_REASON", "conffile-prompt", 1);
++		setenv("DPKG_CONFFILE_OLD", confold, 1);
++		setenv("DPKG_CONFFILE_NEW", confnew, 1);
++
++		command_shell(buf, "custom merge command");
++	}
++
++	/* Parent process. */
++	subproc_wait(pid, "mergecmd");
++}
++
++
+diff --git a/src/main.c b/src/main.c
+index 73e7460..b52b98d 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -155,6 +155,8 @@ usage(const struct cmdinfo *ci, const char *value)
+ "  --no-force-...|--refuse-...\n"
+ "                             Stop when problems encountered.\n"
+ "  --abort-after <n>          Abort after encountering <n> errors.\n"
++"  --conf-merge-cmd <cmd>     Add configuration file merge command. Example:\n"
++"                             'V;Diff/Merge versions with VIM;vim -d %%O %%N'\n"
+ "\n"), ADMINDIR);
+ 
+   printf(_(
+@@ -199,6 +201,8 @@ static const char *admindir = ADMINDIR;
+ const char *instdir= "";
+ struct pkg_list *ignoredependss = NULL;
+ 
++struct conf_merge_cmd confmergecmds[10] = { {0, NULL, NULL} };
++
+ static const char *
+ forcetype_str(char type)
+ {
+@@ -300,6 +304,64 @@ static const struct debuginfo {
+ };
+ 
+ static void
++confmergecmd(const struct cmdinfo *cip, const char *value) {
++	/* parse line */
++	char key;
++	char *label, *cmd;
++	const char *p, *s;
++	unsigned int ind;
++	unsigned int num_cmds;
++	const char *my_usage = "K;Display label;command args %O %N other args";
++	if(!value)
++		badusage(_("conf-merge-cmd requires argument like this: %s"), my_usage);
++
++	p = value;
++	/* - fetch key */
++	key = *p++;
++	if(!key)
++		badusage(_("null merge command, should be %s"), my_usage);
++	if(*p != ';')
++		badusage(_("bad merge command, should be %s"), my_usage);
++	++p; /* skip ';' */
++
++	/* - fetch label */
++	while(*p && isspace(*p)) /* skip spaces */
++		++p;
++	s = p;
++	while(*p && *p != ';') /* find ';' */
++		++p;
++	if(!p)
++		badusage(_("bad merge command, should be %s"), my_usage);
++	label = strndup(s, p-s);
++
++	/* - fetch command */
++	++p; /* skip ';' */
++	while(*p && isspace(*p)) /* skip spaces */
++		++p;
++	if(!p)
++		badusage(_("bad merge command, should be %s"), my_usage);
++	cmd = strdup(p);
++
++	/* find unused table entry */
++	num_cmds = sizeof(confmergecmds)/sizeof(confmergecmds[0]);
++	for(ind = 0; ind < num_cmds; ++ind) {
++		if(!confmergecmds[ind].key)
++			break;
++	}
++	if(ind == num_cmds) {
++		fprintf(stderr, _("Too many merge commsnds (%d is allowed), ignoring '%s'\n"), num_cmds, value);
++		free(label);
++		free(cmd);
++	} else {
++		confmergecmds[ind].key = key;
++		confmergecmds[ind].label = label;
++		confmergecmds[ind].command = cmd;
++		if(ind < num_cmds - 1)
++			confmergecmds[ind + 1].key = 0; /* terminate list */
++	}
++}
++
++static void
+ set_debug(const struct cmdinfo *cpi, const char *value)
+ {
+   char *endp;
+@@ -717,6 +779,7 @@ static const struct cmdinfo cmdinfos[]= {
+   { "debug",             'D', 1, NULL,          NULL,      set_debug,     0 },
+   { "help",              '?', 0, NULL,          NULL,      usage,         0 },
+   { "version",           0,   0, NULL,          NULL,      printversion,  0 },
++  { "conf-merge-cmd",    0,   1, NULL,          NULL,      confmergecmd,  0 },
+   ACTIONBACKEND( "build",		'b', BACKEND),
+   ACTIONBACKEND( "contents",		'c', BACKEND),
+   ACTIONBACKEND( "control",		'e', BACKEND),
+diff --git a/src/main.h b/src/main.h
+index 10014ef..f149a00 100644
+--- a/src/main.h
++++ b/src/main.h
+@@ -118,6 +118,15 @@ enum action {
+ 	act_forgetold,
+ };
+ 
++struct conf_merge_cmd {
++	char key;
++	const char *label;
++	const char *command;
++};
++
++
++extern struct conf_merge_cmd confmergecmds[10];
++
+ extern const char *const statusstrings[];
+ 
+ extern int f_pending, f_recursive, f_alsoselect, f_skipsame, f_noact;

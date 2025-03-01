@@ -1,0 +1,161 @@
+--- debian-7.1.0-amd64.orig/var/lib/dpkg/info/cdrom-detect.postinst	2013-09-10 17:45:08.305375296 -0700
++++ debian-7.1.0-amd64/var/lib/dpkg/info/cdrom-detect.postinst	2013-10-03 21:46:39.392315543 -0700
+@@ -1,4 +1,8 @@
+-#! /bin/sh
++#!/bin/sh
++
++# this should go in /etc/lsb-release or somewhere
++
++DISTRIB_LABEL="Debian 7.1.0 M-A 1"
+ 
+ set -e
+ . /usr/share/debconf/confmodule
+@@ -14,12 +18,21 @@
+ 	exit 1
+ }
+ 
++list_devices_by_id()
++{
++	local dir disk="$(echo "$1" | sed 's/ /\\x20/g')"
++	for dir in /dev/disk/by-label /dev/disk/by-uuid ; do
++		[ -e ${dir}/${disk} ] && echo ${dir}/${disk} || true
++	done
++}
++
+ try_mount() {
+ 	local device=$1
+ 	local type=$2
++	local options=$3
+ 
+ 	local ret=1
+-	if mount -t $type -o $OPTIONS $device /cdrom; then
++	if mount -t $type -o $options $device /cdrom; then
+ 		log "CD-ROM mount succeeded: device=$device fstype=$type"
+ 		if [ -e /cdrom/.disk/info ]; then
+ 			CDNAME=$(cat /cdrom/.disk/info)
+@@ -68,6 +81,7 @@
+ 		CDFS=iso9660
+ 		FATFS=vfat
+ 		OPTIONS=ro,exec
++		LOOPFS=vfat,ext4,iso9660
+ 		;;
+ 	hurd)
+ 		CDFS=iso9660fs
+@@ -95,12 +109,26 @@
+ 
+ mkdir /cdrom 2>/dev/null || true
+ 
++for arg in $(cat /proc/cmdline); do
++	case $arg in
++	loopmount=*)
++		LOOPMOUNT=${arg#loopmount=}
++		LOOPFILE=${LOOPMOUNT#*:}
++		[ "$LOOPFILE" != "$LOOPMOUNT" ] && LOOPDEV=${LOOPMOUNT%:*}
++		;;
++	esac
++done
++
++if [ "$LOOPMOUNT" ]; then
++	mkdir /loop 2>/dev/null || true
++fi
++
+ # Need to wait for the usb device scan to complete
+ if [ "$OS" = "linux" ]; then
+   for count in 1 2 3 4 5 6 8 9 10; do
+     devices="$(list-devices cd; list-devices maybe-usb-floppy)"
+     log "Devices: '$devices'"
+-    if [ -n "$devices" ]; then
++    if [ "$devices" ]; then
+       break 2
+     else
+       sleep 1
+@@ -109,27 +137,62 @@
+ fi
+ 
+ while true; do
+-	WRONG=
++	WRONG=''
+ 
+-	devices="$(list-devices cd; list-devices maybe-usb-floppy)"
+-	for device in $devices; do
+-		if try_mount $device $CDFS; then
+-			break 2
+-		fi
+-	done
+-	
+-	devices="$(list-devices usb-partition)"
+-	for device in $devices; do
+-		if try_mount $device $CDFS; then
+-			db_set cdrom-detect/hybrid true
+-			break 2
+-		fi
+-		if try_mount $device $FATFS; then
+-			db_set cdrom-detect/usb-hdd true
+-			break 2
++	if [ "$LOOPMOUNT" ]
++	then
++
++		log "LOOPDEV='$LOOPDEV' LOOPFILE='$LOOPFILE'"
++
++		loopfile=/loop/${LOOPFILE#/}
++
++		if [ "$LOOPDEV" ] ; then
++			devices="$(list_devices_by_id "$LOOPDEV")"
++		else
++			devices="$(list-devices partition; list-devices cd)"
+ 		fi
+-	done
+ 
++		log "trying loopmount on ($devices)..."
++
++		for device in $devices; do
++			if mount -o $OPTIONS -t $LOOPFS $device /loop; then
++				if [ -f $loopfile ] && try_mount $loopfile $CDFS loop,$OPTIONS ; then
++					break 2
++				else
++					umount /loop
++				fi
++			fi
++		done
++
++	else
++
++		devices="$(list_devices_by_id "$DISTRIB_LABEL")"
++		for device in $devices; do
++			if try_mount $device $CDFS $OPTIONS; then
++				break 2
++			fi
++		done
++
++		devices="$(list-devices cd; list-devices maybe-usb-floppy)"
++		for device in $devices; do
++			if try_mount $device $CDFS $OPTIONS; then
++				break 2
++			fi
++		done
++
++		devices="$(list-devices usb-partition)"
++		for device in $devices; do
++			if try_mount $device $CDFS $OPTIONS; then
++				db_set cdrom-detect/hybrid true
++				break 2
++			fi
++			if try_mount $device $FATFS $OPTIONS; then
++				db_set cdrom-detect/usb-hdd true
++				break 2
++			fi
++		done
++
++	fi
+ 
+ 	if [ "$WRONG" ]; then
+ 		db_input critical cdrom-detect/wrong-cd || [ $? -eq 30 ]
+@@ -138,7 +201,7 @@
+ 	fi
+ 
+ 	# If a device was detected but the mount failed, ask for the CD.
+-	if [ -n "$devices" ]; then
++	if [ "$devices" ]; then
+ 		db_input critical cdrom-detect/retry || [ $? -eq 30 ]
+ 		db_go
+ 		db_get cdrom-detect/retry

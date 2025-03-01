@@ -1,0 +1,92 @@
+diff --git i/man/dpkg-shlibdeps.1 w/man/dpkg-shlibdeps.1
+index fb59dad..0c617dd 100644
+--- i/man/dpkg-shlibdeps.1
++++ w/man/dpkg-shlibdeps.1
+@@ -232,6 +232,11 @@ and you want to ensure that you get the dependency from a given binary
+ package. You can use this option multiple times: directories will be
+ tried in the same order before directories of other binary packages.
+ .TP
++.BI \-I package-build-dir
++Ignore \fIpackage-build-dir\fP when looking for shlibs, symbols, and shared
++libraries files (since dpkg 1.18.5).
++You can use this option multiple times.
++.TP
+ .BI \-\-ignore\-missing\-info
+ Do not fail if dependency information can't be found for a shared library
+ (since dpkg 1.14.8).
+diff --git i/scripts/dpkg-shlibdeps.pl w/scripts/dpkg-shlibdeps.pl
+index 8c83025..ff64b95 100755
+--- i/scripts/dpkg-shlibdeps.pl
++++ w/scripts/dpkg-shlibdeps.pl
+@@ -71,15 +71,10 @@ my $warnings = WARN_SYM_NOT_FOUND | WARN_DEP_AVOIDABLE;
+ my $debug = 0;
+ my @exclude = ();
+ my @pkg_dir_to_search = ();
++my @pkg_dir_to_ignore = ();
+ my $host_arch = get_host_arch();
+ 
+ my (@pkg_shlibs, @pkg_symbols, @pkg_root_dirs);
+-if (-d 'debian') {
+-    push @pkg_symbols, glob 'debian/*/DEBIAN/symbols';
+-    push @pkg_shlibs, glob 'debian/*/DEBIAN/shlibs';
+-    my %uniq = map { guess_pkg_root_dir($_) => 1 } (@pkg_symbols, @pkg_shlibs);
+-    push @pkg_root_dirs, keys %uniq;
+-}
+ 
+ my ($stdout, %exec);
+ foreach (@ARGV) {
+@@ -93,6 +88,8 @@ foreach (@ARGV) {
+ 	Dpkg::Shlibs::add_library_dir($1);
+     } elsif (m/^-S(.*)$/) {
+ 	push @pkg_dir_to_search, $1;
++    } elsif (m/^-I(.*)$/) {
++	push @pkg_dir_to_ignore, $1;
+     } elsif (m/^-O$/) {
+ 	$stdout = 1;
+     } elsif (m/^-O(.+)$/) {
+@@ -146,6 +143,18 @@ foreach (@ARGV) {
+ }
+ usageerr(g_('need at least one executable')) unless scalar keys %exec;
+ 
++sub ignore_path {
++    my $path = shift;
++    return any { $path =~ /^\Q$_\E/ } @pkg_dir_to_ignore;
++}
++
++if (-d 'debian') {
++    push @pkg_symbols, grep { !ignore_path($_) } glob 'debian/*/DEBIAN/symbols';
++    push @pkg_shlibs, grep { !ignore_path($_) } glob 'debian/*/DEBIAN/shlibs';
++    my %uniq = map { guess_pkg_root_dir($_) => 1 } (@pkg_symbols, @pkg_shlibs);
++    push @pkg_root_dirs, keys %uniq;
++}
++
+ my $control = Dpkg::Control::Info->new();
+ my $fields = $control->get_source();
+ my $bd_value = deps_concat($fields->{'Build-Depends'}, $fields->{'Build-Depends-Arch'});
+@@ -563,7 +572,9 @@ sub usage {
+   -t<type>                 set package type (default is deb).
+   -x<package>              exclude package from the generated dependencies.
+   -S<package-build-dir>    search needed libraries in the given
+-                           package build directory first.
++                             package build directory first.
++  -I<package-build-dir>    ignore needed libraries, shlibs and symbols files
++                             in the given build directory.
+   -v                       enable verbose mode (can be used multiple times).
+   --ignore-missing-info    don't fail if dependency information can't be found.
+   --warnings=<value>       define set of active warnings (see manual page).
+@@ -807,6 +818,7 @@ sub my_find_library {
+     # - package build tree given on the command line (option -S)
+     # - other package build trees that contain either a shlibs or a
+     # symbols file
++    # - but ignore build tree given onthe command line (option -I)
+     my @builddirs;
+     my $pkg_root = guess_pkg_root_dir($execfile);
+     push @builddirs, $pkg_root if defined $pkg_root;
+@@ -814,6 +826,7 @@ sub my_find_library {
+     push @builddirs, @pkg_root_dirs;
+     my %dir_checked;
+     foreach my $builddir (@builddirs) {
++	next if ignore_path($builddir);
+ 	next if defined($dir_checked{$builddir});
+ 	$file = find_library($lib, \@RPATH, $format, $builddir);
+ 	return $file if defined($file);

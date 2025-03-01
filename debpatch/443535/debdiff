@@ -1,0 +1,177 @@
+diff -Nru dpkg-1.14.24/debian/changelog dpkg-1.14.25/debian/changelog
+--- dpkg-1.14.24/debian/changelog	2008-12-29 04:38:33.000000000 +0000
++++ dpkg-1.14.25/debian/changelog	2009-01-07 19:54:53.000000000 +0000
+@@ -1,3 +1,10 @@
++dpkg (1.14.25) unstable; urgency=low
++
++  * start-stop-daemon: Add support for changing a process's 
++    scheudling class and priority.
++
++ -- Chris Coulson <chrisccoulson@googlemail.com>  Wed, 07 Jan 2009 19:53:30 +0000
++
+ dpkg (1.14.24) unstable; urgency=low
+ 
+   [ Raphael Hertzog ]
+diff -Nru dpkg-1.14.24/utils/start-stop-daemon.c dpkg-1.14.25/utils/start-stop-daemon.c
+--- dpkg-1.14.24/utils/start-stop-daemon.c	2008-12-26 04:49:01.000000000 +0000
++++ dpkg-1.14.25/utils/start-stop-daemon.c	2009-01-08 13:55:06.000000000 +0000
+@@ -103,6 +103,26 @@
+ #include <error.h>
+ #endif
+ 
++#include <sys/syscall.h>
++#if defined(SYS_ioprio_set) && defined(linux)
++#  define SupportIOPrioSet
++#endif
++
++#ifdef SupportIOPrioSet
++enum {
++	IOPRIO_WHO_PROCESS = 1,
++	IOPRIO_WHO_PGRP,
++	IOPRIO_WHO_USER,
++};
++
++enum {
++	IOPRIO_CLASS_NONE,
++	IOPRIO_CLASS_RT,
++	IOPRIO_CLASS_BE,
++	IOPRIO_CLASS_IDLE,
++};
++#endif
++
+ static int testmode = 0;
+ static int quietmode = 0;
+ static int exitnodo = 1;
+@@ -127,6 +147,14 @@
+ static const char *progname = "";
+ static int nicelevel = 0;
+ static int umask_value = -1;
++#ifdef SupportIOPrioSet
++static int ioprio = 4;
++static int ioprio_class = IOPRIO_CLASS_BE;
++static int set_ioprio = 0;
++static int ioprio_mask = 0;
++
++#define IOPRIO_CLASS_SHIFT	13
++#endif
+ 
+ static struct stat exec_stat;
+ #if defined(OSHURD)
+@@ -168,7 +196,9 @@
+ #if defined(OSLinux) || defined(OShpux)
+ static int pid_is_exec(pid_t pid, const struct stat *esb);
+ #endif
+-
++#ifdef SupportIOPrioSet
++static inline int ioprio_set(int which, int who, int ioprio);
++#endif
+ 
+ static void fatal(const char *format, ...)
+ 	NONRETURNING PRINTFFORMAT(1, 2);
+@@ -308,6 +338,10 @@
+ "  -r|--chroot <directory>       chroot to <directory> before starting\n"
+ "  -d|--chdir <directory>        change to <directory> (default is /)\n"
+ "  -N|--nicelevel <incr>         add incr to the process's nice level\n"
++#ifdef SupportIOPrioSet
++"  -C|--ioschedclass <class>     set the process's IO scheduler class\n"
++"  -P|--ioschedprio <data>       set the process's IO scheduler class data\n"
++#endif
+ "  -k|--umask <mask>             change the umask to <mask> before starting\n"
+ "  -b|--background               force the process to detach\n"
+ "  -m|--make-pidfile             create the pidfile before starting\n"
+@@ -520,6 +554,10 @@
+ 		{ "exec",	  1, NULL, 'x'},
+ 		{ "chuid",	  1, NULL, 'c'},
+ 		{ "nicelevel",	  1, NULL, 'N'},
++#ifdef SupportIOPrioSet
++		{ "ioschedclass",	1, NULL, 'C'},
++		{ "ioschedprio",	1, NULL, 'P'},
++#endif
+ 		{ "umask",	  1, NULL, 'k'},
+ 		{ "background",	  0, NULL, 'b'},
+ 		{ "make-pidfile", 0, NULL, 'm'},
+@@ -533,9 +571,15 @@
+ 	int c;
+ 
+ 	for (;;) {
++#ifdef SupportIOPrioSet
++		c = getopt_long(argc, argv,
++		                "HKSVa:n:op:qr:s:tu:vx:c:N:C:P:k:bmR:g:d:",
++		                longopts, NULL);
++#else
+ 		c = getopt_long(argc, argv,
+ 		                "HKSVa:n:op:qr:s:tu:vx:c:N:k:bmR:g:d:",
+ 		                longopts, NULL);
++#endif
+ 		if (c == -1)
+ 			break;
+ 		switch (c) {
+@@ -597,6 +641,16 @@
+ 		case 'N':  /* --nice */
+ 			nicelevel = atoi(optarg);
+ 			break;
++#ifdef SupportIOPrioSet
++		case 'C':  /* --ioschedclass */
++			ioprio_class = atoi(optarg);
++			set_ioprio = 1;
++			break;
++		case 'P':  /* --ioschedprio */
++			ioprio = atoi(optarg);
++			set_ioprio = 1;			
++			break;
++#endif
+ 		case 'k':  /* --umask <mask> */
+ 			umask_str = optarg;
+ 			break;
+@@ -1221,6 +1275,14 @@
+ 	}
+ }
+ 
++#ifdef SupportIOPrioSet
++static inline int
++ioprio_set (int which, int who, int ioprio)
++{
++	return syscall(SYS_ioprio_set, which, who, ioprio);
++}
++#endif
++
+ int
+ main(int argc, char **argv)
+ {
+@@ -1334,6 +1396,36 @@
+ 			fatal("Unable to alter nice level by %i: %s",
+ 			      nicelevel, strerror(errno));
+ 	}
++#ifdef SupportIOPrioSet
++	if (set_ioprio) {
++		switch (ioprio_class) {
++			case IOPRIO_CLASS_NONE:
++				/* Set to best-effort */
++				if (quietmode < 0)
++					printf("Ignoring user defined IO scheduler class. Setting to IOPRIO_CLASS_BE");
++				ioprio_class = IOPRIO_CLASS_BE;
++				break;
++			case IOPRIO_CLASS_RT:
++			case IOPRIO_CLASS_BE:
++				break;
++			case IOPRIO_CLASS_IDLE:
++				/* Ignore priority for the idle class */
++				if (quietmode < 0)
++					printf ("Ignoring any user defined IO scheduler priority. Setting to priority 7");
++				ioprio = 7;
++				break;
++			default:
++				fatal("Bad IO scheduler class: %i", ioprio_class);
++		}
++		ioprio_mask = ioprio | ioprio_class << IOPRIO_CLASS_SHIFT;
++		if (quietmode < 0)
++			printf("IO priority mask %i", ioprio_mask);
++		errno = 0;
++		if ((ioprio_set(IOPRIO_WHO_PROCESS, getpid(), ioprio_mask) == -1) && (errno != 0))
++			fatal("Unable to alter IO priority to mask %i: %s",
++				  ioprio_mask, strerror(errno));
++	}
++#endif
+ 	if (umask_value >= 0)
+ 		umask(umask_value);
+ 	if (mpidfile && pidfile != NULL) {

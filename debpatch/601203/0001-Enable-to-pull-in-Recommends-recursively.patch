@@ -1,0 +1,214 @@
+From 84878a80ab0f0560e9a55b2d5956c8707fd7b74e Mon Sep 17 00:00:00 2001
+From: Wolfgang Schweer <wschweer@arcor.de>
+Date: Fri, 1 Mar 2019 11:27:46 +0100
+Subject: [PATCH 1/2] Enable to pull in Recommends recursively
+
+To enable set NORECOMMENDS=0 in the build environment. (Closes: #601203)
+---
+ tools/sort_deps | 45 ++++++++++++++++++++++++++++-----------------
+ 1 file changed, 28 insertions(+), 17 deletions(-)
+
+diff --git a/tools/sort_deps b/tools/sort_deps
+index 2bdbfcf..8582b90 100755
+--- a/tools/sort_deps
++++ b/tools/sort_deps
+@@ -647,6 +647,7 @@ sub check_versions {
+ # Check if a specific dependency package is installed already
+ sub dep_pkg_included {
+ 	my $p = shift;
++	my $add_rec = shift;
+ 	my $check_backports = shift;
+ 	my $need_udeb = shift;
+ 	my %d = %$p;
+@@ -754,17 +755,18 @@ sub fix_backport_depends {
+ # dependency or any one of an OR array
+ sub dep_satisfied {
+     my $p = shift;
++    my $add_rec = shift;
+     my $check_backports = shift;
+     my $need_udeb = shift;
+     
+     if ("ARRAY" eq ref $p) {
+ 	foreach (@{$p}) {
+-	    if (dep_pkg_included($_, $check_backports, $need_udeb)) {
++	    if (dep_pkg_included($_, $add_rec, $check_backports, $need_udeb)) {
+ 		return 1;
+ 	    }
+ 	}
+     } elsif ("HASH" eq ref $p) {
+-	return dep_pkg_included($p, $check_backports, $need_udeb);
++	return dep_pkg_included($p, $add_rec, $check_backports, $need_udeb);
+     } else {
+     }
+     return 0;
+@@ -878,7 +880,7 @@ sub add_package {
+ 	}
+ 	
+ 	# Get all dependencies (not yet included) of each package
+-	my (@dep) = (get_missing ($p, $check_backports));
++	my (@dep) = (get_missing ($p, $add_rec, $check_backports));
+ 
+ 	# Stop here if apt failed
+ 	if (not scalar(@dep)) {
+@@ -895,7 +897,7 @@ sub add_package {
+ 	msg(3, "  \@dep before checklist = " . dump_depend(\@dep) . "\n");
+ 	
+ 	# Check if all packages are allowed (fail if one cannot)
+-	($ok, $reasons) = check_list (\@dep, 1, $check_backports);
++	($ok, $reasons) = check_list (\@dep, 1, $add_rec, $check_backports);
+ 	if (not $ok) {
+ 		msg(2, "Can't add $p ... one of the packages needed has " .
+ 		       "been refused. Reasons: $reasons\n"); 
+@@ -905,12 +907,11 @@ sub add_package {
+ 	msg(3, "  \@dep after checklist = " . dump_depend(\@dep) . "\n");
+ 	
+ 	if ($add_rec) {
+-		#TODO: Look for recommends (not yet included !!)
+-		add_recommends (\@dep, $p, $check_backports);
++		add_recommends (\@dep, $p, $add_rec, $check_backports);
+ 		msg(3, "  \@dep after add_recommends = " . dump_depend(\@dep) . "\n");
+ 		# Check again but doesn't fail if one of the package cannot be
+ 		# installed, just ignore it (it will be removed from @dep)
+-		($ok, $reasons) = check_list (\@dep, 0, $check_backports);
++		($ok, $reasons) = check_list (\@dep, 0, $add_rec, $check_backports);
+ 		if (not $ok) {
+ 			msg(0, "UNEXPECTED: It shouldn't fail here !\n");
+ 			return;
+@@ -920,11 +921,11 @@ sub add_package {
+ 
+ 	if ($add_sug) {
+ 	    #TODO: Look for suggests (not yet included !!)
+-		add_suggests (\@dep, $p, $check_backports);
++		add_suggests (\@dep, $p, $add_rec, $check_backports);
+ 		msg(3, "  \@dep after add_suggests = " . dump_depend(\@dep) . "\n");
+         # Check again but doesn't fail if one of the package cannot be
+         # installed, just ignore it (it will be removed from @dep)
+-        ($ok, $reasons) = check_list (\@dep, 0, $check_backports);
++        ($ok, $reasons) = check_list (\@dep, 0, $add_rec, $check_backports);
+         if (not $ok) {
+             msg(0, "UNEXPECTED: It shouldn't fail here !\n");
+             return;
+@@ -952,6 +953,7 @@ sub accepted {
+ sub add_suggests {
+ 	my $deps_list = shift;
+ 	my $pkg = shift;
++        my $add_rec = shift;
+ 	my $check_backports = shift;
+ 	my @parents = ($pkg);
+ 	my $p; # = shift;
+@@ -960,13 +962,14 @@ sub add_suggests {
+ 	foreach $p (@copy) {
+ 		my %t = %$p;
+ 		my $pkgname = $t{"Package"};
+-		add_missing($deps_list, $packages{$pkgname}{"Suggests"}, \%t, 1, \@parents, $check_backports);
++		add_missing($deps_list, $packages{$pkgname}{"Suggests"}, \%t, 1, \@parents, $add_rec, $check_backports);
+ 	}
+ }
+ 
+ sub add_recommends {
+ 	my $deps_list = shift;
+ 	my $pkg = shift;
++        my $add_rec = shift;
+ 	my $check_backports = shift;
+ 	my @parents = ($pkg);
+ 	my $p; # = shift;
+@@ -975,12 +978,13 @@ sub add_recommends {
+ 	foreach $p (@copy) {
+ 		my %t = %$p;
+ 		my $pkgname = $t{"Package"};
+-		add_missing($deps_list, $packages{$pkgname}{"Recommends"}, \%t, 1, \@parents, $check_backports);
++		add_missing($deps_list, $packages{$pkgname}{"Recommends"}, \%t, 1, \@parents, $add_rec, $check_backports);
+ 	}
+ }
+ 
+ sub get_missing {
+ 	my $p = shift;
++        my $add_rec = shift;
+ 	my $check_backports = shift;
+ 	my @deps_list = ();
+ 	my @parents = ();
+@@ -991,7 +995,7 @@ sub get_missing {
+ 	$t{"CmpOp"} = "";
+ 	$t{"Version"} = "";
+ 
+-	if (not add_missing (\@deps_list, $packages{$p}{"Depends"}, \%t, 0, \@parents, $check_backports)) {
++	if (not add_missing (\@deps_list, $packages{$p}{"Depends"}, \%t, 0, \@parents, $add_rec, $check_backports)) {
+ 		return ();
+ 	}
+ 
+@@ -1012,6 +1016,7 @@ sub add_missing {
+ 	my $ok = 1;
+ 	my $soft_depend = shift;
+ 	my $parents = shift;
++        my $add_rec = shift;
+ 	my $check_backports = shift;
+ 	my $pkgname;
+ 	my (%pkgin);
+@@ -1050,7 +1055,7 @@ sub add_missing {
+ 		msg(3, "    $pkgname Dep: $textout soft_depend $soft_depend\n");
+ 
+ 		# Bail out early if we can!
+-		if (dep_satisfied ($thisdep, $check_backports, $need_udeb)) {
++		if (dep_satisfied ($thisdep, $add_rec, $check_backports, $need_udeb)) {
+ 			next;
+ 		}
+ 
+@@ -1073,7 +1078,7 @@ sub add_missing {
+ 				}
+                                
+ 				# Already installed?
+-				if (dep_satisfied($pkg, $check_backports, $need_udeb)) {
++				if (dep_satisfied($pkg, $add_rec, $check_backports, $need_udeb)) {
+ 					msg(3, "    OR relationship already installed: " . dump_depend($pkg) . "\n");
+ 					$or_ok = 1;
+ 					last;
+@@ -1125,7 +1130,7 @@ sub add_missing {
+ 					# added successfully
+ 					# FIXME! NEED TO CHECK IF VERSION DEPS ARE SATISFIED, FALL BACK TO BPO VERSION
+ 					push (@{$list}, $pkg);
+-					if (add_missing ($list, $packages{$pkgname}{"Depends"}, $pkg, $soft_depend, $parents, $check_backports)) {
++					if (add_missing ($list, $packages{$pkgname}{"Depends"}, $pkg, $soft_depend, $parents, $add_rec, $check_backports)) {
+ 					    $or_ok = 1;
+ 					    remove_entry($pkg, $list);
+ 					    push @{$list}, $pkg;
+@@ -1163,7 +1168,7 @@ sub add_missing {
+ 					last;
+ 				}
+ 			}
+-			if (dep_satisfied(\%t, $check_backports, $need_udeb)) {
++			if (dep_satisfied(\%t, $add_rec, $check_backports, $need_udeb)) {
+ 				msg(1, "    $pt already included\n");
+ 				next; # Already included, don't worry
+ 			}
+@@ -1172,7 +1177,7 @@ sub add_missing {
+ 				next;
+ 			}
+ 			push @{$list}, \%t;
+-			if (not add_missing ($list, $packages{$t{"Package"}}{"Depends"}, \%t, $soft_depend, $parents, $check_backports)) {
++			if (not add_missing ($list, $packages{$t{"Package"}}{"Depends"}, \%t, $soft_depend, $parents, $add_rec, $check_backports)) {
+ 				my $pkgname = $pkgin{"Package"};
+ 				msg(1, "couldn't add $pt ...\n");
+ 				if ($soft_depend) {
+@@ -1183,6 +1188,11 @@ sub add_missing {
+ 					pop @{$list};
+ 					$ok = 0;
+ 				}
++			} elsif ($add_rec) {
++				my $reclist = $packages{lc $_}{"Recommends"};
++				msg(0, "trying to add recommended packages $reclist ...\n");
++				# depends added successfully, add recommends too
++				add_missing ($list, $reclist, lc $_, $add_rec);
+ 			}
+ 			remove_entry(\%t, $list);
+ 			push @{$list}, \%t;
+@@ -1249,6 +1259,7 @@ sub remove_entry {
+ sub check_list {
+ 	my $ref = shift;
+ 	my $fail = shift;
++	my $add_rec = shift;
+ 	my $check_backports = shift;
+ 	my $ok = 1;
+ 	my @to_remove = ();
+-- 
+2.34.0
+

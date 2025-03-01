@@ -1,0 +1,420 @@
+--- a/dhelp_parse.rb
++++ b/dhelp_parse.rb
+@@ -61,9 +61,9 @@
+     version           "0.2.0"
+     author            "Esteban Manchado Velázquez"
+     copyright         "Copyright (c) 2005-2007, Esteban Manchado Velázquez"
+-    synopsis          "[-v] [-h] -a doc-base_file1 d-b_f2 ... | -d doc-base_file1 d-b_f2 ... | -r"
++    synopsis          "[-v] [-h] -a doc-base_file1 d-b_f2 ... | -d doc-base_file1 d-b_f2 ... | -i | -r"
+     short_description "Debian online help system parser"
+-    long_description  "Dhelp parser to add/remove/reindex dhelp files"
++    long_description  "Dhelp parser to add/remove/index-incrementally/fully-reindex dhelp files"
+ 
+     option :help
+     option :names => %w(-a), :arity => [0,-1],
+@@ -77,9 +77,12 @@
+     option :names => %w(-v), :arity => [0,0],
+            :opt_found => lambda { @verbose = true },
+            :opt_description => "verbose"
++    option :names => %w(-i), :arity => [0,0],
++           :opt_found => lambda { @action = :index },
++           :opt_description => "perform deferred incremental indexing of pending registered docs"
+     option :names => %w(-r), :arity => [0,0],
+            :opt_found => lambda { @action = :reindex },
+-           :opt_description => "ignored, for compatibility"
++           :opt_description => "perform full re-indexing of all registered docs"
+ 
+     expected_args [0,0]
+ 
+@@ -87,11 +90,52 @@
+     @verbose = false
+   end
+ 
+-
+   def packaged_configured?
+     File.exists? '/var/lib/dhelp/configured'
+   end
+ 
++  # Adds the documents supplied in command-line to the pool.
++  def add_documents(pool)
++    @doc_base_files.each do |doc_base_file|
++      if File.readable?(doc_base_file)
++        if @verbose
++          puts "Parsing document #{doc_base_file}"
++        end
++        doc_base_doc = Dhelp::DocBaseDocument.new(doc_base_file)
++        if @verbose
++          puts "Registering document #{doc_base_file}"
++        end
++        pool.register(doc_base_doc)
++      else
++        # Don't stop on single file errors; allow others with no error
++        # to be successfully registered.
++        $stderr.puts "Can't read doc-base file '#{doc_base_file}'"
++      end
++    end
++  end
++
++  # Rebuilds the HTML indices to be in sync with pool's state.
++  def rebuild_html_index(pool)
++    if @verbose
++      puts "Rebuilding documentation index at #{DEFAULT_INDEX_ROOT}"
++    end
++    exporter = Dhelp::Exporter::Html.new(pool)
++    exporter.export(:dir => DEFAULT_INDEX_ROOT)
++  end
++
++  # Starts the indexer to index the pending-documents-for-indexing list
++  def do_deferred_indexing(user_opts = {})
++    opts = {}
++    if user_opts.has_key? :incremental
++      opts[:incremental] = user_opts[:incremental]
++    end
++    if @verbose
++      puts "Indexing documents contained in pending list"
++    end
++    indexer = Dhelp::Indexer.new(opts)
++    indexer.index
++  end
++
+   def main
+     begin
+       if packaged_configured?
+@@ -111,21 +155,7 @@
+ 
+     case @action
+     when :add
+-      @doc_base_files.each do |doc_base_file|
+-        if File.readable? doc_base_file
+-          if @verbose
+-            puts "Parsing document #{doc_base_file}"
+-          end
+-          doc_base_doc = Dhelp::DocBaseDocument.new(doc_base_file)
+-          if @verbose
+-            puts "Registering/indexing document #{doc_base_file}"
+-          end
+-          pool.register(doc_base_doc)
+-        else
+-          $stderr.puts "Can't read doc-base file '#{doc_base_file}'"
+-          return 1
+-        end
+-      end
++      add_documents(pool)
+     when :delete
+       @doc_base_files.each do |doc_base_file|
+         if @verbose
+@@ -133,19 +163,23 @@
+         end
+         pool.deregister(doc_base_file)
+       end
++    when :index
++      # Index incrementally, to update with registered so-far documents.
++      # This is the normal mode of operation, called by the dpkg trigger
++      # after the end of each installation run.
++      do_deferred_indexing
+     when :reindex
+-      # Simply ignore, the documentation directory will be up-to-date anyway.
++      # Recreate the pool, without doing a full indexing.
++      pool.rebuild(false)
+     else
+       $stderr.puts usage
+       return 1
+     end
+ 
+     # Always executed
+-    if @verbose
+-      puts "Rebuilding documentation index at #{DEFAULT_INDEX_ROOT}"
+-    end
+-    exporter = Dhelp::Exporter::Html.new(pool)
+-    exporter.export(:dir => DEFAULT_INDEX_ROOT)
++    # We cannot defer this, unless a persistence mechanism between 
++    # subsequent invocations of this binary is setup.
++    rebuild_html_index(pool)
+   rescue => e
+     puts "#{e.class}: #{e} (#{e.backtrace.join("\n")})"
+   end
+--- a/lib/dhelp.rb
++++ b/lib/dhelp.rb
+@@ -26,9 +26,13 @@
+ module Dhelp
+   SUPPORTED_FORMATS = %w(html text pdf postscript dvi)
+   DOC_DIR_DATABASE  = '/var/lib/dhelp/doc-base_dirs'
++  DOC_INDEX_FILE    = '/var/lib/dhelp/documents.index'
++  DOC_INDEX_CONFIG  = '/usr/share/dhelp/swish++.conf'
++  DOC_PENDING_FILE  = '/var/lib/dhelp/pending.list'
+ 
+   # Exception for indexer errors (when calling index++)
+   class Exception < RuntimeError; end   # Base class Dhelp::Exception
++  class RegisterDocsError < Exception; end
+   class IndexerError < Exception; end
+   class KeyNotFoundError < Exception; end
+   class InvalidOptionError < Exception; end
+@@ -336,9 +340,13 @@
+   # know everything about them.
+   class DhelpDocumentPool
+     def initialize(user_opts={})
+-      @opts = {:doc_dir_database => DOC_DIR_DATABASE}.merge(user_opts)
++      @opts = {:doc_dir_database    => DOC_DIR_DATABASE,
++               :index_file          => DOC_INDEX_FILE,
++               :indexer_config_file => DOC_INDEX_CONFIG,
++               :pending_file        => DOC_PENDING_FILE}.merge(user_opts)
+       Dhelp.check_options(@opts, [:index_file,
+                                   :indexer_config_file,
++                                  :pending_file,
+                                   :doc_base_dir,
+                                   :doc_dir_database])
+       doc_base_pool_options = {}
+@@ -362,10 +370,25 @@
+     end
+ 
+     # Rebuilds the whole pool, making sure everything is consistent
+-    def rebuild
++    # If doindex = true (the default) full indexing is also performed,
++    # to achieve compatibility with the cron jobs shipped by versions
++    # 0.6.14 and 0.6.19 of the package, 
++    # If doindex = false, the pending file is not cleaned and indexing
++    # is not performed, to make dhelp_parse/doc-base calls efficient.
++    def rebuild(doindex=true)
++      if doindex
++        _clean_pending_file
++      end
+       @skip_list = []
+       # DocBaseDocumentPool works as an iterable document list
+       _register_docs(@doc_base_document_pool, :regenerate_index => true)
++      if doindex
++        indexer = Indexer.new({:incremental  => false,
++                               :index_file   => @opts[:index_file],
++                               :config_file  => @opts[:indexer_config_file],
++                               :pending_file => @opts[:pending_file]})
++        indexer.index
++      end
+     end
+ 
+     # Returns the DocBaseDocument objects that haven't been deregistered
+@@ -403,6 +426,22 @@
+ 
+     private
+ 
++    # Deletes the currently pending documents list to ensure that stale 
++    # contents do not pollute the index with extraneous files when rebuild
++    # is invoked.
++    def _clean_pending_file
++      begin
++        File.delete(@opts[:pending_file])
++      rescue Errno::ENOENT
++        return
++      rescue SystemCallError => e
++        # On any other system errors, report but allow to continue
++        # (else we may risk not-indexing current pending documents)
++        puts "Warning: system returned error code #{e.errno} " +
++          "while deleting #{pending_file}"
++      end
++    end 
++
+     # Registers a list of doc-base documents as part of Dhelp
+     def _register_docs(doc_list, user_opts={})
+       register_opts = {:regenerate_index => false}.merge(user_opts)
+@@ -438,17 +477,25 @@
+       end
+       doc_dir_db.close
+ 
++      # Now append index_paths to index-pending registered docs file
+       unless index_paths.empty?
+-        indexer_opts = {}
+-        if @opts.has_key? :index_file
+-          indexer_opts[:index_file] = @opts[:index_file]
++        err_msg = ""
++        begin
++          File.open(@opts[:pending_file], "a+") do |f|
++            index_paths.each do |ip|
++              f.puts ip
++            end
++          end
++        rescue IOError => e
++          err_msg = "I/O error (#{e})"
++        rescue SystemCallError => e
++          err_msg = "System call error #{e.errno}"
+         end
+-        if @opts.has_key? :indexer_config_file
+-          indexer_opts[:config_file] = @opts[:indexer_config_file]
++        unless err_msg == ""
++          raise RegisterDocsError, 
++            "#{err_msg} while appending #{index_paths.join(', ')}," +
++            " to pending list #{register_opts[:pending_file]}"
+         end
+-        indexer = Indexer.new(indexer_opts)
+-        indexer.index(index_paths,
+-                      :incremental => !register_opts[:regenerate_index])
+       end
+     end
+   end
+@@ -458,43 +505,104 @@
+   # Indexer class. So far it only takes care of doc-base documents.
+   class Indexer
+     def initialize(user_opts={})
+-      @opts = {:index_file   => "/var/lib/dhelp/documents.index",
+-               :config_file  => "/usr/share/dhelp/swish++.conf",
+-               :indexpp_cmd  => "/usr/bin/index++"}.merge(user_opts)
++      @opts = {:incremental  => true,
++               :index_file   => DOC_INDEX_FILE,
++               :config_file  => DOC_INDEX_CONFIG,
++               :indexpp_cmd  => "/usr/bin/index++",
++               :pending_file => DOC_PENDING_FILE}.merge(user_opts)
++      Dhelp.check_options(@opts, [:incremental,
++                                  :index_file,
++                                  :config_file,
++                                  :indexpp_cmd,
++                                  :pending_file])
+     end
+ 
++    # Returns the value of incremental option
++    def incremental; @opts[:incremental]; end
++
+     # Returns the index file
+     def index_file; @opts[:index_file]; end
+ 
++    # Returns the config file
++    def config_file; @opts[:config_file]; end
++
+     # Returns the index++ binary path
+     def indexpp_cmd; @opts[:indexpp_cmd]; end
+ 
+     # Returns the index++ command-line options
+-    def indexpp_options(user_opts)
+-      opts = {:incremental  => true}.merge(user_opts)
+-      "--config-file #{@opts[:config_file]} --index-file #{index_file}" +
++    def indexpp_options
++      "--config-file #{config_file} --index-file #{index_file}" +
+         " --follow-links" +
+-        (opts[:incremental] ? " --incremental" : "")
++        (incremental ? " --incremental" : "")
++    end
++
++    # Returns the pending-documents-list-for-indexing file
++    def pending_file; @opts[:pending_file]; end
++
++    # Returns the pending-documents-list-for-indexing contents as an array
++    def read_pending_file
++      # Don't use File.exists? to avoid races; use exceptions instead
++      begin
++        IO.readlines(pending_file)
++      rescue Errno::ENOENT
++        []
++      rescue IOError, SystemCallError
++        raise IndexerError, "Error during reading index-pending list: " +
++          "#{pending_file}"
++      end
++    end
++
++    # Deletes the currently pending documents list
++    def clean_pending_file
++      begin
++        File.delete(pending_file)
++      rescue Errno::ENOENT
++        return
++      rescue SystemCallError => e
++        # On any other system errors, report but allow to continue
++        # (else we may risk not-indexing current pending documents)
++        puts "Warning: system returned error code #{e.errno} " +
++          "while deleting #{pending_file}"
++      end
++    end 
++
++    # Returns true if already indexing
++    def is_indexing?
++      i_file = (incremental ? "#{index_file}.new" : index_file)
++      File.exists?(i_file) and File.size(i_file) == 0
+     end
+ 
+     # Index the list of given dirs/files with index++. Directories are indexed
+     # recursively.  There is only one valid key for the user_opts hash:
+     # :incremental, which adds the contents of the given paths to the index,
+     # instead of replacing it with the indexed contents of paths.
+-    def index(paths, user_opts={})
+-      opts = {:incremental  => true}.merge(user_opts)
+-      cmd = "#{indexpp_cmd} #{indexpp_options(opts)} -"
+-
+-      # If the index doesn't exist yet and we're doing incremental, just exit
+-      if opts[:incremental] and not File.exists?(index_file)
+-        return
++    def index(paths=[], user_opts={})
++      if user_opts.has_key? :incremental
++        @opts[:incremental] = user_opts[:incremental]
++      end
++      cmd = "#{indexpp_cmd} #{indexpp_options} -"
++
++      # If the index doesn't exist yet and we're doing incremental,
++      # switch to non-incremental mode and create it.  That way we will
++      # have at least a partial index until the next rebuild cron job.
++      if incremental and not File.exists?(index_file)
++        @opts[:incremental] = false
++        cmd = "#{indexpp_cmd} #{indexpp_options} -"
+       end
+ 
+       # If it's already indexing, just exit
+-      if File.exists?(index_file) and File.size(index_file) == 0
++      if is_indexing?
+         return
+       end
+ 
++      # Add to paths the list of currently pending documents
++      paths[paths.length, 0] = read_pending_file
++      # Delete the pending file here. Else any filenames added during the
++      # time we are indexing (by a subsequent invocation of dpkg) may be 
++      # lost if we keep the file around and delete it later.
++      clean_pending_file
++
++      # Finally, invoke the indexer to create the index.
+       begin
+         File.popen(cmd, "w") do |f|
+           paths.each do |dir|
+@@ -511,7 +619,7 @@
+ 
+       # When using incremental indexing (default), a new index is created (with
+       # the extension ".new")
+-      if opts[:incremental]
++      if incremental
+         FileUtils.mv "#{index_file}.new", index_file
+       end
+     end
+@@ -519,7 +627,12 @@
+ 
+     # DEPRECATED METHOD, ONLY FOR COMPATIBILITY WITH NON-UP-TO-DATE cron FILES
+     def reindex_all
+-      DhelpDocumentPool.new.rebuild
++      # Made a no-op, to avoid reverse-depends on DhelpDocumentPool
++      # The cron files in question are either pre-sarge or in intermediate
++      # dhelp versions which now only live on CDs; it's time to upgrade...
++
++      puts "This dhelp method is not supported anymore." +
++        " Please upgrade your cron file to one of the newer versions."
+     end
+   end
+ end
+--- a/test/tc_dhelpdocumentpool.rb
++++ b/test/tc_dhelpdocumentpool.rb
+@@ -5,6 +5,7 @@
+ class TC_DhelpDocumentPool < Test::Unit::TestCase
+   TEST_DOC_DIR_DATABASE = 'test/dddb'
+   TEST_INDEX_FILE       = 'test/index.swish++'
++  TEST_PENDING_FILE     = 'test/pending.list'
+ 
+   def doc_base_document(path)
+     Dhelp::DocBaseDocument.new("test/doc-base-pool/#{path}")
+@@ -22,7 +23,8 @@
+     @pool = Dhelp::DhelpDocumentPool.new(:doc_base_dir => ['test/doc-base-pool'],
+                                          :doc_dir_database => TEST_DOC_DIR_DATABASE,
+                                          :index_file       => TEST_INDEX_FILE,
+-                                         :indexer_config_file => 'swish++.conf')
++                                         :indexer_config_file => 'swish++.conf',
++                                         :pending_file     => TEST_PENDING_FILE)
+     @doc_base_id_set = Set.new(['docbook-xsl-doc-html',
+                                 'pica-manual',
+                                 'pica-manual-2'])
+@@ -156,5 +158,6 @@
+     @doc_base_id_set = nil
+     FileUtils.rm_f TEST_DOC_DIR_DATABASE
+     FileUtils.rm_f TEST_INDEX_FILE
++    FileUtils.rm_f TEST_PENDING_FILE
+   end
+ end

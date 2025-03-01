@@ -1,0 +1,92 @@
+--- /usr/share/initramfs-tools/hooks-cryptroot.distrib	2012-06-12 21:29:49.000000000 +0200
++++ /usr/share/initramfs-tools/hooks/cryptroot	2012-07-25 09:00:50.417460434 +0200
+@@ -16,7 +16,7 @@
+ 
+ . /usr/share/initramfs-tools/hook-functions
+ 
+-get_root_device() {
++get_root_devices() {
+ 	local device mount type options dump pass
+ 
+ 	if [ ! -r /etc/fstab ]; then
+@@ -26,8 +26,15 @@
+ 	grep -s '^[^#]' /etc/fstab | \
+ 	while read device mount type options dump pass; do
+ 		if [ "$mount" = "/" ]; then
+-			device=$(canonical_device "$device") || return 0
+-			echo "$device"
++			local devices
++			if [ "$type" = "btrfs" ] ; then
++				for dev in $(btrfs filesystem show $(canonical_device "$device" --no-simplify) 2>/dev/null | sed -r -e 's/.*devid .+ path (.+)/\1/;tx;d;:x') ; do
++					devices="$devices $(canonical_device "$dev")"
++				done
++			else
++				devices=$(canonical_device "$device") || return 0
++			fi
++			echo "$devices"
+ 			return
+ 		fi
+ 	done
+@@ -90,7 +97,7 @@
+ 		if [ -n "$derived" ]; then
+ 			if grep -q "^$derived" /etc/crypttab; then
+ 				derived=$(canonical_device "/dev/mapper/$derived") || return 0
+-				if [ "$derived" != "$rootdev" ]; then
++				if ! echo "$rootdevs" | grep -q -e "$derived"; then
+ 					devices="$devices $derived"
+ 				fi
+ 			else
+@@ -305,6 +312,7 @@
+ canonical_device() {
+ 	local dev altdev original
+ 	dev="$1"
++	opt="$2"
+ 
+ 	altdev="${dev#LABEL=}"
+ 	if [ "$altdev" != "$dev" ]; then
+@@ -321,6 +329,11 @@
+ 		dev=$(readlink -e "$dev")
+ 	fi
+ 
++	if [ "$opt" = "--no-simplify" ]; then
++		echo "$dev"
++		return 0
++	fi
++
+ 	if [ "x${dev%/dev/dm-*}" = "x" ]; then
+ 		# try to detect corresponding symlink in /dev/mapper/
+ 		for dmdev in /dev/mapper/*; do
+@@ -356,7 +369,7 @@
+ 	fi
+ 
+ 	# Flag root device
+-	if [ "$nodes" = "$rootdev" ]; then
++	if echo "$rootdevs" | grep -q -e "$nodes"; then
+ 		if [ -z "$opts" ]; then
+ 			opts="rootdev"
+ 		else
+@@ -500,20 +513,20 @@
+ #
+ 
+ setup="no"
+-rootdev=""
++rootdevs=""
+ resumedevs=""
+ 
+ # Find the root and resume device(s)
+ if [ -r /etc/crypttab ]; then
+-	rootdev=$(get_root_device)
+-	if [ -z "$rootdev" ]; then
++	rootdevs=$(get_root_devices)
++	if [ -z "$rootdevs" ]; then
+ 		echo "cryptsetup: WARNING: could not determine root device from /etc/fstab" >&2
+ 	fi
+ 	resumedevs=$(get_resume_devices)
+ fi
+ 
+ # Load the config opts and modules for each device
+-for dev in $rootdev $resumedevs; do
++for dev in $rootdevs $resumedevs; do
+ 	if ! modules=$(add_device "$dev"); then
+ 		echo "cryptsetup: FAILURE: could not determine configuration for $dev" >&2
+ 		continue

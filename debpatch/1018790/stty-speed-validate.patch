@@ -1,0 +1,108 @@
+From 544cead8456cf788b47ed13cf17b55bc996b5791 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?P=C3=A1draig=20Brady?= <P@draigBrady.com>
+Date: Wed, 31 Aug 2022 00:17:21 +0100
+Subject: [PATCH] stty: valid ispeed and ospeed arguments
+
+* src/stty.c (apply_settings): Validate [io]speed arguments
+against the internal accepted set.
+(set_speed): Check the cfset[io]speed() return value so
+that we validate against the system supported set.
+* tests/misc/stty-invalid.sh: Add a test case.
+* NEWS: Mention the bug fix.
+Reported in https://bugs.debian.org/1018790
+---
+ NEWS                       |  5 +++++
+ src/stty.c                 | 29 +++++++++++++++++++++++++----
+ tests/misc/stty-invalid.sh |  3 +++
+ 3 files changed, 33 insertions(+), 4 deletions(-)
+
+diff --git a/NEWS b/NEWS
+index ab1a2ef91..db5150824 100644
+--- a/NEWS
++++ b/NEWS
+@@ -26,6 +26,11 @@ GNU coreutils NEWS                                    -*- outline -*-
+   long been documented to be platform-dependent.
+   [bug introduced 1999-05-02 and only partly fixed in coreutils-8.14]
+ 
++  stty ispeed and ospeed options no longer accept and silently ignore
++  invalid speed arguments.  Now they're validated against both the
++  general accepted set, and the system supported set of valid speeds.
++  [This bug was present in "the beginning".]
++
+ ** Changes in behavior
+ 
+   'cp --reflink=always A B' no longer leaves behind a newly created
+diff --git a/src/stty.c b/src/stty.c
+index 3b6a592a9..3d515223e 100644
+--- a/src/stty.c
++++ b/src/stty.c
+@@ -1159,6 +1159,11 @@ apply_settings (bool checking, char const *device_name,
+             {
+               check_argument (arg);
+               ++k;
++              if (string_to_baud (settings[k]) == (speed_t) -1)
++                {
++                  error (0, 0, _("invalid ispeed %s"), quote (settings[k]));
++                  usage (EXIT_FAILURE);
++                }
+               if (checking)
+                 continue;
+               set_speed (input_speed, settings[k], mode);
+@@ -1169,6 +1174,11 @@ apply_settings (bool checking, char const *device_name,
+             {
+               check_argument (arg);
+               ++k;
++              if (string_to_baud (settings[k]) == (speed_t) -1)
++                {
++                  error (0, 0, _("invalid ospeed %s"), quote (settings[k]));
++                  usage (EXIT_FAILURE);
++                }
+               if (checking)
+                 continue;
+               set_speed (output_speed, settings[k], mode);
+@@ -1696,13 +1706,24 @@ set_control_char (struct control_info const *info, char const *arg,
+ static void
+ set_speed (enum speed_setting type, char const *arg, struct termios *mode)
+ {
+-  speed_t baud;
++  /* Note cfset[io]speed(), do not check with the device,
++     and only check whether the system logic supports the specified speed.
++     Therefore we don't report the device name in any errors.  */
++
++  speed_t baud = string_to_baud (arg);
++
++  assert (baud != (speed_t) -1);
+ 
+-  baud = string_to_baud (arg);
+   if (type == input_speed || type == both_speeds)
+-    cfsetispeed (mode, baud);
++    {
++      if (cfsetispeed (mode, baud))
++        die (EXIT_FAILURE, 0, "unsupported ispeed %s", quotef (arg));
++    }
+   if (type == output_speed || type == both_speeds)
+-    cfsetospeed (mode, baud);
++    {
++      if (cfsetospeed (mode, baud))
++        die (EXIT_FAILURE, 0, "unsupported ospeed %s", quotef (arg));
++    }
+ }
+ 
+ #ifdef TIOCGWINSZ
+diff --git a/tests/misc/stty-invalid.sh b/tests/misc/stty-invalid.sh
+index 58e51311d..af49b8d89 100755
+--- a/tests/misc/stty-invalid.sh
++++ b/tests/misc/stty-invalid.sh
+@@ -50,6 +50,9 @@ if tty -s </dev/tty; then
+   returns_ 1 stty eol -F/dev/tty eol || fail=1
+ fi
+ 
++# coreutils <= 9.1 would not validate speeds to ispeed or ospeed
++returns_ 1 stty ispeed 420 || fail=1
++
+ # Just in case either of the above mistakenly succeeds (and changes
+ # the state of our tty), try to restore the initial state.
+ stty $saved_state || fail=1
+-- 
+2.26.2
+

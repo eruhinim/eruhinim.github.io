@@ -1,0 +1,238 @@
+diff -ru cinnamon-screensaver-3.2.13/debian/cinnamon-screensaver-dialog cinnamon-screensaver-3.2.13-patched/debian/cinnamon-screensaver-dialog
+--- cinnamon-screensaver-3.2.13/debian/cinnamon-screensaver-dialog	2017-02-20 17:42:05.941009792 +0100
++++ cinnamon-screensaver-3.2.13-patched/debian/cinnamon-screensaver-dialog	2017-02-20 17:40:48.414392914 +0100
+@@ -0,0 +1,210 @@
++#!/usr/bin/env python3
++"""Transitional script to restart older cinnamon-screensavers.
++
++Older cinnamon-screensavers (<= 3.0) use the cinnamon-screensaver-dialog binary
++that is no longer present with newer cinnamon-screensavers (>= 3.2). As the
++binary is missing the unlock prompt can't be shown and hence the older and
++still running cinnamon-screensaver can't be unlocked anymore after a package
++update to a newer cinnamon-screensaver.
++
++This script is placed instead of cinnamon-screensaver-dialog and if it is
++executed it checks that it got executed from cinnamon-screensaver. If that is
++true the currently running older cinnamon-screensaver will be restarted so that
++the newer cinnamon-screensaver runs. Immediately afterwards the screensaver is
++locked via 'cinnamon-screensaver-command --lock'.
++
++Note: This script has been linted with pep8.
++"""
++
++
++import datetime
++import logging
++import logging.handlers
++import os
++import signal
++import subprocess
++import sys
++
++
++class DummySocket(object):
++    """Dummy socket for the error resilient syslog handler."""
++
++    def __init__(self, *unused_args, **unused_kwargs):
++        super().__init__()
++
++    def close(self, *unused_args, **unused_kwargs):
++        pass
++
++    def send(self, *unused_args, **unused_kwargs):
++        pass
++
++    def sendto(self, *unused_args, **unused_kwargs):
++        pass
++
++    def sendall(self, *unused_args, **unused_kwargs):
++        pass
++
++
++class SysLogHandler(logging.handlers.SysLogHandler):
++    """A syslog handler which does not raise a socket related exception."""
++
++    def _connect_unixsocket(self, address):
++        # If the socket creation fails use a dummy socket instead.
++        try:
++            super()._connect_unixsocket(address)
++            self.socket.settimeout(0.05)  # 50ms
++        except OSError:
++            self.socket = DummySocket()
++
++    def handleError(self, record):
++        # On error fallback to a dummy socket.
++        try:
++            self.socket.close()
++        except OSError:
++            pass
++        self.socket = DummySocket()
++
++
++def InitLogging():
++    """Initializes the logging."""
++    # Get root logger and remove default log handlers.
++    logging.basicConfig()
++    root_logger = logging.getLogger()
++    for log_handler in root_logger.handlers:
++        root_logger.removeHandler(log_handler)
++
++    # Set root logger level to INFO as all log messages will be of level INFO
++    # or above.
++    root_logger.setLevel(logging.INFO)
++
++    # Add error resilient syslog handler.
++    syslog_format = ("cinnamon-screensaver-dialog[%(process)d]: "
++                     "%(levelname)-8s %(message)s")
++    syslog_formatter = logging.Formatter(syslog_format)
++    syslog_handler = SysLogHandler(address="/dev/log")
++    syslog_handler.setFormatter(syslog_formatter)
++    root_logger.addHandler(syslog_handler)
++
++    # Log to ~/.xsession-errors.
++    xsession_log_format = (
++        "cinnamon-screensaver-dialog[%(process)d]: %(asctime)s "
++        "%(levelname)-8s %(message)s")
++    xsession_formatter = logging.Formatter(xsession_log_format)
++    xsession_handler = logging.FileHandler(
++        os.path.expanduser("~/.xsession-errors"))
++    xsession_handler.setFormatter(xsession_formatter)
++    root_logger.addHandler(xsession_handler)
++
++
++def Main():
++    """Main function. Returns exit code."""
++    logging.info("Start of cinnamon-screensaver-dialog transition script.")
++
++    # Check if the parent process is cinnamon-screensaver.
++    ppid = os.getppid()
++    with open("/proc/{0}/cmdline".format(ppid)) as f:
++        pcmd = f.read()
++    if not "cinnamon-screensaver" in pcmd:
++        logging.error(
++            "Parent process isn't cinnamon-screensaver. Parent PID: %d. "
++            "Parent process command line: %s", ppid, pcmd)
++        return 1
++
++    # Terminate the cinnamon-screensaver process (old version) and wait for it
++    # to be gone. We terminate it instead of gracefully shutting it down via
++    # 'cinnamon-screensaver-command --exit' as that would also terminate this
++    # script. In any case the cinnamon-session will log a warning that the
++    # screensaver has left the bus.
++    logging.info(
++        "Killing old cinnamon-screensaver process with PID %d ...", ppid)
++    os.kill(ppid, signal.SIGTERM)
++
++    # Wait for the cinnamon-screensaver process to be gone. The timeout is
++    # 1 second. The while loop doesn't use any sleep to have the time the
++    # desktop is visible after the termination as short as possible.
++    start = datetime.datetime.now()
++    killed = False
++    while (datetime.datetime.now() - start).total_seconds() < 1.0:
++        try:
++            os.kill(ppid, 0)
++        except OSError:
++            killed = True
++            break
++    if not killed:
++        logging.error(
++            "cinnamon-screensaver process with pid %d did not terminate "
++            "within 1 second.", ppid)
++        return 4
++    logging.info("Old cinnamon-screensaver process terminated.")
++
++    # Launch new cinnamon-screensaver process.
++    logging.info("Launching new cinnamon-screensaver process ...")
++    proc = subprocess.Popen(
++        ["/usr/bin/cinnamon-screensaver"],
++        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
++        stderr=open(os.path.expanduser("~/.xsession-errors"), "a"))
++    logging.info(
++        "Launched new cinnamon-screensaver process. PID: %d", proc.pid)
++
++    # Trying to query screensaver state via D-Bus. This will fail the first
++    # few times as cinnamon-screensaver needs a bit to be available via D-Bus.
++    # The timeout is 10 seconds.
++    start = datetime.datetime.now()
++    available = False
++    while ((datetime.datetime.now() - start).total_seconds() < 10.0
++           and proc.poll() is None):
++        try:
++            # cinnamon-screensaver-command returns with exit code 0 under all
++            # tested circumstances.
++            output = subprocess.check_output(
++                ["/usr/bin/cinnamon-screensaver-command", "--query"],
++                stdin=subprocess.DEVNULL, stderr=subprocess.STDOUT)
++
++            if ("The screensaver is active" in str(output) or
++                    "The screensaver is inactive" in str(output)):
++                available = True
++                break
++        except subprocess.CalledProcessError as ex:
++            logging.error(
++                "'cinnamon-screensaver-command --query' failed with exit code "
++                "%d. Output:\n%s", ex.returncode, ex.output)
++    if proc.returncode:
++        logging.error(
++            "New cinnamon-screensaver process with pid %d exited unexpectedly "
++            "with exit code %d. Check ~/.xsession-errors for details.",
++            proc.pid, proc.returncode)
++        return 5
++    if not available:
++        logging.error(
++            "New cinnamon-screensaver process with pid %d did not become "
++            "available via D-Bus within 10 second.", proc.pid)
++        return 6
++    logging.info("New cinnamon-screensaver process available via D-Bus.")
++
++    # Locking the new cinnamon-screensaver so that the user can login.
++    logging.info(
++        "Locking new cinnamon-screensaver ...")
++    try:
++        subprocess.check_call(
++            ["/usr/bin/cinnamon-screensaver-command", "--lock"],
++            stdin=subprocess.DEVNULL, stderr=subprocess.STDOUT)
++    except subprocess.CalledProcessError as ex:
++        logging.error(
++            "'cinnamon-screensaver-command --lock' failed with exit code %d."
++            "Output:\n", ex.returncode, ex.output)
++
++    logging.info(
++        "Transition to new cinnamon-screensaver complete.")
++    return 0
++
++
++if __name__ == "__main__":
++    InitLogging()
++    try:
++        exit_code = Main()
++    except:
++        logging.error("Unhandled error:\n", exc_info=True)
++        exit_code = 100
++    if exit_code > 0:
++        logging.error("Transition to new cinnamon-screensaver failed.")
++    sys.exit(exit_code)
+diff -ru cinnamon-screensaver-3.2.13/debian/copyright cinnamon-screensaver-3.2.13-patched/debian/copyright
+--- cinnamon-screensaver-3.2.13/debian/copyright	2017-01-03 20:56:14.000000000 +0100
++++ cinnamon-screensaver-3.2.13-patched/debian/copyright	2017-02-20 17:44:24.074547050 +0100
+@@ -16,6 +16,10 @@
+ Copyright: 2014-2016, Maximiliano Curia <maxy@debian.org>
+ License: LGPL-2+
+ 
++Files: debian/cinnamon-screensaver-dialog
++Copyright: 2017, Google, Inc
++License: LGPL-2+
++
+ Files: libcscreensaver/setuid.c
+        libcscreensaver/setuid.h
+        libcscreensaver/subprocs.c
+diff -ru cinnamon-screensaver-3.2.13/debian/rules cinnamon-screensaver-3.2.13-patched/debian/rules
+--- cinnamon-screensaver-3.2.13/debian/rules	2017-01-03 20:56:14.000000000 +0100
++++ cinnamon-screensaver-3.2.13-patched/debian/rules	2017-02-20 17:39:26.851848383 +0100
+@@ -15,5 +15,6 @@
+ 	    --libexecdir=\$${prefix}/lib/$(DEB_HOST_MULTIARCH)/cinnamon-screensaver
+ 
+ override_dh_install:
++	dh_install ../cinnamon-screensaver-dialog usr/lib/$(DEB_HOST_MULTIARCH)/cinnamon-screensaver
+ 	dh_install --list-missing
+ 	rm -rf debian/cinnamon-screensaver/usr/share/doc/cinnamon-screensaver-*

@@ -1,0 +1,90 @@
+From 1a57125501f87d11fd59fb5eddf9627a88f1ad26 Mon Sep 17 00:00:00 2001
+From: Max Bowsher <maxb@f2s.com>
+Date: Sun, 12 Apr 2009 12:13:46 +0100
+Subject: [PATCH] Handle packages whose version differs from that of the source package they were built from.
+
+(Fix for bug 517777.)
+---
+ apt-listchanges.py             |   27 +++++++++++++++++++++++++--
+ apt-listchanges/DebianFiles.py |   13 +++++++++++++
+ 2 files changed, 38 insertions(+), 2 deletions(-)
+
+diff --git a/apt-listchanges.py b/apt-listchanges.py
+index bfca1da..915fd2e 100755
+--- a/apt-listchanges.py
++++ b/apt-listchanges.py
+@@ -102,7 +102,30 @@ def main():
+         pkg = DebianFiles.Package(deb)
+         binpackage = pkg.binary
+         srcpackage = pkg.source
+-        srcversion = pkg.Version # XXX take the real version or we'll lose binNMUs
++        # There are two cases in which the version of a binary package and the
++        # version of the source package it was built from may be unequal:
++        #  1. packages where the source explicitly overrides the version of
++        #     created binaries (e.g. using dh_gencontrol -u-v)
++        #  2. binNMUs
++        #
++        # In the first case, we need the source version, or we will spuriously
++        # show no entries (if the overridden binary version compares greater
++        # than the source), or far too many (if the overridden binary version
++        # compares less than the source).
++        #
++        # In the binNMU case, we need the binary version, since otherwise we'd
++        # consider it a reinstallation of the same source version, and wouldn't
++        # show the changelog entry.
++        #
++        # Except... both of these special cases can apply simultaneously to the
++        # same package.
++        #
++        # Sadly, because the binNMU build process leaves no trace of the actual
++        # transiently incremented binNMU source version, we have no recourse
++        # but to engage in heuristics - that is, guesswork - and take the
++        # source version, but copy across any +bN suffix found on the binary
++        # version too.
++        srcversion = pkg.sourceversionwithbinnmuhack
+ 
+         frontend.update_progress()
+         # Show changes later than fromversion
+@@ -116,7 +139,7 @@ def main():
+             else:
+                 statusentry = status.find('Package', binpackage)
+                 if statusentry and statusentry.installed():
+-                    fromversion = statusentry.Version
++                    fromversion = statusentry.sourceversionwithbinnmuhack()
+                 else:
+                     # Package not installed or seen
+                     notes.append(_("%s: will be newly installed") % binpackage)
+diff --git a/apt-listchanges/DebianFiles.py b/apt-listchanges/DebianFiles.py
+index 4bc9c58..e67636d 100644
+--- a/apt-listchanges/DebianFiles.py
++++ b/apt-listchanges/DebianFiles.py
+@@ -67,6 +67,18 @@ class ControlStanza:
+     def installed(self):
+         return hasattr(self, 'Status') and self.Status.split(' ')[2] == 'installed'
+ 
++    def sourceversionwithbinnmuhack(self):
++        sourcefield = getattr(self, 'Source', self.Package)
++        idx = sourcefield.find(' (')
++        if idx != -1 and sourcefield.endswith(')'):
++            version = sourcefield[idx+2:-1]
++            m = re.match(r'.*(\+b[0-9]+)$', self.Version)
++            if m:
++                version += m.group(1)
++            return version
++        else:
++            return self.Version
++
+ class ControlParser:
+     def __init__(self):
+         self.stanzas = []
+@@ -109,6 +121,7 @@ class Package:
+         self.binary  = pkgdata.Package
+         self.source  = pkgdata.source()
+         self.Version = pkgdata.Version
++        self.sourceversionwithbinnmuhack = pkgdata.sourceversionwithbinnmuhack()
+ 
+     def extract_changes(self, which, since_version=None):
+         '''Extract changelog entries, news or both from the package.
+-- 
+1.6.0.4
+

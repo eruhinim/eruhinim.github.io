@@ -1,0 +1,259 @@
+diff --git a/lib/ext2fs/alloc.c b/lib/ext2fs/alloc.c
+index 948a0ec..f203284 100644
+--- a/lib/ext2fs/alloc.c
++++ b/lib/ext2fs/alloc.c
+@@ -126,17 +126,33 @@ errcode_t ext2fs_new_inode(ext2_filsys fs, ext2_ino_t dir,
+ 	if (start_inode > fs->super->s_inodes_count)
+ 		return EXT2_ET_INODE_ALLOC_FAIL;
+ 	i = start_inode;
+-
++	ext2_ino_t modulo = (i - 1) % EXT2_INODES_PER_GROUP(fs->super);
+ 	do {
+-		if (((i - 1) % EXT2_INODES_PER_GROUP(fs->super)) == 0)
++		if (modulo == 0)
+ 			check_inode_uninit(fs, map, (i - 1) /
+ 					   EXT2_INODES_PER_GROUP(fs->super));
+ 
+-		if (!ext2fs_fast_test_inode_bitmap2(map, i))
++		ext2_ino_t upto = i + (EXT2_INODES_PER_GROUP(fs->super) - modulo);
++		if (i < start_inode && upto >= start_inode)
++			upto = start_inode - 1;
++		if (upto > fs->super->s_inodes_count)
++			upto = fs->super->s_inodes_count;
++
++		ext2_ino_t first_zero;
++		errcode_t err = ext2fs_find_first_zero_inode_bitmap2(map, i, upto, &first_zero);
++		if (!err) {
++			i = first_zero;
+ 			break;
+-		i++;
+-		if (i > fs->super->s_inodes_count)
++		} else {
++			if (err != ENOENT)
++				return err; /* Internal error? */
++			i = upto;
++		}
++
++		if (++i > fs->super->s_inodes_count) {
+ 			i = EXT2_FIRST_INODE(fs->super);
++			modulo = (i - 1) % EXT2_INODES_PER_GROUP(fs->super);
++		}
+ 	} while (i != start_inode);
+ 
+ 	if (ext2fs_test_inode_bitmap2(map, i))
+diff --git a/lib/ext2fs/bitops.h b/lib/ext2fs/bitops.h
+index 83a01e4..70caa86 100644
+--- a/lib/ext2fs/bitops.h
++++ b/lib/ext2fs/bitops.h
+@@ -188,6 +188,9 @@ extern void ext2fs_mark_block_bitmap_range2(ext2fs_block_bitmap bitmap,
+ 					    blk64_t block, unsigned int num);
+ extern void ext2fs_unmark_block_bitmap_range2(ext2fs_block_bitmap bitmap,
+ 					      blk64_t block, unsigned int num);
++extern errcode_t ext2fs_find_first_zero_generic_bmap(ext2fs_generic_bitmap bitmap,
++						     __u64 start, __u64 end,
++						     __u64 *out);
+ 
+ /*
+  * The inline routines themselves...
+@@ -593,6 +596,19 @@ _INLINE_ int ext2fs_fast_test_inode_bitmap2(ext2fs_inode_bitmap bitmap,
+ 					inode);
+ }
+ 
++_INLINE_ errcode_t ext2fs_find_first_zero_inode_bitmap2(ext2fs_inode_bitmap bitmap,
++							ext2_ino_t start,
++							ext2_ino_t end,
++							ext2_ino_t *out)
++{
++	__u64 o;
++	errcode_t rv = ext2fs_find_first_zero_generic_bmap((ext2fs_generic_bitmap) bitmap,
++							   start, end, &o);
++	if (!rv)
++		*out = o;
++	return rv;
++}
++
+ _INLINE_ blk64_t ext2fs_get_block_bitmap_start2(ext2fs_block_bitmap bitmap)
+ {
+ 	return ext2fs_get_generic_bmap_start((ext2fs_generic_bitmap) bitmap);
+diff --git a/lib/ext2fs/blkmap64_ba.c b/lib/ext2fs/blkmap64_ba.c
+index 3f0c643..968ffac 100644
+--- a/lib/ext2fs/blkmap64_ba.c
++++ b/lib/ext2fs/blkmap64_ba.c
+@@ -12,6 +12,7 @@
+ #include "config.h"
+ #include <stdio.h>
+ #include <string.h>
++#include <stdint.h>
+ #if HAVE_UNISTD_H
+ #include <unistd.h>
+ #endif
+@@ -317,6 +318,86 @@ static void ba_print_stats(ext2fs_generic_bitmap bitmap)
+ 		sizeof(struct ext2fs_ba_private_struct));
+ }
+ 
++/* Find the first zero bit between start and end, inclusive */
++static errcode_t ba_find_first_zero(ext2fs_generic_bitmap bitmap,
++				    __u64 start, __u64 end, __u64 *out)
++{
++	if (start < bitmap->start || end > bitmap->end || start > end)
++		return EINVAL;
++
++	/* FIXME what is this? */
++	if (bitmap->cluster_bits)
++		return EINVAL;
++
++	ext2fs_ba_private bp = (ext2fs_ba_private)bitmap->private;
++	unsigned long bitpos = start - bitmap->start;
++	unsigned long count = end - start + 1;
++
++	/* scan bits until a byte boundary */
++	while ((bitpos & 0x7) != 0 && count > 0) {
++		if (!ext2fs_test_bit64(bitpos, bp->bitarray)) {
++			*out = bitpos + bitmap->start;
++			return 0;
++		}
++		bitpos++;
++		count--;
++	}
++
++	if (!count)
++		return ENOENT;
++
++	int byte_found = 0; /* whether a != 0xff byte has been found */
++
++	const unsigned char *pos = ((unsigned char *)bp->bitarray) + (bitpos >> 3);
++	/* scan bytes until 8-byte (64-bit) aligned */
++	while (count >= 8 && (((intptr_t)pos) & 0x07)) {
++		if (*pos != 0xff) {
++			byte_found = 1;
++			break;
++		}
++		pos++;
++		count -= 8;
++		bitpos += 8;
++	}
++
++	if (!byte_found) {
++		unsigned long max_loop_count = count >> 6; /* 8-byte blocks */
++		unsigned long i = max_loop_count;
++		while (i) {
++			if (*((const __u64 *)pos) != ((__u64)-1))
++				break;
++			pos += 8;
++			i--;
++		}
++		count -= 64 * (max_loop_count - i);
++		bitpos += 64 * (max_loop_count - i);
++
++		max_loop_count = count >> 3;
++		i = max_loop_count;
++		while (i) {
++			if (*pos != 0xff) {
++				byte_found = 1;
++				break;
++			}
++			pos++;
++			i--;
++		}
++		count -= 8 * (max_loop_count - i);
++		bitpos += 8 * (max_loop_count - i);
++	}
++
++	/* Here either count < 8 or byte_found == 1. */
++	while (count-- > 0) {
++		if (!ext2fs_test_bit64(bitpos, bp->bitarray)) {
++			*out = bitpos + bitmap->start;
++			return 0;
++		}
++		bitpos++;
++	}
++
++	return ENOENT;
++}
++
+ struct ext2_bitmap_ops ext2fs_blkmap64_bitarray = {
+ 	.type = EXT2FS_BMAP64_BITARRAY,
+ 	.new_bmap = ba_new_bmap,
+@@ -333,4 +414,5 @@ struct ext2_bitmap_ops ext2fs_blkmap64_bitarray = {
+ 	.get_bmap_range = ba_get_bmap_range,
+ 	.clear_bmap = ba_clear_bmap,
+ 	.print_stats = ba_print_stats,
++	.find_first_zero = ba_find_first_zero
+ };
+diff --git a/lib/ext2fs/bmap64.h b/lib/ext2fs/bmap64.h
+index 288e1b6..38a20bf 100644
+--- a/lib/ext2fs/bmap64.h
++++ b/lib/ext2fs/bmap64.h
+@@ -89,6 +89,11 @@ struct ext2_bitmap_ops {
+ 				    __u64 start, size_t num, void *out);
+ 	void (*clear_bmap)(ext2fs_generic_bitmap bitmap);
+ 	void (*print_stats)(ext2fs_generic_bitmap);
++
++	/* Find first zero bit between start and end, inclusive.
++	 * May be NULL, in which case a generic function is used. */
++	errcode_t (*find_first_zero)(ext2fs_generic_bitmap bitmap,
++				     __u64 start, __u64 end, __u64 *out);
+ };
+ 
+ extern struct ext2_bitmap_ops ext2fs_blkmap64_bitarray;
+diff --git a/lib/ext2fs/gen_bitmap64.c b/lib/ext2fs/gen_bitmap64.c
+index bf1a76b..14089b2 100644
+--- a/lib/ext2fs/gen_bitmap64.c
++++ b/lib/ext2fs/gen_bitmap64.c
+@@ -759,3 +759,30 @@ errcode_t ext2fs_convert_subcluster_bitmap(ext2_filsys fs,
+ 	*bitmap = cmap;
+ 	return 0;
+ }
++
++errcode_t ext2fs_find_first_zero_generic_bmap(ext2fs_generic_bitmap bitmap,
++					      __u64 start, __u64 end, __u64 *out)
++{
++	if (bitmap->bitmap_ops->find_first_zero)
++		return bitmap->bitmap_ops->find_first_zero(bitmap, start, end, out);
++
++	/* FIXME what is cluster_bits? */
++	if (!bitmap || !EXT2FS_IS_64_BITMAP(bitmap) || bitmap->cluster_bits)
++		return EINVAL;
++
++	if (start < bitmap->start || end > bitmap->end || start > end) {
++		warn_bitmap(bitmap, EXT2FS_TEST_ERROR, start);
++		return EINVAL;
++	}
++
++	while (start <= end) {
++		int b = bitmap->bitmap_ops->test_bmap(bitmap, start);
++		if (!b) {
++			*out = start;
++			return 0;
++		}
++		start++;
++	}
++
++	return ENOENT;
++}
+diff --git a/lib/ext2fs/openfs.c b/lib/ext2fs/openfs.c
+index 32e068c..7c49da6 100644
+--- a/lib/ext2fs/openfs.c
++++ b/lib/ext2fs/openfs.c
+@@ -87,6 +87,7 @@ errcode_t ext2fs_open(const char *name, int flags, int superblock,
+  *				features aren't supported.
+  *	EXT2_FLAG_JOURNAL_DEV_OK - Open an ext3 journal device
+  *	EXT2_FLAG_SKIP_MMP - Open without multi-mount protection check.
++ *	EXT2_FLAG_64BITS - Allow 64-bit bitfields (needed for large filesystems)
+  */
+ errcode_t ext2fs_open2(const char *name, const char *io_options,
+ 		       int flags, int superblock,
+diff --git a/resize/main.c b/resize/main.c
+index 1ab0e04..ec0686e 100644
+--- a/resize/main.c
++++ b/resize/main.c
+@@ -302,6 +302,9 @@ int main (int argc, char ** argv)
+ 
+ 	if (!(mount_flags & EXT2_MF_MOUNTED))
+ 		io_flags = EXT2_FLAG_RW | EXT2_FLAG_EXCLUSIVE;
++
++	io_flags |= EXT2_FLAG_64BITS;
++
+ 	retval = ext2fs_open2(device_name, io_options, io_flags,
+ 			      0, 0, io_ptr, &fs);
+ 	if (retval) {

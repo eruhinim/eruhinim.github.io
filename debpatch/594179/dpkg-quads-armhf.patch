@@ -1,0 +1,229 @@
+diff -ruN dpkg-1.15.8.4/debian/changelog dpkg-1.15.8.4+armhf//debian/changelog
+--- dpkg-1.15.8.4/debian/changelog	2010-08-13 04:25:22.000000000 +0000
++++ dpkg-1.15.8.4+armhf//debian/changelog	2010-08-23 22:34:34.000000000 +0000
+@@ -1,3 +1,12 @@
++dpkg (1.15.8.4+armhf) unreleased; urgency=low
++
++  * Added quads support (now dpkg-architecture.pl and Dpkg.pm now work with quads
++    internally). Now dpkg recognizes properly arm-hardfloat-linux-gnueabi, needed
++    for the new armhf port.
++  * Added the corresponding values for armhf in ostable,triplettable.
++
++ -- Konstantinos Margaritis <markos@genesi-usa.com>  Mon, 23 Aug 2010 21:39:07 +0000
++
+ dpkg (1.15.8.4) unstable; urgency=low
+ 
+   [ Guillem Jover ]
+diff -ruN dpkg-1.15.8.4/ostable dpkg-1.15.8.4+armhf//ostable
+--- dpkg-1.15.8.4/ostable	2010-08-11 13:54:09.000000000 +0000
++++ dpkg-1.15.8.4+armhf//ostable	2010-08-23 21:39:00.000000000 +0000
+@@ -16,6 +16,7 @@
+ # <Debian name>		<GNU name>		<config.guess regex>
+ uclibceabi-linux	linux-uclibceabi	linux[^-]*-uclibceabi
+ uclibc-linux		linux-uclibc		linux[^-]*-uclibc
++gnueabi-linux-hardfloat	hardfloat-linux-gnueabi	hardfloat-linux[^-]*-gnueabi
+ gnueabi-linux		linux-gnueabi		linux[^-]*-gnueabi
+ gnuspe-linux		linux-gnuspe		linux[^-]*-gnuspe
+ gnulp-linux		linux-gnulp		linux[^-]*-gnulp
+diff -ruN dpkg-1.15.8.4/scripts/Dpkg/Arch.pm dpkg-1.15.8.4+armhf//scripts/Dpkg/Arch.pm
+--- dpkg-1.15.8.4/scripts/Dpkg/Arch.pm	2010-08-11 13:54:09.000000000 +0000
++++ dpkg-1.15.8.4+armhf//scripts/Dpkg/Arch.pm	2010-08-23 21:39:00.000000000 +0000
+@@ -80,12 +80,14 @@
+ 	return $host_arch if defined $host_arch;
+ 
+ 	$gcc_host_gnu_type = get_gcc_host_gnu_type();
++        #print "host_gnu_type: ".$gcc_host_gnu_type."\n";
+ 
+ 	if ($gcc_host_gnu_type eq '') {
+ 	    warning(_g("Couldn't determine gcc system type, falling back to " .
+ 	               "default (native compilation)"));
+ 	} else {
+ 	    my (@host_archtriplet) = gnutriplet_to_debtriplet($gcc_host_gnu_type);
++            #print "host_archtriplet: ".@host_archtriplet."\n";
+ 	    $host_arch = debtriplet_to_debarch(@host_archtriplet);
+ 
+ 	    if (defined $host_arch) {
+@@ -136,11 +138,13 @@
+     open CPUTABLE, "$pkgdatadir/cputable"
+ 	or syserr(_g("cannot open %s"), "cputable");
+     while (<CPUTABLE>) {
++        #print "line: $_";
+ 	if (m/^(?!\#)(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)/) {
+ 	    $cputable{$1} = $2;
+ 	    $cputable_re{$1} = $3;
+ 	    $cpubits{$1} = $4;
+ 	    $cpuendian{$1} = $5;
++            #print "cputable{$1}: $cputable{$1}, cputable_re{$1}: $cputable_re{$1}, cpubits{$1}: $cpubits{$1}, cpuendian{$1}: $cpuendian{$1}\n";
+ 	    push @cpu, $1;
+ 	}
+     }
+@@ -155,6 +159,7 @@
+     open OSTABLE, "$pkgdatadir/ostable"
+ 	or syserr(_g("cannot open %s"), "ostable");
+     while (<OSTABLE>) {
++        #print "line: $_";
+ 	if (m/^(?!\#)(\S+)\s+(\S+)\s+(\S+)/) {
+ 	    $ostable{$1} = $2;
+ 	    $ostable_re{$1} = $3;
+@@ -174,9 +179,11 @@
+     open TRIPLETTABLE, "$pkgdatadir/triplettable"
+ 	or syserr(_g("cannot open %s"), "triplettable");
+     while (<TRIPLETTABLE>) {
++        #print "line: $_";
+ 	if (m/^(?!\#)(\S+)\s+(\S+)/) {
+ 	    my $debtriplet = $1;
+ 	    my $debarch = $2;
++            #print "triplet: $debtriplet, arch: $debarch\n";
+ 
+ 	    if ($debtriplet =~ /<cpu>/) {
+ 		foreach my $_cpu (@cpu) {
+@@ -189,6 +196,8 @@
+ 	    } else {
+ 		$debarch_to_debtriplet{$2} = $1;
+ 		$debtriplet_to_debarch{$1} = $2;
++                #print "$1, $2, debarch_to_debtriplet{$2}: $debarch_to_debtriplet{$2}\n";
++                #print "$1, $2, debplet_to_debarch{$1}: $debtriplet_to_debarch{$1}\n";
+ 	    }
+ 	}
+     }
+@@ -200,18 +209,32 @@
+     read_cputable() if (!@cpu);
+     read_ostable() if (!@os);
+ 
+-    my ($abi, $os, $cpu) = @_;
++    my ($abi, $os, $vendor, $cpu) = @_;
++    #print "debtriplet_to_gnutriplet: abi: $abi, vendor: $vendor, os: $os, cpu: $cpu\n";
+ 
+-    return undef unless defined($abi) && defined($os) && defined($cpu) &&
+-        exists($cputable{$cpu}) && exists($ostable{"$abi-$os"});
+-    return join("-", $cputable{$cpu}, $ostable{"$abi-$os"});
++    #print "vendor not defined!\n" if ($vendor eq "undef");
++
++    if (!defined($abi) || !defined($os) || !defined($cpu)) {
++	return undef;
++    } elsif ($vendor eq "undef" && exists($cputable{$cpu}) && exists($ostable{"$abi-$os"})) {
++        #print join("-", $cputable{$cpu}, $ostable{"$abi-$os"})."\n";
++        return  join("-", $cputable{$cpu}, $ostable{"$abi-$os"});
++    } elsif (exists($cputable{$cpu}) && exists($ostable{"$abi-$os-$vendor"})) {
++        #print join("-", $cputable{$cpu}, $ostable{"$abi-$os-$vendor"})."\n";
++        return join("-", $cputable{$cpu}, $ostable{"$abi-$os-$vendor"});
++    } else {
++	return undef;
++    }
+ }
+ 
+ sub gnutriplet_to_debtriplet($)
+ {
++    my (@_ostriplet);
+     my ($gnu) = @_;
++    #print "gnu = ".$gnu."\n";
+     return undef unless defined($gnu);
+     my ($gnu_cpu, $gnu_os) = split(/-/, $gnu, 2);
++    #print "gnu_cpu = $gnu_cpu, gnu_os = $gnu_os\n";
+     return undef unless defined($gnu_cpu) && defined($gnu_os);
+ 
+     read_cputable() if (!@cpu);
+@@ -220,13 +243,16 @@
+     my ($os, $cpu);
+ 
+     foreach my $_cpu (@cpu) {
++        #print "checking $gnu_cpu against $_cpu\n";
+ 	if ($gnu_cpu =~ /^$cputable_re{$_cpu}$/) {
+ 	    $cpu = $_cpu;
+ 	    last;
+ 	}
+     }
+-
+     foreach my $_os (@os) {
++        #print "checking $gnu_os against $_os\n";
++        #print "$ostable{$_os}\n";
++        #print "split(os): ".split(/-/, $_os, 3)."\n";
+ 	if ($gnu_os =~ /^(.*-)?$ostable_re{$_os}$/) {
+ 	    $os = $_os;
+ 	    last;
+@@ -234,19 +260,30 @@
+     }
+ 
+     return undef if !defined($cpu) || !defined($os);
+-    return (split(/-/, $os, 2), $cpu);
++    #print "os: $os, split(os): ".split(/-/, $os, 3)."\n";
++    @_ostriplet = split(/-/, $os, 3);
++    splice(@_ostriplet, 2, 0, "undef") if (@_ostriplet == 2);
++    return (@_ostriplet, $cpu);
+ }
+ 
+ sub debtriplet_to_debarch(@)
+ {
+     read_triplettable() if (!%debtriplet_to_debarch);
+ 
+-    my ($abi, $os, $cpu) = @_;
++    my ($abi, $os, $vendor, $cpu) = @_;
++
++    #print "debtriplet_to_debarch: abi: $abi, vendor: $vendor, os: $os, cpu: $cpu\n";
++
++    #print "vendor not defined!\n" if ($vendor eq "undef");
+ 
+     if (!defined($abi) || !defined($os) || !defined($cpu)) {
+ 	return undef;
+-    } elsif (exists $debtriplet_to_debarch{"$abi-$os-$cpu"}) {
+-	return $debtriplet_to_debarch{"$abi-$os-$cpu"};
++    } elsif ($vendor eq "undef" && exists $debtriplet_to_debarch{"$abi-$os-$cpu"}) {
++        #print "debtriplet_to_debarch[$abi-$os-$cpu] = ".$debtriplet_to_debarch{"$abi-$os-$cpu"}."\n";
++        return $debtriplet_to_debarch{"$abi-$os-$cpu"};
++    } elsif (exists $debtriplet_to_debarch{"$abi-$os-$vendor-$cpu"}) {
++        #print "debtriplet_to_debarch[$abi-$os-$vendor-$cpu] = ".$debtriplet_to_debarch{"$abi-$os-$vendor-$cpu"}."\n";
++        return $debtriplet_to_debarch{"$abi-$os-$vendor-$cpu"};
+     } else {
+ 	return undef;
+     }
+@@ -269,7 +306,10 @@
+     my $triplet = $debarch_to_debtriplet{$arch};
+ 
+     if (defined($triplet)) {
+-	return split('-', $triplet, 3);
++        #print "triplet: $triplet\n";
++        my @_triplet = split('-', $triplet, 4);
++        splice(@_triplet, 2, 0, "undef") if (@_triplet == 3);
++	return @_triplet;
+     } else {
+ 	return undef;
+     }
+@@ -309,7 +349,8 @@
+ sub debarch_to_cpuattrs($)
+ {
+     my ($arch) = @_;
+-    my ($abi, $os, $cpu) = debarch_to_debtriplet($arch);
++    my ($abi, $os, $vendor, $cpu) = debarch_to_debtriplet($arch);
++    #print "debarch_to_cpuattrs: abi: $abi, vendor: $vendor, os: $os, cpu: $cpu\n";
+ 
+     if (defined($cpu)) {
+         return ($cpubits{$cpu}, $cpuendian{$cpu});
+diff -ruN dpkg-1.15.8.4/scripts/dpkg-architecture.pl dpkg-1.15.8.4+armhf//scripts/dpkg-architecture.pl
+--- dpkg-1.15.8.4/scripts/dpkg-architecture.pl	2010-08-11 13:54:09.000000000 +0000
++++ dpkg-1.15.8.4+armhf//scripts/dpkg-architecture.pl	2010-08-23 21:39:00.000000000 +0000
+@@ -177,8 +177,8 @@
+ # Split the Debian and GNU names
+ my $abi;
+ 
+-($abi, $v{DEB_HOST_ARCH_OS}, $v{DEB_HOST_ARCH_CPU}) = debarch_to_debtriplet($v{DEB_HOST_ARCH});
+-($abi, $v{DEB_BUILD_ARCH_OS}, $v{DEB_BUILD_ARCH_CPU}) = debarch_to_debtriplet($v{DEB_BUILD_ARCH});
++($abi, $v{DEB_HOST_ARCH_OS}, $v{DEB_HOST_VENDOR}, $v{DEB_HOST_ARCH_CPU}) = debarch_to_debtriplet($v{DEB_HOST_ARCH});
++($abi, $v{DEB_BUILD_ARCH_OS}, $v{DEB_BUILD_VENDOR}, $v{DEB_BUILD_ARCH_CPU}) = debarch_to_debtriplet($v{DEB_BUILD_ARCH});
+ ($v{DEB_HOST_GNU_CPU}, $v{DEB_HOST_GNU_SYSTEM}) = split(/-/, $v{DEB_HOST_GNU_TYPE}, 2);
+ ($v{DEB_BUILD_GNU_CPU}, $v{DEB_BUILD_GNU_SYSTEM}) = split(/-/, $v{DEB_BUILD_GNU_TYPE}, 2);
+ 
+diff -ruN dpkg-1.15.8.4/triplettable dpkg-1.15.8.4+armhf//triplettable
+--- dpkg-1.15.8.4/triplettable	2010-08-11 13:54:10.000000000 +0000
++++ dpkg-1.15.8.4+armhf//triplettable	2010-08-23 21:39:00.000000000 +0000
+@@ -2,9 +2,10 @@
+ #
+ # Supported variables: <cpu>
+ #
+-# <Debian triplet>	<Debian arch>
++# <Debian triplet>		<Debian arch>
+ uclibceabi-linux-arm	uclibc-linux-armel
+ uclibc-linux-<cpu>	uclibc-linux-<cpu>
++gnueabi-linux-hardfloat-arm	armhf
+ gnueabi-linux-arm	armel
+ gnuspe-linux-powerpc	powerpcspe
+ gnulp-linux-i386	lpia

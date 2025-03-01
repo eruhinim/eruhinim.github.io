@@ -1,0 +1,201 @@
+diff --git a/wump/wump.6 b/wump/wump.6
+index 67ae2c3..2d52203 100644
+--- a/wump/wump.6
++++ b/wump/wump.6
+@@ -40,7 +40,7 @@
+ .Nd hunt the wumpus in an underground cave
+ .Sh SYNOPSIS
+ .Nm
+-.Op Fl h
++.Op Fl ho
+ .Op Fl a Ar arrows
+ .Op Fl b Ar bats
+ .Op Fl p Ar pits
+@@ -69,6 +69,10 @@ The default is three.
+ .It Fl h
+ Play the hard version -- more pits, more bats, and a generally more
+ dangerous cave.
++.It Fl o
++Play the original version, where there are twenty rooms arranged on the
++vertices of a dodecahedron, connected by the edges.
++In this case, the default is two pits and two bat rooms.
+ .It Fl p
+ Specifies the number of rooms in the cave which contain bottomless pits.
+ The default is three.
+diff --git a/wump/wump.c b/wump/wump.c
+index ec21a14..d7fda7c 100644
+--- a/wump/wump.c
++++ b/wump/wump.c
+@@ -99,13 +99,14 @@ int player_loc = -1;			/* player location */
+ int wumpus_loc = -1;			/* The Bad Guy location */
+ int level = EASY;			/* level of play */
+ int arrows_left;			/* arrows unshot */
++int oldstyle = 0;			/* dodecahedral cave? */
+ 
+ #ifdef DEBUG
+ int debug = 0;
+ #endif
+ 
+-int pit_num = PIT_COUNT;		/* # pits in cave */
+-int bat_num = BAT_COUNT;		/* # bats */
++int pit_num = -1;		/* # pits in cave */
++int bat_num = -1;		/* # bats */
+ int room_num = ROOMS_IN_CAVE;		/* # rooms in cave */
+ int link_num = LINKS_IN_ROOM;		/* links per room  */
+ int arrow_num = NUMBER_OF_ARROWS;	/* arrow inventory */
+@@ -116,6 +117,7 @@ int	bats_nearby(void);
+ void	cave_init(void);
+ void	clear_things_in_cave(void);
+ void	display_room_stats(void);
++void	dodecahedral_cave_init(void);
+ int	gcd(int, int);
+ int	getans(const char *);
+ void	initialize_things_in_cave(void);
+@@ -148,9 +150,9 @@ main(argc, argv)
+ 	setregid(getgid(), getgid());
+ 
+ #ifdef DEBUG
+-	while ((c = getopt(argc, argv, "a:b:hp:r:t:d")) != -1)
++	while ((c = getopt(argc, argv, "a:b:hop:r:t:d")) != -1)
+ #else
+-	while ((c = getopt(argc, argv, "a:b:hp:r:t:")) != -1)
++	while ((c = getopt(argc, argv, "a:b:hop:r:t:")) != -1)
+ #endif
+ 		switch (c) {
+ 		case 'a':
+@@ -167,6 +169,9 @@ main(argc, argv)
+ 		case 'h':
+ 			level = HARD;
+ 			break;
++		case 'o':
++			oldstyle = 1;
++			break;
+ 		case 'p':
+ 			pit_num = atoi(optarg);
+ 			break;
+@@ -196,6 +201,21 @@ main(argc, argv)
+ 			usage();
+ 	}
+ 
++	if (oldstyle) {
++		room_num = 20;
++		link_num = 3;
++		/* Original game had exactly 2 bats and 2 pits */
++		if (bat_num < 0)
++			bat_num = 2;
++		if (pit_num < 0)
++			pit_num = 2;
++	} else {
++		if (bat_num < 0)
++			bat_num = BAT_COUNT;
++		if (pit_num < 0)
++			pit_num = PIT_COUNT;
++	}
++
+ 	if (link_num > MAX_LINKS_IN_ROOM ||
+ 	    link_num > room_num - (room_num / 4)) {
+ 		(void)fprintf(stderr,
+@@ -221,7 +241,10 @@ main(argc, argv)
+ 	}
+ 
+ 	instructions();
+-	cave_init();
++	if (oldstyle)
++		dodecahedral_cave_init();
++	else
++		cave_init();
+ 
+ 	/* and we're OFF!  da dum, da dum, da dum, da dum... */
+ 	(void)printf(
+@@ -244,10 +267,13 @@ quiver holds %d custom super anti-evil Wumpus arrows.  Good luck.\n",
+ 
+ 		if (!getans("\nCare to play another game? (y-n) "))
+ 			exit(0);
+-		if (getans("In the same cave? (y-n) "))
+-			clear_things_in_cave();
+-		else
+-			cave_init();
++		clear_things_in_cave();
++		if (!getans("In the same cave? (y-n) ")) {
++			if (oldstyle)
++				dodecahedral_cave_init();
++			else
++				cave_init();
++		}
+ 	}
+ 	/* NOTREACHED */
+ 	return (0);
+@@ -609,6 +635,73 @@ try_again:		link = (random() % room_num) + 1;
+ #endif
+ }
+ 
++void
++dodecahedral_cave_init()
++{
++	int vert[20][3] = {
++		{1, 4, 7},
++		{0, 2, 9},
++		{1, 3, 11},
++		{2, 4, 13},
++		{0, 3, 5},
++		{4, 6, 14},
++		{5, 7, 16},
++		{0, 6, 8},
++		{7, 9, 17},
++		{1, 8, 10},
++		{9, 11, 18},
++		{2, 10, 12},
++		{11, 13, 19},
++		{3, 12, 14},
++		{5, 13, 15},
++		{14, 16, 19},
++		{6, 15, 17},
++		{8, 16, 18},
++		{10, 17, 19},
++		{12, 15, 18},
++	};
++	int loc[20];
++	int i, j, temp;
++
++	srandom((int)time((time_t *)0));
++
++	if (room_num != 20 || link_num != 3)
++		errx(1, "wrong parameters for dodecahedron");
++	for (i = 0; i < room_num; i++)
++		loc[i] = i;
++	for (i = 0; i < room_num; i++) {
++		j = (random() % (room_num - i));
++		if (j) {
++			temp = loc[i];
++			loc[i] = loc[i + j];
++			loc[i + j] = temp;
++		}
++	}
++	/* cave is offset by 1 */
++	for (i = 0; i < room_num; i++) {
++		for (j = 0; j < link_num; j++)
++			cave[loc[i] + 1].tunnel[j] = loc[vert[i][j]] + 1;
++	}
++
++	/*
++	 * now that we're done, sort the tunnels in each of the rooms to
++	 * make it easier on the intrepid adventurer.
++	 */
++	for (i = 1; i <= room_num; ++i)
++		qsort(cave[i].tunnel, (u_int)link_num,
++		    sizeof(cave[i].tunnel[0]), int_compare);
++
++#ifdef DEBUG
++	if (debug)
++		for (i = 1; i <= room_num; ++i) {
++			(void)printf("<room %d  has tunnels to ", i);
++			for (j = 0; j < link_num; ++j)
++				(void)printf("%d ", cave[i].tunnel[j]);
++			(void)printf(">\n");
++		}
++#endif
++}
++
+ void
+ clear_things_in_cave()
+ {

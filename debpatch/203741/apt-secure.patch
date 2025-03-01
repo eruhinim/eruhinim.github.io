@@ -1,0 +1,1928 @@
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/apt-pkg/acquire-item.cc apt-HEAD/apt-pkg/acquire-item.cc
+--- apt/apt-pkg/acquire-item.cc	2003-02-02 17:19:17.000000000 -0500
++++ apt-HEAD/apt-pkg/acquire-item.cc	2003-08-20 20:56:55.000000000 -0400
+@@ -134,8 +134,9 @@
+ /* The package file is added to the queue and a second class is 
+    instantiated to fetch the revision file */   
+ pkgAcqIndex::pkgAcqIndex(pkgAcquire *Owner,
+-			 string URI,string URIDesc,string ShortDesc) :
+-                      Item(Owner), RealURI(URI)
++			 string URI,string URIDesc,string ShortDesc,
++			 string ExpectedMD5) :
++   Item(Owner), RealURI(URI), ExpectedMD5(ExpectedMD5)
+ {
+    Decompression = false;
+    Erase = false;
+@@ -181,6 +182,19 @@
+ 
+    if (Decompression == true)
+    {
++      if (_config->FindB("Debug::pkgAcquire::Auth", false))
++      {
++         std::cerr << std::endl << RealURI << ": Computed MD5: " << MD5;
++         std::cerr << "  Expected MD5: " << ExpectedMD5 << std::endl;
++      }
++
++      if (!ExpectedMD5.empty() && MD5 != ExpectedMD5)
++      {
++         Status = StatAuthError;
++         ErrorText = _("MD5Sum mismatch");
++         Rename(DestFile,DestFile + ".FAILED");
++         return;
++      }
+       // Done, move it into position
+       string FinalFile = _config->FindDir("Dir::State::lists");
+       FinalFile += URItoFileName(RealURI);
+@@ -208,7 +222,7 @@
+       // The files timestamp matches
+       if (StringToBool(LookupTag(Message,"Alt-IMS-Hit"),false) == true)
+ 	 return;
+-      
++
+       Decompression = true;
+       Local = true;
+       DestFile += ".decomp";
+@@ -240,7 +254,225 @@
+    QueueURI(Desc);
+    Mode = "gzip";
+ }
++
++pkgAcqMetaSig::pkgAcqMetaSig(pkgAcquire *Owner,
++			     string URI,string URIDesc,string ShortDesc,
++			     string MetaIndexURI, string MetaIndexURIDesc,
++			     string MetaIndexShortDesc,
++			     const vector<IndexTarget*>* IndexTargets,
++			     indexRecords* MetaIndexParser,
++			     const Vendor *Verifier) :
++   Item(Owner), RealURI(URI), MetaIndexURI(MetaIndexURI),
++   MetaIndexURIDesc(MetaIndexURIDesc), MetaIndexShortDesc(MetaIndexShortDesc)
++{
++   this->MetaIndexParser = MetaIndexParser;
++   this->IndexTargets = IndexTargets;
++   this->Verifier = Verifier;
++   DestFile = _config->FindDir("Dir::State::lists") + "partial/";
++   DestFile += URItoFileName(URI);
++
++   // Create the item
++   Desc.Description = URIDesc;
++   Desc.Owner = this;
++   Desc.ShortDesc = ShortDesc;
++   Desc.URI = URI;
++   
++      
++   QueueURI(Desc);
++}
++									/*}}}*/
++void pkgAcqMetaSig::Done(string Message,unsigned long Size,string MD5,
++			 pkgAcquire::MethodConfig *Cfg)
++{
++   Item::Done(Message,Size,MD5,Cfg);
++
++   string FileName = LookupTag(Message,"Filename");
++   if (FileName.empty() == true)
++   {
++      Status = StatError;
++      ErrorText = "Method gave a blank filename";
++      return;
++   }
++
++   Complete = true;
++   
++   // The files timestamp matches
++   if (StringToBool(LookupTag(Message,"IMS-Hit"),false) == true)
++      return;
++   
++   // We have to copy it into place
++   if (FileName != DestFile)
++   {
++      Local = true;
++      Desc.URI = "copy:" + FileName;
++      QueueURI(Desc);
++      return;
++   }
++   
++   // Done, move it into position
++   string FinalFile = _config->FindDir("Dir::State::lists");
++   FinalFile += URItoFileName(RealURI);
++   Rename(DestFile,FinalFile);
++   
++   chmod(FinalFile.c_str(),0644);
++   
++   // need to queue a pkgAcqMetaIndex here
++   new pkgAcqMetaIndex(Owner, MetaIndexURI, MetaIndexURIDesc, MetaIndexShortDesc,
++		       FinalFile, IndexTargets, MetaIndexParser, Verifier);
++
++}
++									/*}}}*/
++pkgAcqMetaIndex::pkgAcqMetaIndex(pkgAcquire *Owner,
++				 string URI,string URIDesc,string ShortDesc,
++				 string SigFile,
++				 const vector<struct IndexTarget*>* IndexTargets,
++				 indexRecords* MetaIndexParser,
++				 const Vendor *Verifier) :
++  Item(Owner), RealURI(URI), SigFile(SigFile)
++{
++   this->Authentication = false;
++   this->MetaIndexParser = MetaIndexParser;
++   this->IndexTargets = IndexTargets;
++   this->Verifier = Verifier;
++   DestFile = _config->FindDir("Dir::State::lists") + "partial/";
++   DestFile += URItoFileName(URI);
++
++   // Create the item
++   Desc.Description = URIDesc;
++   Desc.Owner = this;
++   Desc.ShortDesc = ShortDesc;
++   Desc.URI = URI;
++
++   QueueURI(Desc);
++}
+ 									/*}}}*/
++void pkgAcqMetaIndex::Done(string Message,unsigned long Size,string MD5,
++			   pkgAcquire::MethodConfig *Cfg)
++{
++   Item::Done(Message,Size,MD5,Cfg);
++
++   if (Authentication == true)
++   {
++      string GPGVOutputStr = LookupTag(Message,"GPGVOutput");
++      if (_config->FindB("Debug::pkgAcquire::Auth", false))
++         std::cerr << std::endl << "Got GPGVOutput: " << GPGVOutputStr
++		   << std::endl;
++
++      std::vector <string> GPGVOutput;
++      string::size_type pos;
++      // Skip the first \n
++      while ((pos = GPGVOutputStr.find('\n')) != string::npos)
++      {
++         GPGVOutput.push_back (GPGVOutputStr.substr(0, pos));
++         GPGVOutputStr = GPGVOutputStr.substr(pos+2);
++      }
++      if (_config->FindB("Debug::pkgAcquire::Auth", false))
++         std::cerr << std::endl << "Pushing \"" << GPGVOutputStr << "\"" << std::endl;
++      GPGVOutput.push_back (GPGVOutputStr);
++
++      if (_config->FindB("Debug::pkgAcquire::Auth", false))
++         std::cerr <<  "Verifying signature fingerprints..." << std::endl;
++      string CheckErrorText;
++      if (!Verifier->CheckFingerprints(GPGVOutput, ErrorText))
++      {
++         if (_config->FindB("Debug::pkgAcquire::Auth", false))
++            std::cerr <<  "Signature verification failed!" << std::endl;
++         Status = StatAuthError;
++         ErrorText = CheckErrorText;
++         return;
++      }
++
++      if (_config->FindB("Debug::pkgAcquire::Auth", false))
++         std::cerr << "Signature verification succeeded, parsing Meta-Index: "
++		   << DestFile << std::endl;
++
++      if (!MetaIndexParser->Load(DestFile))
++      {
++         Status = StatAuthError;
++         ErrorText = MetaIndexParser->ErrorText;
++         return;
++      }
++      string Transformed = MetaIndexParser->GetExpectedDist();
++      pos = Transformed.find('/');
++      if (pos)
++      {
++	 Transformed = Transformed.substr(0, pos);
++      }
++
++      if (_config->FindB("Debug::pkgAcquire::Auth", false)) 
++      {
++         std::cerr << "Got Codename: " << MetaIndexParser->GetDist() << std::endl;
++         std::cerr << "Expecting Dist: " << MetaIndexParser->GetExpectedDist() << std::endl;
++         std::cerr << "Transformed Dist: " << Transformed << std::endl;
++      }
++      
++      if (MetaIndexParser->CheckDist(Transformed) == false)
++      {
++         Status = StatAuthError;
++         ErrorText = "Conflicting distribution; expected "
++	   + MetaIndexParser->GetExpectedDist() + " but got "
++	   + MetaIndexParser->GetDist();
++         return;
++      }
++
++      for (vector <struct IndexTarget*>::const_iterator Target = IndexTargets->begin();
++	   Target != IndexTargets->end();
++	   Target++)
++      {
++         const indexRecords::checkSum *Record = MetaIndexParser->Lookup((*Target)->MetaKey);
++         if (!Record)
++         {
++            Status = StatAuthError;
++            ErrorText = "Unable to find expected entry  "
++	      + (*Target)->MetaKey + " in Meta-index file (malformed Release file?)";
++            return;
++         }
++         string ExpectedIndexMD5 = Record->MD5Hash;
++         if (_config->FindB("Debug::pkgAcquire::Auth", false))
++         {
++            std::cerr << "Queueing: " << (*Target)->URI << std::endl;
++            std::cerr << "Expected MD5: " << ExpectedIndexMD5 << std::endl;
++         }
++         if (ExpectedIndexMD5.empty())
++         {
++            Status = StatAuthError;
++            ErrorText = "Unable to find MD5 sum for "
++	      + (*Target)->MetaKey + " in Meta-index file";
++            return;
++         }
++      
++	// Queue Packages file
++         new pkgAcqIndex(Owner, (*Target)->URI, (*Target)->Description,
++			(*Target)->ShortDesc, ExpectedIndexMD5);
++      }
++      // Done, move it into position
++      string FinalFile = _config->FindDir("Dir::State::lists");
++      FinalFile += URItoFileName(RealURI);
++      Rename(DestFile,FinalFile);
++      return;
++   }
++
++   Complete = true;
++   if (StringToBool(LookupTag(Message,"IMS-Hit"),false) == true)
++      return;
++
++   string FileName = LookupTag(Message,"Filename");
++   if (FileName.empty() == true)
++   {
++      Status = StatError;
++      ErrorText = "Method gave a blank filename";
++   }
++
++   if (FileName != DestFile)
++      Local = true;
++   
++   Authentication = true;
++   Desc.URI = "gpgv:" + SigFile;
++   QueueURI(Desc);
++   Mode = "gpgv";
++}
++									/*}}}*/
++
+ 
+ // AcqIndexRel::pkgAcqIndexRel - Constructor				/*{{{*/
+ // ---------------------------------------------------------------------
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/apt-pkg/acquire-item.h apt-HEAD/apt-pkg/acquire-item.h
+--- apt/apt-pkg/acquire-item.h	2003-02-01 22:13:13.000000000 -0500
++++ apt-HEAD/apt-pkg/acquire-item.h	2003-08-20 20:56:37.000000000 -0400
+@@ -22,7 +22,10 @@
+ 
+ #include <apt-pkg/acquire.h>
+ #include <apt-pkg/indexfile.h>
++#include <apt-pkg/vendor.h>
++#include <apt-pkg/sourcelist.h>
+ #include <apt-pkg/pkgrecords.h>
++#include <apt-pkg/indexrecords.h>
+ 
+ #ifdef __GNUG__
+ #pragma interface "apt-pkg/acquire-item.h"
+@@ -45,7 +48,7 @@
+    public:
+ 
+    // State of the item
+-   enum {StatIdle, StatFetching, StatDone, StatError} Status;
++   enum {StatIdle, StatFetching, StatDone, StatError, StatAuthError} Status;
+    string ErrorText;
+    unsigned long FileSize;
+    unsigned long PartialSize;   
+@@ -86,6 +89,7 @@
+    bool Erase;
+    pkgAcquire::ItemDesc Desc;
+    string RealURI;
++   string ExpectedMD5;
+    
+    public:
+    
+@@ -96,7 +100,68 @@
+    virtual string DescURI() {return RealURI + ".gz";};
+ 
+    pkgAcqIndex(pkgAcquire *Owner,string URI,string URIDesc,
+-	       string ShortDesct);
++	       string ShortDesct, string ExpectedMD5);
++};
++
++struct IndexTarget
++{
++   string URI;
++   string Description;
++   string ShortDesc;
++   string MetaKey;
++};
++
++// Item class for index signatures
++class pkgAcqMetaSig : public pkgAcquire::Item
++{
++   protected:
++   
++   pkgAcquire::ItemDesc Desc;
++   string RealURI,MetaIndexURI,MetaIndexURIDesc,MetaIndexShortDesc;
++   indexRecords* MetaIndexParser;
++   const vector<struct IndexTarget*>* IndexTargets;
++
++   const Vendor *Verifier;
++  
++   public:
++   
++   // Specialized action members
++   virtual void Done(string Message,unsigned long Size,string Md5Hash,
++		     pkgAcquire::MethodConfig *Cnf);
++   virtual string DescURI() {return RealURI; };
++
++   pkgAcqMetaSig(pkgAcquire *Owner,string URI,string URIDesc, string ShortDesc,
++		 string MetaIndexURI, string MetaIndexURIDesc, string MetaIndexShortDesc,
++		 const vector<struct IndexTarget*>* IndexTargets,
++		 indexRecords* MetaIndexParser, const Vendor *Verifier);
++};
++
++// Item class for index signatures
++class pkgAcqMetaIndex : public pkgAcquire::Item
++{
++   protected:
++   
++   pkgAcquire::ItemDesc Desc;
++   string RealURI; // FIXME: is this redundant w/ Desc.URI?
++   string SigFile;
++   const vector<struct IndexTarget*>* IndexTargets;
++   indexRecords* MetaIndexParser;
++   bool Authentication;
++   const Vendor *Verifier;
++   
++   public:
++   
++   // Specialized action members
++   virtual void Done(string Message,unsigned long Size,string Md5Hash,
++		     pkgAcquire::MethodConfig *Cnf);
++   virtual string DescURI() {return RealURI; };
++
++   pkgAcqMetaIndex(pkgAcquire *Owner,
++		   string URI,string URIDesc, string ShortDesc,
++		   string SigFile,
++		   const vector<struct IndexTarget*>* IndexTargets,
++		   indexRecords* MetaIndexParser,
++		   const Vendor *Verifier);
+ };
+ 
+ // Item class for index files
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/apt-pkg/acquire-method.cc apt-HEAD/apt-pkg/acquire-method.cc
+--- apt/apt-pkg/acquire-method.cc	2001-05-22 00:27:11.000000000 -0400
++++ apt-HEAD/apt-pkg/acquire-method.cc	2003-08-20 20:56:37.000000000 -0400
+@@ -29,6 +29,7 @@
+ #include <stdarg.h>
+ #include <stdio.h>
+ #include <unistd.h>
++#include <sys/signal.h>
+ 									/*}}}*/
+ 
+ using namespace std;
+@@ -181,6 +182,11 @@
+       End += snprintf(End,sizeof(S)-50 - (End - S),"MD5-Hash: %s\n",Res.MD5Sum.c_str());
+    if (Res.SHA1Sum.empty() == false)
+       End += snprintf(End,sizeof(S)-50 - (End - S),"SHA1-Hash: %s\n",Res.SHA1Sum.c_str());
++   if (Res.GPGVOutput.size() > 0)
++      End += snprintf(End,sizeof(S)-50 - (End - S),"GPGVOutput:\n");     
++   for (vector<string>::iterator I = Res.GPGVOutput.begin();
++      I != Res.GPGVOutput.end(); I++)
++      End += snprintf(End,sizeof(S)-50 - (End - S), " %s\n", (*I).c_str());
+ 
+    if (Res.ResumePoint != 0)
+       End += snprintf(End,sizeof(S)-50 - (End - S),"Resume-Point: %lu\n",
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/apt-pkg/acquire-method.h apt-HEAD/apt-pkg/acquire-method.h
+--- apt/apt-pkg/acquire-method.h	2001-03-13 01:51:46.000000000 -0500
++++ apt-HEAD/apt-pkg/acquire-method.h	2003-08-20 20:56:37.000000000 -0400
+@@ -39,6 +39,7 @@
+    {
+       string MD5Sum;
+       string SHA1Sum;
++      vector<string> GPGVOutput;
+       time_t LastModified;
+       bool IMSHit;
+       string Filename;
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/apt-pkg/deb/debindexfile.cc apt-HEAD/apt-pkg/deb/debindexfile.cc
+--- apt/apt-pkg/deb/debindexfile.cc	2001-04-29 01:13:51.000000000 -0400
++++ apt-HEAD/apt-pkg/deb/debindexfile.cc	2003-08-20 20:56:37.000000000 -0400
+@@ -129,16 +129,6 @@
+    return Res;
+ }
+ 									/*}}}*/
+-// SourcesIndex::GetIndexes - Fetch the index files			/*{{{*/
+-// ---------------------------------------------------------------------
+-/* */
+-bool debSourcesIndex::GetIndexes(pkgAcquire *Owner) const
+-{
+-   new pkgAcqIndex(Owner,IndexURI("Sources"),Info("Sources"),"Sources");
+-   new pkgAcqIndexRel(Owner,IndexURI("Release"),Info("Release"),"Release");
+-   return true;
+-}
+-									/*}}}*/
+ // SourcesIndex::Exists - Check if the index is available		/*{{{*/
+ // ---------------------------------------------------------------------
+ /* */
+@@ -246,16 +236,6 @@
+    return Res;
+ }
+ 									/*}}}*/
+-// PackagesIndex::GetIndexes - Fetch the index files			/*{{{*/
+-// ---------------------------------------------------------------------
+-/* */
+-bool debPackagesIndex::GetIndexes(pkgAcquire *Owner) const
+-{
+-   new pkgAcqIndex(Owner,IndexURI("Packages"),Info("Packages"),"Packages");
+-   new pkgAcqIndexRel(Owner,IndexURI("Release"),Info("Release"),"Release");
+-   return true;
+-}
+-									/*}}}*/
+ // PackagesIndex::Exists - Check if the index is available		/*{{{*/
+ // ---------------------------------------------------------------------
+ /* */
+@@ -418,48 +398,6 @@
+ }
+ 									/*}}}*/
+ 
+-// Source List types for Debian						/*{{{*/
+-class debSLTypeDeb : public pkgSourceList::Type
+-{
+-   public:
+-
+-   bool CreateItem(vector<pkgIndexFile *> &List,string URI,
+-		   string Dist,string Section,
+-		   pkgSourceList::Vendor const *Vendor) const
+-   {
+-      List.push_back(new debPackagesIndex(URI,Dist,Section));
+-      return true;
+-   };
+-
+-   debSLTypeDeb()
+-   {
+-      Name = "deb";
+-      Label = "Standard Debian binary tree";
+-   }   
+-};
+-
+-class debSLTypeDebSrc : public pkgSourceList::Type
+-{
+-   public:
+-
+-   bool CreateItem(vector<pkgIndexFile *> &List,string URI,
+-		   string Dist,string Section,
+-		   pkgSourceList::Vendor const *Vendor) const 
+-   {      
+-      List.push_back(new debSourcesIndex(URI,Dist,Section));
+-      return true;
+-   };  
+-   
+-   debSLTypeDebSrc()
+-   {
+-      Name = "deb-src";
+-      Label = "Standard Debian source tree";
+-   }   
+-};
+-
+-debSLTypeDeb _apt_DebType;
+-debSLTypeDebSrc _apt_DebSrcType;
+-									/*}}}*/
+ // Index File types for Debian						/*{{{*/
+ class debIFTypeSrc : public pkgIndexFile::Type
+ {
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/apt-pkg/deb/debindexfile.h apt-HEAD/apt-pkg/deb/debindexfile.h
+--- apt/apt-pkg/deb/debindexfile.h	2001-04-29 01:13:51.000000000 -0400
++++ apt-HEAD/apt-pkg/deb/debindexfile.h	2003-08-20 20:56:37.000000000 -0400
+@@ -63,7 +63,6 @@
+    
+    // Interface for acquire
+    virtual string Describe(bool Short) const;   
+-   virtual bool GetIndexes(pkgAcquire *Owner) const;
+    
+    // Interface for the Cache Generator
+    virtual bool Exists() const;
+@@ -96,7 +95,6 @@
+    
+    // Interface for acquire
+    virtual string Describe(bool Short) const;   
+-   virtual bool GetIndexes(pkgAcquire *Owner) const;
+ 
+    // Interface for the record parsers
+    virtual pkgSrcRecords::Parser *CreateSrcParser() const;
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/apt-pkg/deb/debmetaindex.cc apt-HEAD/apt-pkg/deb/debmetaindex.cc
+--- apt/apt-pkg/deb/debmetaindex.cc	1969-12-31 19:00:00.000000000 -0500
++++ apt-HEAD/apt-pkg/deb/debmetaindex.cc	2003-08-20 20:56:55.000000000 -0400
+@@ -0,0 +1,265 @@
++// ijones, walters
++
++#ifdef __GNUG__
++#pragma implementation "apt-pkg/debmetaindex.h"
++#endif
++
++#include <apt-pkg/debmetaindex.h>
++#include <apt-pkg/debindexfile.h>
++#include <apt-pkg/strutl.h>
++#include <apt-pkg/acquire-item.h>
++#include <apt-pkg/configuration.h>
++#include <apt-pkg/error.h>
++
++using namespace std;
++
++string debReleaseIndex::Info(const char *Type, const string Section) const
++{
++   string Info = ::URI::SiteOnly(URI) + ' ';
++   if (Dist[Dist.size() - 1] == '/')
++   {
++      if (Dist != "/")
++         Info += Dist;
++   }
++   else
++      Info += Dist + '/' + Section;   
++   Info += " ";
++   Info += Type;
++   return Info;
++}
++
++string debReleaseIndex::MetaIndexInfo(const char *Type) const
++{
++   string Info = ::URI::SiteOnly(URI) + ' ';
++   if (Dist[Dist.size() - 1] == '/')
++   {
++      if (Dist != "/")
++	 Info += Dist;
++   }
++   else
++      Info += Dist;
++   Info += " ";
++   Info += Type;
++   return Info;
++}
++
++string debReleaseIndex::MetaIndexURI(const char *Type) const
++{
++   string Res;
++
++   if (Dist == "/")
++      Res = URI;
++   else
++      Res = URI + "dists/" + Dist + "/";
++   
++   Res += Type;
++   return Res;
++}
++
++string debReleaseIndex::IndexURISuffix(const char *Type, const string Section) const
++{
++   string Res ="";
++   if (Dist[Dist.size() - 1] != '/')
++      Res += Section + "/binary-" + _config->Find("APT::Architecture") + '/';
++   return Res + Type;
++}
++   
++
++string debReleaseIndex::IndexURI(const char *Type, const string Section) const
++{
++   if (Dist[Dist.size() - 1] == '/')
++   {
++      string Res;
++      if (Dist != "/")
++         Res = URI + Dist;
++      else 
++         Res = URI;
++      return Res + Type;
++   }
++   else
++      return URI + "dists/" + Dist + '/' + IndexURISuffix(Type, Section);
++ }
++
++string debReleaseIndex::SourceIndexURISuffix(const char *Type, const string Section) const
++{
++   return Section + "/source/" + Type;
++}
++
++string debReleaseIndex::SourceIndexURI(const char *Type, const string Section) const
++{
++   string Res;
++   if (Dist[Dist.size() - 1] == '/')
++   {
++      if (Dist != "/")
++         Res = URI + Dist;
++      else 
++         Res = URI;
++      return Res + Type;
++   }
++   else
++      return URI + "dists/" + Dist + "/" + SourceIndexURISuffix(Type, Section);
++}
++
++debReleaseIndex::debReleaseIndex(string URI,string Dist,
++				 const Vendor *Verifier)
++{
++   this->URI = URI;
++   this->Dist = Dist;
++   this->Verifier = Verifier;
++   this->Indexes = NULL;
++   this->Type = "deb";
++}
++
++vector <struct IndexTarget *>* debReleaseIndex::ComputeIndexTargets() const
++{
++   vector <struct IndexTarget *>* IndexTargets = new vector <IndexTarget *>;
++   for (vector <const debSectionEntry *>::const_iterator I = SectionEntries.begin();
++	I != SectionEntries.end();
++	I++)
++   {
++      IndexTarget * Target = new IndexTarget();
++      Target->ShortDesc = (*I)->IsSrc ? "Sources" : "Packages";
++      Target->MetaKey
++	= (*I)->IsSrc ? SourceIndexURISuffix(Target->ShortDesc.c_str(), (*I)->Section)
++	              : IndexURISuffix(Target->ShortDesc.c_str(), (*I)->Section);
++      Target->URI 
++	= (*I)->IsSrc ? SourceIndexURI(Target->ShortDesc.c_str(), (*I)->Section)
++	              : IndexURI(Target->ShortDesc.c_str(), (*I)->Section);
++      
++      Target->Description = Info (Target->ShortDesc.c_str(), (*I)->Section);
++      IndexTargets->push_back (Target);
++   }
++   return IndexTargets;
++}
++									/*}}}*/
++bool debReleaseIndex::GetIndexes(pkgAcquire *Owner) const
++{
++   // this means that the user didn't enter a vendor in the
++   // sources.list file, so we don't do any authentication here.  This
++   // may change later.
++
++   if (Verifier != NULL)
++      new pkgAcqMetaSig(Owner, MetaIndexURI("Release.gpg"),
++			MetaIndexInfo("Release.gpg"), "Release.gpg",
++			MetaIndexURI("Release"), MetaIndexInfo("Release"), "Release",
++			ComputeIndexTargets(),
++			new indexRecords (Dist), Verifier);
++   else
++   {
++      for (vector<const debSectionEntry *>::const_iterator I = SectionEntries.begin(); 
++	   I != SectionEntries.end(); I++)
++      {
++         const char *IndexType = (*I)->IsSrc ? "Sources" : "Packages";
++         string indexURI = (*I)->IsSrc ? SourceIndexURI(IndexType, (*I)->Section)
++                                       : IndexURI(IndexType, (*I)->Section);
++         new pkgAcqIndex(Owner, indexURI, Info(IndexType, (*I)->Section), IndexType, "");
++      }
++   }
++   return true;
++}
++
++vector <pkgIndexFile *> *debReleaseIndex::GetIndexFiles()
++{
++   if (Indexes != NULL)
++      return Indexes;
++
++   Indexes = new vector <pkgIndexFile*>;
++   for (vector<const debSectionEntry *>::const_iterator I = SectionEntries.begin(); 
++	I != SectionEntries.end(); I++)
++      if ((*I)->IsSrc)
++         Indexes->push_back(new debSourcesIndex (URI, Dist, (*I)->Section));
++      else 
++         Indexes->push_back(new debPackagesIndex (URI, Dist, (*I)->Section));
++   return Indexes;
++}
++
++void debReleaseIndex::PushSectionEntry(const debSectionEntry *Entry)
++{
++   SectionEntries.push_back(Entry);
++}
++
++debReleaseIndex::debSectionEntry::debSectionEntry (string Section, bool IsSrc): Section(Section)
++{
++   this->IsSrc = IsSrc;
++}
++
++class debSLTypeDebian : public pkgSourceList::Type
++{
++   protected:
++
++   bool CreateItemInternal(vector<metaIndex *> &List,string URI,
++			   string Dist,string Section,
++			   const Vendor *Verifier,
++			   bool IsSrc) const
++   {
++      for (vector<metaIndex *>::const_iterator I = List.begin(); 
++	   I != List.end(); I++)
++      {
++	 // This check insures that there will be only one Release file
++	 // queued for all the Packages files and Sources files it
++	 // corresponds to.
++	 if ((*I)->GetType() == "deb")
++	 {
++	    debReleaseIndex *Deb = (debReleaseIndex *) (*I);
++	    // If one verifier is NULL and the other isn't, they're not equal.
++	    // A verifier being NULL indicates that this is not a secure source.
++	    if ((Verifier == NULL && Deb->GetVendor() != NULL)
++		|| (Verifier != NULL && Deb->GetVendor() == NULL))
++	       continue;
++	    // This check insures that there will be only one Release file
++	    // queued for all the Packages files and Sources files it
++	    // corresponds to.
++	    if (Deb->GetURI() == URI && Deb->GetDist() == Dist)
++	       //Verifier == NULL indicates that this is not a secure source.
++	    {
++	       Deb->PushSectionEntry(new debReleaseIndex::debSectionEntry(Section, IsSrc));
++	       return true;
++	    }
++	 }
++      }
++      // No currently created Release file indexes this entry, so we create a new one.
++      debReleaseIndex *Deb = new debReleaseIndex(URI,Dist,Verifier);
++      Deb->PushSectionEntry (new debReleaseIndex::debSectionEntry(Section, IsSrc));
++      List.push_back(Deb);
++      return true;
++   }
++};
++
++class debSLTypeDeb : public debSLTypeDebian
++{
++   public:
++
++   bool CreateItem(vector<metaIndex *> &List,string URI,
++		   string Dist,string Section,
++		   const Vendor *Verifier) const
++   {
++      return CreateItemInternal(List, URI, Dist, Section, Verifier, false);
++   }
++
++   debSLTypeDeb()
++   {
++      Name = "deb";
++      Label = "Standard Debian binary tree";
++   }   
++};
++
++class debSLTypeDebSrc : public debSLTypeDebian
++{
++   public:
++
++   bool CreateItem(vector<metaIndex *> &List,string URI,
++		   string Dist,string Section,
++		   const Vendor *Verifier) const 
++   {
++      return CreateItemInternal(List, URI, Dist, Section, Verifier, true);
++   }
++   
++   debSLTypeDebSrc()
++   {
++      Name = "deb-src";
++      Label = "Standard Debian source tree";
++   }   
++};
++
++debSLTypeDeb _apt_DebType;
++debSLTypeDebSrc _apt_DebSrcType;
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/apt-pkg/deb/debmetaindex.h apt-HEAD/apt-pkg/deb/debmetaindex.h
+--- apt/apt-pkg/deb/debmetaindex.h	1969-12-31 19:00:00.000000000 -0500
++++ apt-HEAD/apt-pkg/deb/debmetaindex.h	2003-08-20 20:56:37.000000000 -0400
+@@ -0,0 +1,47 @@
++// ijones, walters
++#ifndef PKGLIB_DEBMETAINDEX_H
++#define PKGLIB_DEBMETAINDEX_H
++
++#ifdef __GNUG__
++#pragma interface "apt-pkg/debmetaindex.h"
++#endif
++
++#include <apt-pkg/metaindex.h>
++#include <apt-pkg/sourcelist.h>
++
++class debReleaseIndex : public metaIndex {
++   public:
++
++   class debSectionEntry
++   {
++      public:
++      debSectionEntry (string Section, bool IsSrc);
++      bool IsSrc;
++      string Section;
++   };
++
++   private:
++   vector <const debSectionEntry *> SectionEntries;
++
++   public:
++
++   debReleaseIndex(string URI, string Dist,
++		   const Vendor *Verifier);
++
++   virtual string ArchiveURI(string File) const {return URI + File;};
++   virtual bool GetIndexes(pkgAcquire *Owner) const;
++   vector <struct IndexTarget *>* ComputeIndexTargets() const;
++   string Info(const char *Type, const string Section) const;
++   string MetaIndexInfo(const char *Type) const;
++   string MetaIndexFile(const char *Types) const;
++   string MetaIndexURI(const char *Type) const;
++   string IndexURI(const char *Type, const string Section) const;
++   string IndexURISuffix(const char *Type, const string Section) const;
++   string SourceIndexURI(const char *Type, const string Section) const;
++   string SourceIndexURISuffix(const char *Type, const string Section) const;
++   virtual vector <pkgIndexFile *> *GetIndexFiles();
++
++   void PushSectionEntry(const debSectionEntry *Entry);
++};
++
++#endif
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/apt-pkg/indexfile.cc apt-HEAD/apt-pkg/indexfile.cc
+--- apt/apt-pkg/indexfile.cc	2001-02-20 02:03:17.000000000 -0500
++++ apt-HEAD/apt-pkg/indexfile.cc	2003-08-20 20:56:37.000000000 -0400
+@@ -42,14 +42,6 @@
+ }
+ 									/*}}}*/
+     
+-// IndexFile::GetIndexes - Stub						/*{{{*/
+-// ---------------------------------------------------------------------
+-/* */
+-bool pkgIndexFile::GetIndexes(pkgAcquire *Owner) const
+-{
+-   return _error->Error("Internal Error, this index file is not downloadable");
+-}
+-									/*}}}*/
+ // IndexFile::ArchiveInfo - Stub					/*{{{*/
+ // ---------------------------------------------------------------------
+ /* */
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/apt-pkg/indexfile.h apt-HEAD/apt-pkg/indexfile.h
+--- apt/apt-pkg/indexfile.h	2002-07-07 23:13:30.000000000 -0400
++++ apt-HEAD/apt-pkg/indexfile.h	2003-08-20 20:56:37.000000000 -0400
+@@ -64,7 +64,6 @@
+ 
+    // Interface for acquire
+    virtual string ArchiveURI(string /*File*/) const {return string();};
+-   virtual bool GetIndexes(pkgAcquire *Owner) const;
+ 
+    // Interface for the record parsers
+    virtual pkgSrcRecords::Parser *CreateSrcParser() const {return 0;};
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/apt-pkg/indexrecords.cc apt-HEAD/apt-pkg/indexrecords.cc
+--- apt/apt-pkg/indexrecords.cc	1969-12-31 19:00:00.000000000 -0500
++++ apt-HEAD/apt-pkg/indexrecords.cc	2003-08-20 20:56:55.000000000 -0400
+@@ -0,0 +1,158 @@
++// -*- mode: cpp; mode: fold -*-
++// Description								/*{{{*/
++// $Id: indexrecords.cc,v 1.1 2003/02/20 03:50:44 ijones Exp $
++									/*}}}*/
++// Include Files							/*{{{*/
++#ifdef __GNUG__
++#pragma implementation "apt-pkg/indexrecords.h"
++#endif
++#include <apt-pkg/indexrecords.h>
++#include <apt-pkg/tagfile.h>
++#include <apt-pkg/error.h>
++#include <apt-pkg/strutl.h>
++#include <apti18n.h>
++#include <sys/stat.h>
++
++string indexRecords::GetDist() const
++{
++   return this->Dist;
++}
++
++bool indexRecords::CheckDist(const string MaybeDist) const
++{
++   return (this->Dist == MaybeDist
++	   || this->Suite == MaybeDist);
++}
++
++string indexRecords::GetExpectedDist() const
++{
++   return this->ExpectedDist;
++}
++
++const indexRecords::checkSum *indexRecords::Lookup(const string MetaKey)
++{
++   return Entries[MetaKey];
++}
++
++bool indexRecords::Load(const string Filename)
++{
++   struct stat buf;
++   if (stat(Filename.c_str(), &buf) != 0)
++   {
++      ErrorText = _(("Unable to stat Release file " + Filename).c_str());
++      return false;
++   }
++     
++   FileFd Fd(Filename, FileFd::ReadOnly);
++   pkgTagFile TagFile(&Fd, buf.st_size + 256); //FIX: ??
++   if (_error->PendingError() == true)
++   {
++      ErrorText = _(("Unable to parse Release file " + Filename).c_str());
++      return false;
++   }
++
++   pkgTagSection Section;
++   if (TagFile.Step(Section) == false)
++   {
++      ErrorText = _(("No sections in Release file " + Filename).c_str());
++      return false;
++   }
++
++   const char *Start, *End;
++   Section.Get (Start, End, 0);
++   Suite = Section.FindS("Suite");
++   Dist = Section.FindS("Codename");
++   if (Dist.empty())
++   {
++      ErrorText = _(("No Codename entry in Release file " + Filename).c_str());
++      return false;
++   }
++   if (!Section.Find("MD5Sum", Start, End))
++   {
++      ErrorText = _(("No MD5Sum entry in Release file " + Filename).c_str());
++      return false;
++   }
++   string Name;
++   string MD5Hash;
++   size_t Size;
++   while (Start < End)
++   {
++      if (!parseSumData(Start, End, Name, MD5Hash, Size))
++	 return false;
++      indexRecords::checkSum *Sum = new indexRecords::checkSum;
++      Sum->MetaKeyFilename = Name;
++      Sum->MD5Hash = MD5Hash;
++      Sum->Size = Size;
++      Entries[Name] = Sum;
++   }
++   
++   string Strdate = Section.FindS("Date"); // FIXME: verify this somehow?
++   return true;
++}
++
++bool indexRecords::parseSumData(const char *&Start, const char *End,
++				   string &Name, string &Hash, size_t &Size)
++{
++   Name = "";
++   Hash = "";
++   Size = 0;
++   /* Skip over the first blank */
++   while ((*Start == '\t' || *Start == ' ' || *Start == '\n')
++	  && Start < End)
++      Start++;
++   if (Start >= End)
++      return false;
++
++   /* Move EntryEnd to the end of the first entry (the hash) */
++   const char *EntryEnd = Start;
++   while ((*EntryEnd != '\t' && *EntryEnd != ' ')
++	  && EntryEnd < End)
++      EntryEnd++;
++   if (EntryEnd == End)
++      return false;
++
++   Hash.append(Start, EntryEnd-Start);
++
++   /* Skip over intermediate blanks */
++   Start = EntryEnd;
++   while (*Start == '\t' || *Start == ' ')
++      Start++;
++   if (Start >= End)
++      return false;
++   
++   EntryEnd = Start;
++   /* Find the end of the second entry (the size) */
++   while ((*EntryEnd != '\t' && *EntryEnd != ' ' )
++	  && EntryEnd < End)
++      EntryEnd++;
++   if (EntryEnd == End)
++      return false;
++   
++   Size = strtol (Start, NULL, 10);
++      
++   /* Skip over intermediate blanks */
++   Start = EntryEnd;
++   while (*Start == '\t' || *Start == ' ')
++      Start++;
++   if (Start >= End)
++      return false;
++   
++   EntryEnd = Start;
++   /* Find the end of the third entry (the filename) */
++   while ((*EntryEnd != '\t' && *EntryEnd != ' ' && *EntryEnd != '\n')
++	  && EntryEnd < End)
++      EntryEnd++;
++
++   Name.append(Start, EntryEnd-Start);
++   Start = EntryEnd; //prepare for the next round
++   return true;
++}
++
++indexRecords::indexRecords()
++{
++}
++
++indexRecords::indexRecords(const string ExpectedDist) :
++   ExpectedDist(ExpectedDist)
++{
++}
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/apt-pkg/indexrecords.h apt-HEAD/apt-pkg/indexrecords.h
+--- apt/apt-pkg/indexrecords.h	1969-12-31 19:00:00.000000000 -0500
++++ apt-HEAD/apt-pkg/indexrecords.h	2003-08-20 20:56:37.000000000 -0400
+@@ -0,0 +1,52 @@
++// -*- mode: cpp; mode: fold -*-
++// Description								/*{{{*/
++// $Id: indexrecords.h,v 1.1 2003/02/20 03:50:44 ijones Exp $
++									/*}}}*/
++#ifndef PKGLIB_INDEXRECORDS_H
++#define PKGLIB_INDEXRECORDS_H
++
++#ifdef __GNUG__
++#pragma interface "apt-pkg/indexrecords.h"
++#endif 
++#include <apt-pkg/pkgcache.h>
++#include <apt-pkg/fileutl.h>
++
++#include <map>
++
++class indexRecords
++{
++   bool parseSumData(const char *&Start, const char *End, string &Name,
++		     string &Hash, size_t &Size);
++   public:
++   struct checkSum;
++   string ErrorText;
++   
++   protected:
++   string Dist;
++   string Suite;
++   string ExpectedDist;
++   std::map<string,checkSum *> Entries;
++
++   public:
++
++   indexRecords();
++   indexRecords(const string ExpectedDist);
++
++   // Lookup function
++   virtual const checkSum *Lookup(const string MetaKey);
++   
++   virtual bool Load(string Filename);
++   string GetDist() const;
++   virtual bool CheckDist(const string MaybeDist) const;
++   string GetExpectedDist() const;
++   virtual ~indexRecords(){};
++};
++
++struct indexRecords::checkSum
++{
++   string MetaKeyFilename;
++   string MD5Hash;
++   size_t Size;      
++};
++
++#endif
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/apt-pkg/makefile apt-HEAD/apt-pkg/makefile
+--- apt/apt-pkg/makefile	2003-02-09 17:02:45.000000000 -0500
++++ apt-HEAD/apt-pkg/makefile	2003-08-20 20:56:37.000000000 -0400
+@@ -33,21 +33,22 @@
+ 	 pkgrecords.cc algorithms.cc acquire.cc\
+ 	 acquire-worker.cc acquire-method.cc init.cc clean.cc \
+ 	 srcrecords.cc cachefile.cc versionmatch.cc policy.cc \
+-	 pkgsystem.cc indexfile.cc pkgcachegen.cc acquire-item.cc
++	 pkgsystem.cc indexfile.cc pkgcachegen.cc acquire-item.cc \
++	 indexrecords.cc vendor.cc
+ HEADERS+= algorithms.h depcache.h pkgcachegen.h cacheiterators.h \
+ 	  orderlist.h sourcelist.h packagemanager.h tagfile.h \
+ 	  init.h pkgcache.h version.h progress.h pkgrecords.h \
+ 	  acquire.h acquire-worker.h acquire-item.h acquire-method.h \
+ 	  clean.h srcrecords.h cachefile.h versionmatch.h policy.h \
+-	  pkgsystem.h indexfile.h
++	  pkgsystem.h indexfile.h metaindex.h indexrecords.h vendor.h
+ 
+ # Source code for the debian specific components
+ # In theory the deb headers do not need to be exported..
+ SOURCE+= deb/deblistparser.cc deb/debrecords.cc deb/dpkgpm.cc \
+          deb/debsrcrecords.cc deb/debversion.cc deb/debsystem.cc \
+-	 deb/debindexfile.cc deb/debindexfile.cc
++	 deb/debindexfile.cc deb/debindexfile.cc deb/debmetaindex.cc
+ HEADERS+= debversion.h debsrcrecords.h dpkgpm.h debrecords.h \
+-	  deblistparser.h debsystem.h debindexfile.h
++	  deblistparser.h debsystem.h debindexfile.h debmetaindex.h
+ 
+ HEADERS := $(addprefix apt-pkg/,$(HEADERS))
+ 
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/apt-pkg/metaindex.h apt-HEAD/apt-pkg/metaindex.h
+--- apt/apt-pkg/metaindex.h	1969-12-31 19:00:00.000000000 -0500
++++ apt-HEAD/apt-pkg/metaindex.h	2003-08-20 20:56:37.000000000 -0400
+@@ -0,0 +1,49 @@
++#ifndef PKGLIB_METAINDEX_H
++#define PKGLIB_METAINDEX_H
++
++/* #ifdef __GNUG__ */
++/* #pragma interface "apt-pkg/metaindex.h" */
++/* #endif */
++
++#include <string>
++#include <apt-pkg/pkgcache.h>
++#include <apt-pkg/srcrecords.h>
++#include <apt-pkg/pkgrecords.h>
++#include <apt-pkg/indexfile.h>
++#include <apt-pkg/vendor.h>
++    
++using std::string;
++
++class pkgAcquire;
++class pkgCacheGenerator;
++class OpProgress;
++
++class metaIndex
++{
++   protected:
++   vector <pkgIndexFile *> *Indexes;
++   const char *Type;
++   string URI;
++   string Dist;
++   const Vendor *Verifier;
++
++   public:
++
++   
++   // Return descriptive strings of various sorts
++   virtual string GetURI() const {return URI;}
++   virtual string GetDist() const {return Dist;}
++   virtual const Vendor *GetVendor() const {return Verifier;}
++   virtual const char* GetType() const {return Type;}
++
++   // Interface for acquire
++   virtual string ArchiveURI(string /*File*/) const = 0;
++   virtual bool GetIndexes(pkgAcquire *Owner) const = 0;
++   
++
++   virtual vector<pkgIndexFile *> *GetIndexFiles() = 0; 
++
++   virtual ~metaIndex() {};
++};
++
++#endif
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/apt-pkg/pkgcachegen.cc apt-HEAD/apt-pkg/pkgcachegen.cc
+--- apt/apt-pkg/pkgcachegen.cc	2003-02-01 21:44:20.000000000 -0500
++++ apt-HEAD/apt-pkg/pkgcachegen.cc	2003-08-20 20:56:37.000000000 -0400
+@@ -678,7 +678,18 @@
+ {
+    unsigned long MapSize = _config->FindI("APT::Cache-Limit",12*1024*1024);
+    
+-   vector<pkgIndexFile *> Files(List.begin(),List.end());
++   vector<pkgIndexFile *> Files;
++   for (vector<metaIndex *>::const_iterator i = List.begin();
++        i != List.end();
++        i++)
++   {
++      vector <pkgIndexFile *> *Indexes = (*i)->GetIndexFiles();
++      for (vector<pkgIndexFile *>::const_iterator j = Indexes->begin();
++	   j != Indexes->end();
++	   j++)
++         Files.push_back (*j);
++   }
++   
+    unsigned long EndOfSource = Files.size();
+    if (_system->AddStatusFiles(Files) == false)
+       return false;
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/apt-pkg/sourcelist.cc apt-HEAD/apt-pkg/sourcelist.cc
+--- apt/apt-pkg/sourcelist.cc	2002-07-08 00:18:07.000000000 -0400
++++ apt-HEAD/apt-pkg/sourcelist.cc	2003-08-20 20:56:37.000000000 -0400
+@@ -74,8 +74,8 @@
+ // ---------------------------------------------------------------------
+ /* This is a generic one that is the 'usual' format for sources.list
+    Weird types may override this. */
+-bool pkgSourceList::Type::ParseLine(vector<pkgIndexFile *> &List,
+-				    Vendor const *Vendor,
++bool pkgSourceList::Type::ParseLine(vector<metaIndex *> &List,
++				    const Vendor *Verifier,
+ 				    const char *Buffer,
+ 				    unsigned long CurLine,
+ 				    string File) const
+@@ -98,7 +98,7 @@
+       if (ParseQuoteWord(Buffer,Section) == true)
+ 	 return _error->Error(_("Malformed line %lu in source list %s (Absolute dist)"),CurLine,File.c_str());
+       Dist = SubstVar(Dist,"$(ARCH)",_config->Find("APT::Architecture"));
+-      return CreateItem(List,URI,Dist,Section,Vendor);
++      return CreateItem(List,URI,Dist,Section,Verifier);
+    }
+    
+    // Grab the rest of the dists
+@@ -107,7 +107,7 @@
+    
+    do
+    {
+-      if (CreateItem(List,URI,Dist,Section,Vendor) == false)
++      if (CreateItem(List,URI,Dist,Section,Verifier) == false)
+ 	 return false;
+    }
+    while (ParseQuoteWord(Buffer,Section) == true);
+@@ -135,7 +135,7 @@
+ {
+    for (const_iterator I = SrcList.begin(); I != SrcList.end(); I++)
+       delete *I;
+-   for (vector<Vendor const *>::const_iterator I = VendorList.begin(); 
++   for (vector<const Vendor *>::const_iterator I = VendorList.begin(); 
+ 	I != VendorList.end(); I++)
+       delete *I;
+ }
+@@ -159,7 +159,7 @@
+       if (ReadConfigFile(Cnf,CnfFile,true) == false)
+ 	 return false;
+ 
+-   for (vector<Vendor const *>::const_iterator I = VendorList.begin(); 
++   for (vector<const Vendor *>::const_iterator I = VendorList.begin(); 
+ 	I != VendorList.end(); I++)
+       delete *I;
+    VendorList.erase(VendorList.begin(),VendorList.end());
+@@ -169,48 +169,59 @@
+    for (Top = (Top == 0?0:Top->Child); Top != 0; Top = Top->Next)
+    {
+       Configuration Block(Top);
+-      Vendor *Vendor;
+-      
+-      Vendor = new pkgSourceList::Vendor;
+-      
+-      Vendor->VendorID = Top->Tag;
+-      Vendor->FingerPrint = Block.Find("Fingerprint");
+-      Vendor->Description = Block.Find("Name");
+-      
+-      if (Vendor->FingerPrint.empty() == true || 
+-	  Vendor->Description.empty() == true)
++      vector <struct Vendor::Fingerprint *> *Fingerprints = new vector<Vendor::Fingerprint *>;
++      string VendorID = Top->Tag;
++      struct Vendor::Fingerprint *Fingerprint = new struct Vendor::Fingerprint;
++
++      Fingerprint->Print = Block.Find("Fingerprint");
++      Fingerprint->Description = Block.Find("Name");
++      Fingerprints->push_back(Fingerprint);
++
++      if (Fingerprint->Print.empty() || Fingerprint->Description.empty())
+       {
+-         _error->Error(_("Vendor block %s is invalid"), Vendor->VendorID.c_str());
+-	 delete Vendor;
+-	 continue;
++         _error->Error(_("Vendor block %s is invalid"), VendorID.c_str());
++         delete Fingerprints;
++         continue;
+       }
+-      
+-      VendorList.push_back(Vendor);
++      if (_config->FindB("Debug::sourceList", false)) 
++         std::cerr << "Adding vendor with ID: " << VendorID
++		   << " Fingerprint: " << Fingerprint->Print << std::endl;
++
++      VendorList.push_back(new Vendor(VendorID, Fingerprints));
+    }
+ 
+-   /* XXX Process 'group-key' type sections
+-      This is currently faked out so that the vendors file format is
+-      parsed but nothing is done with it except check for validity */
++   /* Process 'group-key' type sections */
+    Top = Cnf.Tree("group-key");
+    for (Top = (Top == 0?0:Top->Child); Top != 0; Top = Top->Next)
+    {
+-      Configuration Block(Top);
+-      Vendor *Vendor;
+-      
+-      Vendor = new pkgSourceList::Vendor;
+-      
+-      Vendor->VendorID = Top->Tag;
+-      Vendor->Description = Block.Find("Name");
++//       Configuration Block(Top);
++//       vector<Vendor::Fingerprint *> Fingerprints;
++//       string VendorID = Top->Tag;
++
++//       while (Block->Next)
++//       {
++// 	 struct Vendor::Fingerprint Fingerprint = new struct Vendor::Fingerprint;
++// 	 Fingerprint->Print = Block.Find("Fingerprint");
++// 	 Fingerprint->Description = Block.Find("Name");
++// 	 if (Fingerprint->print.empty() || Fingerprint->Description.empty())
++// 	 {
++// 	    _error->Error(_("Vendor block %s is invalid"), 
++// 			  Vendor->VendorID.c_str());
++// 	    delete Fingerprint;
++// 	    break;
++// 	 }
++// 	 Block = Block->Next->Next;
++//       }
++//       if (_error->PendingError())
++//       {
++// 	 for (vector <struct Vendor::Fingerprint *>::iterator I = Fingerprints.begin();
++// 	      I != Fingerprints.end(); I++)
++// 	    delete *I;
++// 	 delete Fingerprints;
++// 	 continue;
++//       }
+ 
+-      if (Vendor->Description.empty() == true)
+-      {
+-         _error->Error(_("Vendor block %s is invalid"), 
+-		       Vendor->VendorID.c_str());
+-	 delete Vendor;
+-	 continue;
+-      }
+-      
+-      VendorList.push_back(Vendor);
++//       VendorList.push_back(new Vendor(VendorID, Fingerprints));
+    }
+    
+    return !_error->PendingError();
+@@ -270,7 +281,7 @@
+ 	 return _error->Error(_("Type '%s' is not known in on line %u in source list %s"),LineType.c_str(),CurLine,File.c_str());
+       
+       // Authenticated repository
+-      Vendor const *Vndr = 0;
++      const Vendor *Verifier = 0;
+       if (C[0] == '[')
+       {
+ 	 string VendorID;
+@@ -282,22 +293,23 @@
+ 	     return _error->Error(_("Malformed line %u in source list %s (vendor id)"),CurLine,File.c_str());
+ 	 VendorID = string(VendorID,1,VendorID.size()-2);
+ 	 
+-	 for (vector<Vendor const *>::const_iterator iter = VendorList.begin();
++	 for (vector<const Vendor *>::const_iterator iter = VendorList.begin();
+ 	      iter != VendorList.end(); iter++) 
+ 	 {
+-	    if ((*iter)->VendorID == VendorID)
++	    if ((*iter)->GetVendorID() == VendorID)
+ 	    {
+-	       Vndr = *iter;
++	      if (_config->FindB("Debug::sourceList", false)) 
++		std::cerr << "Comparing VendorID \"" << VendorID << "\" with \"" << (*iter)->GetVendorID() << '"' << std::endl;
++	       Verifier = *iter;
+ 	       break;
+ 	    }
+ 	 }
+ 
+-	 if (Vndr == 0)
++	 if (Verifier == 0)
+ 	    return _error->Error(_("Unknown vendor ID '%s' in line %u of source list %s"),
+ 				 VendorID.c_str(),CurLine,File.c_str());
+       }
+-      
+-      if (Parse->ParseLine(SrcList,Vndr,C,CurLine,File) == false)
++      if (Parse->ParseLine(SrcList,Verifier,C,CurLine,File) == false)
+ 	 return false;
+    }
+    return true;
+@@ -311,10 +323,15 @@
+ {
+    for (const_iterator I = SrcList.begin(); I != SrcList.end(); I++)
+    {
+-      if ((*I)->FindInCache(*File.Cache()) == File)
++      vector<pkgIndexFile *> *Indexes = (*I)->GetIndexFiles();
++      for (vector<pkgIndexFile *>::const_iterator J = Indexes->begin();
++	   J != Indexes->end(); J++)
+       {
+-	 Found = *I;
+-	 return true;
++         if ((*J)->FindInCache(*File.Cache()) == File)
++         {
++            Found = (*J);
++             return true;
++         }
+       }
+    }
+    
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/apt-pkg/sourcelist.h apt-HEAD/apt-pkg/sourcelist.h
+--- apt/apt-pkg/sourcelist.h	2002-07-01 17:41:11.000000000 -0400
++++ apt-HEAD/apt-pkg/sourcelist.h	2003-08-20 20:56:37.000000000 -0400
+@@ -30,7 +30,8 @@
+ #include <string>
+ #include <vector>
+ #include <apt-pkg/pkgcache.h>
+-#include <apt-pkg/indexfile.h>
++#include <apt-pkg/metaindex.h>
++#include <apt-pkg/vendor.h>
+ 
+ using std::string;
+ using std::vector;
+@@ -44,18 +45,6 @@
+ {
+    public:
+    
+-   // An available vendor
+-   struct Vendor
+-   {
+-      string VendorID;
+-      string FingerPrint;
+-      string Description;
+-
+-      /* Lets revisit these..
+-      bool MatchFingerPrint(string FingerPrint);
+-      string FingerPrintDescr();*/
+-   };
+-   
+    // List of supported source list types
+    class Type
+    {
+@@ -70,23 +59,22 @@
+       const char *Label;
+ 
+       bool FixupURI(string &URI) const;
+-      virtual bool ParseLine(vector<pkgIndexFile *> &List,
+-			     Vendor const *Vendor,
++      virtual bool ParseLine(vector<metaIndex *> &List,
++			     const Vendor *Verifier,
+ 			     const char *Buffer,
+ 			     unsigned long CurLine,string File) const;
+-      virtual bool CreateItem(vector<pkgIndexFile *> &List,string URI,
++      virtual bool CreateItem(vector<metaIndex *> &List,string URI,
+ 			      string Dist,string Section,
+-			      Vendor const *Vendor) const = 0;
+-
++			      const Vendor *Verifier) const = 0;
+       Type();
+       virtual ~Type() {};
+    };
+    
+-   typedef vector<pkgIndexFile *>::const_iterator const_iterator;
++   typedef vector<metaIndex *>::const_iterator const_iterator;
+    
+    protected:
+ 
+-   vector<pkgIndexFile *> SrcList;
++   vector<metaIndex *> SrcList;
+    vector<Vendor const *> VendorList;
+    
+    public:
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/apt-pkg/srcrecords.cc apt-HEAD/apt-pkg/srcrecords.cc
+--- apt/apt-pkg/srcrecords.cc	2002-11-09 15:38:02.000000000 -0500
++++ apt-HEAD/apt-pkg/srcrecords.cc	2003-08-20 20:56:37.000000000 -0400
+@@ -35,11 +35,16 @@
+    pkgSourceList::const_iterator I = List.begin();
+    for (; I != List.end(); I++)
+    {
+-      Files[Count] = (*I)->CreateSrcParser();
+-      if (_error->PendingError() == true)
+-	 return;
+-      if (Files[Count] != 0)
+-	 Count++;
++      vector<pkgIndexFile *> *Indexes = (*I)->GetIndexFiles();
++      for (vector<pkgIndexFile *>::const_iterator J = Indexes->begin();
++	   J != Indexes->end(); J++)
++      {
++         Files[Count] = (*J)->CreateSrcParser();
++	 if (_error->PendingError() == true)
++            return;
++         if (Files[Count] != 0)
++            Count++;
++      }
+    }
+    Files[Count] = 0;
+    
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/apt-pkg/vendor.cc apt-HEAD/apt-pkg/vendor.cc
+--- apt/apt-pkg/vendor.cc	1969-12-31 19:00:00.000000000 -0500
++++ apt-HEAD/apt-pkg/vendor.cc	2003-08-20 20:56:37.000000000 -0400
+@@ -0,0 +1,56 @@
++#ifdef __GNUG__
++#pragma implementation "apt-pkg/vendor.h"
++#endif
++
++#include <iostream>
++#include <apt-pkg/error.h>
++#include <apt-pkg/vendor.h>
++#include <apt-pkg/configuration.h>
++
++Vendor::Vendor(std::string VendorID,
++	       std::vector<struct Vendor::Fingerprint *> *FingerprintList)
++{
++   this->VendorID = VendorID;
++   for (std::vector<struct Vendor::Fingerprint *>::iterator I = FingerprintList->begin();
++	I != FingerprintList->end(); I++)
++   {
++      if (_config->FindB("Debug::Vendor", false))
++         std::cerr << "Vendor \"" << VendorID << "\": Mapping \""
++		   << (*I)->Print << "\" to \"" << (*I)->Description << '"' << std::endl;
++      Fingerprints[(*I)->Print] = (*I)->Description;
++   }
++   delete FingerprintList;
++}
++
++const string Vendor::LookupFingerprint(string Print) const
++{
++   std::map<string,string>::const_iterator Elt = Fingerprints.find(Print);
++   if (Elt == Fingerprints.end())
++      return "";
++   else
++      return (*Elt).second;
++}
++
++bool Vendor::CheckFingerprints(const std::vector<string> GPGVOutput,
++			       string &ErrorText) const
++{
++   // In this policy, one good signature from a key with a known fingerprint is acceptable.
++   for (std::vector<string>::const_iterator I = GPGVOutput.begin(); I != GPGVOutput.end(); I++)
++   {
++      string::size_type pos = (*I).find("VALIDSIG ");
++      if (_config->FindB("Debug::Vendor", false))
++	 std::cerr << "Looking for VALIDSIG in \"" << (*I) << "\": pos " << pos << std::endl;
++      if (pos != std::string::npos)
++      {
++	 string Fingerprint = (*I).substr(pos+sizeof("VALIDSIG"));
++	 if (_config->FindB("Debug::Vendor", false))
++	    std::cerr << "Looking for \"" << Fingerprint << "\" in vendor..." << std::endl;
++	 if (this->LookupFingerprint(Fingerprint) != "")
++	    return true;
++      }
++   }
++   if (_config->FindB("Debug::Vendor", false))
++      std::cerr << "Couldn't find VALIDSIG in vendor..." << std::endl;
++   ErrorText = "No valid signature from an authenticated key found.";
++   return false;
++}
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/apt-pkg/vendor.h apt-HEAD/apt-pkg/vendor.h
+--- apt/apt-pkg/vendor.h	1969-12-31 19:00:00.000000000 -0500
++++ apt-HEAD/apt-pkg/vendor.h	2003-08-20 20:56:37.000000000 -0400
+@@ -0,0 +1,36 @@
++#ifndef PKGLIB_VENDOR_H
++#define PKGLIB_VENDOR_H
++#include <string>
++#include <vector>
++#include <map>
++
++#ifdef __GNUG__
++#pragma interface "apt-pkg/vendor.h"
++#endif
++
++using std::string;
++
++// A class representing a particular software provider. 
++class Vendor
++{
++   public:
++   struct Fingerprint
++   {
++      string Print;
++      string Description;
++   };
++
++   protected:
++   string VendorID;
++   std::map<string, string> Fingerprints;
++
++   public:
++   Vendor(string VendorID, std::vector<struct Fingerprint *> *FingerprintList);
++   virtual const string& GetVendorID() const { return VendorID; };
++   virtual const string LookupFingerprint(string Print) const;
++   virtual bool CheckFingerprints(const std::vector<string> Fingerprints,
++				  string &ErrorText) const;
++   virtual ~Vendor(){};
++};
++
++#endif
+Files apt/bin/apt-cache and apt-HEAD/bin/apt-cache differ
+Files apt/bin/apt-cdrom and apt-HEAD/bin/apt-cdrom differ
+Files apt/bin/apt-config and apt-HEAD/bin/apt-config differ
+Files apt/bin/apt-extracttemplates and apt-HEAD/bin/apt-extracttemplates differ
+Files apt/bin/apt-get and apt-HEAD/bin/apt-get differ
+Files apt/bin/apt-sortpkgs and apt-HEAD/bin/apt-sortpkgs differ
+Files apt/bin/libapt-inst-libc6.3-5.so.1.0 and apt-HEAD/bin/libapt-inst-libc6.3-5.so.1.0 differ
+Files apt/bin/libapt-inst-libc6.3-5.so.1.0.0 and apt-HEAD/bin/libapt-inst-libc6.3-5.so.1.0.0 differ
+Files apt/bin/libapt-inst.so and apt-HEAD/bin/libapt-inst.so differ
+Files apt/bin/libapt-pkg-libc6.3-5.so.3.3 and apt-HEAD/bin/libapt-pkg-libc6.3-5.so.3.3 differ
+Files apt/bin/libapt-pkg-libc6.3-5.so.3.3.0 and apt-HEAD/bin/libapt-pkg-libc6.3-5.so.3.3.0 differ
+Files apt/bin/libapt-pkg.so and apt-HEAD/bin/libapt-pkg.so differ
+Files apt/bin/methods/bzip2 and apt-HEAD/bin/methods/bzip2 differ
+Files apt/bin/methods/cdrom and apt-HEAD/bin/methods/cdrom differ
+Files apt/bin/methods/copy and apt-HEAD/bin/methods/copy differ
+Files apt/bin/methods/file and apt-HEAD/bin/methods/file differ
+Files apt/bin/methods/ftp and apt-HEAD/bin/methods/ftp differ
+Files apt/bin/methods/gpgv and apt-HEAD/bin/methods/gpgv differ
+Files apt/bin/methods/gzip and apt-HEAD/bin/methods/gzip differ
+Files apt/bin/methods/http and apt-HEAD/bin/methods/http differ
+Files apt/bin/methods/rsh and apt-HEAD/bin/methods/rsh differ
+Files apt/bin/methods/ssh and apt-HEAD/bin/methods/ssh differ
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/methods/gpgv.cc apt-HEAD/methods/gpgv.cc
+--- apt/methods/gpgv.cc	1969-12-31 19:00:00.000000000 -0500
++++ apt-HEAD/methods/gpgv.cc	2003-08-20 20:56:37.000000000 -0400
+@@ -0,0 +1,261 @@
++#include <apt-pkg/error.h>
++#include <apt-pkg/acquire-method.h>
++#include <apt-pkg/strutl.h>
++
++#include <sys/stat.h>
++#include <unistd.h>
++#include <utime.h>
++#include <stdio.h>
++#include <fcntl.h>
++#include <errno.h>
++#include <sys/wait.h>
++#include <iostream>
++
++#define GNUPGPREFIX "[GNUPG:]"
++#define GNUPGBADSIG "[GNUPG:] BADSIG"
++#define GNUPGNOPUBKEY "[GNUPG:] NO_PUBKEY"
++#define GNUPGVALIDSIG "[GNUPG:] VALIDSIG"
++
++class GPGVMethod : public pkgAcqMethod
++{
++   private:
++   const char *VerifyGetSigners(const char *file, const char *outfile,
++				vector<string> &GoodSigners, vector<string> &BadSigners,
++				vector<string> &NoPubKeySigners);
++   
++   protected:
++   virtual bool Fetch(FetchItem *Itm);
++   
++   public:
++   
++   GPGVMethod() : pkgAcqMethod("1.0",SingleInstance | SendConfig) {};
++};
++
++const char *GPGVMethod::VerifyGetSigners(const char *file, const char *outfile,
++					 vector<string> &GoodSigners,
++					 vector<string> &BadSigners,
++					 vector<string> &NoPubKeySigners)
++{
++   if (_config->FindB("Debug::Acquire::gpg", false))
++   {
++      std::cerr << "inside VerifyGetSigners" << std::endl;
++   }
++   pid_t pid;
++   int fd[2];
++   FILE *pipein;
++   int status;
++   struct stat buff;
++   string gpgvpath = _config->Find("Dir::Bin::gpg", "/usr/bin/gpgv");
++   string pubringpath = _config->Find("Apt::GPGV::TrustedKeyring", "/etc/apt/trusted.gpg");
++   if (_config->FindB("Debug::Acquire::gpg", false))
++   {
++      std::cerr << "gpgv path: " << gpgvpath << std::endl;
++      std::cerr << "Keyring path: " << pubringpath << std::endl;
++   }
++
++   if (stat(pubringpath.c_str(), &buff))
++      return (string("Couldn't access keyring: ") + strerror(errno)).c_str();
++
++   if (pipe(fd) < 0)
++   {
++      return "Couldn't create pipe";
++   }
++
++   pid = fork();
++   if (pid < 0)
++   {
++      return (string("Couldn't spawn new process") + strerror(errno)).c_str();
++   }
++   else if (pid == 0)
++   {
++      if (_config->FindB("Debug::Acquire::gpg", false))
++      {
++         std::cerr << "Preparing to exec: " << gpgvpath
++		   << " --status-fd 3 --keyring " << pubringpath
++		   << " " << file << " " << outfile << std::endl;
++      }
++      int nullfd = open("/dev/null", O_RDONLY);
++      close(fd[0]);
++      // Redirect output to /dev/null; we read from the status fd
++      dup2(nullfd, STDOUT_FILENO); 
++      dup2(nullfd, STDERR_FILENO); 
++      // Redirect the pipe to the status fd (3)
++      dup2(fd[1], 3);
++
++      putenv("LANG=");
++      putenv("LC_ALL=");
++      putenv("LC_MESSAGES=");
++      execlp(gpgvpath.c_str(), gpgvpath.c_str(), "--status-fd", "3", "--keyring", 
++	     pubringpath.c_str(), file, outfile, NULL);
++             
++      exit(111);
++   }
++   close(fd[1]);
++
++   pipein = fdopen(fd[0], "r"); 
++   
++   // Loop over the output of gpgv, and check the signatures.
++   size_t buffersize = 64;
++   char *buffer = (char *) malloc(buffersize);
++   size_t bufferoff = 0;
++   while (1)
++   {
++      int c;
++
++      // Read a line.  Sigh.
++      while ((c = getc(pipein)) != EOF && c != '\n')
++      {
++         if (bufferoff == buffersize)
++            buffer = (char *) realloc(buffer, buffersize *= 2);
++         *(buffer+bufferoff) = c;
++         bufferoff++;
++      }
++      if (bufferoff == 0 && c == EOF)
++         break;
++      *(buffer+bufferoff) = '\0';
++      bufferoff = 0;
++      if (_config->FindB("Debug::Acquire::gpg", false))
++         std::cerr << "Read: " << buffer << std::endl;
++
++      // Push the data into three separate vectors, which
++      // we later concatenate.  They're kept separate so
++      // if we improve the apt method communication stuff later
++      // it will be better.
++      if (strncmp(buffer, GNUPGBADSIG, sizeof(GNUPGBADSIG)-1) == 0)
++      {
++         if (_config->FindB("Debug::Acquire::gpg", false))
++            std::cerr << "Got BADSIG! " << std::endl;
++         BadSigners.push_back(string(buffer+sizeof(GNUPGPREFIX)));
++      }
++      
++      if (strncmp(buffer, GNUPGNOPUBKEY, sizeof(GNUPGNOPUBKEY)-1) == 0)
++      {
++         if (_config->FindB("Debug::Acquire::gpg", false))
++            std::cerr << "Got NO_PUBKEY " << std::endl;
++         NoPubKeySigners.push_back(string(buffer+sizeof(GNUPGPREFIX)));
++      }
++
++      if (strncmp(buffer, GNUPGVALIDSIG, sizeof(GNUPGVALIDSIG)-1) == 0)
++      {
++         char *sig = buffer + sizeof(GNUPGPREFIX);
++         char *p = sig + sizeof("VALIDSIG");
++         while (*p && isxdigit(*p)) 
++            p++;
++         *p = 0;
++         if (_config->FindB("Debug::Acquire::gpg", false))
++            std::cerr << "Got VALIDSIG, key ID:" << sig << std::endl;
++         GoodSigners.push_back(string(sig));
++      }
++   }
++   fclose(pipein);
++
++   waitpid(pid, &status, 0);
++   if (_config->FindB("Debug::Acquire::gpg", false))
++   {
++      std::cerr <<"gpgv exited\n";
++   }
++   
++   if (WEXITSTATUS(status) == 0)
++   {
++      if (GoodSigners.empty())
++         return "Internal error: Good signature, but could not determine key fingerprint?!";
++      return NULL;
++   }
++   else if (WEXITSTATUS(status) == 1)
++   {
++      return "At least one invalid signature was encountered.";
++   }
++   else if (WEXITSTATUS(status) == 111)
++   {
++      return (string("Could not execute ") + gpgvpath +
++	      string(" to verify signature")).c_str();
++   }
++   else
++   {
++      return "Unknown error executing gpgv";
++   }
++}
++
++bool GPGVMethod::Fetch(FetchItem *Itm)
++{
++   URI Get = Itm->Uri;
++   string Path = Get.Host + Get.Path; // To account for relative paths
++   string keyID;
++   vector<string> GoodSigners;
++   vector<string> BadSigners;
++   vector<string> NoPubKeySigners;
++   
++   FetchResult Res;
++   Res.Filename = Itm->DestFile;
++   URIStart(Res);
++
++   // Run gpgv on file, extract contents and get the key ID of the signer
++   const char *msg = VerifyGetSigners(Path.c_str(), Itm->DestFile.c_str(),
++				      GoodSigners, BadSigners, NoPubKeySigners);
++   if (GoodSigners.empty() || !BadSigners.empty() || !NoPubKeySigners.empty())
++   {
++      string errmsg;
++      // In this case, something bad probably happened, so we just go
++      // with what the other method gave us for an error message.
++      if (BadSigners.empty() && NoPubKeySigners.empty())
++         errmsg = msg;
++      else
++      {
++         if (!BadSigners.empty())
++         {
++            errmsg += "The following signatures were invalid:\n";
++            for (vector<string>::iterator I = BadSigners.begin();
++		 I != BadSigners.end(); I++)
++               errmsg += (*I + "\n");
++         }
++         if (!NoPubKeySigners.empty())
++         {
++             errmsg += "The following signatures couldn't be verified because the public key is not available:\n";
++            for (vector<string>::iterator I = NoPubKeySigners.begin();
++		 I != NoPubKeySigners.end(); I++)
++               errmsg += (*I + "\n");
++         }
++      }
++      return _error->Error(errmsg.c_str());
++   }
++      
++   // Transfer the modification times
++   struct stat Buf;
++   if (stat(Path.c_str(),&Buf) != 0)
++      return _error->Errno("stat","Failed to stat %s", Path.c_str());
++
++   struct utimbuf TimeBuf;
++   TimeBuf.actime = Buf.st_atime;
++   TimeBuf.modtime = Buf.st_mtime;
++   if (utime(Itm->DestFile.c_str(),&TimeBuf) != 0)
++      return _error->Errno("utime","Failed to set modification time");
++
++   if (stat(Itm->DestFile.c_str(),&Buf) != 0)
++      return _error->Errno("stat","Failed to stat");
++   
++   // Return a Done response
++   Res.LastModified = Buf.st_mtime;
++   Res.Size = Buf.st_size;
++   // Just pass the raw output up, because passing it as a real data
++   // structure is too difficult with the method stuff.  We keep it
++   // as three separate vectors for future extensibility.
++   Res.GPGVOutput = GoodSigners;
++   Res.GPGVOutput.insert(Res.GPGVOutput.end(),BadSigners.begin(),BadSigners.end());
++   Res.GPGVOutput.insert(Res.GPGVOutput.end(),NoPubKeySigners.begin(),NoPubKeySigners.end());
++   URIDone(Res);
++
++   if (_config->FindB("Debug::Acquire::gpg", false))
++   {
++      std::cerr <<"gpgv suceeded\n";
++   }
++
++   return true;
++}
++
++
++int main()
++{
++   GPGVMethod Mth;
++
++   return Mth.Run();
++}
+diff -uNr -x '*.d' -x '*.o' -x po -x scripts -x CVS -x scripts -x include -x docs -x doc -x configure -x autom4te.cache -x build -x aclocal.m4 apt/methods/makefile apt-HEAD/methods/makefile
+--- apt/methods/makefile	2002-11-11 02:00:16.000000000 -0500
++++ apt-HEAD/methods/makefile	2003-08-20 20:56:37.000000000 -0400
+@@ -31,6 +31,13 @@
+ SOURCE = gzip.cc
+ include $(PROGRAM_H)
+ 
++# The gpgv method
++PROGRAM=gpgv
++SLIBS = -lapt-pkg
++LIB_MAKES = apt-pkg/makefile
++SOURCE = gpgv.cc
++include $(PROGRAM_H)
++
+ # The cdrom method
+ PROGRAM=cdrom
+ SLIBS = -lapt-pkg 
+Files apt/obj/apt-inst/arfile.opic and apt-HEAD/obj/apt-inst/arfile.opic differ
+Files apt/obj/apt-inst/database.opic and apt-HEAD/obj/apt-inst/database.opic differ
+Files apt/obj/apt-inst/debfile.opic and apt-HEAD/obj/apt-inst/debfile.opic differ
+Files apt/obj/apt-inst/dirstream.opic and apt-HEAD/obj/apt-inst/dirstream.opic differ
+Files apt/obj/apt-inst/dpkgdb.opic and apt-HEAD/obj/apt-inst/dpkgdb.opic differ
+Files apt/obj/apt-inst/extract.opic and apt-HEAD/obj/apt-inst/extract.opic differ
+Files apt/obj/apt-inst/extracttar.opic and apt-HEAD/obj/apt-inst/extracttar.opic differ
+Files apt/obj/apt-inst/filelist.opic and apt-HEAD/obj/apt-inst/filelist.opic differ
+Files apt/obj/apt-pkg/acquire-item.opic and apt-HEAD/obj/apt-pkg/acquire-item.opic differ
+Files apt/obj/apt-pkg/acquire-method.opic and apt-HEAD/obj/apt-pkg/acquire-method.opic differ
+Files apt/obj/apt-pkg/acquire.opic and apt-HEAD/obj/apt-pkg/acquire.opic differ
+Files apt/obj/apt-pkg/acquire-worker.opic and apt-HEAD/obj/apt-pkg/acquire-worker.opic differ
+Files apt/obj/apt-pkg/algorithms.opic and apt-HEAD/obj/apt-pkg/algorithms.opic differ
+Files apt/obj/apt-pkg/cachefile.opic and apt-HEAD/obj/apt-pkg/cachefile.opic differ
+Files apt/obj/apt-pkg/cdromutl.opic and apt-HEAD/obj/apt-pkg/cdromutl.opic differ
+Files apt/obj/apt-pkg/clean.opic and apt-HEAD/obj/apt-pkg/clean.opic differ
+Files apt/obj/apt-pkg/cmndline.opic and apt-HEAD/obj/apt-pkg/cmndline.opic differ
+Files apt/obj/apt-pkg/configuration.opic and apt-HEAD/obj/apt-pkg/configuration.opic differ
+Files apt/obj/apt-pkg/crc-16.opic and apt-HEAD/obj/apt-pkg/crc-16.opic differ
+Files apt/obj/apt-pkg/debindexfile.opic and apt-HEAD/obj/apt-pkg/debindexfile.opic differ
+Files apt/obj/apt-pkg/deblistparser.opic and apt-HEAD/obj/apt-pkg/deblistparser.opic differ
+Files apt/obj/apt-pkg/debmetaindex.opic and apt-HEAD/obj/apt-pkg/debmetaindex.opic differ
+Files apt/obj/apt-pkg/debrecords.opic and apt-HEAD/obj/apt-pkg/debrecords.opic differ
+Files apt/obj/apt-pkg/debsrcrecords.opic and apt-HEAD/obj/apt-pkg/debsrcrecords.opic differ
+Files apt/obj/apt-pkg/debsystem.opic and apt-HEAD/obj/apt-pkg/debsystem.opic differ
+Files apt/obj/apt-pkg/debversion.opic and apt-HEAD/obj/apt-pkg/debversion.opic differ
+Files apt/obj/apt-pkg/depcache.opic and apt-HEAD/obj/apt-pkg/depcache.opic differ
+Files apt/obj/apt-pkg/dpkgpm.opic and apt-HEAD/obj/apt-pkg/dpkgpm.opic differ
+Files apt/obj/apt-pkg/error.opic and apt-HEAD/obj/apt-pkg/error.opic differ
+Files apt/obj/apt-pkg/fileutl.opic and apt-HEAD/obj/apt-pkg/fileutl.opic differ
+Files apt/obj/apt-pkg/hashes.opic and apt-HEAD/obj/apt-pkg/hashes.opic differ
+Files apt/obj/apt-pkg/indexfile.opic and apt-HEAD/obj/apt-pkg/indexfile.opic differ
+Files apt/obj/apt-pkg/indexrecords.opic and apt-HEAD/obj/apt-pkg/indexrecords.opic differ
+Files apt/obj/apt-pkg/init.opic and apt-HEAD/obj/apt-pkg/init.opic differ
+Files apt/obj/apt-pkg/md5.opic and apt-HEAD/obj/apt-pkg/md5.opic differ
+Files apt/obj/apt-pkg/mmap.opic and apt-HEAD/obj/apt-pkg/mmap.opic differ
+Files apt/obj/apt-pkg/orderlist.opic and apt-HEAD/obj/apt-pkg/orderlist.opic differ
+Files apt/obj/apt-pkg/packagemanager.opic and apt-HEAD/obj/apt-pkg/packagemanager.opic differ
+Files apt/obj/apt-pkg/pkgcachegen.opic and apt-HEAD/obj/apt-pkg/pkgcachegen.opic differ
+Files apt/obj/apt-pkg/pkgcache.opic and apt-HEAD/obj/apt-pkg/pkgcache.opic differ
+Files apt/obj/apt-pkg/pkgrecords.opic and apt-HEAD/obj/apt-pkg/pkgrecords.opic differ
+Files apt/obj/apt-pkg/pkgsystem.opic and apt-HEAD/obj/apt-pkg/pkgsystem.opic differ
+Files apt/obj/apt-pkg/policy.opic and apt-HEAD/obj/apt-pkg/policy.opic differ
+Files apt/obj/apt-pkg/progress.opic and apt-HEAD/obj/apt-pkg/progress.opic differ
+Files apt/obj/apt-pkg/sha1.opic and apt-HEAD/obj/apt-pkg/sha1.opic differ
+Files apt/obj/apt-pkg/sourcelist.opic and apt-HEAD/obj/apt-pkg/sourcelist.opic differ
+Files apt/obj/apt-pkg/srcrecords.opic and apt-HEAD/obj/apt-pkg/srcrecords.opic differ
+Files apt/obj/apt-pkg/strutl.opic and apt-HEAD/obj/apt-pkg/strutl.opic differ
+Files apt/obj/apt-pkg/tagfile.opic and apt-HEAD/obj/apt-pkg/tagfile.opic differ
+Files apt/obj/apt-pkg/vendor.opic and apt-HEAD/obj/apt-pkg/vendor.opic differ
+Files apt/obj/apt-pkg/versionmatch.opic and apt-HEAD/obj/apt-pkg/versionmatch.opic differ
+Files apt/obj/apt-pkg/version.opic and apt-HEAD/obj/apt-pkg/version.opic differ

@@ -1,0 +1,76 @@
+commit 77b6f202e1629b7794a03b6522d636ff1436d074
+Author: David Kalnischkies <david@kalnischkies.de>
+Date:   Sat Jan 10 12:31:18 2015 +0100
+
+    award points for positive dependencies again
+    
+    Commit 9ec748ff103840c4c65471ca00d3b72984131ce4 from Feb 23 last year
+    adds a version check after 8daf68e366fa9fa2794ae667f51562663856237c
+    added 8 days earlier negative points for breaks/conflicts with the
+    intended that only dependencies which are satisfied propagate points
+    (aka: old conflicts do not).
+    
+    The implementation was needlessly complex and flawed through preventing
+    positive dependencies from gaining points like they did before these
+    commits making library transitions harder instead of simpler. It worked
+    out anyhow most of the time out of pure 'luck' (and other ways of
+    gaining points) or got miss attributed to being a temporary hick-up.
+    
+    Closes: 774924
+
+diff --git a/apt-pkg/algorithms.cc b/apt-pkg/algorithms.cc
+index 608ec7f..b838310 100644
+--- a/apt-pkg/algorithms.cc
++++ b/apt-pkg/algorithms.cc
+@@ -468,7 +468,7 @@ void pkgProblemResolver::MakeScores()
+ 	 if (D->Version != 0)
+ 	 {
+ 	    pkgCache::VerIterator const IV = Cache[T].InstVerIter(Cache);
+-	    if (IV.end() == true || D.IsSatisfied(IV) != D.IsNegative())
++	    if (IV.end() == true || D.IsSatisfied(IV) == false)
+ 	       continue;
+ 	 }
+ 	 Scores[T->ID] += DepMap[D->Type];
+diff --git a/test/integration/test-allow-scores-for-all-dependency-types b/test/integration/test-allow-scores-for-all-dependency-types
+index a5c98f3..d60cb8d 100755
+--- a/test/integration/test-allow-scores-for-all-dependency-types
++++ b/test/integration/test-allow-scores-for-all-dependency-types
+@@ -32,6 +32,11 @@ insertpackage 'multipleyes' 'foo' 'amd64' '2.2' 'Conflicts: bar (<= 3)'
+ # having foo multiple times as conflict is a non-advisable hack in general
+ insertpackage 'multipleyes' 'bar' 'amd64' '2.2' 'Conflicts: foo (<= 3), foo (<= 3)'
+ 
++#774924 - slightly simplified
++insertpackage 'jessie' 'login' 'amd64' '2' 'Pre-Depends: libaudit1 (>= 0)'
++insertpackage 'jessie' 'libaudit1' 'amd64' '2' 'Depends: libaudit-common (>= 0)'
++insertpackage 'jessie' 'libaudit-common' 'amd64' '2' 'Breaks: libaudit0, libaudit1 (<< 2)'
++
+ cp rootdir/var/lib/dpkg/status rootdir/var/lib/dpkg/status-backup
+ setupaptarchive
+ 
+@@ -142,3 +147,26 @@ Inst foo [1] (2 versioned [amd64])
+ Inst baz (2 versioned [amd64])
+ Conf foo (2 versioned [amd64])
+ Conf baz (2 versioned [amd64])' aptget install baz -st versioned
++
++# recreating the exact situation is hard, so we pull tricks to get the score
++cp -f rootdir/var/lib/dpkg/status-backup rootdir/var/lib/dpkg/status
++insertinstalledpackage 'gdm3' 'amd64' '1' 'Depends: libaudit0, libaudit0'
++insertinstalledpackage 'login' 'amd64' '1' 'Essential: yes'
++insertinstalledpackage 'libaudit0' 'amd64' '1'
++testequal 'Reading package lists...
++Building dependency tree...
++The following packages will be REMOVED:
++  gdm3 libaudit0
++The following NEW packages will be installed:
++  libaudit-common libaudit1
++The following packages will be upgraded:
++  login
++1 upgraded, 2 newly installed, 2 to remove and 0 not upgraded.
++Remv gdm3 [1]
++Remv libaudit0 [1]
++Inst libaudit-common (2 jessie [amd64])
++Conf libaudit-common (2 jessie [amd64])
++Inst libaudit1 (2 jessie [amd64])
++Conf libaudit1 (2 jessie [amd64])
++Inst login [1] (2 jessie [amd64])
++Conf login (2 jessie [amd64])' aptget dist-upgrade -st jessie

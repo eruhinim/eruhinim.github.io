@@ -1,0 +1,181 @@
+Index: debian/changelog
+===================================================================
+--- debian/changelog (révision 2374)
++++ debian/changelog (copie de travail)
+@@ -1,3 +1,10 @@
++dbus (1.2.1-3) UNRELEASED; urgency=low
++
++  * New patch, 60_sysconf-pw-sizes, use sysconf to retrieve the needed size
++    for getpwnam() and getgrnam() bufs; closes: #489738.
++
++ -- Loic Minier <lool@dooz.org>  Wed, 23 Jul 2008 03:00:27 +0200
++
+ dbus (1.2.1-2) unstable; urgency=low
+ 
+   [ Sjoerd Simons ]
+Index: debian/patches/60_sysconf-pw-sizes.patch
+===================================================================
+--- debian/patches/60_sysconf-pw-sizes.patch (révision 0)
++++ debian/patches/60_sysconf-pw-sizes.patch (révision 0)
+@@ -0,0 +1,161 @@
++diff --git a/dbus/dbus-sysdeps-unix.c b/dbus/dbus-sysdeps-unix.c
++index 19858dd..7533cc2 100644
++--- a/dbus/dbus-sysdeps-unix.c
+++++ b/dbus/dbus-sysdeps-unix.c
++@@ -1452,28 +1452,45 @@ fill_user_info (DBusUserInfo       *info,
++   {
++     struct passwd *p;
++     int result;
++-    char buf[1024];
+++    size_t buflen;
+++    char *buf;
++     struct passwd p_str;
++ 
+++    /* retrieve maximum needed size for buf */
+++    buflen = sysconf(_SC_GETPW_R_SIZE_MAX);
+++
+++    if (buflen <= 0)
+++      buflen = 1024;
+++
+++    buf = dbus_malloc(buflen);
+++    if (buf == NULL)
+++      {
+++        dbus_set_error (error, DBUS_ERROR_NO_MEMORY, NULL);
+++        return FALSE;
+++      }
+++
++     p = NULL;
++ #ifdef HAVE_POSIX_GETPWNAM_R
++     if (uid != DBUS_UID_UNSET)
++-      result = getpwuid_r (uid, &p_str, buf, sizeof (buf),
+++      result = getpwuid_r (uid, &p_str, buf, buflen,
++                            &p);
++     else
++-      result = getpwnam_r (username_c, &p_str, buf, sizeof (buf),
+++      result = getpwnam_r (username_c, &p_str, buf, buflen,
++                            &p);
++ #else
++     if (uid != DBUS_UID_UNSET)
++-      p = getpwuid_r (uid, &p_str, buf, sizeof (buf));
+++      p = getpwuid_r (uid, &p_str, buf, buflen);
++     else
++-      p = getpwnam_r (username_c, &p_str, buf, sizeof (buf));
+++      p = getpwnam_r (username_c, &p_str, buf, buflen);
++     result = 0;
++ #endif /* !HAVE_POSIX_GETPWNAM_R */
++     if (result == 0 && p == &p_str)
++       {
++         if (!fill_user_info_from_passwd (p, info, error))
++-          return FALSE;
+++          {
+++            dbus_free(buf);
+++            return FALSE;
+++          }
++       }
++     else
++       {
++@@ -1481,6 +1498,7 @@ fill_user_info (DBusUserInfo       *info,
++                         "User \"%s\" unknown or no memory to allocate password entry\n",
++                         username_c ? username_c : "???");
++         _dbus_verbose ("User %s unknown\n", username_c ? username_c : "???");
+++        dbus_free(buf);
++         return FALSE;
++       }
++   }
++@@ -1497,7 +1515,10 @@ fill_user_info (DBusUserInfo       *info,
++     if (p != NULL)
++       {
++         if (!fill_user_info_from_passwd (p, info, error))
++-          return FALSE;
+++          {
+++            dbus_free(buf);
+++            return FALSE;
+++          }
++       }
++     else
++       {
++@@ -1505,6 +1526,7 @@ fill_user_info (DBusUserInfo       *info,
++                         "User \"%s\" unknown or no memory to allocate password entry\n",
++                         username_c ? username_c : "???");
++         _dbus_verbose ("User %s unknown\n", username_c ? username_c : "???");
+++        dbus_free(buf);
++         return FALSE;
++       }
++   }
++diff --git a/dbus/dbus-sysdeps-util-unix.c b/dbus/dbus-sysdeps-util-unix.c
++index 9ff3fbc..5f0df3f 100644
++--- a/dbus/dbus-sysdeps-util-unix.c
+++++ b/dbus/dbus-sysdeps-util-unix.c
++@@ -828,31 +828,49 @@ fill_group_info (DBusGroupInfo    *info,
++   {
++     struct group *g;
++     int result;
++-    char buf[1024];
+++    size_t buflen;
+++    char *buf;
++     struct group g_str;
+++    dbus_bool_t b;
+++
+++    /* retrieve maximum needed size for buf */
+++    buflen = sysconf(_SC_GETGR_R_SIZE_MAX);
+++
+++    if (buflen <= 0)
+++      buflen = 1024;
+++
+++    buf = dbus_malloc(buflen);
+++    if (buf == NULL)
+++      {
+++        dbus_set_error (error, DBUS_ERROR_NO_MEMORY, NULL);
+++        return FALSE;
+++      }
++ 
++     g = NULL;
++ #ifdef HAVE_POSIX_GETPWNAM_R
++ 
++     if (group_c_str)
++-      result = getgrnam_r (group_c_str, &g_str, buf, sizeof (buf),
+++      result = getgrnam_r (group_c_str, &g_str, buf, buflen,
++                            &g);
++     else
++-      result = getgrgid_r (gid, &g_str, buf, sizeof (buf),
+++      result = getgrgid_r (gid, &g_str, buf, buflen,
++                            &g);
++ #else
++-    g = getgrnam_r (group_c_str, &g_str, buf, sizeof (buf));
+++    g = getgrnam_r (group_c_str, &g_str, buf, buflen);
++     result = 0;
++ #endif /* !HAVE_POSIX_GETPWNAM_R */
++     if (result == 0 && g == &g_str)
++       {
++-        return fill_user_info_from_group (g, info, error);
+++        b = fill_user_info_from_group (g, info, error);
+++        dbus_free(buf);
+++        return b;
++       }
++     else
++       {
++         dbus_set_error (error, _dbus_error_from_errno (errno),
++                         "Group %s unknown or failed to look it up\n",
++                         group_c_str ? group_c_str : "???");
+++        dbus_free(buf);
++         return FALSE;
++       }
++   }
++@@ -865,13 +883,16 @@ fill_group_info (DBusGroupInfo    *info,
++ 
++     if (g != NULL)
++       {
++-        return fill_user_info_from_group (g, info, error);
+++        b = fill_user_info_from_group (g, info, error);
+++        dbus_free(buf);
+++        return b;
++       }
++     else
++       {
++         dbus_set_error (error, _dbus_error_from_errno (errno),
++                         "Group %s unknown or failed to look it up\n",
++                         group_c_str ? group_c_str : "???");
+++        dbus_free(buf);
++         return FALSE;
++       }
++   }

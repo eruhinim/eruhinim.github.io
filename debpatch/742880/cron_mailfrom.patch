@@ -1,0 +1,241 @@
+diff -Naur cron-3.0pl1.orig/compat.h cron-3.0pl1/compat.h
+--- cron-3.0pl1.orig/compat.h	2014-03-28 12:38:30.000000000 +0100
++++ cron-3.0pl1/compat.h	2014-03-28 12:39:12.000000000 +0100
+@@ -63,7 +63,7 @@
+ 
+ #ifndef POSIX
+ # if (BSD >= 199103) || defined(__linux__) || defined(__GNU__) || defined(ultrix) ||\
+-        defined(AIX) ||\ defined(HPUX) || defined(CONVEX) || defined(IRIX) || defined(__GLIBC__)
++        defined(AIX) || defined(HPUX) || defined(CONVEX) || defined(IRIX) || defined(__GLIBC__)
+ #  define POSIX
+ # endif
+ #endif
+diff -Naur cron-3.0pl1.orig/config.h cron-3.0pl1/config.h
+--- cron-3.0pl1.orig/config.h	2014-03-28 12:38:30.000000000 +0100
++++ cron-3.0pl1/config.h	2014-03-28 12:39:12.000000000 +0100
+@@ -44,7 +44,7 @@
+ 
+ #define MAILCMD _PATH_SENDMAIL					/*-*/
+ /* #define MAILARGS "%s -i -FCronDaemon -odi -oem  %s"		/*-*/
+-#define MAILARGS "%s -i -FCronDaemon -oem  %s"		/*-*/
++#define MAILARGS "%s %s -i -FCronDaemon -oem  %s"		/*-*/
+ 			/* -i    = don't terminate on "." by itself
+                          * -Fx	 = set full-name of sender
+ 			 * -odi	 = Option Deliverymode Interactive
+diff -Naur cron-3.0pl1.orig/cron.8 cron-3.0pl1/cron.8
+--- cron-3.0pl1.orig/cron.8	2014-03-28 12:38:30.000000000 +0100
++++ cron-3.0pl1/cron.8	2014-03-28 12:39:12.000000000 +0100
+@@ -24,6 +24,7 @@
+ .SH SYNOPSIS
+ cron
+ .RB [ -f ]
++.RB [ -r ]
+ .RB [ -l ]
+ .RB [ -L
+ .IR loglevel ]
+@@ -36,6 +37,10 @@
+ .B -f
+ Stay in foreground mode, don't daemonize.
+ .TP
++.B -r
++Set the return-path in any emails to "<>" to suppress bounce emails. Can be
++overridden per crontab entry by the environment variable MAILFROM.
++.TP
+ .B -l
+ Enable LSB compliant names for /etc/cron.d files. This setting, however, does
+ not affect the parsing of files under /etc/cron.hourly, /etc/cron.daily,
+diff -Naur cron-3.0pl1.orig/cron.c cron-3.0pl1/cron.c
+--- cron-3.0pl1.orig/cron.c	2014-03-28 12:38:30.000000000 +0100
++++ cron-3.0pl1/cron.c	2014-03-28 12:39:12.000000000 +0100
+@@ -469,14 +469,18 @@
+ 	log_level = 1;
+ 	stay_foreground = 0;
+         lsbsysinit_mode = 0;
++	unset_returnpath = 0;
+ 
+-	while (EOF != (argch = getopt(argc, argv, "lfx:L:"))) {
++	while (EOF != (argch = getopt(argc, argv, "lfrx:L:"))) {
+ 		switch (argch) {
+ 		default:
+ 			usage();
+ 		case 'f':
+ 			stay_foreground = 1;
+ 			break;
++		case 'r':
++			unset_returnpath = 1;
++			break;
+ 		case 'x':
+ 			if (!set_debug_flags(optarg))
+ 				usage();
+diff -Naur cron-3.0pl1.orig/cron.h cron-3.0pl1/cron.h
+--- cron-3.0pl1.orig/cron.h	2014-03-28 12:38:30.000000000 +0100
++++ cron-3.0pl1/cron.h	2014-03-28 12:39:12.000000000 +0100
+@@ -271,6 +271,10 @@
+ FILE		*cron_popen __P((char *, char *, entry *));
+ 
+ 
++/* New config option which must be read in do_command.c */
++int	unset_returnpath;
++
++
+ 				/* in the C tradition, we only create
+ 				 * variables for the main program, just
+ 				 * extern them elsewhere.
+diff -Naur cron-3.0pl1.orig/crontab.5 cron-3.0pl1/crontab.5
+--- cron-3.0pl1.orig/crontab.5	2014-03-28 12:38:30.000000000 +0100
++++ cron-3.0pl1/crontab.5	2014-03-28 12:39:12.000000000 +0100
+@@ -101,6 +101,17 @@
+ recipients by separating recipient users with a comma. If MAILTO is defined
+ but empty (MAILTO=""), no mail will be sent.  Otherwise mail is sent to the
+ owner of the crontab.
++
++Additionally
++.IR cron (8)
++will look at MAILFROM. If this variable is set, its value will be taken
++as return-path in mails. Remember that only root and trusted users are
++allowed to set any address as return-path. But every user is allowed to
++set the return-path to the empty address "<>" which will prevent bounce
++mails from e.g. vacancy systems. Because this setting is pretty useful
++for normal cron jobs it is also available as default setting by starting
++.IR cron (8)
++with the -r switch.
+ .PP
+ On the Debian GNU/Linux system, cron supports the
+ .B pam_env
+diff -Naur cron-3.0pl1.orig/debian/NEWS cron-3.0pl1/debian/NEWS
+--- cron-3.0pl1.orig/debian/NEWS	2014-03-28 12:38:30.000000000 +0100
++++ cron-3.0pl1/debian/NEWS	2014-03-28 12:39:12.000000000 +0100
+@@ -1,3 +1,17 @@
++cron (3.0pl1-124.2) unstable; urgency=low
++
++    The new -r option of the cron daemon globally sets the return-path
++    of any mails to the empty sender "<>" which successfuly prevents
++    mail bounces of e.g. vacancy systems. The value of the return-path
++    can also be overridden individually in every crontab by setting the
++    environment variable MAILFROM. Remember that only root and trusted
++    users are allowed to set any arbitrary value. However - every user
++    is allowed to set the empty vlue "<>". So if the administrator does
++    not set the -r option every crontab can still disable bounces by
++    setting the MAILFROM variable.
++
++ -- Christopher Odenbach <odenbach@uni-paderborn.de>  Fri, 28 Mar 2014 12:17:19 +0200
++
+ cron (3.0pl1-119) unstable; urgency=low
+ 
+     The semantics of the -L option of the cron daemon have changed: from
+diff -Naur cron-3.0pl1.orig/debian/changelog cron-3.0pl1/debian/changelog
+--- cron-3.0pl1.orig/debian/changelog	2014-03-28 12:38:30.000000000 +0100
++++ cron-3.0pl1/debian/changelog	2014-03-28 12:39:12.000000000 +0100
+@@ -1,3 +1,17 @@
++cron (3.0pl1-124.2) UNRELEASED; urgency=low
++
++  * Non-maintainer upload.
++  * Added -r switch to globally unset the returnpath
++
++ -- Christopher Odenbach <odenbach@uni-paderborn.de>  Fri, 28 Mar 2014 00:04:06 +0100
++
++cron (3.0pl1-124.1) UNRELEASED; urgency=low
++
++  * Non-maintainer upload.
++  * Added MAILFROM enviroment variable to set the returnpath
++
++ -- Christopher Odenbach <odenbach@uni-paderborn.de>  Fri, 28 Mar 2014 00:04:06 +0100
++
+ cron (3.0pl1-124) unstable; urgency=medium
+ 
+   [ Release targeted to Wheezy including fixes for critical/important bugs ]
+diff -Naur cron-3.0pl1.orig/debian/cron.default cron-3.0pl1/debian/cron.default
+--- cron-3.0pl1.orig/debian/cron.default	2014-03-28 12:38:30.000000000 +0100
++++ cron-3.0pl1/debian/cron.default	2014-03-28 12:39:12.000000000 +0100
+@@ -24,5 +24,8 @@
+ #   4   log jobs with exit status != 0
+ #   8   log the process identifier of child process (in all logs)
+ #
+-#EXTRA_OPTS=""
++# Currently the -r switch is default (to set the return-path of mails
++# to the empty sender "<>" and therefore successfuly disable bounces.
++#
++EXTRA_OPTS="-r"
+ 
+diff -Naur cron-3.0pl1.orig/do_command.c cron-3.0pl1/do_command.c
+--- cron-3.0pl1.orig/do_command.c	2014-03-28 12:38:30.000000000 +0100
++++ cron-3.0pl1/do_command.c	2014-03-28 12:39:12.000000000 +0100
+@@ -49,6 +49,7 @@
+ /* #include <selinux/get_context_list.h> */
+ #endif
+ 
++extern int unset_returnpath;
+ 
+ static void		child_process __P((entry *, user *)),
+ 			do_univ __P((user *));
+@@ -129,7 +130,7 @@
+ 	int		stdin_pipe[2];
+ 	FILE		*tmpout;
+ 	register char	*input_data;
+-	char		*usernm, *mailto;
++	char		*usernm, *mailto, *mailfrom;
+ 	int		children = 0;
+ 	pid_t		job_pid;
+ 
+@@ -153,6 +154,7 @@
+ 	 */
+ 	usernm = env_get("LOGNAME", e->envp);
+ 	mailto = env_get("MAILTO", e->envp);
++	mailfrom = env_get("MAILFROM", e->envp);
+ 
+ 	/* Check for arguments */
+ 	if (mailto) {
+@@ -169,6 +171,21 @@
+ 		}
+ 	}
+ 
++	if (mailfrom) {
++		const char	*end;
++
++		/* These chars have to match those cron_popen()
++		 * uses to split the command string */
++		mailfrom += strspn(mailfrom, " \t\n");
++		end = mailfrom + strcspn(mailfrom, " \t\n");
++		if (*mailfrom == '-' || *end != '\0') {
++			printf("Bad Mailfrom karma.\n");
++			log_it("CRON",getpid(),"error","bad mailfrom");
++			mailfrom = NULL;
++		}
++	}
++
++
+ #ifdef USE_SIGCHLD
+ 	/* our parent is watching for our death by catching SIGCHLD.  we
+ 	 * do not care to watch for our children's deaths this way -- we
+@@ -547,13 +564,30 @@
+ 	register char	**env;
+ 	char    	**jobenv = build_env(e->envp); 
+ 	auto char	mailcmd[MAX_COMMAND];
++	auto char	returnpath[MAX_ENVSTR + 3];
+ 	auto char	hostname[MAXHOSTNAMELEN];
+ 	char    	*content_type = env_get("CONTENT_TYPE",jobenv),
+ 			*content_transfer_encoding = env_get("CONTENT_TRANSFER_ENCODING",jobenv);
+ 
+ 	(void) gethostname(hostname, MAXHOSTNAMELEN);
++
++	/* construct additional parameter for the return path */
++	if (mailfrom) {
++		(void) snprintf (returnpath, sizeof(returnpath),
++				 "-f %s", mailfrom);
++	} else {
++		if (unset_returnpath) {
++			(void) snprintf (returnpath, sizeof(returnpath),
++					"%s", "-f <>");
++		
++		} else {
++			(void) snprintf (returnpath, sizeof(returnpath),
++					"%s", "");
++		}
++	}
++
+ 	(void) snprintf(mailcmd, sizeof(mailcmd),
+-			MAILARGS, MAILCMD, mailto);
++			MAILARGS, MAILCMD, returnpath, mailto);
+ 	if (!(mail = cron_popen(mailcmd, "w", e))) {
+ 		perror(MAILCMD);
+ 		(void) _exit(ERROR_EXIT);

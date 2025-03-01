@@ -1,0 +1,196 @@
+diff -ru /tmp/d.or/usr/share/pyshared/duplicity/backends/imapbackend.py /usr/share/pyshared/duplicity/backends/imapbackend.py
+--- /tmp/d.or/usr/share/pyshared/duplicity/backends/imapbackend.py	2012-02-29 20:24:04.000000000 +0100
++++ /usr/share/pyshared/duplicity/backends/imapbackend.py	2014-04-08 22:07:17.312737024 +0200
+@@ -29,6 +29,8 @@
+ import rfc822
+ import getpass
+ import email
++import email.message
++import base64
+ 
+ import duplicity.backend
+ from duplicity import globals
+@@ -37,12 +39,15 @@
+ 
+ 
+ class ImapBackend(duplicity.backend.Backend):
++
+     def __init__(self, parsed_url):
+         duplicity.backend.Backend.__init__(self, parsed_url)
+ 
+         log.Debug("I'm %s (scheme %s) connecting to %s as %s" %
+                   (self.__class__.__name__, parsed_url.scheme, parsed_url.hostname, parsed_url.username))
+ 
++        self.reKofN = re.compile("^(.*)-([0-9]+)of([0-9]+)$")
++
+         #  Store url for reconnection on error
+         self._url = parsed_url
+ 
+@@ -99,8 +104,8 @@
+             log.Info("IMAP connected")
+ 
+ 
+-    def _prepareBody(self,f,rname):
+-        mp = email.MIMEMultipart.MIMEMultipart()
++    def _prepareBody(self,payload,rname):
++        mp = email.message.Message()
+ 
+         # I am going to use the remote_dir as the From address so that
+         # multiple archives can be stored in an IMAP account and can be
+@@ -108,12 +113,9 @@
+         mp["From"]=self.remote_dir
+         mp["Subject"]=rname
+ 
+-        a = email.MIMEBase.MIMEBase("application","binary")
+-        a.set_payload(f.read())
+-
+-        email.Encoders.encode_base64(a)
++        a = base64.encodestring(payload)
+ 
+-        mp.attach(a)
++        mp.set_payload(a)
+ 
+         return mp.as_string()
+ 
+@@ -121,18 +123,27 @@
+         if not remote_filename:
+             remote_filename = source_path.get_filename()
+         f=source_path.open("rb")
++        payload=f.read()
++        chunks = {}
++        nchunks = int((len(payload) + globals.imapsize - 1) / globals.imapsize)
++        if nchunks < 2:
++            chunks[""] = payload
++        else:
++            for i in xrange(nchunks):
++                chunks["-" + str(i+1) + "of" + str(nchunks)] = \
++                    payload[i * globals.imapsize : (i + 1) * globals.imapsize]
+         allowedTimeout = globals.timeout
+         if (allowedTimeout == 0):
+             # Allow a total timeout of 1 day
+             allowedTimeout = 2880
+         while allowedTimeout > 0:
+             try:
+-                self._conn.select(remote_filename)
+-                body=self._prepareBody(f,remote_filename)
+                 # If we don't select the IMAP folder before
+                 # append, the message goes into the INBOX.
+                 self._conn.select(globals.imap_mailbox)
+-                self._conn.append(globals.imap_mailbox, None, None, body)
++                for csuf in chunks:
++                    body=self._prepareBody(chunks[csuf],remote_filename + csuf)
++                    self._conn.append(globals.imap_mailbox, None, None, body)
+                 break
+             except (imaplib.IMAP4.abort, socket.error, socket.sslerror):
+                 allowedTimeout -= 1
+@@ -165,19 +176,32 @@
+                 if list[0] == '':
+                     raise Exception("no mail with subject %s")
+ 
+-                (result,list) = self._conn.fetch(list[0],"(RFC822)")
+-
+-                if result != "OK":
+-                    raise Exception(list[0])
+-                rawbody=list[0][1]
+-
+-                p = email.Parser.Parser()
+-
+-                m = p.parsestr(rawbody)
++                chunks = {}
+ 
+-                mp = m.get_payload(0)
++                for id in list[0].split():
+ 
+-                body = mp.get_payload(decode=True)
++                    (result,list) = self._conn.fetch(id,
++				"(BODY[HEADER.FIELDS (SUBJECT)])")
++                    if result != "OK":
++                        raise Exception(list[0])
++                    subject = re.sub("[\r\n]*$", "", list[0][1])
++
++                    (result,list) = self._conn.fetch(id, "(BODY[TEXT])")
++                    if result != "OK":
++                        raise Exception(list[0])
++                    rawbody=list[0][1]
++                    payload = base64.decodestring(rawbody)
++                
++                    s = self.reKofN.match(subject)
++                    if s:
++                        chunks[int(s.groups()[1])] = payload
++                    else:
++                        chunks[0] = payload
++                    
++                if 0 in chunks:
++                    body = chunks[0]
++                else:
++                    body = "".join(chunks[x] for x in sorted(chunks.keys()))
+                 break
+             except (imaplib.IMAP4.abort, socket.error, socket.sslerror):
+                 allowedTimeout -= 1
+@@ -230,6 +254,25 @@
+                 if (re.compile("^" + self.remote_dir + "$").match(header_from)):
+                     ret.append(subj)
+                     log.Info("IMAP LIST: %s %s" % (subj,header_from))
++
++        # replace "x-1ofN" ... "x-NofN" with "x", unless "x" already exists
++        ret.sort()
++        i = 0
++        while i < len(ret):
++            s = self.reKofN.match(ret[i])
++            if s:
++                collapse = i == 0 or ret[i-1] != s.groups()[0]
++                collapse = collapse and i + int(s.groups()[2]) <= len(ret)
++                # work around the fact that "10of10" < "1of10" < "2of10"
++                for j in xrange(int(s.groups()[2])):
++                    p = s.groups()[0] + "-" + str(j+1) + "of" + s.groups()[2]
++                    if p not in ret[i:i+int(s.groups()[2])]:
++                        collapse = False
++                        break
++                if collapse:
++                    ret[i:i+int(s.groups()[2])] = [s.groups()[0]]
++            i += 1
++
+         return ret
+ 
+     def _imapf(self,fun,*args):
+@@ -249,8 +292,9 @@
+         for filename in filename_list:
+             list = self._imapf(self._conn.search,None,"(SUBJECT %s)"%filename)
+             list = list[0].split()
+-            if len(list)==0 or list[0]=="":raise Exception("no such mail with subject '%s'"%filename)
+-            self._delete_single_mail(list[0])
++            if len(list)==0 or list[0]=="":
++                raise Exception("no such mail with subject '%s'"%filename)
++            map(self._delete_single_mail, list)
+             log.Notice("marked %s to be deleted" % filename)
+         self._expunge()
+         log.Notice("IMAP expunged %s files" % len(list))
+diff -ru /tmp/d.or/usr/share/pyshared/duplicity/commandline.py /usr/share/pyshared/duplicity/commandline.py
+--- /tmp/d.or/usr/share/pyshared/duplicity/commandline.py	2012-02-29 20:24:04.000000000 +0100
++++ /usr/share/pyshared/duplicity/commandline.py	2014-04-08 10:22:12.371437380 +0200
+@@ -535,6 +535,12 @@
+     parser.add_option("--volsize", type="int", action="callback", metavar=_("number"),
+                       callback=lambda o, s, v, p: setattr(p.values, "volsize", v*1024*1024))
+ 
++    # imap size: split files in chunks before storing to imap backend, to work around 
++    # message size restrictions that many imap providers enforce.  the factor 4/3 is a gross
++    # estimate of the base64 encoding overhead
++    parser.add_option("--imapsize", type="float", action="callback", metavar=_("number"),
++                      callback=lambda o, s, v, p: setattr(p.values, "imapsize",
++                      int(v * 1024 * 1024 / 4 * 3)))
+     # parse the options
+     (options, args) = parser.parse_args()
+ 
+diff -ru /tmp/d.or/usr/share/pyshared/duplicity/globals.py /usr/share/pyshared/duplicity/globals.py
+--- /tmp/d.or/usr/share/pyshared/duplicity/globals.py	2012-02-29 20:24:05.000000000 +0100
++++ /usr/share/pyshared/duplicity/globals.py	2014-04-08 10:08:55.921441562 +0200
+@@ -137,6 +137,9 @@
+ # volume size. default 25M
+ volsize = 25*1024*1024
+ 
++# imap chunk size
++imapsize = 18 * 1024 * 1024
++
+ # Working directory for the tempfile module. Defaults to /tmp on most systems.
+ temproot = None
+ 

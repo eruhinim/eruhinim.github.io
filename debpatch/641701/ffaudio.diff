@@ -1,0 +1,233 @@
+Description: Make audacious work with current unstable version of FFAUDIO
+Author: Andrei Alin <andrew@webupd8.org>
+Last-Update: 2012-01-28
+--- a/configure.ac
++++ b/configure.ac
+@@ -549,7 +549,7 @@
+ 
+ if test $enable_ffaudio = yes ; then
+     PKG_CHECK_MODULES([FFMPEG],
+-     [libavcodec >= 53.40.0 libavformat >= 53.5.0 libavutil >= 50.42.0],
++     [libavcodec >= 52.64.0 libavformat >= 52.110.0 libavutil >= 50.42.0],
+      [have_ffaudio=yes], [have_ffaudio=no])
+ fi
+ 
+--- a/configure
++++ b/configure
+@@ -10914,12 +10914,12 @@
+     pkg_cv_FFMPEG_CFLAGS="$FFMPEG_CFLAGS"
+  elif test -n "$PKG_CONFIG"; then
+     if test -n "$PKG_CONFIG" && \
+-    { { $as_echo "$as_me:${as_lineno-$LINENO}: \$PKG_CONFIG --exists --print-errors \"libavcodec >= 53.40.0 libavformat >= 53.5.0 libavutil >= 50.42.0\""; } >&5
+-  ($PKG_CONFIG --exists --print-errors "libavcodec >= 53.40.0 libavformat >= 53.5.0 libavutil >= 50.42.0") 2>&5
++    { { $as_echo "$as_me:${as_lineno-$LINENO}: \$PKG_CONFIG --exists --print-errors \"libavcodec >= 52.64.0 libavformat >= 52.110.0 libavutil >= 50.42.0\""; } >&5
++  ($PKG_CONFIG --exists --print-errors "libavcodec >= 52.64.0 libavformat >= 52.110.0 libavutil >= 50.42.0") 2>&5
+   ac_status=$?
+   $as_echo "$as_me:${as_lineno-$LINENO}: \$? = $ac_status" >&5
+   test $ac_status = 0; }; then
+-  pkg_cv_FFMPEG_CFLAGS=`$PKG_CONFIG --cflags "libavcodec >= 53.40.0 libavformat >= 53.5.0 libavutil >= 50.42.0" 2>/dev/null`
++  pkg_cv_FFMPEG_CFLAGS=`$PKG_CONFIG --cflags "libavcodec >= 52.64.0 libavformat >= 52.110.0 libavutil >= 50.42.0" 2>/dev/null`
+ 		      test "x$?" != "x0" && pkg_failed=yes
+ else
+   pkg_failed=yes
+@@ -10931,12 +10931,12 @@
+     pkg_cv_FFMPEG_LIBS="$FFMPEG_LIBS"
+  elif test -n "$PKG_CONFIG"; then
+     if test -n "$PKG_CONFIG" && \
+-    { { $as_echo "$as_me:${as_lineno-$LINENO}: \$PKG_CONFIG --exists --print-errors \"libavcodec >= 53.40.0 libavformat >= 53.5.0 libavutil >= 50.42.0\""; } >&5
+-  ($PKG_CONFIG --exists --print-errors "libavcodec >= 53.40.0 libavformat >= 53.5.0 libavutil >= 50.42.0") 2>&5
++    { { $as_echo "$as_me:${as_lineno-$LINENO}: \$PKG_CONFIG --exists --print-errors \"libavcodec >= 52.64.0 libavformat >= 52.110.0 libavutil >= 50.42.0\""; } >&5
++  ($PKG_CONFIG --exists --print-errors "libavcodec >= 52.64.0 libavformat >= 52.110.0 libavutil >= 50.42.0") 2>&5
+   ac_status=$?
+   $as_echo "$as_me:${as_lineno-$LINENO}: \$? = $ac_status" >&5
+   test $ac_status = 0; }; then
+-  pkg_cv_FFMPEG_LIBS=`$PKG_CONFIG --libs "libavcodec >= 53.40.0 libavformat >= 53.5.0 libavutil >= 50.42.0" 2>/dev/null`
++  pkg_cv_FFMPEG_LIBS=`$PKG_CONFIG --libs "libavcodec >= 52.64.0 libavformat >= 52.110.0 libavutil >= 50.42.0" 2>/dev/null`
+ 		      test "x$?" != "x0" && pkg_failed=yes
+ else
+   pkg_failed=yes
+@@ -10957,9 +10957,9 @@
+         _pkg_short_errors_supported=no
+ fi
+         if test $_pkg_short_errors_supported = yes; then
+-	        FFMPEG_PKG_ERRORS=`$PKG_CONFIG --short-errors --print-errors --cflags --libs "libavcodec >= 53.40.0 libavformat >= 53.5.0 libavutil >= 50.42.0" 2>&1`
++	        FFMPEG_PKG_ERRORS=`$PKG_CONFIG --short-errors --print-errors --cflags --libs "libavcodec >= 52.64.0 libavformat >= 52.110.0 libavutil >= 50.42.0" 2>&1`
+         else
+-	        FFMPEG_PKG_ERRORS=`$PKG_CONFIG --print-errors --cflags --libs "libavcodec >= 53.40.0 libavformat >= 53.5.0 libavutil >= 50.42.0" 2>&1`
++	        FFMPEG_PKG_ERRORS=`$PKG_CONFIG --print-errors --cflags --libs "libavcodec >= 52.64.0 libavformat >= 52.110.0 libavutil >= 50.42.0" 2>&1`
+         fi
+ 	# Put the nasty error message in config.log where it belongs
+ 	echo "$FFMPEG_PKG_ERRORS" >&5
+--- a/src/ffaudio/ffaudio-core.c
++++ b/src/ffaudio/ffaudio-core.c
+@@ -40,6 +40,14 @@
+ #endif
+ #include <libaudcore/audstrings.h>
+ 
++#if ! CHECK_LIBAVFORMAT_VERSION (53, 5, 0)
++#define avformat_find_stream_info(i, o) av_find_stream_info (i)
++#endif
++
++#if ! CHECK_LIBAVCODEC_VERSION (53, 8, 0)
++#define avcodec_open2(a, c, o) avcodec_open (a, c)
++#endif
++
+ static GMutex *ctrl_mutex = NULL;
+ static GCond *ctrl_cond = NULL;
+ static gint64 seek_value = -1;
+@@ -423,8 +431,11 @@
+     AVCodecContext *c = NULL;
+     AVStream *s = NULL;
+     AVPacket pkt = {.data = NULL};
++    guint8 *outbuf = NULL, *resbuf = NULL;
+     gint i, stream_id, errcount;
+-    gboolean codec_opened = FALSE;
++    gint in_sample_size, out_sample_size, chunk_size;
++    ReSampleContext *resctx = NULL;
++    gboolean codec_opened = FALSE, do_resampling = FALSE;
+     gint out_fmt;
+     gboolean seekable;
+     gboolean error = FALSE;
+@@ -460,14 +471,38 @@
+ 
+     codec_opened = TRUE;
+ 
++    /* Determine if audio conversion or resampling is needed */
++    in_sample_size = av_get_bytes_per_sample (c->sample_fmt);
++    out_sample_size = av_get_bytes_per_sample (SAMPLE_FMT_S16);
++
++    chunk_size = out_sample_size * c->channels * (c->sample_rate / 50);
++
++
+     switch (c->sample_fmt) {
+         case SAMPLE_FMT_U8: out_fmt = FMT_U8; break;
+         case SAMPLE_FMT_S16: out_fmt = FMT_S16_NE; break;
+         case SAMPLE_FMT_S32: out_fmt = FMT_S32_NE; break;
+         case SAMPLE_FMT_FLT: out_fmt = FMT_FLOAT; break;
+-    default:
+-        fprintf (stderr, "ffaudio: Unsupported audio format %d\n", (int) c->sample_fmt);
+-        goto error_exit;
++        default: do_resampling = TRUE; break;
++    }
++
++    if (do_resampling)
++    {
++        /* Initialize resampling context */
++        out_fmt = FMT_S16_NE;
++
++        AUDDBG("resampling needed chn=%d, rate=%d, fmt=%d -> chn=%d, rate=%d, fmt=S16NE\n",
++            c->channels, c->sample_rate, c->sample_fmt,
++            c->channels, c->sample_rate);
++
++        resctx = av_audio_resample_init(
++            c->channels, c->channels,
++            c->sample_rate, c->sample_rate,
++            SAMPLE_FMT_S16, c->sample_fmt,
++            16, 10, 0, 0.8);
++
++        if (resctx == NULL)
++            goto error_exit;
+     }
+ 
+     /* Open audio output */
+@@ -481,6 +516,10 @@
+ 
+     playback->set_gain_from_playlist(playback);
+ 
++    /* Allocate output buffer aligned to 16 byte boundary */
++    outbuf = av_malloc(AVCODEC_MAX_AUDIO_FRAME_SIZE);
++    resbuf = av_malloc(AVCODEC_MAX_AUDIO_FRAME_SIZE);
++
+     AUDDBG("setting parameters\n");
+ 
+     if (pause)
+@@ -553,6 +592,9 @@
+         memcpy(&tmp, &pkt, sizeof(tmp));
+         while (tmp.size > 0 && !stop_flag)
+         {
++            gint len, out_size = AVCODEC_MAX_AUDIO_FRAME_SIZE;
++            guint8 *outbuf_p;
++
+             /* Check for seek request and bail out if we have one */
+             g_mutex_lock(ctrl_mutex);
+             if (seek_value != -1)
+@@ -570,25 +612,60 @@
+             }
+             g_mutex_unlock(ctrl_mutex);
+ 
+-            AVFrame * frame = avcodec_alloc_frame ();
+-            int decoded = 0;
+-            int len = avcodec_decode_audio4 (c, frame, & decoded, & tmp);
++            /* Decode whatever we can of the frame data */
++            len = avcodec_decode_audio3(c, (gint16 *)outbuf, &out_size, &tmp);
+ 
+             if (len < 0)
+             {
+-                fprintf (stderr, "ffaudio: decode_audio() failed, code %d\n", len);
++                AUDDBG("codec failure, breaking out of loop\n");
+                 break;
+             }
+ 
+             tmp.size -= len;
+             tmp.data += len;
+ 
+-            if (! decoded)
++            if (out_size <= 0)
+                 continue;
+ 
+-            playback->output->write_audio (frame->data[0], FMT_SIZEOF (out_fmt)
+-             * c->channels * frame->nb_samples);
+-            av_free (frame);
++            /* Perform audio resampling if necessary */
++            if (do_resampling)
++            {
++                out_size = audio_resample(resctx,
++                    (gint16 *)resbuf, (gint16 *)outbuf,
++                    out_size / in_sample_size) * out_sample_size;
++                outbuf_p = resbuf;
++            }
++            else
++                outbuf_p = outbuf;
++
++            /* Output audio in small blocks */
++            while (out_size > 0 && !stop_flag && (stop_time < 0 ||
++             playback->output->written_time () < stop_time))
++            {
++                gint writeoff = MIN (chunk_size, out_size);
++
++                playback->output->write_audio((gint16 *)outbuf_p, writeoff);
++
++                outbuf_p += writeoff;
++                out_size -= writeoff;
++
++                /* Check for seek request and bail out if we have one */
++                g_mutex_lock(ctrl_mutex);
++                if (seek_value != -1)
++                {
++                    if (!seekable)
++                    {
++                        seek_value = -1;
++                        g_cond_signal(ctrl_cond);
++                    }
++                    else
++                    {
++                        g_mutex_unlock(ctrl_mutex);
++                        break;
++                    }
++                }
++                g_mutex_unlock(ctrl_mutex);
++            }
+         }
+ 
+         if (pkt.data)
+@@ -611,6 +688,10 @@
+ 
+     stop_flag = TRUE;
+ 
++    av_free(outbuf);
++    av_free(resbuf);
++    if (resctx != NULL)
++        audio_resample_close(resctx);
+     if (pkt.data)
+         av_free_packet(&pkt);
+     if (codec_opened)

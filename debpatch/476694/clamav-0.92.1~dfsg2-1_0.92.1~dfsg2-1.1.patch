@@ -1,0 +1,754 @@
+diff -u clamav-0.92.1~dfsg2/debian/changelog clamav-0.92.1~dfsg2/debian/changelog
+--- clamav-0.92.1~dfsg2/debian/changelog
++++ clamav-0.92.1~dfsg2/debian/changelog
+@@ -1,3 +1,13 @@
++clamav (0.92.1~dfsg2-1.1) unstable; urgency=high
++
++  * Non-maintainer upload by the Security Team.
++  * This update addresses the following security issue:
++    - CVE-2008-1833: heap-based buffer overflow allows remote
++      attackers to execute arbitrary code via a crafted WWPack compressed
++      PE binary (Closes: #476694).
++
++ -- Nico Golde <nion@debian.org>  Sat, 19 Apr 2008 12:42:18 +0200
++
+ clamav (0.92.1~dfsg2-1) unstable; urgency=high
+ 
+   * libclamav/pe.c: possible integer overflow in wwpack
+diff -u clamav-0.92.1~dfsg2/debian/patches/00list clamav-0.92.1~dfsg2/debian/patches/00list
+--- clamav-0.92.1~dfsg2/debian/patches/00list
++++ clamav-0.92.1~dfsg2/debian/patches/00list
+@@ -5,0 +6 @@
++26_CVE-2008-1833
+only in patch2:
+unchanged:
+--- clamav-0.92.1~dfsg2.orig/debian/patches/26_CVE-2008-1833.dpatch
++++ clamav-0.92.1~dfsg2/debian/patches/26_CVE-2008-1833.dpatch
+@@ -0,0 +1,727 @@
++#! /bin/sh /usr/share/dpatch/dpatch-run
++## 26_CVE-2008-1833.dpatch by Nico Golde <nion@debian.org>
++##
++## All lines beginning with `## DP:' are a description of the patch.
++## DP: No description.
++
++@DPATCH@
++diff -urNad clamav-0.92.1~dfsg2~/libclamav/pe.c clamav-0.92.1~dfsg2/libclamav/pe.c
++--- clamav-0.92.1~dfsg2~/libclamav/pe.c	2008-04-19 12:33:25.000000000 +0200
+++++ clamav-0.92.1~dfsg2/libclamav/pe.c	2008-04-19 12:46:09.000000000 +0200
++@@ -1,5 +1,5 @@
++ /*
++- *  Copyright (C) 2004 - 2006 Tomasz Kojm <tkojm@clamav.net>
+++ *  Copyright (C) 2004 - 2007 Tomasz Kojm <tkojm@clamav.net>
++  *			      aCaB <acab@clamav.net>
++  *
++  *  This program is free software; you can redistribute it and/or modify
++@@ -23,11 +23,12 @@
++ #endif
++ 
++ #include <stdio.h>
+++#if HAVE_STRING_H
++ #include <string.h>
+++#endif
++ #include <sys/types.h>
++ #include <sys/stat.h>
++ #include <fcntl.h>
++-#include <sys/stat.h>
++ #ifdef HAVE_UNISTD_H
++ #include <unistd.h>
++ #endif
++@@ -1861,106 +1862,65 @@
++ 	CLI_UNPRESULTS("yC",(yc_decrypt(spinned, fsize, exe_sections, nsections-1, e_lfanew, ndesc)),0,(spinned,0));
++     }
++ 
++-
++     /* WWPack */
++ 
++-    if((DCONF & PE_CONF_WWPACK) && nsections > 1 &&
++-       exe_sections[nsections-1].raw>0x2b1 &&
+++    while ((DCONF & PE_CONF_WWPACK) && nsections > 1 &&
++        vep == exe_sections[nsections - 1].rva &&
++-       exe_sections[nsections - 1].rva + exe_sections[nsections - 1].rsz == max &&
++        memcmp(epbuff, "\x53\x55\x8b\xe8\x33\xdb\xeb", 7) == 0 &&
++        memcmp(epbuff+0x68, "\xe8\x00\x00\x00\x00\x58\x2d\x6d\x00\x00\x00\x50\x60\x33\xc9\x50\x58\x50\x50", 19) == 0)  {
++-	uint32_t headsize=exe_sections[nsections - 1].raw;
++-	char *dest, *wwp;
+++	uint32_t head = exe_sections[nsections - 1].raw;
+++        uint8_t *packer;
++ 
++-	for(i = 0 ; i < (unsigned int)nsections-1; i++)
++-	    if (exe_sections[i].raw<headsize) headsize=exe_sections[i].raw;
++-      
++-	dsize = max-min+headsize-exe_sections[nsections - 1].rsz;
+++	ssize = 0;
+++	for(i=0 ; ; i++) {
+++	    if(exe_sections[i].raw<head) 
+++	        head=exe_sections[i].raw;
+++	    if(i==nsections-1) break;
+++	    if(ssize<exe_sections[i].rva+exe_sections[i].vsz)
+++		ssize=exe_sections[i].rva+exe_sections[i].vsz;
+++	}
+++	if(!head || !ssize || head>ssize) break;
++ 
++-	CLI_UNPSIZELIMITS("WWPack", dsize);
+++	CLI_UNPSIZELIMITS("WWPack", ssize);
++ 
++-	if((dest = (char *) cli_calloc(dsize, sizeof(char))) == NULL) {
++-	    cli_dbgmsg("WWPack: Can't allocate %d bytes\n", dsize);
+++        if(!(src=(char *)cli_calloc(ssize, sizeof(char)))) {
++ 	    free(exe_sections);
++ 	    return CL_EMEM;
++ 	}
++-
++ 	lseek(desc, 0, SEEK_SET);
++-	if((size_t) cli_readn(desc, dest, headsize) != headsize) {
++-	    cli_dbgmsg("WWPack: Can't read %d bytes from headers\n", headsize);
++-	    free(dest);
+++	if((size_t) cli_readn(desc, src, head) != head) {
+++	    cli_dbgmsg("WWPack: Can't read %d bytes from headers\n", head);
+++	    free(src);
++ 	    free(exe_sections);
++ 	    return CL_EIO;
++ 	}
++-
++-	for(i = 0 ; i < (unsigned int)nsections-1; i++) {
++-	    if(exe_sections[i].rsz) {
++-		if(!cli_seeksect(desc, &exe_sections[i]) || (unsigned int) cli_readn(desc, dest + headsize + exe_sections[i].rva - min, exe_sections[i].rsz) != exe_sections[i].rsz) {
++-		    free(dest);
++-		    free(exe_sections);
++-		    return CL_EIO;
++-		}
++-	    }
++-	}
++-
++-	if((wwp = (char *) cli_calloc(exe_sections[nsections - 1].rsz, sizeof(char))) == NULL) {
++-	    cli_dbgmsg("WWPack: Can't allocate %d bytes\n", exe_sections[nsections - 1].rsz);
++-	    free(dest);
+++        for(i = 0 ; i < (unsigned int)nsections-1; i++) {
+++	    if(!exe_sections[i].rsz) continue;
+++	    if(!cli_seeksect(desc, &exe_sections[i])) break;
+++            if(!CLI_ISCONTAINED(src, ssize, src+exe_sections[i].rva, exe_sections[i].rsz)) break;
+++            if(cli_readn(desc, src+exe_sections[i].rva, exe_sections[i].rsz)!=exe_sections[i].rsz) break;
+++        }
+++        if(i!=nsections-1) {
+++            cli_dbgmsg("WWpack: Probably hacked/damaged file.\n");
+++            free(src);
+++            break;
+++        }
+++	if((packer = (char *) cli_calloc(exe_sections[nsections - 1].rsz, sizeof(char))) == NULL) {
+++	    free(src);
++ 	    free(exe_sections);
++ 	    return CL_EMEM;
++ 	}
++-
++-	if(!cli_seeksect(desc, &exe_sections[nsections - 1]) || (size_t) cli_readn(desc, wwp, exe_sections[nsections - 1].rsz) != exe_sections[nsections - 1].rsz) {
+++	if(!cli_seeksect(desc, &exe_sections[nsections - 1]) || (size_t) cli_readn(desc, packer, exe_sections[nsections - 1].rsz) != exe_sections[nsections - 1].rsz) {
++ 	    cli_dbgmsg("WWPack: Can't read %d bytes from wwpack sect\n", exe_sections[nsections - 1].rsz);
++-	    free(dest);
++-	    free(wwp);
+++	    free(src);
+++	    free(packer);
++ 	    free(exe_sections);
++ 	    return CL_EIO;
++ 	}
++ 
++-	if (!wwunpack(dest, dsize, headsize, min, exe_sections[nsections-1].rva, e_lfanew, wwp, exe_sections[nsections - 1].rsz, nsections-1)) {
++-	
++-	    free(wwp);
++-
++-	    CLI_UNPTEMP("WWPack",(dest,exe_sections,0));
++-
++-	    if((unsigned int) write(ndesc, dest, dsize) != dsize) {
++-		cli_dbgmsg("WWPack: Can't write %d bytes\n", dsize);
++-		close(ndesc);
++-		free(tempfile);
++-		free(dest);
++-		free(exe_sections);
++-		return CL_EIO;
++-	    }
++-
++-	    free(dest);
++-	    if (cli_leavetemps_flag)
++-		cli_dbgmsg("WWPack: Unpacked and rebuilt executable saved in %s\n", tempfile);
++-	    else
++-		cli_dbgmsg("WWPack: Unpacked and rebuilt executable\n");
++-
++-	    fsync(ndesc);
++-	    lseek(ndesc, 0, SEEK_SET);
++-
++-	    if(cli_magic_scandesc(ndesc, ctx) == CL_VIRUS) {
++-		free(exe_sections);
++-		close(ndesc);
++-		if(!cli_leavetemps_flag)
++-		    unlink(tempfile);
++-		free(tempfile);
++-		return CL_VIRUS;
++-	    }
++-
++-	    close(ndesc);
++-	    if(!cli_leavetemps_flag)
++-		unlink(tempfile);
++-	    free(tempfile);
++-	} else {
++-	    free(wwp);
++-	    free(dest);
++-	    cli_dbgmsg("WWPpack: Decompression failed\n");
++-	}
+++	CLI_UNPTEMP("WWPack",(src,packer,exe_sections,0));
+++	CLI_UNPRESULTS("WWPack",(wwunpack(src, ssize, packer, exe_sections, nsections-1, e_lfanew, ndesc)),0,(src,packer,0));
+++	break;
++     }
++ 
++ 
++diff -urNad clamav-0.92.1~dfsg2~/libclamav/wwunpack.c clamav-0.92.1~dfsg2/libclamav/wwunpack.c
++--- clamav-0.92.1~dfsg2~/libclamav/wwunpack.c	2007-12-06 13:59:04.000000000 +0100
+++++ clamav-0.92.1~dfsg2/libclamav/wwunpack.c	2008-04-19 13:42:25.000000000 +0200
++@@ -1,6 +1,7 @@
++ /*
++- *  Copyright (C) 2006 Sensory Networks, Inc.
++- *             Written by aCaB <acab@clamav.net>
+++ *  Copyright (C) 2007 Sourcefire Inc.
+++ *  Author: aCaB <acab@clamav.net>
+++ *
++  *  This program is free software; you can redistribute it and/or modify
++  *  it under the terms of the GNU General Public License version 2 as
++  *  published by the Free Software Foundation.
++@@ -16,346 +17,218 @@
++  *  MA 02110-1301, USA.
++  */
++ 
++-/*
++-** wwunpack.c
++-**
++-** 09/07/2k6 - Campioni del mondo!!!
++-** 14/07/2k6 - RCE'ed + standalone sect unpacker
++-** 15/07/2k6 - Merge started
++-** 17/07/2k6 - Rebuild
++-** 18/07/2k6 - Secured (well, hopefully...)
++-**
++-*/
++-
++-/*
++-** Unpacks+rebuilds WWPack32 1.20
++-**
++-** Just boooooring stuff, blah.
++-**
++-*/
++-
++-
++-/*
++-** TODO:
++-**
++-** review
++-** check eax vs al
++-** (check for dll's)
++-** (have a look at older versions)
++-**
++-*/
++-
++-
++ #if HAVE_CONFIG_H
++ #include "clamav-config.h"
++ #endif
++ 
++-#include <stdlib.h>
++-#include <string.h>
++-
++ #include "cltypes.h"
++ #include "others.h"
++-#include "wwunpack.h"
+++#include "execs.h"
++ 
++-#define VAALIGN(s) (((s)/0x1000+((s)%0x1000!=0))*0x1000)
++-#define FIXVS(v, r) (VAALIGN((r>v)?r:v))
+++#if HAVE_STRING_H
+++#include <string.h>
+++#endif
++ 
+++#define RESEED \
+++if (CLI_ISCONTAINED(compd, szd, ccur, 4)) { \
+++  bt = cli_readint32(ccur); \
+++  ccur+=4; \
+++} else { \
+++  cli_dbgmsg("WWPack: Out of bits\n"); \
+++  error=1; \
+++} \
+++bc = 32;
++ 
++-static int getbitmap(uint32_t *bitmap, char **src, uint8_t *bits, char *buf, unsigned int size) {
++-  if (! CLI_ISCONTAINED(buf, size, *src, 4)) return 1;
++-  *bitmap=cli_readint32(*src);
++-  *src+=4;
++-  *bits=32;
++-  return 0;
++-}
++ 
++-static int getbits(uint8_t X, uint32_t *eax, uint32_t *bitmap, uint8_t *bits, char **src, char *buf, unsigned int size) {
++-  *eax=*bitmap>>(32-X);
++-  if (*bits>X) {
++-    *bitmap<<=X;
++-    *bits-=X;
++-  } else if (*bits<X) {
++-    X-=*bits;
++-    *eax>>=X;
++-    if (getbitmap(bitmap, src, bits, buf, size)) return 1;
++-    *eax<<=X;
++-    *eax|=*bitmap>>(32-X);
++-    *bitmap<<=X;
++-    *bits-=X;
++-  } else {
++-    if (getbitmap(bitmap, src, bits, buf, size)) return 1;
++-  }
++-  return 0;
+++#define BIT \
+++bits = bt>>31; \
+++bt<<=1; \
+++if(!--bc) { \
+++  RESEED; \
++ }
++ 
++-static int wunpsect(char *packed, char *unpacked, unsigned int psize, unsigned int usize) {
++-  char *src=packed, *dst=unpacked;
++-  uint32_t bitmap, eax;
++-  uint8_t bits;
++-  unsigned int lostbit, getmorestuff;
++-  uint16_t backbytes;
++-  uint16_t backsize;
++-  uint8_t oal;
+++#define BITS(N) \
+++bits = bt>>(32-(N)); \
+++if (bc>=(N)) { \
+++  bc -= (N); \
+++  bt<<=(N); \
+++  if (!bc) { \
+++    RESEED; \
+++  } \
+++} else { \
+++  if (CLI_ISCONTAINED(compd, szd, ccur, 4)) { \
+++    bt = cli_readint32(ccur); \
+++    ccur+=4; \
+++    bc += 32 - (N); \
+++    bits |= bt>>(bc); \
+++    bt <<= (32-bc); \
+++  } else { \
+++    cli_dbgmsg("WWPack: Out of bits\n"); \
+++    error=1; \
+++  } \
+++}
++ 
++-  if (getbitmap(&bitmap, &src, &bits, packed, psize)) return 1;
++-  eax=bitmap;
+++int wwunpack(uint8_t *exe, uint32_t exesz, uint8_t *wwsect, struct cli_exe_section *sects, uint16_t scount, uint32_t pe, int desc) {
+++  uint8_t *structs = wwsect + 0x2a1, *compd, *ccur, *unpd, *ucur, bc;
+++  uint32_t src, srcend, szd, bt, bits;
+++  int error=0, i;
++ 
+++  cli_dbgmsg("in wwunpack\n");
++   while (1) {
++-    lostbit=bitmap>>31;
++-    bitmap<<=1;
++-    bits--;
++-    if (!lostbit && bits) {
++-      if (!(CLI_ISCONTAINED(packed, psize, src, 1) && CLI_ISCONTAINED(unpacked, usize, dst, 1))) return 1;
++-      *dst++=*src++;
++-      continue;
+++    if (!CLI_ISCONTAINED(wwsect, sects[scount].rsz, structs, 17)) {
+++      cli_dbgmsg("WWPack: Array of structs out of section\n");
+++      break;
++     }
+++    src = sects[scount].rva - cli_readint32(structs); /* src delta / dst delta - not used / dwords / end of src */
+++    structs+=8;
+++    szd = cli_readint32(structs) * 4;
+++    structs+=4;
+++    srcend = cli_readint32(structs);
+++    structs+=4;
+++
+++    unpd = ucur = exe+src+srcend+4-szd;
+++    if (!szd || !CLI_ISCONTAINED(exe, exesz, unpd, szd)) {
+++      cli_dbgmsg("WWPack: Compressed data out of file\n");
+++      break;
+++    }
+++    cli_dbgmsg("WWP: src: %x, szd: %x, srcend: %x - %x\n", src, szd, srcend, srcend+4-szd);
+++    if (!(compd = cli_malloc(szd))) break;
+++    memcpy(compd, unpd, szd);
+++    memset(unpd, -1, szd); /*FIXME*/
+++    ccur=compd;
++     
++-    if (!bits) {
++-      if (getbitmap(&bitmap, &src, &bits, packed, psize)) return 1;
++-      eax=bitmap;
++-      if (!lostbit) {
++-	if (!(CLI_ISCONTAINED(packed, psize, src, 1) && CLI_ISCONTAINED(unpacked, usize, dst, 1))) return 1;
++-	*dst++=*src++;
+++    RESEED;
+++    while(!error) {
+++      uint32_t backbytes, backsize;
+++      uint8_t saved;
+++
+++      BIT;
+++      if (!bits) { /* BYTE copy */
+++	if(ccur-compd>=szd || !CLI_ISCONTAINED(exe, exesz, ucur, 1))
+++	  error=1;
+++	else
+++	  *ucur++=*ccur++;
++ 	continue;
++       }
++-    }
++-    
++-    if (getbits(2, &eax, &bitmap, &bits, &src, packed, psize)) return 1;
++-    
++-    if ((eax&0xff)>=3) {
++-      /* 50ff - two_bytes */
++-      uint8_t fetchbits;
++-      
++-      if (getbits(2, &eax, &bitmap, &bits, &src, packed, psize)) return 1;
++-      fetchbits=(eax&0xff)+5;
++-      eax--;
++-      if ((int16_t)(eax&0xffff)<=0) {
++-	/* 5113 */
++-	backbytes=1<<fetchbits;
++-	backbytes=(backbytes&0xff00)|((backbytes-31)&0xff);
++-      } else {
++-	/* 511b */
++-	fetchbits++;
++-	backbytes=1<<fetchbits;
++-	backbytes-=0x9f;
+++
+++      BITS(2);
+++      if(bits==3) { /* WORD backcopy */
+++	uint8_t shifted, subbed = 31;
+++	BITS(2);
+++	shifted = bits + 5;
+++	if(bits>=2) {
+++	  shifted++;
+++	  subbed += 0x80;
+++	}
+++	backbytes = (1<<shifted)-subbed; /* 1h, 21h, 61h, 161h */
+++	BITS(shifted); /* 5, 6, 8, 9 */
+++	if(error || bits == 0x1ff) break;
+++	backbytes+=bits;
+++	if(!CLI_ISCONTAINED(exe, exesz, ucur, 2) || !CLI_ISCONTAINED(exe, exesz, ucur-backbytes, 2)) {
+++	  error=1;
+++	} else {
+++	  ucur[0]=*(ucur-backbytes);
+++	  ucur[1]=*(ucur-backbytes+1);
+++	  ucur+=2;
+++	}
+++	continue;
++       }
++-      /* 5125 */
++-      if (getbits(fetchbits, &eax, &bitmap, &bits, &src, packed, psize)) return 1;
++-      if ((eax&0xffff)==0x1ff) break;
++-      eax&=0xffff;
++-      backbytes+=eax;
++-      if (!(CLI_ISCONTAINED(unpacked, usize, dst-backbytes, 2) && CLI_ISCONTAINED(unpacked, usize, dst, 2))) return 1;
++-      *dst=*(dst-backbytes);
++-      dst++;
++-      *dst=*(dst-backbytes);
++-      dst++;
++-      continue;
++-    }
++ 
++-    /* 5143 - more_backbytes */      
++-    oal=eax&0xff;
++-    getmorestuff=1;
+++      /* BLOCK backcopy */
+++      saved = bits; /* cmp al, 1 / pushf */
++ 
++-    
++-    if (getbits(3, &eax, &bitmap, &bits, &src, packed, psize)) return 1;
++-    if ((eax&0xff)<=3) {
++-      lostbit=0;
++-      if ((eax&0xff)==3) {
++-	/* next_bit_or_reseed */
++-	lostbit=bitmap>>31;
++-	bitmap<<=1;
++-	bits--;
++-	if (!bits) {
++-	  if (getbitmap(&bitmap, &src, &bits, packed, psize)) return 1; 
+++      BITS(3);
+++      if (bits<6) {
+++	backbytes = bits;
+++	switch(bits) {
+++	case 4: /* 10,11 */
+++	  backbytes++;
+++	case 3: /* 8,9 */
+++	  BIT;
+++	  backbytes+=bits;
+++	case 0:	case 1:	case 2: /* 5,6,7 */
+++	  backbytes+=5;
+++	  break;
+++	case 5: /* 12 */
+++	  backbytes=12;
+++	  break;
++ 	}
+++	BITS(backbytes);
+++	bits+=(1<<backbytes)-31;
+++      } else if(bits==6) {
+++	BITS(0x0e);
+++	bits+=0x1fe1;
+++      } else {
+++	BITS(0x0f);
+++	bits+=0x5fe1;
++       }
++-      eax=eax+lostbit+5;
++-      /* jmp more_bb_commondock */
++-    } else { /* >3 */
++-      /* 5160 - more_bb_morethan3 */
++-      if ((eax&0xff)==4) {
++-	/* next_bit_or_reseed */
++-	lostbit=bitmap>>31;
++-	bitmap<<=1;
++-	bits--;
++-	if (!bits) {
++-	  if (getbitmap(&bitmap, &src, &bits, packed, psize)) return 1;  
++-	}
++-	eax=eax+lostbit+6;
++-	/* jmp more_bb_commondock */
++-      } else { /* !=4 */
++-	eax+=7;
++-	if ((eax&0xff)>=0x0d) {
++-	  getmorestuff=0; /* jmp more_bb_PASTcommondock */
++-	  if ((eax&0xff)==0x0d) {
++-	    /* 5179  */
++-	    if (getbits(0x0e, &eax, &bitmap, &bits, &src, packed, psize)) return 1;
++-	    eax+=0x1fe1;
+++
+++      backbytes = bits;
+++
+++      /* popf / jb */
+++      if (!saved) {
+++	BIT;
+++	if(!bits) {
+++	  BIT;
+++	  bits+=5;
+++	} else {
+++	  BITS(3);
+++	  if(bits) {
+++	    bits+=6;
++ 	  } else {
++-	    /* 516c */
++-	    if (getbits(0x0f, &eax, &bitmap, &bits, &src, packed, psize)) return 1;
++-	    eax+=0x5fe1;
+++	    BITS(4);
+++	    if(bits) {
+++	      bits+=13;
+++	    } else {
+++	      uint8_t cnt = 4;
+++	      uint16_t shifted = 0x0d;
+++	      
+++	      do {
+++		if(cnt==7) { cnt = 0x0e; shifted = 0; break; }
+++		shifted=((shifted+2)<<1)-1;
+++		BIT;
+++		cnt++;
+++	      } while(!bits);
+++	      BITS(cnt);
+++	      bits+=shifted;
+++	    }
++ 	  }
++-	  /* jmp more_bb_PASTcommondock */
++-	} /* al >= 0d */
++-      } /* al != 4 */
++-    } /* >3 */
++-    
++-    if (getmorestuff) {
++-      /* 5192 - more_bb_commondock */
++-      uint16_t bk=(1<<(eax&0xff))-0x1f;
++-      if (getbits((eax&0xff), &eax, &bitmap, &bits, &src, packed, psize)) return 1;
++-      eax+=bk;
++-    }
++-    
++-    /* 51a7 - more_bb_pastcommondock */
++-    eax&=0xffff;
++-    backbytes=eax;
++-    backsize=3+(oal!=1);
++-    
++-    if (oal<1) { /* overrides backsize */
++-      /* 51bb - more_bb_again */
++-      
++-      /* next_bit_or_reseed */
++-      lostbit=bitmap>>31;
++-      bitmap<<=1;
++-      bits--;
++-      if (!bits) {
++-	if (getbitmap(&bitmap, &src, &bits, packed, psize)) return 1;  
++-      }
++-      if (!lostbit) {
++-	/* 51c2 */
++-	/* next_bit_or_reseed */
++-	lostbit=bitmap>>31;
++-	bitmap<<=1;
++-	bits--;
++-	if (!bits) {
++-	  if (getbitmap(&bitmap, &src, &bits, packed, psize)) return 1;   
++ 	}
++-	eax=5+lostbit;
++-	/* jmp setsize_and_backcopy */
+++	backsize = bits;
++       } else {
++-	/* 51ce - more_bb_again_and_again */
++-	if (getbits(3, &eax, &bitmap, &bits, &src, packed, psize)) return 1;
++-	if (eax&0xff) {
++-	  /* 51e6 */
++-	  eax+=6;
++-	  /* jmp setsize_and_backcopy */
++-	} else {
++-	  if (getbits(4, &eax, &bitmap, &bits, &src, packed, psize)) return 1;
++-	  if (eax&0xff) {
++-	    /* 51e4 */
++-	    eax+=7+6;
++-	    /* jmp setsize_and_backcopy */
++-	  } else {
++-	    /* 51ea - OMGWTF */
++-	    uint8_t c=4;
++-	    uint16_t d=0x0d;
++-	    
++-	    while ( 1 ) {
++-	      if (c!=7){
++-		d+=2;
++-		d<<=1;
++-		d--;
++-		
++-		/* next_bit_or_reseed */
++-		lostbit=bitmap>>31;
++-		bitmap<<=1;
++-		bits--;
++-		if (!bits) {
++-		  if (getbitmap(&bitmap, &src, &bits, packed, psize)) return 1;    
++-		}
++-		c++;
++-		if (!lostbit) continue;
++-		if (getbits(c, &eax, &bitmap, &bits, &src, packed, psize)) return 1;
++-		d+=eax&0xff;
++-		eax&=0xffffff00;
++-		eax|=d&0xff;
++-	      } else {
++-		if (getbits(14, &eax, &bitmap, &bits, &src, packed, psize)) return 1;
++-	      }
++-	      break;
++-	    } /* while */
++-	  } /* OMGWTF */
++-	} /* eax&0xff */
++-      } /* lostbit */
++-	/* 521b - setsize_and_backcopy */
++-      backsize=eax&0xffff;
++-    }
++-
++-    /* 521e - backcopy */
++-    if (!(CLI_ISCONTAINED(unpacked, usize, dst-backbytes, backsize) && CLI_ISCONTAINED(unpacked, usize, dst, backsize))) return 1;
++-    while(backsize--){
++-      *dst=*(dst-backbytes);
++-      dst++;
++-    }
++-
++-  } /* while true */
++-
++-  return 0;
++-}
++-
++-int wwunpack(char *exe, uint32_t exesz, uint32_t headsize, uint32_t min, uint32_t wwprva, uint32_t e_lfanew, char *wwp, uint32_t wwpsz, uint16_t sects) {
++-  char *stuff=wwp+0x2a1, *packed, *unpacked;
++-  uint32_t rva, csize;
++-
++-  cli_dbgmsg("in wwunpack\n");
++-
+++	backsize = saved+2;
+++      }
++ 
++-  while(1) {
++-    if (!CLI_ISCONTAINED(wwp, wwpsz, stuff, 17)) {
++-      cli_dbgmsg("WWPack: next chunk out ouf file, giving up.\n");
++-      return 1;
++-    }
++-    if ((csize=cli_readint32(stuff+8)*4)!=(uint32_t)cli_readint32(stuff+12)+4) {
++-      cli_dbgmsg("WWPack: inconsistent/hacked data, go figure!\n");
++-      return 1;
++-    }
++-    rva = wwprva-cli_readint32(stuff);
++-    if((packed = (char *) cli_calloc(csize, sizeof(char))) == NULL) {
++-      cli_dbgmsg("WWPack: Can't allocate %d bytes\n", csize);
++-      return 1;
++-    }
++-    unpacked=exe+headsize+rva-min;
++-    if (!CLI_ISCONTAINED(exe, exesz, unpacked, csize)) {
++-      free(packed);
++-      cli_dbgmsg("WWPack: packed data out of bounds, giving up.\n");
++-      return 1;
+++      if(!CLI_ISCONTAINED(exe, exesz, ucur, backsize) || !CLI_ISCONTAINED(exe, exesz, ucur-backbytes, backsize)) error=1;
+++      while(backsize--) {
+++	*ucur=*(ucur-backbytes);
+++	ucur++;
+++      }
++     }
++-    memcpy(packed, unpacked, csize);
++-    if (wunpsect(packed, unpacked, csize, exesz-(unpacked-exe))) {
++-      free(packed);
++-      cli_dbgmsg("WWPack: unpacking failed.\n");
++-      return 1;
+++    free(compd);
+++    if(error) {
+++      cli_dbgmsg("WWPack: decompression error\n");
+++      break;
++     }
++-    free(packed);
++-    if (!stuff[16]) break;
++-    stuff+=17;
+++    if (error || !*structs++) break;
++   }
++ 
++-  stuff=exe+e_lfanew;
++-  stuff[6]=sects&0xff;
++-  stuff[7]=sects>>8;
++-
++-  csize=cli_readint32(wwp+0x295)+wwprva+0x299;
++-  cli_dbgmsg("WWPack: found OEP @%x\n", csize);
++-  cli_writeint32(stuff+0x28, csize);
++-
++-  csize=cli_readint32(stuff+0x50)-VAALIGN(wwpsz);
++-  cli_writeint32(stuff+0x50, csize);
++-
+++  if(!error) {
+++    exe[pe+6]=(uint8_t)scount;
+++    exe[pe+7]=(uint8_t)(scount>>8);
+++    cli_writeint32(&exe[pe+0x28], cli_readint32(wwsect+0x295)+sects[scount].rva+0x299);
+++    cli_writeint32(&exe[pe+0x50], cli_readint32(&exe[pe+0x50])-sects[scount].vsz);
++ 
++-  stuff+=0x18+(cli_readint32(stuff+0x14)&0xffff);
++-  while (sects--) {
++-    uint32_t v=cli_readint32(stuff+8);
++-    uint32_t r=cli_readint32(stuff+16);
++-    csize=FIXVS(v, r);
++-    cli_writeint32(stuff+8, csize);
++-    cli_writeint32(stuff+16, csize);
++-    cli_writeint32(stuff+20, cli_readint32(stuff+12)-min+headsize);
++-    stuff+=0x28;
+++    structs = &exe[0xffff&cli_readint32(&exe[pe+0x14])+pe+0x18];
+++    for(i=0 ; i<scount ; i++) {
+++      cli_writeint32(structs+8, sects[i].vsz);
+++      cli_writeint32(structs+12, sects[i].rva);
+++      cli_writeint32(structs+16, sects[i].vsz);
+++      cli_writeint32(structs+20, sects[i].rva);
+++      structs+=0x28;
+++    }
+++    memset(structs, 0, 0x28);
+++    error = cli_writen(desc, exe, exesz)!=exesz;
++   }
++-  memset(stuff, 0, 0x28);
++-
++-  return 0;
+++  return error;
++ }
++diff -urNad clamav-0.92.1~dfsg2~/libclamav/wwunpack.h clamav-0.92.1~dfsg2/libclamav/wwunpack.h
++--- clamav-0.92.1~dfsg2~/libclamav/wwunpack.h	2007-12-06 13:59:04.000000000 +0100
+++++ clamav-0.92.1~dfsg2/libclamav/wwunpack.h	2008-04-19 13:42:25.000000000 +0200
++@@ -20,8 +20,8 @@
++ #define __WWP32_H
++ 
++ #include "cltypes.h"
++-#include "rebuildpe.h"
+++#include "execs.h"
++ 
++-int wwunpack(char *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, char *, uint32_t, uint16_t);
+++int wwunpack(uint8_t *, uint32_t, uint8_t *, struct cli_exe_section *, uint16_t, uint32_t, int);
++ 
++ #endif

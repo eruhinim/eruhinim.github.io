@@ -1,0 +1,85 @@
+Index: packages/debian-installer-utils/fetch-url-methods/http
+===================================================================
+--- packages/debian-installer-utils/fetch-url-methods/http	(revision 54394)
++++ packages/debian-installer-utils/fetch-url-methods/http	(working copy)
+@@ -3,16 +3,29 @@
+ 	url="$1"
+ 	file="$2"
+ 
++	if [ "$proto" = "http" ] ; then 
+ 	wget404() {
+ 	# see README.wget404 in the debian-installer-utils udeb source for more info about this
+ 		local RETVAL=$( {
+ 			echo 1
+ 			wget "$@" 2>&1 >&3 && echo %OK%
+ 			echo %EOF%
+-			} | ( sed -ne '1{h;d};/server returned error 404/{p;s/.*/4/;h;d};/^%OK%$/{s/.*/0/;h;d};$!p;$x;$w /dev/fd/4' >&2 ) 4>&1
++			} | ( sed -ne '1{h;d};/server returned error: HTTP\/1\.[01] 404 /{p;s/.*/4/;h;d};/^%OK%$/{s/.*/0/;h;d};$!p;$x;$w /dev/fd/4' >&2 ) 4>&1
+ 		) 3>&1
+ 		return $RETVAL
+ 	}
++	elif [ "$proto" = "ftp" ] ; then
++	wget404() {
++	# see README.wget404 in the debian-installer-utils udeb source for more info about this
++		local RETVAL=$( {
++			echo 1
++			wget "$@" 2>&1 >&3 && echo %OK%
++			echo %EOF%
++			} | ( sed -ne '1{h;d};/bad response to RETR: 550 /{p;s/.*/4/;h;d};/^%OK%$/{s/.*/0/;h;d};$!p;$x;$w /dev/fd/4' >&2 ) 4>&1
++		) 3>&1
++		return $RETVAL
++	}
++	fi
+ 
+ 	# use the proxy for wgets (should speed things up)
+ 	if db_get mirror/$proto/proxy; then
+Index: packages/debian-installer-utils/README.wget404
+===================================================================
+--- packages/debian-installer-utils/README.wget404	(revision 54394)
++++ packages/debian-installer-utils/README.wget404	(working copy)
+@@ -11,6 +11,20 @@
+ output does change, the sed will fail safe by returning 1 (i.e. general
+ error) if no specific error is found.
+ 
++From etch to lenny busybox wget error output did change.
++For lenny busybox wget 404 output is for example:
++"server returned error: HTTP/1.1 404 Not Found"
++This comprises the static string "server returned error: " 
++followed by the server response which should follow rfc2616 section 6.1.
++Thus the output may say HTTP/1.0 instead of HTTP/1.1 and the string "Not Found"
++may also change. Thus the regular expression:
++  /server returned error: HTTP\/1\.[01] 404 /
++should catch all possible output for lenny.
++
++For the ftp method the error sring is different. The following regexp should work:
++ /bad response to RETR: 550 /
++
++
+ Here is a copy of the function being documented (since it's bound to
+ get out of sync with the one in the fetch-url-methods/http file, so you
+ might as well see the one that's being documented as well ;-)
+@@ -20,8 +34,8 @@
+                 local RETVAL=$( {
+                         echo 1
+                         wget "$@" 2>&1 >&3 && echo %OK%
+-                        echo %EOF%
+-                        } | ( sed -ne '1{h;d};/server returned error 404/{p;s/.*/4/;h;d};/^%OK%$/{s/.*/0/;h;d};$!p;$x;$w /dev/fd/4' >&2 ) 4>&1
++                        echo %EOF% 
++                       } | ( sed -ne '1{h;d};/server returned error: HTTP\/1\.[01] 404 /{p;s/.*/4/;h;d};/^%OK%$/{s/.*/0/;h;d};$!p;$x;$w /dev/fd/4' >&2 ) 4>&1
+                 ) 3>&1
+                 return $RETVAL
+         }
+@@ -35,7 +49,7 @@
+   1{h;d}  --  take the first line (provided by the echo 1) and put it in sed's hold space
+               this will provide a default return value of 1 unless something else happens
+ 
+-  /server returned error 404/{p;s/.*/4/;h;d}
++  /server returned error: HTTP\/1\.[01] 404 /{p;s/.*/4/;h;d}
+           If we see a 404 error, print it, then turn it into a "4" and stuff it in the 
+           sed hold space, and finally, delete the "4"
+           This is where our return value of 4 comes from
+@@ -86,3 +100,4 @@
+ STDOUT anyway -- Doh!
+ 
+ Phil Hands -- 2008-02-29
++Alex Owen  -- 2008-07-16

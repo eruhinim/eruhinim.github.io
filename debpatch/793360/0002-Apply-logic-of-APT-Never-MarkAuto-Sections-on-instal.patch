@@ -1,0 +1,69 @@
+From 03f272f8be909813f8035e3ed2dd7f0944e0e26d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Rapha=C3=ABl=20Hertzog?= <hertzog@debian.org>
+Date: Thu, 23 Jul 2015 18:21:08 +0200
+Subject: [PATCH 2/2] Apply logic of APT::Never-MarkAuto-Sections on installed
+ packages too
+
+Up to now, only dependencies leading to new package installations were
+marked as manually installed. With this change, a package that is already
+installed and marked as auto-installed and that is needed to satisfy a
+dependency of a package maching APT::Never-MarkAuto-Sections will be
+switched to manually installed too.
+
+Sponsored-by: Offensive Security
+---
+ apt-pkg/depcache.cc | 23 ++++++++++++++++++++---
+ 1 file changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/apt-pkg/depcache.cc b/apt-pkg/depcache.cc
+index 0b2f71d..807c58c 100644
+--- a/apt-pkg/depcache.cc
++++ b/apt-pkg/depcache.cc
+@@ -1076,7 +1076,12 @@ bool pkgDepCache::MarkInstall(PkgIterator const &Pkg,bool AutoInst,
+    P.Mode = ModeInstall;
+    P.InstallVer = P.CandidateVer;
+ 
+-   if(FromUser)
++   // now check if we should consider dependencies as automatic dependency or not
++   bool MarkDepsAsAuto = true;
++   if(P.InstallVer->Section != 0 && ConfigValueInSubTree("APT::Never-MarkAuto-Sections", P.InstVerIter(*this).Section()))
++      MarkDepsAsAuto = false;
++
++   if(FromUser == true || MarkDepsAsAuto == false)
+      {
+        // Set it to manual if it's a new install or already installed,
+        // but only if its not marked by the autoremover (aptitude depend on this behavior)
+@@ -1114,8 +1119,20 @@ bool pkgDepCache::MarkInstall(PkgIterator const &Pkg,bool AutoInst,
+       {
+ 	 LastOR = (Dep->CompareOp & Dep::Or) == Dep::Or;
+ 
+-	 if ((DepState[Dep->ID] & DepInstall) == DepInstall)
++	 if ((DepState[Dep->ID] & DepInstall) == DepInstall) {
++	    StateCache &T = PkgState[Dep.TargetPkg()->ID];
++	    if(MarkDepsAsAuto == false && (T.Flags & Flag::Auto) == Flag::Auto)
++	    {
++	       if(DebugAutoInstall == true)
++	          std::clog << OutputInDepth(Depth) << "Setting "
++			    << Dep.TargetPkg().Name()
++		            << " as NOT auto-installed (direct "
++                            << Start.DepType() << " of " << Dep.ParentPkg().Name()
++			    << " in APT::Never-MarkAuto-Sections)" << std::endl;
++	       MarkAuto(Dep.TargetPkg(), false);
++	    }
+ 	    Result = false;
++	 }
+       }
+       
+       // Dep is satisfied okay.
+@@ -1226,7 +1243,7 @@ bool pkgDepCache::MarkInstall(PkgIterator const &Pkg,bool AutoInst,
+ 	       continue;
+ 	    }
+ 	    // now check if we should consider it a automatic dependency or not
+-	    if(P.InstallVer->Section != 0 && ConfigValueInSubTree("APT::Never-MarkAuto-Sections", P.InstVerIter(*this).Section()))
++	    if(MarkDepsAsAuto == false)
+ 	    {
+ 	       if(DebugAutoInstall == true)
+ 		  std::clog << OutputInDepth(Depth) << "Setting NOT as auto-installed (direct "
+-- 
+2.1.4
+

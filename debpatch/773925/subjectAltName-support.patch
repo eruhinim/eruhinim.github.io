@@ -1,0 +1,182 @@
+Description: allows creating RSA keys valid for more than one domain by
+ using the subjectAltName attribute.
+
+Origin: http://www.msquared.id.au/articles/easy-rsa-subjectaltname/
+Forwarded: no
+Author: Vicente Aguilar <bisente@bisente.com> and Msquared <http://www.msquared.id.au/>
+Last-Update: 2012-11-12
+
+Index: easy-rsa-2.2.2/openssl-0.9.6.cnf
+===================================================================
+--- easy-rsa-2.2.2.orig/openssl-0.9.6.cnf
++++ easy-rsa-2.2.2/openssl-0.9.6.cnf
+@@ -191,6 +191,7 @@ keyUsage = digitalSignature
+ # This stuff is for subjectAltName and issuerAltname.
+ # Import the email address.
+ # subjectAltName=email:copy
++subjectAltName=$ENV::KEY_ALTNAMES
+ 
+ # Copy subject details
+ # issuerAltName=issuer:copy
+@@ -212,6 +213,7 @@ subjectKeyIdentifier=hash
+ authorityKeyIdentifier=keyid,issuer:always
+ extendedKeyUsage=serverAuth
+ keyUsage = digitalSignature, keyEncipherment
++subjectAltName=$ENV::KEY_ALTNAMES
+ 
+ [ v3_req ]
+ 
+Index: easy-rsa-2.2.2/openssl-0.9.8.cnf
+===================================================================
+--- easy-rsa-2.2.2.orig/openssl-0.9.8.cnf
++++ easy-rsa-2.2.2/openssl-0.9.8.cnf
+@@ -200,6 +200,7 @@ keyUsage = digitalSignature
+ # This stuff is for subjectAltName and issuerAltname.
+ # Import the email address.
+ # subjectAltName=email:copy
++subjectAltName=$ENV::KEY_ALTNAMES
+ 
+ # Copy subject details
+ # issuerAltName=issuer:copy
+@@ -221,6 +222,7 @@ subjectKeyIdentifier=hash
+ authorityKeyIdentifier=keyid,issuer:always
+ extendedKeyUsage=serverAuth
+ keyUsage = digitalSignature, keyEncipherment
++subjectAltName=$ENV::KEY_ALTNAMES
+ 
+ [ v3_req ]
+ 
+Index: easy-rsa-2.2.2/pkitool
+===================================================================
+--- easy-rsa-2.2.2.orig/pkitool
++++ easy-rsa-2.2.2/pkitool
+@@ -269,31 +269,37 @@ if [ $DO_ROOT -eq 1 ]; then
+     if [ -z "$KEY_CN" ]; then
+         if [ "$1" ]; then
+             KEY_CN="$1"
++	    KEY_ALTNAMES="DNS:${KEY_CN}"
+         elif [ "$KEY_ORG" ]; then
+             KEY_CN="$KEY_ORG CA"
++	    KEY_ALTNAMES="$KEY_CN"
+         fi
+     fi
+     if [ $BATCH ] && [ "$KEY_CN" ]; then
+         echo "Using CA Common Name:" "$KEY_CN"
++	KEY_ALTNAMES="$KEY_CN"
+     fi
+     FN="$KEY_CN"
+ elif [ $BATCH ] && [ "$KEY_CN" ]; then
+     echo "Using Common Name:" "$KEY_CN"
++    KEY_ALTNAMES="$KEY_CN"
+     FN="$KEY_CN"
+     if [ "$1" ]; then
+         FN="$1"
+     fi
+ else
+-    if [ $# -ne 1 ]; then
+-        usage
+-        exit 1
+-    else
+-        KEY_CN="$1"
+-    fi
++    KEY_CN="$1"
++    KEY_ALTNAMES="DNS:$1"
++    shift
++    while [ "x$1" != "x" ]
++    do
++        KEY_ALTNAMES="${KEY_ALTNAMES},DNS:$1"
++        shift
++    done
+     FN="$KEY_CN"
+ fi
+ 
+-export CA_EXPIRE KEY_EXPIRE KEY_OU KEY_NAME KEY_CN PKCS11_MODULE_PATH PKCS11_PIN
++export CA_EXPIRE KEY_EXPIRE KEY_OU KEY_NAME KEY_CN PKCS11_MODULE_PATH PKCS11_PIN KEY_ALTNAMES
+ 
+ # Show parameters (debugging)
+ if [ $DEBUG -eq 1 ]; then
+@@ -305,6 +311,7 @@ if [ $DEBUG -eq 1 ]; then
+     echo NODES_P12 $NODES_P12
+     echo DO_P12 $DO_P12
+     echo KEY_CN $KEY_CN
++    echo KEY_ALTNAMES $KEY_ALTNAMES
+     echo BATCH $BATCH
+     echo DO_ROOT $DO_ROOT
+     echo KEY_EXPIRE $KEY_EXPIRE
+Index: easy-rsa-2.2.2/README.subjectAltName
+===================================================================
+--- /dev/null
++++ easy-rsa-2.2.2/README.subjectAltName
+@@ -0,0 +1,38 @@
++easy-rsa with subjectAltName support
++by Vicente Aguilar <bisente@bisente.com>
++http://www.bisente.com/proyectos/easy-rsa-subjectaltname
++updates by Msquared <http://www.msquared.id.au/>
++http://www.msquared.id.au/articles/easy-rsa-subjectaltname/
++
++
++INTRODUCTION
++============
++
++This is a modified version of OpenVPN's easy-rsa script, that allows you to
++create RSA keys valid for more than one domain by using the subjectAltName
++attribute.
++
++While I don't see this as a good practice when using the certificate for
++identity validation (like in establishing a VPN), it can be useful if you
++have a web server with just one IP address and want to provide HTTPS service
++for several virtual domains without the browser complaining that the site
++domain doesn't match the certificate's domain.
++
++
++USAGE
++=====
++
++Use the script as usual, see README.orig and http://openvpn.net/easyrsa.html.
++If you want to make a key with several domains, just add them as parameters
++on the command line:
++
++  # ./build-key-server www.domain1.com www.domain2.com www.domain3.com
++
++The key's certificate in ./keys/www.domain1.com.crt will contain a section
++like:
++
++    X509v3 Subject Alternative Name:
++        DNS:www.domain1.com, DNS:www.domain2.com, DNS:www.domain3.com
++
++Any modern browser should accept the certificate for all these domains
++without complaining.
+Index: easy-rsa-2.2.2/revoke-full
+===================================================================
+--- easy-rsa-2.2.2.orig/revoke-full
++++ easy-rsa-2.2.2/revoke-full
+@@ -20,6 +20,9 @@ if [ "$KEY_DIR" ]; then
+     export KEY_OU=""
+     export KEY_NAME=""
+ 
++	# required due to hack in openssl.cnf that supports Subject Alternative Names
++    export KEY_ALTNAMES=""
++
+     # revoke key and generate a new CRL
+     $OPENSSL ca -revoke "$1.crt" -config "$KEY_CONFIG"
+ 
+Index: easy-rsa-2.2.2/openssl-1.0.0.cnf
+===================================================================
+--- easy-rsa-2.2.2.orig/openssl-1.0.0.cnf
++++ easy-rsa-2.2.2/openssl-1.0.0.cnf
+@@ -195,6 +195,7 @@ keyUsage = digitalSignature
+ # This stuff is for subjectAltName and issuerAltname.
+ # Import the email address.
+ # subjectAltName=email:copy
++subjectAltName=$ENV::KEY_ALTNAMES
+ 
+ # Copy subject details
+ # issuerAltName=issuer:copy
+@@ -216,6 +217,7 @@ subjectKeyIdentifier=hash
+ authorityKeyIdentifier=keyid,issuer:always
+ extendedKeyUsage=serverAuth
+ keyUsage = digitalSignature, keyEncipherment
++subjectAltName=$ENV::KEY_ALTNAMES
+ 
+ [ v3_req ]
+ 

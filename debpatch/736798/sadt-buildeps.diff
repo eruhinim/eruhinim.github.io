@@ -1,0 +1,88 @@
+diff -Nru devscripts-2.14.1/debian/changelog devscripts-2.14.2/debian/changelog
+--- devscripts-2.14.1/debian/changelog	2014-01-26 04:15:54.000000000 +0100
++++ devscripts-2.14.2/debian/changelog	2014-01-26 21:51:12.000000000 +0100
+@@ -1,3 +1,11 @@
++devscripts (2.14.2) UNRELEASED; urgency=medium
++
++  [ Jakub Wilk ]
++  * sadt:
++    + Add support for @builddeps@ in tests' Depends.
++
++ -- Jakub Wilk <jwilk@debian.org>  Sun, 26 Jan 2014 21:50:35 +0100
++
+ devscripts (2.14.1) unstable; urgency=medium
+ 
+   * Actually install sadt.  (Closes: #736683)
+diff -Nru devscripts-2.14.1/scripts/sadt devscripts-2.14.2/scripts/sadt
+--- devscripts-2.14.1/scripts/sadt	2014-01-26 04:15:54.000000000 +0100
++++ devscripts-2.14.2/scripts/sadt	2014-01-26 21:50:29.000000000 +0100
+@@ -166,7 +166,7 @@
+     def __iter__(self):
+         return iter(self.tests)
+ 
+-    def expand_depends(self, packages):
++    def expand_depends(self, packages, build_depends):
+         if '@' not in self.depends:
+             return
+         or_clauses = []
+@@ -183,6 +183,9 @@
+             finally:
+                 sys.stderr = orig_sys_stderr
+         for or_clause in parsed_depends:
++            if len(or_clause) == 1 and or_clause[0]['name'] == '@builddeps@':
++                or_clauses += build_depends
++                continue
+             stripped_or_clause = [r for r in or_clause if r['name'] != '@']
+             if len(stripped_or_clause) < len(or_clause):
+                 for package in packages:
+@@ -195,7 +198,6 @@
+         self.depends = deb822.PkgRelation.str(or_clauses)
+ 
+     def check_depends(self):
+-        assert '@' not in self.depends
+         if self._check_depends_cache is not None:
+             if isinstance(self._depends_cache, Exception):
+                 raise self._check_depends_cache
+@@ -341,6 +343,7 @@
+     options.tests = frozenset(options.tests)
+     options.ignore_restrictions = frozenset(options.ignore_restrictions.split(','))
+     binary_packages = set()
++    build_depends = []
+     try:
+         file = open('debian/control', encoding='UTF-8')
+     except IOError as exc:
+@@ -352,6 +355,11 @@
+         for n, para in enumerate(deb822.Packages.iter_paragraphs(file)):
+             if n == 0:
+                 para['Source']
++                for field in 'Build-Depends', 'Build-Depends-Indep':
++                    try:
++                        build_depends += deb822.PkgRelation.parse_relations(para[field])
++                    except KeyError:
++                        continue
+             else:
+                 binary_packages.add(para['Package'])
+     test_groups = []
+@@ -375,7 +383,7 @@
+                     break
+                 method(value)
+             if group is not None:
+-                group.expand_depends(binary_packages)
++                group.expand_depends(binary_packages, build_depends)
+                 test_groups += [group]
+     failures = []
+     n_skip = n_ok = 0
+diff -Nru devscripts-2.14.1/scripts/sadt.pod devscripts-2.14.2/scripts/sadt.pod
+--- devscripts-2.14.1/scripts/sadt.pod	2014-01-26 04:15:54.000000000 +0100
++++ devscripts-2.14.2/scripts/sadt.pod	2014-01-26 21:50:29.000000000 +0100
+@@ -62,6 +62,10 @@
+ 
+ =back
+ 
++=head1 CONFORMING TO
++
++README.package-tests shipped by autopkgtest 2.6
++
+ =head1 SEE ALSO
+ 
+ B<adt-run>(1)

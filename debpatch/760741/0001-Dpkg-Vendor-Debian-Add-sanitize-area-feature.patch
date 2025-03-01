@@ -1,0 +1,135 @@
+From 5016b6781bf5658505b2fb86b7666b87f044bd4a Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Tue, 21 Oct 2014 22:43:55 +0200
+Subject: [PATCH] Dpkg::Vendor::Debian: Add sanitize area feature
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This feature area includes the features “address”, “thread”, “leak” and
+“undefined”.
+
+Cloess: #760741
+---
+ man/dpkg-buildflags.1         | 27 ++++++++++++++++++++--
+ scripts/Dpkg/Vendor/Debian.pm | 52 +++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 77 insertions(+), 2 deletions(-)
+
+diff --git a/man/dpkg-buildflags.1 b/man/dpkg-buildflags.1
+index ad42427..ca8488b 100644
+--- a/man/dpkg-buildflags.1
++++ b/man/dpkg-buildflags.1
+@@ -135,8 +135,9 @@ the flag is set/modified by an environment-specific configuration.
+ .TP
+ .BI \-\-query\-features " area"
+ Print the features enabled for a given area. The only currently recognized
+-areas on Debian and derivatives are \fBqa\fP, \fBreproducible\fP and
+-\fBhardening\fP, see the \fBFEATURE AREAS\fP section for more details.
++areas on Debian and derivatives are \fBqa\fP, \fBreproducible\fP,
++\fBsanitize\fP and \fBhardening\fP, see the \fBFEATURE AREAS\fP
++section for more details.
+ Exits with 0 if the area is known otherwise exits with 1.
+ .IP
+ The output is in RFC822 format, with one section per feature.
+@@ -230,6 +231,28 @@ The only currently supported flags are \fBCPPFLAGS\fP, \fBCFLAGS\fP,
+ to \fB\-D__DEB_CANARY_\fP\fIflag\fP_\fIrandom-id\fP\fB__\fP, and
+ \fBLDFLAGS\fP set to \fB\-Wl,\-z,deb-canary\-\fP\fIrandom-id\fP.
+ .
++.SS Sanitize
++Several compile-time options (detailed below) can be used to help sanitize
++a resulting binary against memory corruptions, memory leaks, use after free,
++threading data races and undefined behavior bugs.
++.TP
++.B address
++This setting (disabled by default) adds \fB\-fsanitize=address\fP to
++\fBLDFLAGS\fP and \fB\-fsanitize=address \-fno\-omit\-frame\-pointer\fP to
++\fBCFLAGS\fP and \fBCXXFLAGS\fP.
++.TP
++.B thread
++This setting (disabled by default) adds \fB\-fsanitize=thread\fP to
++\fBCFLAGS\fP, \fBCXXFLAGS\fP and \fBLDFLAGS\fP.
++.TP
++.B leak
++This setting (disabled by default) adds \fB\-fsanitize=leak\fP to
++\fBLDFLAGS\fP. It gets automatically disabled if either the \fBaddress\fP
++or the \fBthread\fP features are enabled, as they imply it.
++.TP
++.B undefined
++This setting (disabled by default) adds \fB\-fsanitize=undefined\fP to
++\fBCFLAGS\fP, \fBCXXFLAGS\fP and \fBLDFLAGS\fP.
+ .SS Hardening
+ Several compile-time options (detailed below) can be used to help harden
+ a resulting binary against memory corruption attacks, or provide
+diff --git a/scripts/Dpkg/Vendor/Debian.pm b/scripts/Dpkg/Vendor/Debian.pm
+index 7bf45da..62b9a1b 100644
+--- a/scripts/Dpkg/Vendor/Debian.pm
++++ b/scripts/Dpkg/Vendor/Debian.pm
+@@ -69,6 +69,7 @@ sub run_hook {
+     } elsif ($hook eq 'update-buildflags') {
+ 	$self->_add_qa_flags(@params);
+ 	$self->_add_reproducible_flags(@params);
++	$self->_add_sanitize_flags(@params);
+ 	$self->_add_hardening_flags(@params);
+     } else {
+         return $self->SUPER::run_hook($hook, @params);
+@@ -168,6 +169,57 @@ sub _add_reproducible_flags {
+     }
+ }
+ 
++sub _add_sanitize_flags {
++    my ($self, $flags) = @_;
++
++    # Default feature states.
++    my %use_feature = (
++        address => 0,
++        thread => 0,
++        leak => 0,
++        undefined => 0,
++    );
++
++    # Adjust features based on user or maintainer's desires.
++    $self->_parse_feature_area('sanitize', \%use_feature);
++
++    # Handle logical feature interactions.
++    if ($use_feature{address} or $use_feature{thread}) {
++        # Disable leak sanitizer, it is implied by the address or thread ones.
++        $use_feature{leak} = 0;
++    }
++
++    if ($use_feature{address}) {
++        my $flag = '-fsanitize=address -fno-omit-frame-pointer';
++        $flags->append('CFLAGS', $flag);
++        $flags->append('CXXFLAGS', $flag);
++        $flags->append('LDFLAGS', '-fsanitize=address');
++    }
++
++    if ($use_feature{thread}) {
++        my $flag = '-fsanitize=thread';
++        $flags->append('CFLAGS', $flag);
++        $flags->append('CXXFLAGS', $flag);
++        $flags->append('LDFLAGS', $flag);
++    }
++
++    if ($use_feature{leak}) {
++        $flags->append('LDFLAGS', '-fsanitize=leak');
++    }
++
++    if ($use_feature{undefined}) {
++        my $flag = '-fsanitize=undefined';
++        $flags->append('CFLAGS', $flag);
++        $flags->append('CXXFLAGS', $flag);
++        $flags->append('LDFLAGS', $flag);
++    }
++
++    # Store the feature usage.
++    while (my ($feature, $enabled) = each %use_feature) {
++       $flags->set_feature('sanitize', $feature, $enabled);
++    }
++}
++
+ sub _add_hardening_flags {
+     my ($self, $flags) = @_;
+     my $arch = get_host_arch();
+-- 
+2.2.1.209.g41e5f3a
+

@@ -1,0 +1,731 @@
+diffstat for libmspack-0.9.1 libmspack-0.10.1
+
+ ChangeLog                                       |   50 ++++
+ README                                          |    2 
+ config.h.in                                     |   15 +
+-configure                                       |  245 +++++++++++++++++++++++-
+ configure.ac                                    |    3 
+ debian/changelog                                |    8 
+ debian/copyright                                |    2 
+ debian/libmspack-doc.docs                       |    4 
+ mspack/cab.h                                    |    2 
+ mspack/cabd.c                                   |   54 ++---
+ mspack/chmd.c                                   |   27 +-
+ mspack/mspack.h                                 |   31 ++-
+ mspack/oab.h                                    |    1 
+ mspack/oabd.c                                   |   85 ++++----
+ mspack/system.c                                 |    5 
+ mspack/system.h                                 |   19 -
+-test/chminfo.c                                  |    2 
+-test/test_files/chmd/short-system-filenames.chm |binary
+ 18 files changed, 447 insertions(+), 108 deletions(-)
+
+diff -Nru -w libmspack-0.9.1/ChangeLog libmspack-0.10.1/ChangeLog
+--- libmspack-0.9.1/ChangeLog	2018-11-04 01:04:14.000000000 +0100
++++ libmspack-0.10.1/ChangeLog	2019-02-18 21:01:59.000000000 +0100
+@@ -1,3 +1,53 @@
++2019-02-18  Stuart Caie <kyzer@cabextract.org.uk>
++
++	* chmd_read_headers(): a CHM file name beginning "::" but shorter
++	than 33 bytes will lead to reading past the freshly-allocated name
++	buffer - checks for specific control filenames didn't take length
++	into account. Thanks to ADLab of Venustech for the report and
++	proof of concept.
++
++2019-02-18  Stuart Caie <kyzer@cabextract.org.uk>
++
++	* chmd_read_headers(): CHM files can declare their chunks are any
++	size up to 4GB, and libmspack will attempt to allocate that to
++	read the file.
++
++	This is not a security issue; libmspack doesn't promise how much
++	memory it'll use to unpack files. You can set your own limits by
++	returning NULL in a custom mspack_system.alloc() implementation.
++
++	However, it would be good to validate chunk size further. With no
++	offical specification, only empirical data is available. All files
++	created by hhc.exe have a chunk size of 4096 bytes, and this is
++	matched by all the files I've found in the wild, except for one
++	which has a chunk size of 8192 bytes, which was created by someone
++	developing a CHM file creator 15 years ago, and they appear to
++	have abandoned it, so it seems 4096 is a de-facto standard.
++
++	I've changed the "chunk size is not a power of two" warning to
++	"chunk size is not 4096", and now only allow chunk sizes between
++	22 and 8192 bytes. If you have CHM files with a larger chunk size,
++	please send them to me and I'll increase this upper limit.
++
++	Thanks to ADLab of Venustech for the report.
++
++2019-02-18  Stuart Caie <kyzer@cabextract.org.uk>
++
++	* oabd.c: replaced one-shot copying of uncompressed blocks (which
++	requires allocating a buffer of the size declared in the header,
++	which can be 4GB) with a fixed-size buffer. The buffer size is
++	user-controllable with the new msoab_decompressor::set_param()
++	method (check you have version 2 of the OAB decompressor), and
++	also controls the input buffer used for OAB's LZX decompression.
++
++	Reminder: compression formats can dictate how much memory is
++	needed to decompress them. If memory usage is a security concern
++	to you, write a custom mspack_system.alloc() that returns NULL
++	if "too much" memory is requested. Do not rely on libmspack adding
++	special heuristics to know not to request "too much".
++
++	Thanks to ADLab of Venustech for the report.
++
+ 2018-11-03  Stuart Caie <kyzer@cabextract.org.uk>
+ 
+ 	* configure.ac, doc/Makefile.in, doc/Doxyfile.in: remove these
+diff -Nru -w libmspack-0.9.1/config.h.in libmspack-0.10.1/config.h.in
+--- libmspack-0.9.1/config.h.in	2018-11-06 12:17:02.000000000 +0100
++++ libmspack-0.10.1/config.h.in	2019-03-04 10:39:16.000000000 +0100
+@@ -1,5 +1,8 @@
+ /* config.h.in.  Generated from configure.ac by autoheader.  */
+ 
++/* Define if building universal (internal helper macro) */
++#undef AC_APPLE_UNIVERSAL_BUILD
++
+ /* Turn debugging mode on? */
+ #undef DEBUG
+ 
+@@ -81,6 +84,18 @@
+ /* Version number of package */
+ #undef VERSION
+ 
++/* Define WORDS_BIGENDIAN to 1 if your processor stores words with the most
++   significant byte first (like Motorola and SPARC, unlike Intel). */
++#if defined AC_APPLE_UNIVERSAL_BUILD
++# if defined __BIG_ENDIAN__
++#  define WORDS_BIGENDIAN 1
++# endif
++#else
++# ifndef WORDS_BIGENDIAN
++#  undef WORDS_BIGENDIAN
++# endif
++#endif
++
+ /* Enable large inode numbers on Mac OS X 10.5.  */
+ #ifndef _DARWIN_USE_64_BIT_INODE
+ # define _DARWIN_USE_64_BIT_INODE 1
+diff -Nru -w libmspack-0.9.1/configure libmspack-0.10.1/configure
+diff -Nru -w libmspack-0.9.1/configure.ac libmspack-0.10.1/configure.ac
+--- libmspack-0.9.1/configure.ac	2018-11-06 12:16:17.000000000 +0100
++++ libmspack-0.10.1/configure.ac	2019-03-04 10:36:51.000000000 +0100
+@@ -1,7 +1,7 @@
+ # -*- Autoconf -*-
+ # Process this file with autoconf to produce a configure script.
+ AC_PREREQ(2.59)
+-AC_INIT([libmspack],[0.9.1alpha],[kyzer@cabextract.org.uk])
++AC_INIT([libmspack],[0.10.1alpha],[kyzer@cabextract.org.uk])
+ AC_CONFIG_MACRO_DIR([m4])
+ AM_INIT_AUTOMAKE([1.11])
+ AM_SILENT_RULES([yes])
+@@ -30,6 +30,7 @@
+ # Checks for typedefs, structures, and compiler characteristics.
+ AC_C_CONST
+ AC_C_INLINE
++AC_C_BIGENDIAN
+ AC_TYPE_MODE_T
+ AC_TYPE_OFF_T
+ AC_TYPE_SIZE_T
+diff -Nru -w libmspack-0.9.1/debian/changelog libmspack-0.10.1/debian/changelog
+--- libmspack-0.9.1/debian/changelog	2018-11-06 14:38:49.000000000 +0100
++++ libmspack-0.10.1/debian/changelog	2019-03-05 11:03:29.000000000 +0100
+@@ -1,3 +1,11 @@
++libmspack (0.10.1-1) unstable; urgency=medium
++
++  * New upstream release:
++    + fix build on big-endian systems (Closes: #914794)
++  * Add missing JS files for documentation menu and search functions.
++
++ -- Marc DequÃ¨nes (Duck) <Duck@DuckCorp.org>  Tue, 05 Mar 2019 19:03:29 +0900
++
+ libmspack (0.9.1-1) unstable; urgency=medium
+ 
+   * New upstream release:
+diff -Nru -w libmspack-0.9.1/debian/copyright libmspack-0.10.1/debian/copyright
+--- libmspack-0.9.1/debian/copyright	2018-07-29 06:03:32.000000000 +0200
++++ libmspack-0.10.1/debian/copyright	2019-03-05 07:24:35.000000000 +0100
+@@ -2,6 +2,8 @@
+ Upstream-Name: libmspack
+ Upstream-Contact: Stuart Caie <kyzer@4u.net>
+ Source: https://www.cabextract.org.uk/libmspack/
++# doxygen-generated doc which is embedded in the upstream tarball; regenerated in the Debian build
++Files-excluded: doc/html
+ 
+ 
+ Files: *
+diff -Nru -w libmspack-0.9.1/debian/libmspack-doc.docs libmspack-0.10.1/debian/libmspack-doc.docs
+--- libmspack-0.9.1/debian/libmspack-doc.docs	2018-11-06 14:32:42.000000000 +0100
++++ libmspack-0.10.1/debian/libmspack-doc.docs	2019-03-05 10:52:56.000000000 +0100
+@@ -1,4 +1,8 @@
+ doc/html/*.html
+ doc/html/*.css
+ doc/html/*.png
++# jquery.js is generated by doxygen
++# there is no easy way to replace it with a symlink to a system common version
++# rationale: /usr/share/doc/doxygen/README.jquery
++doc/html/*.js
+ doc/html/search
+diff -Nru -w libmspack-0.9.1/mspack/cabd.c libmspack-0.10.1/mspack/cabd.c
+--- libmspack-0.9.1/mspack/cabd.c	2018-11-05 12:53:09.000000000 +0100
++++ libmspack-0.10.1/mspack/cabd.c	2019-03-04 02:09:26.000000000 +0100
+@@ -156,10 +156,10 @@
+     self->d               = NULL;
+     self->error           = MSPACK_ERR_OK;
+ 
+-    self->param[MSCABD_PARAM_SEARCHBUF] = 32768;
+-    self->param[MSCABD_PARAM_FIXMSZIP]  = 0;
+-    self->param[MSCABD_PARAM_DECOMPBUF] = 4096;
+-    self->param[MSCABD_PARAM_SALVAGE]   = 0;
++    self->searchbuf_size  = 32768;
++    self->fix_mszip       = 0;
++    self->buf_size        = 4096;
++    self->salvage         = 0;
+   }
+   return (struct mscab_decompressor *) self;
+ }
+@@ -203,7 +203,7 @@
+   if ((fh = sys->open(sys, filename, MSPACK_SYS_OPEN_READ))) {
+     if ((cab = (struct mscabd_cabinet_p *) sys->alloc(sys, sizeof(struct mscabd_cabinet_p)))) {
+       cab->base.filename = filename;
+-      error = cabd_read_headers(sys, fh, cab, (off_t) 0, self->param[MSCABD_PARAM_SALVAGE], 0);
++      error = cabd_read_headers(sys, fh, cab, (off_t) 0, self->salvage, 0);
+       if (error) {
+         cabd_close(base, (struct mscabd_cabinet *) cab);
+         cab = NULL;
+@@ -600,7 +600,7 @@
+   sys = self->system;
+ 
+   /* allocate a search buffer */
+-  search_buf = (unsigned char *) sys->alloc(sys, (size_t) self->param[MSCABD_PARAM_SEARCHBUF]);
++  search_buf = (unsigned char *) sys->alloc(sys, (size_t) self->searchbuf_size);
+   if (!search_buf) {
+     self->error = MSPACK_ERR_NOMEMORY;
+     return NULL;
+@@ -649,7 +649,7 @@
+   struct mspack_system *sys = self->system;
+   unsigned char *p, *pend, state = 0;
+   unsigned int cablen_u32 = 0, foffset_u32 = 0;
+-  int false_cabs = 0, salvage = self->param[MSCABD_PARAM_SALVAGE];
++  int false_cabs = 0;
+ 
+ #if !LARGEFILE_SUPPORT
+   /* detect 32-bit off_t overflow */
+@@ -664,8 +664,8 @@
+     /* search length is either the full length of the search buffer, or the
+      * amount of data remaining to the end of the file, whichever is less. */
+     length = flen - offset;
+-    if (length > self->param[MSCABD_PARAM_SEARCHBUF]) {
+-      length = self->param[MSCABD_PARAM_SEARCHBUF];
++    if (length > self->searchbuf_size) {
++      length = self->searchbuf_size;
+     }
+ 
+     /* fill the search buffer with data from disk */
+@@ -729,14 +729,14 @@
+          * mode, don't check the alleged length, allow it to be garbage */
+         if ((foffset_u32 < cablen_u32) &&
+             ((caboff + (off_t) foffset_u32) < (flen + 32)) &&
+-            (((caboff + (off_t) cablen_u32)  < (flen + 32)) || salvage))
++            (((caboff + (off_t) cablen_u32)  < (flen + 32)) || self->salvage))
+         {
+           /* likely cabinet found -- try reading it */
+           if (!(cab = (struct mscabd_cabinet_p *) sys->alloc(sys, sizeof(struct mscabd_cabinet_p)))) {
+             return MSPACK_ERR_NOMEMORY;
+           }
+           cab->base.filename = filename;
+-          if (cabd_read_headers(sys, fh, cab, caboff, salvage, 1)) {
++          if (cabd_read_headers(sys, fh, cab, caboff, self->salvage, 1)) {
+             /* destroy the failed cabinet */
+             cabd_close((struct mscab_decompressor *) self,
+                        (struct mscabd_cabinet *) cab);
+@@ -1030,7 +1030,7 @@
+    */
+   filelen = file->length;
+   if (filelen > CAB_LENGTHMAX || (file->offset + filelen) > CAB_LENGTHMAX) {
+-    if (self->param[MSCABD_PARAM_SALVAGE]) {
++    if (self->salvage) {
+       filelen = CAB_LENGTHMAX - file->offset;
+     }
+     else {
+@@ -1048,7 +1048,7 @@
+   /* if file goes beyond what can be decoded, given an error.
+    * In salvage mode, don't assume block sizes, just try decoding
+    */
+-  if (!self->param[MSCABD_PARAM_SALVAGE]) {
++  if (!self->salvage) {
+     off_t maxlen = fol->base.num_blocks * CAB_BLOCKMAX;
+     if ((file->offset + filelen) > maxlen) {
+       sys->message(NULL, "ERROR; file \"%s\" cannot be extracted, "
+@@ -1165,24 +1165,22 @@
+   switch (ct & cffoldCOMPTYPE_MASK) {
+   case cffoldCOMPTYPE_NONE:
+     self->d->decompress = (int (*)(void *, off_t)) &noned_decompress;
+-    self->d->state = noned_init(&self->d->sys, fh, fh,
+-                                self->param[MSCABD_PARAM_DECOMPBUF]);
++    self->d->state = noned_init(&self->d->sys, fh, fh, self->buf_size);
+     break;
+   case cffoldCOMPTYPE_MSZIP:
+     self->d->decompress = (int (*)(void *, off_t)) &mszipd_decompress;
+-    self->d->state = mszipd_init(&self->d->sys, fh, fh,
+-                                 self->param[MSCABD_PARAM_DECOMPBUF],
+-                                 self->param[MSCABD_PARAM_FIXMSZIP]);
++    self->d->state = mszipd_init(&self->d->sys, fh, fh, self->buf_size,
++                                 self->fix_mszip);
+     break;
+   case cffoldCOMPTYPE_QUANTUM:
+     self->d->decompress = (int (*)(void *, off_t)) &qtmd_decompress;
+     self->d->state = qtmd_init(&self->d->sys, fh, fh, (int) (ct >> 8) & 0x1f,
+-                               self->param[MSCABD_PARAM_DECOMPBUF]);
++                               self->buf_size);
+     break;
+   case cffoldCOMPTYPE_LZX:
+     self->d->decompress = (int (*)(void *, off_t)) &lzxd_decompress;
+     self->d->state = lzxd_init(&self->d->sys, fh, fh, (int) (ct >> 8) & 0x1f, 0,
+-                               self->param[MSCABD_PARAM_DECOMPBUF], (off_t)0,0);
++                               self->buf_size, (off_t)0,0);
+     break;
+   default:
+     return self->error = MSPACK_ERR_DATAFORMAT;
+@@ -1221,10 +1219,10 @@
+   struct mspack_system *sys = self->system;
+   int avail, todo, outlen, ignore_cksum, ignore_blocksize;
+ 
+-  ignore_cksum = self->param[MSCABD_PARAM_SALVAGE] ||
+-    (self->param[MSCABD_PARAM_FIXMSZIP] && 
++  ignore_cksum = self->salvage ||
++    (self->fix_mszip && 
+      ((self->d->comp_type & cffoldCOMPTYPE_MASK) == cffoldCOMPTYPE_MSZIP));
+-  ignore_blocksize = self->param[MSCABD_PARAM_SALVAGE];
++  ignore_blocksize = self->salvage;
+ 
+   todo = bytes;
+   while (todo > 0) {
+@@ -1244,7 +1242,7 @@
+ 
+       /* check if we're out of input blocks, advance block counter */
+       if (self->d->block++ >= self->d->folder->base.num_blocks) {
+-        if (!self->param[MSCABD_PARAM_SALVAGE]) {
++        if (!self->salvage) {
+           self->read_error = MSPACK_ERR_DATAFORMAT;
+         }
+         else {
+@@ -1481,17 +1479,17 @@
+   switch (param) {
+   case MSCABD_PARAM_SEARCHBUF:
+     if (value < 4) return MSPACK_ERR_ARGS;
+-    self->param[MSCABD_PARAM_SEARCHBUF] = value;
++    self->searchbuf_size = value;
+     break;
+   case MSCABD_PARAM_FIXMSZIP:
+-    self->param[MSCABD_PARAM_FIXMSZIP] = value;
++    self->fix_mszip = value;
+     break;
+   case MSCABD_PARAM_DECOMPBUF:
+     if (value < 4) return MSPACK_ERR_ARGS;
+-    self->param[MSCABD_PARAM_DECOMPBUF] = value;
++    self->buf_size = value;
+     break;
+   case MSCABD_PARAM_SALVAGE:
+-    self->param[MSCABD_PARAM_SALVAGE] = value;
++    self->salvage = value;
+     break;
+   default:
+     return MSPACK_ERR_ARGS;
+diff -Nru -w libmspack-0.9.1/mspack/cab.h libmspack-0.10.1/mspack/cab.h
+--- libmspack-0.9.1/mspack/cab.h	2018-11-05 12:53:09.000000000 +0100
++++ libmspack-0.10.1/mspack/cab.h	2019-03-04 10:09:35.000000000 +0100
+@@ -113,7 +113,7 @@
+   struct mscab_decompressor base;
+   struct mscabd_decompress_state *d;
+   struct mspack_system *system;
+-  int param[4]; /* !!! MATCH THIS TO NUM OF PARAMS IN MSPACK.H !!! */
++  int buf_size, searchbuf_size, fix_mszip, salvage; /* params */
+   int error, read_error;
+ };
+ 
+diff -Nru -w libmspack-0.9.1/mspack/chmd.c libmspack-0.10.1/mspack/chmd.c
+--- libmspack-0.9.1/mspack/chmd.c	2018-11-05 12:53:09.000000000 +0100
++++ libmspack-0.10.1/mspack/chmd.c	2019-03-04 02:10:28.000000000 +0100
+@@ -44,7 +44,7 @@
+   struct mschm_decompressor_p *self, struct mschmd_file *file);
+ static int read_reset_table(
+   struct mschm_decompressor_p *self, struct mschmd_sec_mscompressed *sec,
+-  int entry, off_t *length_ptr, off_t *offset_ptr);
++  unsigned int entry, off_t *length_ptr, off_t *offset_ptr);
+ static int read_spaninfo(
+   struct mschm_decompressor_p *self, struct mschmd_sec_mscompressed *sec,
+   off_t *length_ptr);
+@@ -381,14 +381,18 @@
+     D(("more than 100,000 chunks"))
+     return MSPACK_ERR_DATAFORMAT;
+   }   
++  if (chm->chunk_size > 8192) {
++    D(("chunk size over 8192 (get in touch if this is valid)"))
++    return MSPACK_ERR_DATAFORMAT;
++  }
+   if ((off_t)chm->chunk_size * (off_t)chm->num_chunks > chm->length) {
+     D(("chunks larger than entire file"))
+     return MSPACK_ERR_DATAFORMAT;
+   }
+ 
+   /* common sense checks on header section 1 fields */
+-  if ((chm->chunk_size & (chm->chunk_size - 1)) != 0) {
+-    sys->message(fh, "WARNING; chunk size is not a power of two");
++  if (chm->chunk_size != 4096) {
++    sys->message(fh, "WARNING; chunk size is not 4096");
+   }
+   if (chm->first_pmgl != 0) {
+     sys->message(fh, "WARNING; first PMGL chunk is not zero");
+@@ -435,7 +439,7 @@
+       sys->message(fh, "WARNING; PMGL quickref area is too small");
+     }
+     if (EndGetI32(&chunk[pmgl_QuickRefSize]) > 
+-        ((int)chm->chunk_size - pmgl_Entries))
++        (chm->chunk_size - pmgl_Entries))
+     {
+       sys->message(fh, "WARNING; PMGL quickref area is too large");
+     }
+@@ -483,20 +487,18 @@
+ 
+       if (name[0] == ':' && name[1] == ':') {
+         /* system file */
+-        if (memcmp(&name[2], &content_name[2], 31L) == 0) {
+-          if (memcmp(&name[33], &content_name[33], 8L) == 0) {
++        if (name_len == 40 && memcmp(name, content_name, 40) == 0) {
+             chm->sec1.content = fi;
+           }
+-          else if (memcmp(&name[33], &control_name[33], 11L) == 0) {
++        else if (name_len == 44 && memcmp(name, control_name, 44) == 0) {
+             chm->sec1.control = fi;
+           }
+-          else if (memcmp(&name[33], &spaninfo_name[33], 8L) == 0) {
++        else if (name_len == 41 && memcmp(name, spaninfo_name, 41) == 0) {
+             chm->sec1.spaninfo = fi;
+           }
+-          else if (memcmp(&name[33], &rtable_name[33], 72L) == 0) {
++        else if (name_len == 105 && memcmp(name, rtable_name, 105) == 0) {
+             chm->sec1.rtable = fi;
+           }
+-        }
+         fi->next = chm->sysfiles;
+         chm->sysfiles = fi;
+       }
+@@ -589,7 +591,7 @@
+             }
+ 
+             /* stop simple infinite loops: can't visit the same chunk twice */
+-            if ((int)n == EndGetI32(&chunk[pmgl_NextChunk])) {
++            if (n == EndGetI32(&chunk[pmgl_NextChunk])) {
+                 break;
+             }
+         }
+@@ -1154,7 +1156,8 @@
+  */
+ static int read_reset_table(struct mschm_decompressor_p *self,
+                             struct mschmd_sec_mscompressed *sec,
+-                            int entry, off_t *length_ptr, off_t *offset_ptr)
++                            unsigned int entry,
++                            off_t *length_ptr, off_t *offset_ptr)
+ {
+     struct mspack_system *sys = self->system;
+     unsigned char *data;
+diff -Nru -w libmspack-0.9.1/mspack/mspack.h libmspack-0.10.1/mspack/mspack.h
+--- libmspack-0.9.1/mspack/mspack.h	2018-11-05 12:53:09.000000000 +0100
++++ libmspack-0.10.1/mspack/mspack.h	2019-02-18 21:25:16.000000000 +0100
+@@ -1,5 +1,5 @@
+ /* libmspack -- a library for working with Microsoft compression formats.
+- * (C) 2003-2016 Stuart Caie <kyzer@cabextract.org.uk>
++ * (C) 2003-2019 Stuart Caie <kyzer@cabextract.org.uk>
+  *
+  * libmspack is free software; you can redistribute it and/or modify it under
+  * the terms of the GNU Lesser General Public License (LGPL) version 2.1
+@@ -1554,7 +1554,7 @@
+    */
+   int (*set_param)(struct mschm_compressor *self,
+                    int param,
+-                   unsigned int value);
++                   int value);
+ 
+   /**
+    * Returns the error code set by the most recently called method.
+@@ -1853,7 +1853,7 @@
+    */
+   int (*set_param)(struct msszdd_compressor *self,
+                    int param,
+-                   unsigned int value);
++                   int value);
+ 
+   /**
+    * Returns the error code set by the most recently called method.
+@@ -2091,7 +2091,7 @@
+    */
+   int (*set_param)(struct mskwaj_compressor *self,
+                    int param,
+-                   unsigned int value);
++                   int value);
+ 
+ 
+   /**
+@@ -2353,8 +2353,31 @@
+                                  const char *input,
+                                  const char *base,
+                                  const char *output);
++
++  /**
++   * Sets an OAB decompression engine parameter. Available only in OAB
++   * decompressor version 2 and above.
++   *
++   * - #MSOABD_PARAM_DECOMPBUF: How many bytes should be used as an input
++   *   buffer by decompressors? The minimum value is 16. The default value
++   *   is 4096.
++   *
++   * @param  self     a self-referential pointer to the msoab_decompressor
++   *                  instance being called
++   * @param  param    the parameter to set
++   * @param  value    the value to set the parameter to
++   * @return MSPACK_ERR_OK if all is OK, or MSPACK_ERR_ARGS if there
++   *         is a problem with either parameter or value.
++   */
++  int (*set_param)(struct msoab_decompressor *self,
++                   int param,
++                   int value);
++
+ };
+ 
++/** msoab_decompressor::set_param() parameter: size of decompression buffer */
++#define MSOABD_PARAM_DECOMPBUF (0)
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff -Nru -w libmspack-0.9.1/mspack/oabd.c libmspack-0.10.1/mspack/oabd.c
+--- libmspack-0.9.1/mspack/oabd.c	2018-11-05 12:53:09.000000000 +0100
++++ libmspack-0.10.1/mspack/oabd.c	2019-03-04 10:11:49.000000000 +0100
+@@ -33,6 +33,11 @@
+ static int oabd_decompress_incremental(struct msoab_decompressor *self,
+                                        const char *input, const char *base,
+                                        const char *output);
++static int oabd_param(struct msoab_decompressor *base, int param, int value);
++static int copy_fh(struct mspack_system *sys, struct mspack_file *infh,
++                   struct mspack_file *outfh, size_t bytes_to_copy,
++                   unsigned char *buf, int buf_size);
++
+ 
+ struct msoab_decompressor *
+   mspack_create_oab_decompressor(struct mspack_system *sys)
+@@ -45,7 +50,9 @@
+   if ((self = (struct msoab_decompressor_p *) sys->alloc(sys, sizeof(struct msoab_decompressor_p)))) {
+     self->base.decompress             = &oabd_decompress;
+     self->base.decompress_incremental = &oabd_decompress_incremental;
++    self->base.set_param              = &oabd_param;
+     self->system                      = sys;
++    self->buf_size                    = 4096;
+   }
+   return (struct msoab_decompressor *) self;
+ }
+@@ -132,17 +139,13 @@
+   block_max   = EndGetI32(&hdrbuf[oabhead_BlockMax]);
+   target_size = EndGetI32(&hdrbuf[oabhead_TargetSize]);
+ 
+-  /* We use it for reading block headers too */
+-  if (block_max < oabblk_SIZEOF)
+-    block_max = oabblk_SIZEOF;
+-
+   outfh = sys->open(sys, output, MSPACK_SYS_OPEN_WRITE);
+   if (!outfh) {
+     ret = MSPACK_ERR_OPEN;
+     goto out;
+   }
+ 
+-  buf = sys->alloc(sys, block_max);
++  buf = sys->alloc(sys, self->buf_size);
+   if (!buf) {
+     ret = MSPACK_ERR_NOMEMORY;
+     goto out;
+@@ -181,14 +184,8 @@
+         ret = MSPACK_ERR_DATAFORMAT;
+         goto out;
+       }
+-      if (sys->read(infh, buf, blk_dsize) != (int)blk_dsize) {
+-        ret = MSPACK_ERR_READ;
+-        goto out;
+-      }
+-      if (sys->write(outfh, buf, blk_dsize) != (int)blk_dsize) {
+-        ret = MSPACK_ERR_WRITE;
+-        goto out;
+-      }
++      ret = copy_fh(sys, infh, outfh, blk_dsize, buf, self->buf_size);
++      if (ret) goto out;
+     } else {
+       /* LZX compressed block */
+       window_bits = 17;
+@@ -200,7 +197,7 @@
+       out_ofh.crc = 0xffffffff;
+ 
+       lzx = lzxd_init(&oabd_sys, (void *)&in_ofh, (void *)&out_ofh, window_bits,
+-                      0, 4096, blk_dsize, 1);
++                      0, self->buf_size, blk_dsize, 1);
+       if (!lzx) {
+         ret = MSPACK_ERR_NOMEMORY;
+         goto out;
+@@ -214,18 +211,8 @@
+       lzx = NULL;
+ 
+       /* Consume any trailing padding bytes before the next block */
+-      while (in_ofh.available) {
+-        int count = block_max;
+-        if ((size_t)count > in_ofh.available)
+-          count = in_ofh.available;
+-
+-        count = sys->read(infh, buf, count);
+-        if (count < 0) {
+-          ret = MSPACK_ERR_READ;
+-          goto out;
+-        }
+-        in_ofh.available -= count;
+-      }
++      ret = copy_fh(sys, infh, NULL, in_ofh.available, buf, self->buf_size);
++      if (ret) goto out;
+ 
+       if (out_ofh.crc != blk_crc) {
+         ret = MSPACK_ERR_CHECKSUM;
+@@ -301,7 +288,7 @@
+     goto out;
+   }
+ 
+-  buf = sys->alloc(sys, block_max);
++  buf = sys->alloc(sys, self->buf_size);
+   if (!buf) {
+     ret = MSPACK_ERR_NOMEMORY;
+     goto out;
+@@ -364,18 +351,8 @@
+     lzx = NULL;
+ 
+     /* Consume any trailing padding bytes before the next block */
+-    while (in_ofh.available) {
+-      int count = block_max;
+-      if ((size_t)count > in_ofh.available)
+-        count = in_ofh.available;
+-
+-      count = sys->read(infh, buf, count);
+-      if (count < 0) {
+-        ret = MSPACK_ERR_READ;
+-        goto out;
+-      }
+-      in_ofh.available -= count;
+-    }
++    ret = copy_fh(sys, infh, NULL, in_ofh.available, buf, self->buf_size);
++    if (ret) goto out;
+ 
+     if (out_ofh.crc != blk_crc) {
+       ret = MSPACK_ERR_CHECKSUM;
+@@ -394,3 +371,33 @@
+ 
+   return ret;
+ }
++
++static int copy_fh(struct mspack_system *sys, struct mspack_file *infh,
++                   struct mspack_file *outfh, size_t bytes_to_copy,
++                   unsigned char *buf, int buf_size)
++{
++    while (bytes_to_copy) {
++        int run = buf_size;
++        if ((size_t) run > bytes_to_copy) {
++            run = (int) bytes_to_copy;
++        }
++        if (sys->read(infh, buf, run) != run) {
++            return MSPACK_ERR_READ;
++        }
++        if (outfh && sys->write(outfh, buf, run) != run) {
++            return MSPACK_ERR_WRITE;
++        }
++        bytes_to_copy -= run;
++    }
++    return MSPACK_ERR_OK;
++}
++
++static int oabd_param(struct msoab_decompressor *base, int param, int value) {
++    struct msoab_decompressor_p *self = (struct msoab_decompressor_p *) base;
++    if (self && param == MSOABD_PARAM_DECOMPBUF && value >= 16) {
++        /* must be at least 16 bytes (patchblk_SIZEOF, oabblk_SIZEOF) */
++        self->buf_size = value;
++        return MSPACK_ERR_OK;
++    }
++    return MSPACK_ERR_ARGS;
++}
+diff -Nru -w libmspack-0.9.1/mspack/oab.h libmspack-0.10.1/mspack/oab.h
+--- libmspack-0.9.1/mspack/oab.h	2018-11-05 12:53:09.000000000 +0100
++++ libmspack-0.10.1/mspack/oab.h	2019-02-18 17:39:40.000000000 +0100
+@@ -27,6 +27,7 @@
+ struct msoab_decompressor_p {
+   struct msoab_decompressor base;
+   struct mspack_system *system;
++  int buf_size;
+   /* todo */
+ };
+ 
+diff -Nru -w libmspack-0.9.1/mspack/system.c libmspack-0.10.1/mspack/system.c
+--- libmspack-0.9.1/mspack/system.c	2018-11-05 12:53:09.000000000 +0100
++++ libmspack-0.10.1/mspack/system.c	2019-02-18 17:26:17.000000000 +0100
+@@ -31,12 +31,15 @@
+    * - added MSCABD_PARAM_SALVAGE
+    */
+   case MSPACK_VER_MSCABD:
++  /* OAB decoder version  1 -> 2 changes:
++   * - added msoab_decompressor::set_param and MSOABD_PARAM_DECOMPBUF
++   */
++  case MSPACK_VER_MSOABD:
+     return 2;
+   case MSPACK_VER_LIBRARY:
+   case MSPACK_VER_SYSTEM:
+   case MSPACK_VER_MSSZDDD:
+   case MSPACK_VER_MSKWAJD:
+-  case MSPACK_VER_MSOABD:
+     return 1;
+   case MSPACK_VER_MSCABC:
+   case MSPACK_VER_MSCHMC:
+diff -Nru -w libmspack-0.9.1/mspack/system.h libmspack-0.10.1/mspack/system.h
+--- libmspack-0.9.1/mspack/system.h	2018-11-05 12:53:09.000000000 +0100
++++ libmspack-0.10.1/mspack/system.h	2019-03-04 02:10:28.000000000 +0100
+@@ -81,20 +81,19 @@
+ #endif
+ 
+ /* endian-neutral reading of little-endian data */
+-#define __egi32(a,n) ( ((((unsigned char *) a)[n+3]) << 24) | \
+-                       ((((unsigned char *) a)[n+2]) << 16) | \
+-                       ((((unsigned char *) a)[n+1]) <<  8) | \
+-                       ((((unsigned char *) a)[n+0])))
+-#define EndGetI64(a) ((((unsigned long long int) __egi32(a,4)) << 32) | \
+-                      ((unsigned int) __egi32(a,0)))
++#define __egi32(a,n) (((unsigned int) ((unsigned char *)(a))[n+3] << 24) | \
++                      ((unsigned int) ((unsigned char *)(a))[n+2] << 16) | \
++                      ((unsigned int) ((unsigned char *)(a))[n+1] <<  8) | \
++                      ((unsigned int) ((unsigned char *)(a))[n]))
++#define EndGetI64(a) (((unsigned long long int) __egi32(a,4) << 32) | __egi32(a,0))
+ #define EndGetI32(a) __egi32(a,0)
+ #define EndGetI16(a) ((((a)[1])<<8)|((a)[0]))
+ 
+ /* endian-neutral reading of big-endian data */
+-#define EndGetM32(a) (((((unsigned char *) a)[0]) << 24) | \
+-                      ((((unsigned char *) a)[1]) << 16) | \
+-                      ((((unsigned char *) a)[2]) <<  8) | \
+-                      ((((unsigned char *) a)[3])))
++#define EndGetM32(a) (((unsigned int) ((unsigned char *)(a))[0] << 24) | \
++                      ((unsigned int) ((unsigned char *)(a))[1] << 16) | \
++                      ((unsigned int) ((unsigned char *)(a))[2] <<  8) | \
++                      ((unsigned int) ((unsigned char *)(a))[3]))
+ #define EndGetM16(a) ((((a)[0])<<8)|((a)[1]))
+ 
+ extern struct mspack_system *mspack_default_system;
+diff -Nru -w libmspack-0.9.1/README libmspack-0.10.1/README
+--- libmspack-0.9.1/README	2018-11-06 12:16:32.000000000 +0100
++++ libmspack-0.10.1/README	2019-03-04 10:36:57.000000000 +0100
+@@ -1,4 +1,4 @@
+-libmspack 0.9.1alpha
++libmspack 0.10.1alpha
+ 
+ The purpose of libmspack is to provide compressors and decompressors,
+ archivers and dearchivers for Microsoft compression formats: CAB, CHM, WIM,

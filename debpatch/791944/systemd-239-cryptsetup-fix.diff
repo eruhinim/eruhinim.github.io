@@ -1,0 +1,96 @@
+diff -urN systemd-239/debian/udev.init systemd-239-cryptsetup-fix/debian/udev.init
+--- systemd-239/debian/udev.init	2018-07-22 13:40:15.000000000 +0200
++++ systemd-239-cryptsetup-fix/debian/udev.init	2018-08-11 11:51:48.000000000 +0200
+@@ -4,10 +4,18 @@
+ # Required-Start:    mountkernfs
+ # Required-Stop:
+ # Default-Start:     S
+-# Default-Stop:
++# Default-Stop:      0 6
+ # Short-Description: Start systemd-udevd, populate /dev and load drivers.
+ ### END INIT INFO
+ 
++PATH="/sbin:/bin"
++NAME="systemd-udevd"
++DAEMON="/lib/systemd/systemd-udevd"
++DESC="the hotplug events dispatcher"
++PIDFILE="/run/udev.pid"
++CTRLFILE="/run/udev/control"
++OMITDIR="/run/sendsigs.omit.d"
++
+ # we need to unmount /dev/pts/ and remount it later over the devtmpfs
+ unmount_devpts() {
+   if mountpoint -q /dev/pts/; then
+@@ -98,10 +106,6 @@
+ 
+ ##############################################################################
+ 
+-PATH="/sbin:/bin"
+-NAME="systemd-udevd"
+-DAEMON="/lib/systemd/systemd-udevd"
+-DESC="the hotplug events dispatcher"
+ 
+ [ -x $DAEMON ] || exit 0
+ 
+@@ -175,7 +179,11 @@
+     [ -x /sbin/restorecon ] && /sbin/restorecon -R /dev
+ 
+     log_daemon_msg "Starting $DESC" "$NAME"
+-    if $DAEMON --daemon; then
++    if start-stop-daemon --start --name $NAME --user root --quiet \
++	--pidfile $PIDFILE --exec $DAEMON --background --make-pidfile; then
++	# prevents to be killed by sendsigs (see #791944)
++	mkdir -p $OMITDIR
++	ln -sf $PIDFILE $OMITDIR/$NAME
+ 	log_end_msg $?
+     else
+ 	log_warning_msg $?
+@@ -203,7 +211,9 @@
+ 
+     stop)
+     log_daemon_msg "Stopping $DESC" "$NAME"
+-    if start-stop-daemon --stop --name $NAME --user root --quiet --oknodo --retry 5; then
++    if start-stop-daemon --stop --name $NAME --user root --quiet \
++	--pidfile $PIDFILE --remove-pidfile --oknodo --retry 5; then
++	rm -f $CTRLFILE    # prevents cryptsetup/dmsetup hangs (see #791944)
+ 	log_end_msg $?
+     else
+ 	log_end_msg $?
+@@ -212,14 +222,20 @@
+ 
+     restart)
+     log_daemon_msg "Stopping $DESC" "$NAME"
+-    if start-stop-daemon --stop --name $NAME --user root --quiet --oknodo --retry 5; then
++    if start-stop-daemon --stop --name $NAME --user root --quiet \
++	--pidfile $PIDFILE --remove-pidfile --oknodo --retry 5; then
++	rm -f $CTRLFILE    # prevents cryptsetup/dmsetup hangs (see #791944)
+ 	log_end_msg $?
+     else
+ 	log_end_msg $? || true
+     fi
+ 
+     log_daemon_msg "Starting $DESC" "$NAME"
+-    if $DAEMON --daemon; then
++    if start-stop-daemon --start --name $NAME --user root --quiet \
++	--pidfile $PIDFILE --exec $DAEMON --background --make-pidfile; then
++	# prevents to be killed by sendsigs (see #791944)
++	mkdir -p $OMITDIR
++	ln -sf $PIDFILE $OMITDIR/$NAME
+ 	log_end_msg $?
+     else
+ 	log_end_msg $?
+diff -urN systemd-239/debian/udev.postinst systemd-239-cryptsetup-fix/debian/udev.postinst
+--- systemd-239/debian/udev.postinst	2018-07-22 13:40:15.000000000 +0200
++++ systemd-239-cryptsetup-fix/debian/udev.postinst	2018-08-11 11:51:57.000000000 +0200
+@@ -85,6 +85,11 @@
+ NamePolicy=onboard kernel
+ EOF
+   fi
++
++  # new Default-Stop (see #791944)
++  if dpkg --compare-versions "$2" le '239-7'; then
++    update-rc.d -f udev remove
++  fi
+ }
+ 
+ update_hwdb() {

@@ -1,0 +1,303 @@
+commit 77914836bb483673261377a737cfb8f72efff81c
+Author: Peter van Dijk <peter@7bits.nl>
+Date:   Wed Jan 5 13:51:23 2022 +0100
+
+    import upstream patch to fix Evolution crashes
+
+diff --git a/debian/changelog b/debian/changelog
+index 0a21d5f..e60e774 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,3 +1,11 @@
++evolution-data-server (3.38.3-1.1) UNRELEASED; urgency=medium
++
++  * Non-maintainer upload.
++  * Import https://gitlab.gnome.org/GNOME/evolution-data-server/-/commit/1f1017492
++    to fix https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=986564
++
++ -- Peter van Dijk <peter@7bits.nl>  Wed, 05 Jan 2022 13:49:49 +0100
++
+ evolution-data-server (3.38.3-1) unstable; urgency=medium
+ 
+   * New upstream release
+diff --git a/debian/libcamel-1.2-62.symbols b/debian/libcamel-1.2-62.symbols
+index 467511e..0cf7260 100644
+--- a/debian/libcamel-1.2-62.symbols
++++ b/debian/libcamel-1.2-62.symbols
+@@ -1359,6 +1359,8 @@ libcamel-1.2.so.62 libcamel-1.2-62 #MINVER#
+  camel_util_bdata_get_string@Base 3.24.1
+  camel_util_bdata_put_number@Base 3.24.1
+  camel_util_bdata_put_string@Base 3.24.1
++ camel_utils_weak_ref_free@Base 3.38.3-1.1
++ camel_utils_weak_ref_new@Base 3.38.3-1.1
+  camel_uudecode_step@Base 3.19.92
+  camel_uuencode_close@Base 3.19.92
+  camel_uuencode_step@Base 3.19.92
+diff --git a/debian/patches/evolution-crash.patch b/debian/patches/evolution-crash.patch
+new file mode 100644
+index 0000000..0270049
+--- /dev/null
++++ b/debian/patches/evolution-crash.patch
+@@ -0,0 +1,253 @@
++import https://gitlab.gnome.org/GNOME/evolution-data-server/-/commit/1f1017492
++
++this fixes https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=986564
++--- a/src/camel/camel-folder.c
+++++ b/src/camel/camel-folder.c
++@@ -152,50 +152,61 @@
++ 	camel_folder_synchronize_sync (folder, FALSE, cancellable, error);
++ }
++ 
+++static void
+++folder_schedule_store_changes_job (CamelFolder *folder)
+++{
+++	CamelSession *session;
+++	CamelStore *parent_store;
+++
+++	g_return_if_fail (CAMEL_IS_FOLDER (folder));
+++
+++	parent_store = camel_folder_get_parent_store (folder);
+++	session = parent_store ? camel_service_ref_session (CAMEL_SERVICE (parent_store)) : NULL;
+++	if (session) {
+++		gchar *description;
+++
+++		/* Translators: The first â%sâ is replaced with an account name and the second â%sâ
+++		   is replaced with a full path name. The spaces around â:â are intentional, as
+++		   the whole â%s : %sâ is meant as an absolute identification of the folder. */
+++		description = g_strdup_printf (_("Storing changes in folder â%s : %sâ"),
+++			camel_service_get_display_name (CAMEL_SERVICE (parent_store)),
+++			camel_folder_get_full_name (folder));
+++
+++		camel_session_submit_job (session, description,
+++			folder_store_changes_job_cb,
+++			g_object_ref (folder), g_object_unref);
+++
+++		g_free (description);
+++	}
+++
+++	g_clear_object (&session);
+++}
+++
++ static gboolean
++-folder_schedule_store_changes_job (gpointer user_data)
+++folder_schedule_store_changes_job_cb (gpointer user_data)
++ {
++-	CamelFolder *folder = user_data;
+++	GWeakRef *weak_ref = user_data;
++ 	GSource *source;
+++	CamelFolder *folder;
++ 
++ 	source = g_main_current_source ();
++ 
++ 	if (g_source_is_destroyed (source))
++ 		return FALSE;
++ 
++-	g_return_val_if_fail (CAMEL_IS_FOLDER (folder), FALSE);
++-
++-	g_mutex_lock (&folder->priv->store_changes_lock);
++-
++-	if (folder->priv->store_changes_id == g_source_get_id (source)) {
++-		CamelSession *session;
++-		CamelStore *parent_store;
++-
++-		folder->priv->store_changes_id = 0;
++-
++-		parent_store = camel_folder_get_parent_store (folder);
++-		session = parent_store ? camel_service_ref_session (CAMEL_SERVICE (parent_store)) : NULL;
++-		if (session) {
++-			gchar *description;
+++	folder = g_weak_ref_get (weak_ref);
+++	if (folder) {
+++		g_mutex_lock (&folder->priv->store_changes_lock);
++ 
++-			/* Translators: The first â%sâ is replaced with an account name and the second â%sâ
++-			   is replaced with a full path name. The spaces around â:â are intentional, as
++-			   the whole â%s : %sâ is meant as an absolute identification of the folder. */
++-			description = g_strdup_printf (_("Storing changes in folder â%s : %sâ"),
++-				camel_service_get_display_name (CAMEL_SERVICE (parent_store)),
++-				camel_folder_get_full_name (folder));
++-
++-			camel_session_submit_job (session, description,
++-				folder_store_changes_job_cb,
++-				g_object_ref (folder), g_object_unref);
++-
++-			g_free (description);
+++		if (folder->priv->store_changes_id == g_source_get_id (source)) {
+++			folder->priv->store_changes_id = 0;
+++			folder_schedule_store_changes_job (folder);
++ 		}
++ 
++-		g_clear_object (&session);
++-	}
+++		g_mutex_unlock (&folder->priv->store_changes_lock);
++ 
++-	g_mutex_unlock (&folder->priv->store_changes_lock);
+++		g_object_unref (folder);
+++	}
++ 
++ 	return FALSE;
++ }
++@@ -235,8 +246,9 @@
++ 		if (interval == 0)
++ 			folder_schedule_store_changes_job (folder);
++ 		else if (interval > 0)
++-			folder->priv->store_changes_id = g_timeout_add_seconds (interval,
++-				folder_schedule_store_changes_job, folder);
+++			folder->priv->store_changes_id = g_timeout_add_seconds_full (G_PRIORITY_DEFAULT, interval,
+++				folder_schedule_store_changes_job_cb,
+++				camel_utils_weak_ref_new (folder), (GDestroyNotify) camel_utils_weak_ref_free);
++ 	}
++ 
++ 	g_mutex_unlock (&folder->priv->store_changes_lock);
++@@ -788,6 +800,12 @@
++ 
++ 	folder = CAMEL_FOLDER (object);
++ 
+++	g_mutex_lock (&folder->priv->store_changes_lock);
+++	if (folder->priv->store_changes_id)
+++		g_source_remove (folder->priv->store_changes_id);
+++	folder->priv->store_changes_id = 0;
+++	g_mutex_unlock (&folder->priv->store_changes_lock);
+++
++ 	if (folder->priv->summary) {
++ 		camel_folder_summary_save (folder->priv->summary, NULL);
++ 		g_clear_object (&folder->priv->summary);
++@@ -800,12 +818,6 @@
++ 		folder->priv->parent_store = NULL;
++ 	}
++ 
++-	g_mutex_lock (&folder->priv->store_changes_lock);
++-	if (folder->priv->store_changes_id)
++-		g_source_remove (folder->priv->store_changes_id);
++-	folder->priv->store_changes_id = 0;
++-	g_mutex_unlock (&folder->priv->store_changes_lock);
++-
++ 	/* Chain up to parent's dispose () method. */
++ 	G_OBJECT_CLASS (camel_folder_parent_class)->dispose (object);
++ }
++--- a/src/camel/camel-utils.c
+++++ b/src/camel/camel-utils.c
++@@ -240,3 +240,47 @@
++ 
++ 	return mktime (&tm);
++ }
+++
+++/**
+++ * camel_utils_weak_ref_new: (skip)
+++ * @object: (nullable): a #GObject or %NULL
+++ *
+++ * Allocates a new #GWeakRef and calls g_weak_ref_set() with @object.
+++ *
+++ * Free the returned #GWeakRef with camel_utils_weak_ref_free().
+++ *
+++ * Returns: (transfer full): a new #GWeakRef
+++ *
+++ * Since: 3.38.4
+++ **/
+++GWeakRef *
+++camel_utils_weak_ref_new (gpointer object)
+++{
+++	GWeakRef *weak_ref;
+++
+++	/* Based on e_weak_ref_new(). */
+++
+++	weak_ref = g_slice_new0 (GWeakRef);
+++	g_weak_ref_init (weak_ref, object);
+++
+++	return weak_ref;
+++}
+++
+++/**
+++ * camel_utils_weak_ref_free: (skip)
+++ * @weak_ref: a #GWeakRef
+++ *
+++ * Frees a #GWeakRef created by camel_utils_weak_ref_new().
+++ *
+++ * Since: 3.38.4
+++ **/
+++void
+++camel_utils_weak_ref_free (GWeakRef *weak_ref)
+++{
+++	g_return_if_fail (weak_ref != NULL);
+++
+++	/* Based on e_weak_ref_free(). */
+++
+++	g_weak_ref_clear (weak_ref);
+++	g_slice_free (GWeakRef, weak_ref);
+++}
++--- a/src/camel/camel-utils.h
+++++ b/src/camel/camel-utils.h
++@@ -41,6 +41,9 @@
++ 						 CamelTimeUnit unit,
++ 						 gint value);
++ 
+++GWeakRef *	camel_utils_weak_ref_new	(gpointer object);
+++void		camel_utils_weak_ref_free	(GWeakRef *weak_ref);
+++
++ G_END_DECLS
++ 
++ #endif /* CAMEL_UTILS_H */
++--- a/src/camel/providers/imapx/camel-imapx-server.c
+++++ b/src/camel/providers/imapx/camel-imapx-server.c
++@@ -380,32 +380,6 @@
++ 	}
++ }
++ 
++-static GWeakRef *
++-imapx_weak_ref_new (gpointer object)
++-{
++-	GWeakRef *weak_ref;
++-
++-	/* XXX Might want to expose this in Camel's public API if it
++-	 *     proves useful elsewhere.  Based on e_weak_ref_new(). */
++-
++-	weak_ref = g_slice_new0 (GWeakRef);
++-	g_weak_ref_init (weak_ref, object);
++-
++-	return weak_ref;
++-}
++-
++-static void
++-imapx_weak_ref_free (GWeakRef *weak_ref)
++-{
++-	g_return_if_fail (weak_ref != NULL);
++-
++-	/* XXX Might want to expose this in Camel's public API if it
++-	 *     proves useful elsewhere.  Based on e_weak_ref_free(). */
++-
++-	g_weak_ref_clear (weak_ref);
++-	g_slice_free (GWeakRef, weak_ref);
++-}
++-
++ static const CamelIMAPXUntaggedRespHandlerDesc *
++ replace_untagged_descriptor (GHashTable *untagged_handlers,
++                              const gchar *key,
++@@ -700,8 +674,8 @@
++ 	g_source_set_callback (
++ 		is->priv->inactivity_timeout,
++ 		imapx_server_inactivity_timeout_cb,
++-		imapx_weak_ref_new (is),
++-		(GDestroyNotify) imapx_weak_ref_free);
+++		camel_utils_weak_ref_new (is),
+++		(GDestroyNotify) camel_utils_weak_ref_free);
++ 	g_source_attach (is->priv->inactivity_timeout, NULL);
++ 
++ 	g_mutex_unlock (&is->priv->inactivity_timeout_lock);
++@@ -7207,7 +7181,7 @@
++ 	is->priv->idle_pending = g_timeout_source_new_seconds (IMAPX_IDLE_WAIT_SECONDS);
++ 	g_source_set_callback (
++ 		is->priv->idle_pending, imapx_server_run_idle_thread_cb,
++-		imapx_weak_ref_new (is), (GDestroyNotify) imapx_weak_ref_free);
+++		camel_utils_weak_ref_new (is), (GDestroyNotify) camel_utils_weak_ref_free);
++ 	g_source_attach (is->priv->idle_pending, NULL);
++ 
++ 	g_mutex_unlock (&is->priv->idle_lock);
+diff --git a/debian/patches/series b/debian/patches/series
+index d876186..22f8341 100644
+--- a/debian/patches/series
++++ b/debian/patches/series
+@@ -3,3 +3,4 @@ ubuntu_gettext_domain.patch
+ I-281-GLibTools.cmake-Use-basename-in-glib-mkenums-templa.patch
+ M-62-GObjectIntrospection.cmake-Specify-the-sources-top-d.patch
+ I-282-tests-Avoid-build-source-directories-in-executables.patch
++evolution-crash.patch

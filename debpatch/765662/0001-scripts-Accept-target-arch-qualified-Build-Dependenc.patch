@@ -1,0 +1,270 @@
+From 77aff816f9aa894844b9a4bdc9959177467c2971 Mon Sep 17 00:00:00 2001
+From: josch <j.schauer@email.de>
+Date: Fri, 17 Oct 2014 08:39:30 +0200
+Subject: [PATCH] =?UTF-8?q?scripts:=20Accept=20=E2=80=9C:target=E2=80=9D?=
+ =?UTF-8?q?=20arch-qualified=20Build-Dependencies?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ debian/changelog               |  6 +++++-
+ scripts/Dpkg/Arch.pm           | 19 +++++++++++++++++++
+ scripts/Dpkg/Deps.pm           | 27 ++++++++++++++++++++++++---
+ scripts/dpkg-checkbuilddeps.pl | 10 +++++++---
+ scripts/t/Dpkg_Deps.t          |  5 ++++-
+ 5 files changed, 59 insertions(+), 8 deletions(-)
+
+diff --git a/debian/changelog b/debian/changelog
+index bf93b1f..833d319 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,6 +1,10 @@
+ dpkg (1.17.20) UNRELEASED; urgency=low
+ 
+-  * 
++  [ Johannes Schauer ]
++  * dpkg-checkbuilddeps:
++    - Add the --target-arch option to specify the target architecture for
++      building compilers
++    - Accept “:target” arch-qualified Build-Dependencies.
+ 
+  -- Guillem Jover <guillem@debian.org>  Mon, 20 Oct 2014 16:06:38 +0200
+ 
+diff --git a/scripts/Dpkg/Arch.pm b/scripts/Dpkg/Arch.pm
+index f561b66..e5bc67a 100644
+--- a/scripts/Dpkg/Arch.pm
++++ b/scripts/Dpkg/Arch.pm
+@@ -23,6 +23,7 @@ our $VERSION = '0.01';
+ use Exporter qw(import);
+ our @EXPORT_OK = qw(get_raw_build_arch get_raw_host_arch
+                     get_build_arch get_host_arch get_gcc_host_gnu_type
++                    get_target_arch
+                     get_valid_arches debarch_eq debarch_is debarch_is_wildcard
+                     debarch_to_cpuattrs
+                     debarch_to_gnutriplet gnutriplet_to_debarch
+@@ -50,6 +51,7 @@ my %debarch_to_debtriplet;
+     my $build_arch;
+     my $host_arch;
+     my $gcc_host_gnu_type;
++    my $target_arch;
+ 
+     sub get_raw_build_arch()
+     {
+@@ -120,6 +122,23 @@ my %debarch_to_debtriplet;
+     {
+ 	return Dpkg::BuildEnv::get('DEB_HOST_ARCH') || get_raw_host_arch();
+     }
++
++    sub get_raw_target_arch()
++    {
++	return $target_arch if defined $target_arch;
++
++	if (!defined($target_arch)) {
++	    # Fall back to building a compiler for the host arch.
++	    $host_arch = get_raw_host_arch();
++	}
++
++	return $target_arch;
++    }
++
++    sub get_target_arch()
++    {
++	return Dpkg::BuildEnv::get('DEB_TARGET_ARCH') || get_raw_target_arch();
++    }
+ }
+ 
+ sub get_valid_arches()
+diff --git a/scripts/Dpkg/Deps.pm b/scripts/Dpkg/Deps.pm
+index 5e9728b..0aa186a 100644
+--- a/scripts/Dpkg/Deps.pm
++++ b/scripts/Dpkg/Deps.pm
+@@ -49,10 +49,10 @@ All the deps_* functions are exported by default.
+ use strict;
+ use warnings;
+ 
+-our $VERSION = '1.05';
++our $VERSION = '1.06';
+ 
+ use Dpkg::Version;
+-use Dpkg::Arch qw(get_host_arch get_build_arch);
++use Dpkg::Arch qw(get_host_arch get_build_arch get_target_arch);
+ use Dpkg::BuildProfiles qw(get_build_profiles);
+ use Dpkg::ErrorHandling;
+ use Dpkg::Gettext;
+@@ -190,6 +190,11 @@ Dpkg::Arch::get_host_arch() to identify the proper architecture.
+ Define the build architecture. By default it uses
+ Dpkg::Arch::get_build_arch() to identify the proper architecture.
+ 
++=item target_arch (defaults to the current architecture)
++
++Define the target architecture. By default it uses
++Dpkg::Arch::get_target_arch() to identify the proper architecture.
++
+ =item reduce_arch (defaults to 0)
+ 
+ If set to 1, ignore dependencies that do not concern the current host
+@@ -243,6 +248,7 @@ sub deps_parse {
+     $options{reduce_arch} //= 0;
+     $options{host_arch} //= get_host_arch();
+     $options{build_arch} //= get_build_arch();
++    $options{target_arch} //= get_target_arch();
+     $options{use_profiles} //= 1;
+     $options{reduce_profiles} //= 0;
+     $options{build_profiles} //= [ get_build_profiles() ];
+@@ -267,6 +273,8 @@ sub deps_parse {
+ 	                                             $options{host_arch},
+ 	                                             build_arch =>
+ 	                                             $options{build_arch},
++	                                             target_arch =>
++	                                             $options{target_arch},
+ 	                                             build_dep =>
+ 	                                             $options{build_dep});
+ 	    if (not defined $dep_simple->{package}) {
+@@ -558,6 +566,7 @@ sub new {
+     $self->reset();
+     $self->{host_arch} = $opts{host_arch} || Dpkg::Arch::get_host_arch();
+     $self->{build_arch} = $opts{build_arch} || Dpkg::Arch::get_build_arch();
++    $self->{target_arch} = $opts{target_arch} || Dpkg::Arch::get_target_arch();
+     $self->{build_dep} = $opts{build_dep} // 0;
+     $self->parse_string($arg) if defined($arg);
+     return $self;
+@@ -609,6 +618,7 @@ sub parse_string {
+             }x;
+     if (defined($2)) {
+ 	return if $2 eq 'native' and not $self->{build_dep};
++	return if $2 eq 'target' and not $self->{build_dep};
+ 	$self->{archqual} = $2;
+     }
+     $self->{package} = $1;
+@@ -724,11 +734,15 @@ sub _arch_qualifier_allows_implication {
+     } elsif (defined $p and $p eq 'native') {
+ 	return 1 if defined $q and ($q eq 'any' or $q eq 'native');
+ 	return 0;
++    } elsif (defined $p and $p eq 'target') {
++	return 1 if defined $q and ($q eq 'any' or $q eq 'target');
++	return 0;
+     } elsif (defined $p) {
+ 	return 1 if defined $q and ($p eq $q or $q eq 'any');
+ 	return 0;
+     } else {
+-	return 0 if defined $q and $q ne 'any' and $q ne 'native';
++	return 0 if defined $q and $q ne 'any' and $q ne 'native'
++			       and $q ne 'target';
+ 	return 1;
+     }
+ }
+@@ -1419,6 +1433,7 @@ sub _find_package {
+     return if not exists $self->{pkg}{$pkg};
+     my $host_arch = $dep->{host_arch};
+     my $build_arch = $dep->{build_arch};
++    my $target_arch = $dep->{target_arch};
+     foreach my $p (@{$self->{pkg}{$pkg}}) {
+ 	my $a = $p->{architecture};
+ 	my $ma = $p->{multiarch};
+@@ -1433,6 +1448,8 @@ sub _find_package {
+ 	    return $p if $ma eq 'allowed';
+ 	} elsif ($archqual eq 'native') {
+ 	    return $p if $a eq $build_arch and $ma ne 'foreign';
++	} elsif ($archqual eq 'target') {
++	    return $p if $a eq $target_arch and $ma ne 'foreign';
+ 	} else {
+ 	    return $p if $a eq $archqual;
+ 	}
+@@ -1480,6 +1497,10 @@ sub _evaluate_simple_dep {
+ 
+ =head1 CHANGES
+ 
++=head2 Version 1.06
++
++New option: Add target_arch option to Dpkg::Deps::deps_parse().
++
+ =head2 Version 1.05
+ 
+ New function: Dpkg::Deps::deps_iterate().
+diff --git a/scripts/dpkg-checkbuilddeps.pl b/scripts/dpkg-checkbuilddeps.pl
+index 3feba3a..f004eb2 100755
+--- a/scripts/dpkg-checkbuilddeps.pl
++++ b/scripts/dpkg-checkbuilddeps.pl
+@@ -27,7 +27,7 @@ use Getopt::Long qw(:config posix_default bundling no_ignorecase);
+ use Dpkg ();
+ use Dpkg::Gettext;
+ use Dpkg::ErrorHandling;
+-use Dpkg::Arch qw(get_host_arch);
++use Dpkg::Arch qw(get_host_arch get_target_arch);
+ use Dpkg::BuildProfiles qw(get_build_profiles set_build_profiles);
+ use Dpkg::Deps;
+ use Dpkg::Control::Info;
+@@ -52,6 +52,8 @@ sub usage {
+   -c build-conf  use given string for build conflicts instead of
+                  retrieving them from control file
+   -a arch        assume given host architecture
++  --target-arch=<arch>
++                 assume given target architecture
+   -P profiles    assume given build profiles (comma-separated list)
+   --admindir=<directory>
+                  change the administrative directory.
+@@ -67,6 +69,7 @@ my $ignore_bd_indep = 0;
+ my ($bd_value, $bc_value);
+ my $bp_value;
+ my $host_arch = get_host_arch();
++my $target_arch = get_target_arch();
+ my $admindir = $Dpkg::ADMINDIR;
+ my @options_spec = (
+     'help|?' => sub { usage(); exit(0); },
+@@ -76,6 +79,7 @@ my @options_spec = (
+     'd=s' => \$bd_value,
+     'c=s' => \$bc_value,
+     'a=s' => \$host_arch,
++    'target-arch=s' => \$target_arch,
+     'P=s' => \$bp_value,
+     'admindir=s' => \$admindir,
+ );
+@@ -112,7 +116,7 @@ my (@unmet, @conflicts);
+ if ($bd_value) {
+     my $dep = deps_parse($bd_value, reduce_restrictions => 1,
+                          build_dep => 1, build_profiles => \@build_profiles,
+-                         host_arch => $host_arch);
++                         host_arch => $host_arch, target_arch => $target_arch);
+     error(_g('error occurred while parsing %s'),
+           'Build-Depends/Build-Depends-Arch/Build-Depends-Indep')
+         unless defined $dep;
+@@ -121,7 +125,7 @@ if ($bd_value) {
+ if ($bc_value) {
+     my $dep = deps_parse($bc_value, reduce_restrictions => 1, union => 1,
+                          build_dep => 1, build_profiles => \@build_profiles,
+-                         host_arch => $host_arch);
++                         host_arch => $host_arch, target_arch => $target_arch);
+     error(_g('error occurred while parsing %s'),
+           'Build-Conflicts/Build-Conflicts-Arch/Build-Conflicts-Indep')
+         unless defined $dep;
+diff --git a/scripts/t/Dpkg_Deps.t b/scripts/t/Dpkg_Deps.t
+index 9fa06d8..6fd30bb 100644
+--- a/scripts/t/Dpkg_Deps.t
++++ b/scripts/t/Dpkg_Deps.t
+@@ -16,7 +16,7 @@
+ use strict;
+ use warnings;
+ 
+-use Test::More tests => 45;
++use Test::More tests => 47;
+ use Dpkg::Arch qw(get_host_arch);
+ use Dpkg::Version;
+ 
+@@ -57,10 +57,13 @@ is($dep_or2->implies($dep_or1), undef, 'Implication between OR 2/2');
+ my $dep_ma_any = deps_parse('libcairo2:any');
+ my $dep_ma_native = deps_parse('libcairo2');
+ my $dep_ma_native2 = deps_parse('libcairo2:native', build_dep => 1);
++my $dep_ma_target = deps_parse('libcairo2:target', build_dep => 1);
+ is($dep_ma_native->implies($dep_ma_any), 1, 'foo -> foo:any');
+ is($dep_ma_native2->implies($dep_ma_any), 1, 'foo:native -> foo:any');
++is($dep_ma_target->implies($dep_ma_any), 1, 'foo:target -> foo:any');
+ is($dep_ma_any->implies($dep_ma_native), undef, 'foo:any !-> foo');
+ is($dep_ma_any->implies($dep_ma_native2), undef, 'foo:any !-> foo:native');
++is($dep_ma_any->implies($dep_ma_target), undef, 'foo:any !-> foo:target');
+ 
+ my $field_arch = 'libc6 (>= 2.5) [!alpha !hurd-i386], libc6.1 [alpha], libc0.1 [hurd-i386]';
+ my $dep_i386 = deps_parse($field_arch, reduce_arch => 1, host_arch => 'i386');
+-- 
+2.0.1
+

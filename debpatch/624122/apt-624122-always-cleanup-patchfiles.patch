@@ -1,0 +1,117 @@
+commit 34d6ece7566ea4fcda2286478b31641378aefc93
+Author: David Kalnischkies <david@kalnischkies.de>
+Date:   Mon Feb 10 17:55:13 2014 +0100
+
+    always cleanup patchfiles at the end of rred call
+    
+    With APT::Get::List-Cleanup disabled the ed-style patch files are
+    lingering in the lists/ directory otherwise. That was kinda okay in the
+    old none-client-merge as the filename was always the same so it was
+    constantly overridden, but now with different names for client-merge
+    quiet a few could pill up on the system and are used by the next call
+    as it picks them up based on the filename.
+
+diff --git a/apt-pkg/acquire-item.cc b/apt-pkg/acquire-item.cc
+index 1185908..60003c0 100644
+--- a/apt-pkg/acquire-item.cc
++++ b/apt-pkg/acquire-item.cc
+@@ -757,6 +757,7 @@ void pkgAcqIndexDiffs::Done(string Message,unsigned long long Size,string Md5Has
+    {
+       // remove the just applied patch
+       available_patches.erase(available_patches.begin());
++      unlink((FinalFile + ".ed").c_str());
+ 
+       // move into place
+       if(Debug) 
+@@ -887,6 +888,14 @@ void pkgAcqIndexMergeDiffs::Done(string Message,unsigned long long Size,string M
+       // otherwise lists cleanup will eat the file
+       DestFile = FinalFile;
+ 
++      // ensure the ed's are gone regardless of list-cleanup
++      for (std::vector<pkgAcqIndexMergeDiffs *>::const_iterator I = allPatches->begin();
++	    I != allPatches->end(); ++I)
++      {
++	    std::string patch = FinalFile + ".ed." + (*I)->patch.file + ".gz";
++	    unlink(patch.c_str());
++      }
++
+       // all set and done
+       Complete = true;
+       if(Debug)
+diff --git a/test/integration/test-pdiff-usage b/test/integration/test-pdiff-usage
+index ad31511..afe1ad4 100755
+--- a/test/integration/test-pdiff-usage
++++ b/test/integration/test-pdiff-usage
+@@ -31,6 +31,16 @@ wasmergeused() {
+ 		msgfail
+ 	fi
+ 
++	msgtest 'No intermediate patch files' 'still exist'
++	local EDS="$(find rootdir/var/lib/apt/lists -name '*.ed' -o -name '*.ed.*')"
++	if [ -z "$EDS" ]; then
++		msgpass
++	else
++		echo
++		echo "$EDS"
++		msgfail
++	fi
++
+ 	msgtest 'Check if the right pdiff merger was used'
+ 	if grep -q '^pkgAcqIndexMergeDiffs::Done(): rred' $OUTPUT; then
+ 		if echo "$*" | grep -q -- '-o Acquire::PDiffs::Merge=1'; then
+@@ -46,7 +56,7 @@ wasmergeused() {
+ }
+ 
+ testrun() {
+-	# setup the base
++	msgmsg "Testcase: setup the base with: $*"
+ 	find aptarchive -name 'Packages*' -type f -delete
+ 	cp ${PKGFILE} aptarchive/Packages
+ 	compressfile 'aptarchive/Packages'
+@@ -59,7 +69,7 @@ testrun() {
+ 	testequal "$(cat ${PKGFILE})
+ " aptcache show apt oldstuff
+ 
+-	msgmsg 'Testcase: apply with one patch'
++	msgmsg "Testcase: apply with one patch: $*"
+ 	cp ${PKGFILE}-new aptarchive/Packages
+ 	compressfile 'aptarchive/Packages'
+ 	mkdir -p aptarchive/Packages.diff
+@@ -82,13 +92,13 @@ SHA1-Patches:
+ 	testequal "$(cat ${PKGFILE}-new)
+ " aptcache show apt newstuff
+ 
+-	msgmsg 'Testcase: index is already up-to-date'
++	msgmsg "Testcase: index is already up-to-date: $*"
+ 	find rootdir/var/lib/apt/lists -name '*.IndexDiff' -type f -delete
+ 	testsuccess aptget update "$@"
+ 	testequal "$(cat ${PKGFILE}-new)
+ " aptcache show apt newstuff
+ 
+-	msgmsg 'Testcase: apply with two patches'
++	msgmsg "Testcase: apply with two patches: $*"
+ 	cp ${PKGFILE}-new aptarchive/Packages
+ 	echo '
+ Package: futurestuff
+@@ -129,7 +139,7 @@ SHA1-Patches:
+ 	testequal "$(cat Packages-future)
+ " aptcache show apt newstuff futurestuff
+ 
+-	msgmsg 'Testcase: patch applying fails, but successful fallback'
++	msgmsg "Testcase: patch applying fails, but successful fallback: $*"
+ 	rm -rf rootdir/var/lib/apt/lists
+ 	cp -a rootdir/var/lib/apt/lists-bak rootdir/var/lib/apt/lists
+ 	cp ${PKGFILE}-new aptarchive/Packages
+@@ -154,6 +164,10 @@ SHA1-Patches:
+ 	testequal "$(cat ${PKGFILE}-new)
+ " aptcache show apt newstuff
+ }
++echo 'Debug::pkgAcquire::Diffs "true";
++Debug::pkgAcquire::rred "true";' > rootdir/etc/apt/apt.conf.d/rreddebug.conf
+ 
+-testrun -o Debug::pkgAcquire::Diffs=1 -o Debug::pkgAcquire::rred=1 -o Acquire::PDiffs::Merge=0
+-testrun -o Debug::pkgAcquire::Diffs=1 -o Debug::pkgAcquire::rred=1 -o Acquire::PDiffs::Merge=1
++testrun -o Acquire::PDiffs::Merge=0 -o APT::Get::List-Cleanup=1
++testrun -o Acquire::PDiffs::Merge=1 -o APT::Get::List-Cleanup=1
++testrun -o Acquire::PDiffs::Merge=0 -o APT::Get::List-Cleanup=0
++testrun -o Acquire::PDiffs::Merge=1 -o APT::Get::List-Cleanup=0

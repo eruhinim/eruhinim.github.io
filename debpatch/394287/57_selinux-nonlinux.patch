@@ -1,0 +1,134 @@
+diff -ruN coreutils-5.97-old/configure.ac coreutils-5.97/configure.ac
+--- coreutils-5.97-old/configure.ac	2006-10-20 00:51:24.000000000 -0500
++++ coreutils-5.97/configure.ac	2006-10-20 00:57:43.000000000 -0500
+@@ -32,6 +32,8 @@
+ [  --enable-selinux              Enable use of the SELINUX libraries],
+ [AC_DEFINE(WITH_SELINUX, 1, [Define if you want to use SELINUX])
+ LIB_SELINUX="-lselinux"
++	OPTIONAL_BIN_PROGS="$OPTIONAL_BIN_PROGS chcon\$(EXEEXT) runcon\$(EXEEXT)"
++	MAN="$MAN chcon.1 runcon.1"
+ AC_SUBST(LIB_SELINUX)])
+ 
+ gl_DEFAULT_POSIX2_VERSION
+diff -ruN coreutils-5.97-old/src/cp.c coreutils-5.97/src/cp.c
+--- coreutils-5.97-old/src/cp.c	2006-10-20 00:51:24.000000000 -0500
++++ coreutils-5.97/src/cp.c	2006-10-20 00:57:43.000000000 -0500
+@@ -832,17 +832,19 @@
+ 	case PRESERVE_LINK:
+ 	  x->preserve_links = on_off;
+ 	  break;
+-
++#ifdef WITH_SELINUX
+ 	case PRESERVE_CONTEXT:
+ 	  x->preserve_security_context = on_off;
+ 	  break;
+-
++#endif
+ 	case PRESERVE_ALL:
+ 	  x->preserve_mode = on_off;
+ 	  x->preserve_timestamps = on_off;
+ 	  x->preserve_ownership = on_off;
+ 	  x->preserve_links = on_off;
++#ifdef WITH_SELINUX
+ 	  x->preserve_security_context = on_off;
++#endif	  
+ 	  break;
+ 
+ 	default:
+diff -ruN coreutils-5.97-old/src/id.c coreutils-5.97/src/id.c
+--- coreutils-5.97-old/src/id.c	2006-10-20 00:51:24.000000000 -0500
++++ coreutils-5.97/src/id.c	2006-10-20 00:57:43.000000000 -0500
+@@ -72,7 +72,9 @@
+ /* The SELinux context */
+ /* Set `context' to a known invalid value so print_full_info() will *
+  * know when `context' has not been set to a meaningful value.      */
++#ifdef WITH_SELINUX
+ static security_context_t context=NULL;
++#endif
+ 
+ static struct option const longopts[] =
+ {
+@@ -122,7 +124,9 @@
+ main (int argc, char **argv)
+ {
+   int optc;
++#ifdef WITH_SELINUX
+   int selinux_enabled=(is_selinux_enabled()>0);
++#endif
+ 
+   /* If true, output the list of all group IDs. -G */
+   bool just_group_list = false;
+@@ -200,10 +204,13 @@
+         error (1, 0, "can't get process context");
+     }
+ #endif
+-
++#ifdef WITH_SELINUX
+   if (just_user + just_group + just_group_list + just_context > 1)
+     error (EXIT_FAILURE, 0, _("cannot print \"only\" of more than one choice"));
+-
++#else
++  if (just_user + just_group + just_group_list > 1)
++    error (EXIT_FAILURE, 0, _("cannot print \"only\" of more than one choice"));
++#endif
+   if (just_user + just_group + just_group_list == 0 && (use_real | use_name))
+     error (EXIT_FAILURE, 0,
+ 	   _("cannot print only names or real IDs in default format"));
+diff -ruN coreutils-5.97-old/src/Makefile.am coreutils-5.97/src/Makefile.am
+--- coreutils-5.97-old/src/Makefile.am	2006-10-20 00:51:24.000000000 -0500
++++ coreutils-5.97/src/Makefile.am	2006-10-20 00:57:43.000000000 -0500
+@@ -17,16 +17,16 @@
+ ## along with this program; if not, write to the Free Software Foundation,
+ ## Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+ 
+-EXTRA_PROGRAMS = chroot df hostid nice pinky stty su uname uptime users who
++EXTRA_PROGRAMS = chroot df hostid nice pinky stty su uname uptime users who chcon runcon
+ 
+ bin_SCRIPTS = groups
+-bin_PROGRAMS = [ chgrp chown chmod chcon cp dd dircolors du \
++bin_PROGRAMS = [ chgrp chown chmod cp dd dircolors du \
+   ginstall link ln dir vdir ls mkdir \
+   mkfifo mknod mv nohup readlink rm rmdir shred stat sync touch unlink \
+   cat cksum comm csplit cut expand fmt fold head join md5sum \
+   nl od paste pr ptx sha1sum sort split sum tac tail tr tsort unexpand uniq wc \
+   basename date dirname echo env expr factor false \
+-  hostname id kill logname pathchk printenv printf pwd runcon seq sleep tee \
++  hostname id kill logname pathchk printenv printf pwd seq sleep tee \
+   test true tty whoami yes \
+   $(OPTIONAL_BIN_PROGS) $(DF_PROG)
+ 
+@@ -238,7 +238,7 @@
+   $(EXTRA_PROGRAMS)
+ 
+ all_programs.list:
+-	@echo $(all_programs) | tr ' ' '\n' | sed -e 's,$(EXEEXT)$$,,' \
++	@echo $(bin_PROGRAMS) $(bin_SCRIPTS) | tr ' ' '\n' | sed -e 's,$(EXEEXT)$$,,' \
+ 	  | $(ASSORT) -u
+ 
+ pm = progs-makefile
+@@ -260,7 +260,7 @@
+ au_dotdot = authors-dotdot
+ au_actual = authors-actual
+ .PHONY: check-AUTHORS
+-check-AUTHORS: $(all_programs)
++check-AUTHORS: 
+ 	rm -f $(au_actual) $(au_dotdot)
+ 	for i in `ls $(all_programs) | sed -e 's,$(EXEEXT)$$,,' \
+ 	    | $(ASSORT) -u`; do				\
+diff -ruN coreutils-5.97-old/src/stat.c coreutils-5.97/src/stat.c
+--- coreutils-5.97-old/src/stat.c	2006-10-20 00:51:24.000000000 -0500
++++ coreutils-5.97/src/stat.c	2006-10-20 00:57:43.000000000 -0500
+@@ -979,9 +979,12 @@
+ 	  terse = true;
+ 	  break;
+ 	case 'Z':
++#ifdef WITH_SELINUX
+ 	  if((is_selinux_enabled()>0))
+ 	    secure = 1;
+-	  else {
++	  else 
++#endif	  
++	  {
+ 	    error (0, 0, _("Kernel is not SELinux enabled"));
+ 	    usage (EXIT_FAILURE);
+ 	  }

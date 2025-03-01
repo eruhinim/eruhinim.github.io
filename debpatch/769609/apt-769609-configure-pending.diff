@@ -1,0 +1,371 @@
+commit 1a46b9499017105f0d6a8c6319521088eadff6b2
+Author: David Kalnischkies <david@kalnischkies.de>
+Date:   Tue Nov 18 19:53:56 2014 +0100
+
+    always run 'dpkg --configure -a' at the end of our dpkg callings
+    
+    dpkg checks now for dependencies before running triggers, so that
+    packages can now end up in trigger states (especially those we are not
+    touching at all with our calls) after apt is done running.
+    
+    The solution to this is trivial: Just tell dpkg to configure everything
+    after we have (supposely) configured everything already. In the worst
+    case this means dpkg will have to run a bunch of triggers, usually it
+    will just do nothing though.
+    
+    The code to make this happen was already available, so we just flip a
+    config option here to cause it to be run. This way we can keep
+    pretending that triggers are an implementation detail of dpkg.
+    --triggers-only would supposely work as well, but --configure is more
+    robust in regards to future changes to dpkg and something we will
+    hopefully make use of in future versions anyway (as it was planed at the
+    time this and related options were implemented).
+    
+    Closes: 769609
+
+diff --git a/apt-pkg/deb/dpkgpm.cc b/apt-pkg/deb/dpkgpm.cc
+index 5938750..56e9d75 100644
+--- a/apt-pkg/deb/dpkgpm.cc
++++ b/apt-pkg/deb/dpkgpm.cc
+@@ -1047,6 +1047,12 @@ void pkgDPkgPM::BuildPackagesProgressMap()
+ 	 PackagesTotal++;
+       }
+    }
++   /* one extra: We don't want the progress bar to reach 100%, especially not
++      if we call dpkg --configure --pending and process a bunch of triggers
++      while showing 100%. Also, spindown takes a while, so never reaching 100%
++      is way more correct than reaching 100% while still doing stuff even if
++      doing it this way is slightly bending the rules */
++   ++PackagesTotal;
+ }
+                                                                         /*}}}*/
+ bool pkgDPkgPM::Go(int StatusFd)
+@@ -1274,9 +1280,8 @@ bool pkgDPkgPM::Go(APT::Progress::PackageManager *progress)
+ 
+    // support subpressing of triggers processing for special
+    // cases like d-i that runs the triggers handling manually
+-   bool const SmartConf = (_config->Find("PackageManager::Configure", "all") != "all");
+    bool const TriggersPending = _config->FindB("DPkg::TriggersPending", false);
+-   if (_config->FindB("DPkg::ConfigurePending", SmartConf) == true)
++   if (_config->FindB("DPkg::ConfigurePending", true) == true)
+       List.push_back(Item(Item::ConfigurePending, PkgIterator()));
+ 
+    // for the progress
+diff --git a/test/integration/framework b/test/integration/framework
+index ff059f5..36deccf 100644
+--- a/test/integration/framework
++++ b/test/integration/framework
+@@ -1241,10 +1241,13 @@ testnopackage() {
+ 	fi
+ }
+ 
+-testdpkginstalled() {
+-	msgtest "Test for correctly installed package(s) with" "dpkg -l $*"
+-	local PKGS="$(dpkg -l "$@" 2>/dev/null | grep '^i' | wc -l)"
+-	if [ "$PKGS" != $# ]; then
++testdpkgstatus() {
++	local STATE="$1"
++	local NR="$2"
++	shift 2
++	msgtest "Test that $NR package(s) are in state $STATE with" "dpkg -l $*"
++	local PKGS="$(dpkg -l "$@" 2>/dev/null | grep "^${STATE}" | wc -l)"
++	if [ "$PKGS" != $NR ]; then
+ 		echo >&2 $PKGS
+ 		dpkg -l "$@" | grep '^[a-z]' >&2
+ 		msgfail
+@@ -1253,16 +1256,12 @@ testdpkginstalled() {
+ 	fi
+ }
+ 
++testdpkginstalled() {
++	testdpkgstatus 'ii' "$#" "$@"
++}
++
+ testdpkgnotinstalled() {
+-	msgtest "Test for correctly not-installed package(s) with" "dpkg -l $*"
+-	local PKGS="$(dpkg -l "$@" 2> /dev/null | grep '^i' | wc -l)"
+-	if [ "$PKGS" != 0 ]; then
+-		echo
+-		dpkg -l "$@" | grep '^[a-z]' >&2
+-		msgfail
+-	else
+-		msgpass
+-	fi
++	testdpkgstatus 'ii' '0' "$@"
+ }
+ 
+ testmarkedauto() {
+diff --git a/test/integration/test-apt-progress-fd b/test/integration/test-apt-progress-fd
+index af022f5..90e6ef7 100755
+--- a/test/integration/test-apt-progress-fd
++++ b/test/integration/test-apt-progress-fd
+@@ -19,13 +19,14 @@ testequal "dlstatus:1:0:Retrieving file 1 of 1
+ dlstatus:1:20:Retrieving file 1 of 1
+ pmstatus:dpkg-exec:0:Running dpkg
+ pmstatus:testing:0:Installing testing (amd64)
+-pmstatus:testing:20:Preparing testing (amd64)
+-pmstatus:testing:40:Unpacking testing (amd64)
+-pmstatus:testing:60:Preparing to configure testing (amd64)
+-pmstatus:dpkg-exec:60:Running dpkg
+-pmstatus:testing:60:Configuring testing (amd64)
+-pmstatus:testing:80:Configuring testing (amd64)
+-pmstatus:testing:100:Installed testing (amd64)" cat apt-progress.log
++pmstatus:testing:16.6667:Preparing testing (amd64)
++pmstatus:testing:33.3333:Unpacking testing (amd64)
++pmstatus:testing:50:Preparing to configure testing (amd64)
++pmstatus:dpkg-exec:50:Running dpkg
++pmstatus:testing:50:Configuring testing (amd64)
++pmstatus:testing:66.6667:Configuring testing (amd64)
++pmstatus:testing:83.3333:Installed testing (amd64)
++pmstatus:dpkg-exec:83.3333:Running dpkg" cat apt-progress.log
+ 
+ # upgrade
+ exec 3> apt-progress.log
+@@ -34,13 +35,14 @@ testequal "dlstatus:1:0:Retrieving file 1 of 1
+ dlstatus:1:20:Retrieving file 1 of 1
+ pmstatus:dpkg-exec:0:Running dpkg
+ pmstatus:testing:0:Installing testing (amd64)
+-pmstatus:testing:20:Preparing testing (amd64)
+-pmstatus:testing:40:Unpacking testing (amd64)
+-pmstatus:testing:60:Preparing to configure testing (amd64)
+-pmstatus:dpkg-exec:60:Running dpkg
+-pmstatus:testing:60:Configuring testing (amd64)
+-pmstatus:testing:80:Configuring testing (amd64)
+-pmstatus:testing:100:Installed testing (amd64)" cat apt-progress.log
++pmstatus:testing:16.6667:Preparing testing (amd64)
++pmstatus:testing:33.3333:Unpacking testing (amd64)
++pmstatus:testing:50:Preparing to configure testing (amd64)
++pmstatus:dpkg-exec:50:Running dpkg
++pmstatus:testing:50:Configuring testing (amd64)
++pmstatus:testing:66.6667:Configuring testing (amd64)
++pmstatus:testing:83.3333:Installed testing (amd64)
++pmstatus:dpkg-exec:83.3333:Running dpkg" cat apt-progress.log
+ 
+ # reinstall
+ exec 3> apt-progress.log
+@@ -49,22 +51,24 @@ testequal "dlstatus:1:0:Retrieving file 1 of 1
+ dlstatus:1:20:Retrieving file 1 of 1
+ pmstatus:dpkg-exec:0:Running dpkg
+ pmstatus:testing:0:Installing testing (amd64)
+-pmstatus:testing:20:Preparing testing (amd64)
+-pmstatus:testing:40:Unpacking testing (amd64)
+-pmstatus:testing:60:Preparing to configure testing (amd64)
+-pmstatus:dpkg-exec:60:Running dpkg
+-pmstatus:testing:60:Configuring testing (amd64)
+-pmstatus:testing:80:Configuring testing (amd64)
+-pmstatus:testing:100:Installed testing (amd64)" cat apt-progress.log
++pmstatus:testing:16.6667:Preparing testing (amd64)
++pmstatus:testing:33.3333:Unpacking testing (amd64)
++pmstatus:testing:50:Preparing to configure testing (amd64)
++pmstatus:dpkg-exec:50:Running dpkg
++pmstatus:testing:50:Configuring testing (amd64)
++pmstatus:testing:66.6667:Configuring testing (amd64)
++pmstatus:testing:83.3333:Installed testing (amd64)
++pmstatus:dpkg-exec:83.3333:Running dpkg" cat apt-progress.log
+ 
+ # and remove
+ exec 3> apt-progress.log
+ testsuccess aptget remove testing -y -o APT::Status-Fd=3
+ testequal "pmstatus:dpkg-exec:0:Running dpkg
+ pmstatus:testing:0:Removing testing (amd64)
+-pmstatus:testing:33.3333:Preparing for removal of testing (amd64)
+-pmstatus:testing:66.6667:Removing testing (amd64)
+-pmstatus:testing:100:Removed testing (amd64)" cat apt-progress.log
++pmstatus:testing:25:Preparing for removal of testing (amd64)
++pmstatus:testing:50:Removing testing (amd64)
++pmstatus:testing:75:Removed testing (amd64)
++pmstatus:dpkg-exec:75:Running dpkg" cat apt-progress.log
+ 
+ # install non-native and ensure we get proper progress info
+ exec 3> apt-progress.log
+@@ -75,12 +79,13 @@ testequal "dlstatus:1:0:Retrieving file 1 of 1
+ dlstatus:1:20:Retrieving file 1 of 1
+ pmstatus:dpkg-exec:0:Running dpkg
+ pmstatus:testing2:0:Installing testing2 (i386)
+-pmstatus:testing2:20:Preparing testing2 (i386)
+-pmstatus:testing2:40:Unpacking testing2 (i386)
+-pmstatus:testing2:60:Preparing to configure testing2 (i386)
+-pmstatus:dpkg-exec:60:Running dpkg
+-pmstatus:testing2:60:Configuring testing2 (i386)
+-pmstatus:testing2:80:Configuring testing2 (i386)
+-pmstatus:testing2:100:Installed testing2 (i386)" cat apt-progress.log
++pmstatus:testing2:16.6667:Preparing testing2 (i386)
++pmstatus:testing2:33.3333:Unpacking testing2 (i386)
++pmstatus:testing2:50:Preparing to configure testing2 (i386)
++pmstatus:dpkg-exec:50:Running dpkg
++pmstatus:testing2:50:Configuring testing2 (i386)
++pmstatus:testing2:66.6667:Configuring testing2 (i386)
++pmstatus:testing2:83.3333:Installed testing2 (i386)
++pmstatus:dpkg-exec:83.3333:Running dpkg" cat apt-progress.log
+ 
+ rm -f apt-progress*.log
+diff --git a/test/integration/test-apt-progress-fd-deb822 b/test/integration/test-apt-progress-fd-deb822
+index 9d22794..badc985 100755
+--- a/test/integration/test-apt-progress-fd-deb822
++++ b/test/integration/test-apt-progress-fd-deb822
+@@ -27,37 +27,41 @@ Message: Installing testing (amd64)
+ 
+ Status: progress
+ Package: testing:amd64
+-Percent: 20
++Percent: 16.6667
+ Message: Preparing testing (amd64)
+ 
+ Status: progress
+ Package: testing:amd64
+-Percent: 40
++Percent: 33.3333
+ Message: Unpacking testing (amd64)
+ 
+ Status: progress
+ Package: testing:amd64
+-Percent: 60
++Percent: 50
+ Message: Preparing to configure testing (amd64)
+ 
+ Status: progress
+-Percent: 60
++Percent: 50
+ Message: Running dpkg
+ 
+ Status: progress
+ Package: testing:amd64
+-Percent: 60
++Percent: 50
+ Message: Configuring testing (amd64)
+ 
+ Status: progress
+ Package: testing:amd64
+-Percent: 80
++Percent: 66.6667
+ Message: Configuring testing (amd64)
+ 
+ Status: progress
+ Package: testing:amd64
+-Percent: 100
++Percent: 83.3333
+ Message: Installed testing (amd64)
++
++Status: progress
++Percent: 83.3333
++Message: Running dpkg
+ " cat apt-progress.log
+ 
+ 
+diff --git a/test/integration/test-apt-progress-fd-error b/test/integration/test-apt-progress-fd-error
+index a47095b..6323007 100755
+--- a/test/integration/test-apt-progress-fd-error
++++ b/test/integration/test-apt-progress-fd-error
+@@ -18,7 +18,7 @@ setupaptarchive
+ exec 3> apt-progress.log
+ testfailure aptget install foo1 foo2 -y -o APT::Status-Fd=3
+ msgtest "Ensure correct error message"
+-if grep -q "aptarchive/pool/foo2_0.8.15_amd64.deb:40:trying to overwrite '/usr/bin/file-conflict', which is also in package foo1 0.8.15" apt-progress.log; then
++if grep -q "aptarchive/pool/foo2_0.8.15_amd64.deb:36.3636:trying to overwrite '/usr/bin/file-conflict', which is also in package foo1 0.8.15" apt-progress.log; then
+ 	msgpass
+ else
+ 	cat apt-progress.log
+diff --git a/test/integration/test-bug-769609-triggers-still-pending-after-run b/test/integration/test-bug-769609-triggers-still-pending-after-run
+new file mode 100755
+index 0000000..b97f309
+--- /dev/null
++++ b/test/integration/test-bug-769609-triggers-still-pending-after-run
+@@ -0,0 +1,77 @@
++#!/bin/sh
++set -e
++
++TESTDIR=$(readlink -f $(dirname $0))
++. $TESTDIR/framework
++
++setupenvironment
++configarchitecture 'amd64'
++
++msgtest 'Check if installed dpkg supports' 'noawait trigger'
++if dpkg-checkbuilddeps -d 'dpkg (>= 1.16.1)' /dev/null; then
++	msgpass
++else
++	msgskip 'dpkg version too old'
++	exit 0
++fi
++configdpkgnoopchroot
++
++buildtriggerpackages() {
++	local TYPE="$1"
++	setupsimplenativepackage "triggerable-$TYPE" 'all' '1.0' 'unstable' "Depends: trigdepends-$TYPE"
++	BUILDDIR="incoming/triggerable-${TYPE}-1.0"
++	cat >${BUILDDIR}/debian/postinst <<EOF
++#!/bin/sh
++if [ "\$1" = 'triggered' ]; then
++	ls -l /proc/self/fd/
++fi
++EOF
++	echo "$TYPE /usr/share/doc" > ${BUILDDIR}/debian/triggers
++	buildpackage "$BUILDDIR" 'unstable' 'main' 'native'
++	rm -rf "$BUILDDIR"
++	buildsimplenativepackage "trigdepends-$TYPE" 'all' '1.0' 'unstable'
++}
++
++# FIXME: implement test with activate-style triggers
++buildtriggerpackages 'interest'
++buildtriggerpackages 'interest-noawait'
++
++buildsimplenativepackage "trigstuff" 'all' '1.0' 'unstable'
++
++
++setupaptarchive
++
++runtests() {
++	local TYPE="$1"
++	testsuccess aptget install triggerable-$TYPE -y
++	cp rootdir/tmp/testsuccess.output terminal.output
++	testsuccess grep '^REWRITE ' terminal.output
++	testdpkginstalled triggerable-$TYPE trigdepends-$TYPE
++
++	testsuccess aptget install trigdepends-$TYPE -y --reinstall
++	cp rootdir/tmp/testsuccess.output terminal.output
++	testsuccess grep '^REWRITE ' terminal.output
++	testsuccess grep ' root root ' terminal.output
++	testdpkginstalled triggerable-$TYPE trigdepends-$TYPE
++
++	testsuccess aptget install trigstuff -y
++	cp rootdir/tmp/testsuccess.output terminal.output
++	testsuccess grep '^REWRITE ' terminal.output
++	testsuccess grep ' root root ' terminal.output
++	testdpkginstalled triggerable-$TYPE trigdepends-$TYPE trigstuff
++
++	testsuccess aptget purge trigstuff -y
++	cp rootdir/tmp/testsuccess.output terminal.output
++	testsuccess grep '^REWRITE ' terminal.output
++	testsuccess grep ' root root ' terminal.output
++	testdpkginstalled triggerable-$TYPE trigdepends-$TYPE
++	testdpkgnotinstalled trigstuff
++
++	testsuccess aptget purge trigdepends-$TYPE -y
++	cp rootdir/tmp/testsuccess.output terminal.output
++	testfailure grep '^REWRITE ' terminal.output
++	testfailure grep ' root root ' terminal.output
++	testdpkgnotinstalled triggerable-$TYPE trigdepends-$TYPE
++}
++runtests 'interest'
++runtests 'interest-noawait'
+diff --git a/test/integration/test-no-fds-leaked-to-maintainer-scripts b/test/integration/test-no-fds-leaked-to-maintainer-scripts
+index 428db46..cde987b 100755
+--- a/test/integration/test-no-fds-leaked-to-maintainer-scripts
++++ b/test/integration/test-no-fds-leaked-to-maintainer-scripts
+@@ -48,7 +48,8 @@ startup packages configure
+ configure $PKGNAME 1.0 <none>
+ status unpacked $PKGNAME 1.0
+ status half-configured $PKGNAME 1.0
+-status installed $PKGNAME 1.0" cut -f 3- -d' ' rootdir/var/log/dpkg.log
++status installed $PKGNAME 1.0
++startup packages configure" cut -f 3- -d' ' rootdir/var/log/dpkg.log
+ 
+ rm -f rootdir/var/log/dpkg.log rootdir/var/log/apt/term.log
+ testsuccess aptget purge -y fdleaks -qq
+@@ -76,4 +77,5 @@ status config-files $PKGNAME 1.0
+ status config-files $PKGNAME 1.0
+ status config-files $PKGNAME 1.0
+ status config-files $PKGNAME 1.0
+-status not-installed $PKGNAME <none>" cut -f 3- -d' ' rootdir/var/log/dpkg.log
++status not-installed $PKGNAME <none>
++startup packages configure" cut -f 3- -d' ' rootdir/var/log/dpkg.log

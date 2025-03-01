@@ -1,0 +1,275 @@
+diff --git a/debian/changelog b/debian/changelog
+index dffaa5b..55f2e87 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,3 +1,11 @@
++dynamite (0.1.1-1.1) unstable; urgency=low
++
++  * Non-maintainer upload.
++  * Backport a patch from upstream: introduce binary
++    "id-shr-extract"
++
++ -- Jon Dowland <jmtd@debian.org>  Mon, 25 Apr 2011 22:05:23 +0100
++
+ dynamite (0.1.1-1) unstable; urgency=low
+ 
+   * New maintainer. (Closes: #469793)
+diff --git a/debian/dynamite.install b/debian/dynamite.install
+index 50ccd1c..f9386e6 100644
+--- a/debian/dynamite.install
++++ b/debian/dynamite.install
+@@ -1,2 +1,2 @@
+-debian/tmp/usr/bin/dynamite
++debian/tmp/usr/bin/*
+ debian/tmp/usr/share/man/man1/dynamite.1
+diff --git a/src/Makefile.am b/src/Makefile.am
+index fedf629..ccb40b3 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -1,10 +1,12 @@
+ INCLUDES = -I../lib
+ LDADD = ../lib/libdynamite.la
+ 
+-bin_PROGRAMS = dynamite
++bin_PROGRAMS = dynamite id-shr-extract
+ 
+ dynamite_SOURCES = dynamite.c
+ 
++id_shr_extract_SOURCES = id-shr-extract.c
++
+ noinst_PROGRAMS = queen_extract
+ 
+ queen_extract_SOURCES = queen_extract.c
+diff --git a/src/Makefile.in b/src/Makefile.in
+index e9f42ff..deab4ac 100644
+--- a/src/Makefile.in
++++ b/src/Makefile.in
+@@ -33,7 +34,7 @@ POST_UNINSTALL = :
+ build_triplet = @build@
+ host_triplet = @host@
+ target_triplet = @target@
+-bin_PROGRAMS = dynamite$(EXEEXT)
++bin_PROGRAMS = dynamite$(EXEEXT) id-shr-extract$(EXEEXT)
+ noinst_PROGRAMS = queen_extract$(EXEEXT)
+ subdir = src
+ DIST_COMMON = $(srcdir)/Makefile.am $(srcdir)/Makefile.in
+@@ -51,6 +52,10 @@ am_dynamite_OBJECTS = dynamite.$(OBJEXT)
+ dynamite_OBJECTS = $(am_dynamite_OBJECTS)
+ dynamite_LDADD = $(LDADD)
+ dynamite_DEPENDENCIES = ../lib/libdynamite.la
++am_id_shr_extract_OBJECTS = id-shr-extract.$(OBJEXT)
++id_shr_extract_OBJECTS = $(am_id_shr_extract_OBJECTS)
++id_shr_extract_LDADD = $(LDADD)
++id_shr_extract_DEPENDENCIES = ../lib/libdynamite.la
+ am_queen_extract_OBJECTS = queen_extract.$(OBJEXT)
+ queen_extract_OBJECTS = $(am_queen_extract_OBJECTS)
+ queen_extract_LDADD = $(LDADD)
+@@ -67,8 +72,10 @@ CCLD = $(CC)
+ LINK = $(LIBTOOL) --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) \
+ 	--mode=link $(CCLD) $(AM_CFLAGS) $(CFLAGS) $(AM_LDFLAGS) \
+ 	$(LDFLAGS) -o $@
+-SOURCES = $(dynamite_SOURCES) $(queen_extract_SOURCES)
+-DIST_SOURCES = $(dynamite_SOURCES) $(queen_extract_SOURCES)
++SOURCES = $(dynamite_SOURCES) $(id_shr_extract_SOURCES) \
++	$(queen_extract_SOURCES)
++DIST_SOURCES = $(dynamite_SOURCES) $(id_shr_extract_SOURCES) \
++	$(queen_extract_SOURCES)
+ ETAGS = etags
+ CTAGS = ctags
+ DISTFILES = $(DIST_COMMON) $(DIST_SOURCES) $(TEXINFOS) $(EXTRA_DIST)
+@@ -182,11 +191,13 @@ target_alias = @target_alias@
+ target_cpu = @target_cpu@
+ target_os = @target_os@
+ target_vendor = @target_vendor@
++top_build_prefix = @top_build_prefix@
+ top_builddir = @top_builddir@
+ top_srcdir = @top_srcdir@
+ INCLUDES = -I../lib
+ LDADD = ../lib/libdynamite.la
+ dynamite_SOURCES = dynamite.c
++id_shr_extract_SOURCES = id-shr-extract.c
+ queen_extract_SOURCES = queen_extract.c
+ all: all-am
+ 
+@@ -259,6 +270,9 @@ clean-noinstPROGRAMS:
+ dynamite$(EXEEXT): $(dynamite_OBJECTS) $(dynamite_DEPENDENCIES) 
+ 	@rm -f dynamite$(EXEEXT)
+ 	$(LINK) $(dynamite_OBJECTS) $(dynamite_LDADD) $(LIBS)
++id-shr-extract$(EXEEXT): $(id_shr_extract_OBJECTS) $(id_shr_extract_DEPENDENCIES) 
++	@rm -f id-shr-extract$(EXEEXT)
++	$(LINK) $(id_shr_extract_OBJECTS) $(id_shr_extract_LDADD) $(LIBS)
+ queen_extract$(EXEEXT): $(queen_extract_OBJECTS) $(queen_extract_DEPENDENCIES) 
+ 	@rm -f queen_extract$(EXEEXT)
+ 	$(LINK) $(queen_extract_OBJECTS) $(queen_extract_LDADD) $(LIBS)
+@@ -270,6 +284,7 @@ distclean-compile:
+ 	-rm -f *.tab.c
+ 
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/dynamite.Po@am__quote@
++@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/id-shr-extract.Po@am__quote@
+ @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/queen_extract.Po@am__quote@
+ 
+ .c.o:
+diff --git a/src/id-shr-extract.c b/src/id-shr-extract.c
+new file mode 100644
+index 0000000..4194048
+--- /dev/null
++++ b/src/id-shr-extract.c
+@@ -0,0 +1,158 @@
++/* utility to extract the .SHR installer data files of early ID software
++   shareware games
++   
++    Copyright (C) 2007 Hans de Goede  <j.w.r.degoede@hhs.nl>
++*/
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <ctype.h>
++#include <libdynamite.h>
++
++struct cookie_s {
++  char *in_buffer;
++  size_t in_buffer_remaining;
++  int in_buffer_index;
++  size_t in_buffer_size;
++  FILE* out_file;
++};   
++
++size_t reader(void* buffer, size_t size, void* cookie)
++{
++  struct cookie_s *c = cookie;
++  if (size > c->in_buffer_remaining)
++    size = c->in_buffer_remaining;
++    
++  memcpy (buffer, c->in_buffer + c->in_buffer_index, size);
++  
++  c->in_buffer_index += size;
++  c->in_buffer_remaining -= size;
++  
++  return size;
++}
++
++size_t writer(void* buffer, size_t size, void* cookie)
++{
++  struct cookie_s *c = cookie;
++  return fwrite(buffer, 1, size, c->out_file);
++}
++
++int main(int argc, char *argv[])
++{
++  struct cookie_s cookie;
++  FILE *in_file;
++  char filename[16];
++  unsigned char buf[4];
++  size_t i, compressed_size;
++    
++  if (argc != 2) {
++    fprintf(stderr, "%s: Usage: %s <filename.SHR> %d\n", argv[0], argv[0], argc);
++    return 1;
++  }
++  
++  in_file = fopen(argv[1], "r");
++  if (!in_file) {
++    fprintf(stderr, "error opening: %s", argv[1]);
++    perror(NULL);
++    return 1;
++  } 
++
++  /* skip first 0x3A bytes header */
++  if (fseek(in_file, 0x3A, SEEK_CUR)) {
++    perror("error skipping initial file header");
++    return 1;
++  }
++  
++  cookie.in_buffer = malloc(65536);
++  if (!cookie.in_buffer) {
++    fprintf(stderr, "Error: out of memory\n");
++    return 1;
++  }
++  cookie.in_buffer_size = 65536;
++  
++  while (1)
++  {
++    /* get the name of the file */
++    if (fread(filename, 1, sizeof(filename), in_file) != sizeof(filename)) {
++      if (feof(in_file)) {
++        free(cookie.in_buffer);
++        fclose(in_file);
++        return 0; /* done */
++      }
++      perror("error getting output filename from file");
++      return 1;
++    }
++
++    /* verify the filename and convert to lower case */
++    for (i = 0 ; i < sizeof(filename); i++) {
++      if (filename[i] == 0)
++        break; /* done */
++      if (!isprint(filename[i])) {
++        fprintf(stderr, "error invalid output filename\n");
++        return 1;
++      }
++      filename[i] = tolower(filename[i]);
++    }
++    if (i == sizeof(filename)) {
++      fprintf(stderr, "error too long output filename\n");
++      return 1;
++    }
++    
++    /* seek to compressed size */
++    if (fseek(in_file, 0x88 - sizeof(filename), SEEK_CUR)) {
++      perror("error skipping file header before file size");
++      return 1;
++    }
++
++    if (fread(buf, 1, 4, in_file) != 4) {
++      perror("error reading file size");
++      return 1;
++    }
++    compressed_size = (buf[3] << 24) | (buf[2] << 16) | (buf[1] << 8) | buf[0];
++    if (compressed_size > cookie.in_buffer_size) {
++      cookie.in_buffer = realloc(cookie.in_buffer, compressed_size);
++      if (!cookie.in_buffer) {
++        fprintf(stderr, "Error: out of memory\n");
++        return 1;
++      }
++      cookie.in_buffer_size = compressed_size;
++    }
++
++    /* seek to begin of compressed data */
++    if (fseek(in_file, 0x1C, SEEK_CUR)) {
++      perror("error skipping file header before file size");
++      return 1;
++    }
++    
++    /* read compressed data */
++    if (fread(cookie.in_buffer, 1, compressed_size, in_file) !=
++          compressed_size) {
++      perror("error reading compressed data");
++      return 1;
++    }
++    
++    cookie.in_buffer_index = 0;
++    cookie.in_buffer_remaining = compressed_size;
++    
++    cookie.out_file = fopen(filename, "w");
++    if (!cookie.out_file) {
++      fprintf(stderr, "Error creating: %s for writing", filename);
++      perror(NULL);
++      return 1;
++    }
++
++    printf("decompressing: %s, compressed size: %d\n", filename,
++            compressed_size);
++    
++    if ((i = dynamite_explode(reader, writer, &cookie))) {
++      fprintf(stderr, "Error: %d while decompressing\n", i);
++      return i;
++    }
++    
++    fclose(cookie.out_file);
++  }
++  
++  /* never reached */
++  return 0;
++}

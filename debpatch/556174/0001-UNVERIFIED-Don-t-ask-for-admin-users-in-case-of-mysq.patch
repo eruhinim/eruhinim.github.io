@@ -1,0 +1,79 @@
+From eb452d82150375f7d1cf135666524be9f8d4eaed Mon Sep 17 00:00:00 2001
+From: Paul Gevers <elbrus@debian.org>
+Date: Sat, 11 Oct 2014 09:12:27 +0200
+Subject: [PATCH] UNVERIFIED Don't ask for admin users in case of mysql and
+ non-admin updates
+
+TODO: similar for pgsql, see #475829
+
+Closes: #556174, #599896
+---
+ dpkg/postinst  |   11 +++++++++++
+ internal/mysql |    6 +++---
+ 2 files changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/dpkg/postinst b/dpkg/postinst
+index fec0e3d..14244c4 100644
+--- a/dpkg/postinst
++++ b/dpkg/postinst
+@@ -177,6 +177,7 @@ dbc_go(){
+ 				if echo "$dbc_authenticated_dbtypes" | grep -q "$dbc_dbtype"; then
+ 					if [ ! "$dbc_frontend" ]; then
+ 						if [ ! "$dbc_dbtype" = "pgsql" ] || [ ! "$dbc_authmethod_admin" = "ident" ]; then
++							# We might be fooled here that we already know it, see below
+ 							dbc_get_admin_pass
+ 						fi
+ 					fi
+@@ -234,8 +235,14 @@ _dbc_find_upgrades(){
+ 		fi
+ 	done
+ 
++	# We only need the admin password for upgrade-dbadmin data
++	need_adminpw=false
++
+ 	# for each pending update
+ 	for f in ${pending:-}; do
++	    if [ -f "$admsqldir/$f" ] ; then
++		need_adminpw=true
++	    fi
+ 		# if the sorted list is empty
+ 		if [ ! "${sorted:-}" ]; then
+ 			sorted="$f"
+@@ -265,6 +272,10 @@ _dbc_find_upgrades(){
+ 		fi
+ 	done
+ 
++	if [ $need_adminpw != 'true' ] && [ $dbc_dbtype = mysql ] ; then
++	    # fool dcb_go above that the admin password has already been provided, as it is not needed
++	    db_fset $dbc_package/$dbc_dbtype/admin-pass seen true || true
++	fi
+ 	echo $sorted
+ }
+ 
+diff --git a/internal/mysql b/internal/mysql
+index e988159..c7ad1c0 100644
+--- a/internal/mysql
++++ b/internal/mysql
+@@ -30,8 +30,8 @@ port		= '${dbc_dbport:-}'
+ socket	  = '/var/run/mysqld/mysqld.sock'
+ 
+ [mysqldump]
+-user		= '${dbc_dbadmin:-}'
+-password	= '${dbc_dbadmpass:-}'
++user		= '${dbc_dbuser:-}'
++password	= '${dbc_dbpass:-}'
+ host		= '${dbc_dbserver:-}'
+ port		= '${dbc_dbport:-}'
+ socket	  = '/var/run/mysqld/mysqld.sock'
+@@ -339,7 +339,7 @@ EOF
+ ##
+ dbc_mysql_dump(){
+ 	local mycnf dumperr db dumpfile old_umask
+-	_dbc_sanity_check dbname dbadmin mysql || return 1
++	_dbc_sanity_check dbname dbuser mysql || return 1
+ 	_dbc_mysql_check_connect || return 1
+ 	dumpfile=$1
+ 	dumperr=0
+-- 
+1.7.10.4
+

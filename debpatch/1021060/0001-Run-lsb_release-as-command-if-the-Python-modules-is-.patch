@@ -1,0 +1,86 @@
+From 994c8d7149f688eeab7b89b1797ec15b3ddddb5d Mon Sep 17 00:00:00 2001
+From: Gioele Barabucci <gioele@svario.it>
+Date: Sat, 1 Oct 2022 13:11:38 +0200
+Subject: [PATCH] Run lsb_release as command if the Python modules is not
+ available
+
+apt-clone currently fails when the `lsb_release` Python module
+is not available, as it is the case since 2022-09-26 in Debian unstable.
+
+The attached patch makes `apt-clone` use the `lsb_release` command
+when the namesake Python module is not available.
+---
+ apt-clone    |  9 +++++++--
+ apt_clone.py | 14 +++++++++++---
+ 2 files changed, 18 insertions(+), 5 deletions(-)
+
+diff --git a/apt-clone b/apt-clone
+index 20b2f60..4633a8f 100755
+--- a/apt-clone
++++ b/apt-clone
+@@ -21,6 +21,7 @@ from __future__ import print_function
+ 
+ import argparse
+ import os
++import subprocess
+ import sys
+ 
+ from apt_clone import AptClone
+@@ -132,8 +133,12 @@ if __name__ == "__main__":
+         # packages because they are probably new defaults pkgs. If however
+         # we are not yet on the new release its fine to remove installed
+         # pkgs as part of the upgrade
+-        import lsb_release
+-        codename = lsb_release.get_os_release()["CODENAME"]
++        try:
++            import lsb_release
++            codename = lsb_release.get_os_release()["CODENAME"]
++        except ImportError:
++            codename = subprocess.getoutput("lsb_release --codename --short")
++
+         if (args.new_distro_codename and args.new_distro_codename == codename):
+             protect_installed = True
+         else:
+diff --git a/apt_clone.py b/apt_clone.py
+index 0598d2a..0351f2c 100644
+--- a/apt_clone.py
++++ b/apt_clone.py
+@@ -26,7 +26,10 @@ import fnmatch
+ import glob
+ import hashlib
+ import logging
+-import lsb_release
++try:
++    import lsb_release
++except ImportError:
++    lsb_release = None
+ import os
+ import re
+ import shutil
+@@ -71,8 +74,10 @@ class LowLevelCommands(object):
+         return (ret == 0)
+ 
+     def debootstrap(self, targetdir, distro=None):
+-        if distro is None:
++        if distro is None and lsb_release:
+             distro = lsb_release.get_distro_information()['CODENAME']
++        if distro is None:
++            distro = subprocess.getoutput("lsb_release --codename --short")
+         ret = subprocess.call(["debootstrap", distro, targetdir])
+         return (ret == 0)
+ 
+@@ -187,7 +192,10 @@ class AptClone(object):
+         cache = self._cache_cls(rootdir=sourcedir)
+         s = ""
+         foreign = ""
+-        distro_id = lsb_release.get_distro_information()['ID']
++        if lsb_release:
++            distro_id = lsb_release.get_distro_information()['ID']
++        else:
++            distro_id = subprocess.getoutput("lsb_release --id --short")
+         for pkg in cache:
+             if pkg.is_installed:
+                 # a version identifies the pacakge
+-- 
+2.35.1
+

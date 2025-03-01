@@ -1,0 +1,124 @@
+From 4b510c506ced96636b973066de270fce707caa35 Mon Sep 17 00:00:00 2001
+From: Bastian Germann <bastiangermann@fishpost.de>
+Date: Fri, 22 Feb 2019 23:48:50 +0100
+Subject: [PATCH] Download and validate SHA256SUMS (closes: #819490)
+
+---
+ debmirror | 67 ++++++++++++++++++++++++++++++-------------------------
+ 1 file changed, 37 insertions(+), 30 deletions(-)
+
+diff --git a/debmirror b/debmirror
+index 2d12e9e..8018ca2 100755
+--- a/debmirror
++++ b/debmirror
+@@ -1107,8 +1107,7 @@ foreach my $dist (keys %distset) {
+   }
+ }
+
+-# Get and parse MD5SUMS files for D-I images.
+-# (There are not currently other checksums for these.)
++# Get and parse MD5SUMS/SHA256SUMS files for D-I images.
+ di_add_files() if @di_dists;
+
+ # Get Packages and Sources files and other miscellany.
+@@ -2942,35 +2941,39 @@ sub di_add_files {
+
+       my $image_dir = "dists/$dist/main/installer-$arch/current/images";
+       make_dir ("$tdir/$image_dir");
+-      if (!remote_get("$image_dir/MD5SUMS", $tdir)) {
+-        say("Failed to download $image_dir/MD5SUMS; skipping.");
+-        return;
+-      }
+-      if (-f "$tdir/$image_dir/MD5SUMS") {
+-        $bytes_to_get += -s _; # As we did not have the size earlier
+-      }
+
+-      local $/;
+-      undef $/; # Read whole file
+-      open(FILE, "<", "$tdir/$image_dir/MD5SUMS") or die "$tdir/$image_dir/MD5SUMS: $!";
+-      $_ = <FILE>;
+-      while (m/^([A-Za-z0-9]{32}  .*)/mg) {
+-        my ($md5sum, $filename) = split(' ', $1, 3);
+-        $filename =~ s:^\./::;
+-        if(!(defined($include) && ($image_dir."/".$filename)=~/$include/o)) {
+-          next if (defined($exclude) && ($image_dir."/".$filename)=~/$exclude/o);
++      foreach my $sums_fname ("SHA256SUMS", "MD5SUMS") {
++        my $sum_name = substr($sums_fname, 0, 6);
++        if (!remote_get("$image_dir/$sums_fname", $tdir)) {
++          say("Failed to download $image_dir/$sums_fname; skipping.");
++          return;
+         }
++        if (-f "$tdir/$image_dir/$sums_fname") {
++          $bytes_to_get += -s _; # As we did not have the size earlier
++        }
++
++        local $/;
++        undef $/; # Read whole file
++        open(FILE, "<", "$tdir/$image_dir/$sums_fname") or die "$tdir/$image_dir/$sums_fname: $!";
++        $_ = <FILE>;
++        while (m/^([A-Za-z0-9]+  .+)/mg) {
++          my ($checksum, $filename) = split(' ', $1, 3);
++          $filename =~ s:^\./::;
++          if(!(defined($include) && ($image_dir."/".$filename)=~/$include/o)) {
++            next if (defined($exclude) && ($image_dir."/".$filename)=~/$exclude/o);
++          }
+
+-        $di_files{$image_dir}{$filename}{md5sum} = $md5sum;
++          $di_files{$image_dir}{$filename}{$sum_name} = $checksum;
+
+-        # Check against the version currently on the mirror
+-        if (check_file(filename => "$image_dir/$filename", size => -1, MD5Sum => $md5sum)) {
+-          $di_files{$image_dir}{$filename}{status} = 1;
+-        } else {
+-          $di_files{$image_dir}{$filename}{status} = 0;
++          # Check against the version currently on the mirror
++          if (check_file(filename => "$image_dir/$filename", size => -1, $sum_name => $checksum)) {
++            $di_files{$image_dir}{$filename}{status} = 1;
++          } else {
++            $di_files{$image_dir}{$filename}{status} = 0;
++          }
+         }
++        close(FILE);
+       }
+-      close(FILE);
+     }
+   }
+ }
+@@ -2989,7 +2992,9 @@ sub di_get_files {
+       $file =~ m:(^.*)/:;
+       make_dir ("$tdir/$image_dir/$1") if $1;
+       if (!remote_get("$image_dir/$file", $tdir) ||
+-          !check_file(filename => "$tdir/$image_dir/$file", size => -1, MD5Sum => $di_files{$image_dir}{$file}{md5sum})) {
++          !check_file(filename => "$tdir/$image_dir/$file", size => -1,
++                      SHA256 => $di_files{$image_dir}{$file}{SHA256},
++                      MD5SUM => $di_files{$image_dir}{$file}{MD5SUM})) {
+         $lres = 0;
+         last if (! $do_dry_run);
+       }
+@@ -3007,9 +3012,11 @@ sub di_get_files {
+         unlink "$image_dir/$file" if (-f "$image_dir/$file");
+         link("$tdir/$image_dir/$file", "$image_dir/$file");
+       }
+-      # Move the MD5SUMS file in place on mirror
+-      unlink "$image_dir/MD5SUMS" if (-f "$image_dir/MD5SUMS");
+-      link("$tdir/$image_dir/MD5SUMS", "$image_dir/MD5SUMS");
++      # Move the checksums file in place on mirror
++      foreach my $sums_fname ("SHA256SUMS", "MD5SUMS") {
++        unlink "$image_dir/$sums_fname" if (-f "$image_dir/$sums_fname");
++        link("$tdir/$image_dir/$sums_fname", "$image_dir/$sums_fname");
++      }
+     } elsif (! $do_dry_run) {
+       say("Failed to download some files in $image_dir; not updating images.");
+     }
+@@ -3026,7 +3033,7 @@ sub di_cleanup {
+       chomp $file;
+       $file=~s:^\./::;
+       if (! exists $di_files{$image_dir} || ! exists $di_files{$image_dir}{$file}) {
+-        next if (exists $di_files{$image_dir} && $file eq "MD5SUMS");
++        next if (exists $di_files{$image_dir} && ($file eq "SHA256SUMS" || $file eq "MD5SUMS"));
+         say("deleting $image_dir/$file") if ($verbose);
+         if (! $do_dry_run) {
+           unlink "$file" or die "unlink $image_dir/$file: $!\n";
+--
+GitLab
+

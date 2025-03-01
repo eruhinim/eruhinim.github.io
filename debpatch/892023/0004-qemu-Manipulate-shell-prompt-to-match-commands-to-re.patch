@@ -1,0 +1,126 @@
+From cb61fac93e69bd356f3def50f548ebd0b0002d80 Mon Sep 17 00:00:00 2001
+From: Simon McVittie <smcv@debian.org>
+Date: Fri, 20 Apr 2018 09:11:20 +0100
+Subject: [PATCH 4/4] qemu: Manipulate shell prompt to match commands to
+ responses
+
+Instead of waiting for "#", which could legitimately appear in command
+output, set PS1 to a random string and wait for that string to appear.
+
+Signed-off-by: Simon McVittie <smcv@debian.org>
+---
+ virt/autopkgtest-virt-qemu | 37 +++++++++++++++++++++----------------
+ 1 file changed, 21 insertions(+), 16 deletions(-)
+
+diff --git a/virt/autopkgtest-virt-qemu b/virt/autopkgtest-virt-qemu
+index 89efaea..0299353 100755
+--- a/virt/autopkgtest-virt-qemu
++++ b/virt/autopkgtest-virt-qemu
+@@ -36,6 +36,7 @@ import errno
+ import fcntl
+ import re
+ import argparse
++import random
+ 
+ sys.path.insert(0, '/usr/share/autopkgtest/lib')
+ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+@@ -137,6 +138,17 @@ def check_ttyS1_shell():
+         VirtSubproc.expect(term, b'#', 10)
+ 
+ 
++def remote_command(term, command, timeout=10):
++    if isinstance(command, str):
++        command = command.encode('utf-8')
++
++    r1 = random.randint(0, 0x7FFFFFFF)
++    r2 = random.randint(0, 0x7FFFFFFF)
++
++    term.send(b'PS1="%08x"-"%08x# "; %s' % (r1, r2, command))
++    VirtSubproc.expect(term, b'%08x-%08x#' % (r1, r2), timeout)
++
++
+ def setup_shell():
+     '''Log into the VM and set up root shell on ttyS1'''
+ 
+@@ -197,12 +209,10 @@ def setup_baseimage():
+ 
+     # Setup udev rules for /dev/baseimage; set link_priority to -1024 so
+     # that the duplicate UUIDs of the partitions will have no effect.
+-    term.send(b'''mkdir -p -m 0755 /run/udev/rules.d ; printf '# Created by autopkgtest-virt-qemu\\n%s\\n%s\\n%s\\n' 'KERNEL=="vd*[!0-9]", ENV{ID_SERIAL}=="BASEIMAGE", OPTIONS+="link_priority=-1024", SYMLINK+="baseimage", MODE="0664"' 'KERNEL=="vd*[0-9]",  ENV{ID_SERIAL}=="BASEIMAGE", OPTIONS+="link_priority=-1024"' 'KERNEL=="vd*", ENV{ID_SERIAL}=="BASEIMAGE", ENV{ID_FS_TYPE}:="", ENV{ID_FS_USAGE}:="", ENV{ID_FS_UUID}:=""' > /run/udev/rules.d/61-baseimage.rules\n''')
+-    VirtSubproc.expect(term, b'#', 10)
++    remote_command(term, b'''mkdir -p -m 0755 /run/udev/rules.d ; printf '# Created by autopkgtest-virt-qemu\\n%s\\n%s\\n%s\\n' 'KERNEL=="vd*[!0-9]", ENV{ID_SERIAL}=="BASEIMAGE", OPTIONS+="link_priority=-1024", SYMLINK+="baseimage", MODE="0664"' 'KERNEL=="vd*[0-9]",  ENV{ID_SERIAL}=="BASEIMAGE", OPTIONS+="link_priority=-1024"' 'KERNEL=="vd*", ENV{ID_SERIAL}=="BASEIMAGE", ENV{ID_FS_TYPE}:="", ENV{ID_FS_USAGE}:="", ENV{ID_FS_UUID}:=""' > /run/udev/rules.d/61-baseimage.rules\n''')
+     # Reload udev to make sure the rules take effect (udev only auto-
+     # rereads rules every 3 seconds)
+-    term.send(b'udevadm control --reload\n')
+-    VirtSubproc.expect(term, b'#', 10)
++    remote_command(term, b'udevadm control --reload\n')
+ 
+     # Add the base image as an additional drive
+     monitor = VirtSubproc.get_unix_socket(os.path.join(workdir, 'monitor'))
+@@ -211,8 +221,7 @@ def setup_baseimage():
+     monitor.send(b'device_add virtio-blk-pci,drive=drive-baseimage,id=virtio-baseimage\n')
+     VirtSubproc.expect(monitor, b'(qemu)', 10)
+ 
+-    term.send(b'udevadm settle --exit-if-exists=/dev/baseimage\n')
+-    VirtSubproc.expect(term, b'#', 10)
++    remote_command(term, b'udevadm settle --exit-if-exists=/dev/baseimage\n')
+ 
+ 
+ def setup_shared(shared_dir):
+@@ -220,12 +229,11 @@ def setup_shared(shared_dir):
+ 
+     term = VirtSubproc.get_unix_socket(os.path.join(workdir, 'ttyS1'))
+ 
+-    term.send(b'''mkdir -p -m 1777 /run/autopkgtest/shared &&
++    remote_command(term, b'''mkdir -p -m 1777 /run/autopkgtest/shared &&
+ mount -t 9p -o trans=virtio,access=any autopkgtest /run/autopkgtest/shared &&
+ chmod 1777 /run/autopkgtest/shared &&
+ touch /run/autopkgtest/shared/done_shared
+-''')
+-    VirtSubproc.expect(term, b'#', 30)
++''', 30)
+ 
+     with VirtSubproc.timeout(10, 'timed out on client shared directory setup'):
+         flag = os.path.join(shared_dir, 'done_shared')
+@@ -233,8 +241,7 @@ touch /run/autopkgtest/shared/done_shared
+             time.sleep(0.2)
+ 
+     # ensure that root has $HOME set
+-    term.send(b'[ -n "$HOME" ] || export HOME=`getent passwd root|cut -f6 -d:`\n')
+-    VirtSubproc.expect(term, b'#', 5)
++    remote_command(term, b'[ -n "$HOME" ] || export HOME=`getent passwd root|cut -f6 -d:`\n', 5)
+ 
+     # create helper for runcmd: cat data from its stdin (from a file) to stdout
+     # eternally (like tail -f), but stop once either an "EOF" file exists and
+@@ -242,7 +249,7 @@ touch /run/autopkgtest/shared/done_shared
+     # arg), or an "exit flag" file exists.
+     # We don't run that from /run/autopkgtest/shared as 9p from older QEMU
+     # versions is buggy and causes "invalid numeric result" errors on that.
+-    term.send(b'''PYTHON=$(which python3) || PYTHON=$(which python); cat <<EOF > /tmp/eofcat; chmod 755 /tmp/eofcat
++    remote_command(term, b'''PYTHON=$(which python3) || PYTHON=$(which python); cat <<EOF > /tmp/eofcat; chmod 755 /tmp/eofcat
+ #!$PYTHON
+ import sys, os, fcntl, time, errno
+ (feof, fexit) = sys.argv[1:]
+@@ -271,8 +278,7 @@ while not os.path.exists(fexit):
+     if limit is not None and count >= limit:
+         break
+ EOF
+-''')
+-    VirtSubproc.expect(term, b'# ', 5)
++''', 5)
+ 
+ 
+ def setup_config(shared_dir):
+@@ -294,8 +300,7 @@ def setup_config(shared_dir):
+ 
+         if tz:
+             adtlog.debug('Copying host timezone %s to VM' % tz.decode())
+-            term.send(b'echo ' + tz + b' > /etc/timezone; DEBIAN_FRONTEND=noninteractive dpkg-reconfigure tzdata\n')
+-            VirtSubproc.expect(term, b'#', 30)
++            remote_command(term, b'echo ' + tz + b' > /etc/timezone; DEBIAN_FRONTEND=noninteractive dpkg-reconfigure tzdata\n', 30)
+         else:
+             adtlog.debug('Could not determine host timezone')
+ 
+-- 
+2.17.0
+

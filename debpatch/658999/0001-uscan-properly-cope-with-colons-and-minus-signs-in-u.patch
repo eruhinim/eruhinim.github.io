@@ -1,0 +1,162 @@
+From 8ca1468fe89327e6960d02181f99fe7ab95048b6 Mon Sep 17 00:00:00 2001
+From: "Bernhard R. Link" <brlink@debian.org>
+Date: Tue, 7 Feb 2012 10:53:12 +0100
+Subject: [PATCH] uscan: properly cope with colons and minus signs in upstream
+ versions
+
+uscan uses dpkg --compare-versions and Dpkg::Version to compare upstream
+versions.  But this command takes debian versions, which means it produces
+wrong results if the upstream version contains colons or minus signs.
+
+For example    3-1-1-3   >   3-1-4   (as 'upstream' is 3-1-1   vs. 3-1)
+but            3-1-1-3-1 <   3-1-4-1 (as 'upstream' is 3-1-1-3 vs. 3-1-4)
+
+To work around this compare the upstream versions with a epoch before
+and a revision afterwards, so colons and minus signs are treated as part
+of the upstream version.
+
+Calls to dpkg --compare-versions in uscan get this treatment directly,
+for the Dpkg::Version calls fix Devscripts::Versort:
+
+Add Devscripts::Versort::upstream_versort to sort versions ad upstream
+versions. (Devscripts::Versort::versort was documented to take upstream
+versions, but some other scripts seem to call it with Debian versions,
+so keep that behaviour and add a new one).
+
+Signed-off-by: Bernhard R. Link <brlink@debian.org>
+
+---
+
+If you prefer this in two patches, one touching Versort and one uscan.pl
+let me know.
+---
+ Devscripts/Versort.pm |   27 +++++++++++++++++----------
+ scripts/uscan.pl      |   14 +++++++-------
+ 2 files changed, 24 insertions(+), 17 deletions(-)
+
+diff --git a/Devscripts/Versort.pm b/Devscripts/Versort.pm
+index 5bc4f8e..ed4650f 100644
+--- a/Devscripts/Versort.pm
++++ b/Devscripts/Versort.pm
+@@ -13,13 +13,15 @@
+ # You should have received a copy of the GNU General Public License
+ # along with this program. If not, see <http://www.gnu.org/licenses/>.
+ 
+-# The functions in this Perl module are versort and deb_versort.  They
+-# each take as input an array of elements of the form [version, data, ...]
+-# and sort them into decreasing order according to dpkg's
++# The functions in this Perl module are versort, upstream_versort and
++# deb_versort.  They each take as input an array of elements of the form
++# [version, data, ...] and sort them into decreasing order according to dpkg's
+ # understanding of version sorting.  The output is a sorted array.  In
+-# versort, "version" is assumed to be an upstream version number only,
+-# whereas in deb_versort, "version" is assumed to be a Debian version
+-# number, possibly including an epoch and/or a Debian revision.
++# upstream_versort, "version" is assumed to be an upstream version number only,
++# whereas in deb_versort, "version" is assumed to be a Debian version number,
++# possibly including an epoch and/or a Debian revision. versort is available
++# for compatibility reasons. It compares versions as Debian versions
++# (i.e. 1-2-4 < 1-3) but disables checks for wellformed versions.
+ #
+ # The returned array has the greatest version as the 0th array element.
+ 
+@@ -28,20 +30,25 @@ use Dpkg::Version;
+ 
+ sub versort (@)
+ {
+-    return _versort(0, @_);
++    return _versort(0, sub { return shift->[0] }, @_);
+ }
+ 
+ sub deb_versort (@)
+ {
+-    return _versort(1, @_);
++    return _versort(1, sub { return shift->[0] }, @_);
++}
++
++sub upstream_versort (@)
++{
++    return _versort(0, sub { return "1:" . shift->[0] . "-1" }, @_);
+ }
+ 
+ sub _versort ($@)
+ {
+-    my ($check, @namever_pairs) = @_;
++    my ($check, $getversion, @namever_pairs) = @_;
+ 
+     foreach my $pair (@namever_pairs) {
+-	unshift(@$pair, Dpkg::Version->new($pair->[0], check => $check));
++	unshift(@$pair, Dpkg::Version->new(&$getversion($pair), check => $check));
+     }
+ 
+     my @sorted = sort { $b->[0] <=> $a->[0] } @namever_pairs;
+diff --git a/scripts/uscan.pl b/scripts/uscan.pl
+index 3b325a5..ca3fafa 100755
+--- a/scripts/uscan.pl
++++ b/scripts/uscan.pl
+@@ -859,7 +859,7 @@ sub process_watchline ($$$$$$)
+ 
+     # What is the most recent file, based on the filenames?
+     # We first have to find the candidates, then we sort them using
+-    # Devscripts::Versort::versort
++    # Devscripts::Versort::upstream_versort
+     if ($site =~ m%^http(s)?://%) {
+ 	if (defined($1) and !$haveSSL) {
+ 	    die "$progname: you must have the libcrypt-ssleay-perl package installed\nto use https URLs\n";
+@@ -966,7 +966,7 @@ sub process_watchline ($$$$$$)
+ 		    return 1;
+ 		}
+ 	    } else {
+-		@hrefs = Devscripts::Versort::versort(@hrefs);
++		@hrefs = Devscripts::Versort::upstream_versort(@hrefs);
+ 		($newversion, $newfile) = @{$hrefs[0]};
+ 	    }
+ 	} else {
+@@ -1063,7 +1063,7 @@ sub process_watchline ($$$$$$)
+ 		    return 1;
+ 		}
+ 	    } else {
+-		@files = Devscripts::Versort::versort(@files);
++		@files = Devscripts::Versort::upstream_versort(@files);
+ 		($newversion, $newfile) = @{$files[0]};
+ 	    }
+ 	} else {
+@@ -1204,7 +1204,7 @@ EOF
+ 
+     # Can't just use $lastversion eq $newversion, as then 0.01 and 0.1
+     # compare different, whereas they are treated as equal by dpkg
+-    if (system("dpkg", "--compare-versions", "$mangled_lastversion", "eq", "$newversion") == 0) {
++    if (system("dpkg", "--compare-versions", "1:${mangled_lastversion}-0", "eq", "1:${newversion}-0") == 0) {
+ 	if ($verbose or ($download == 0 and $report and ! $dehs)) {
+ 	    print $pkg_report_header;
+ 	    $pkg_report_header = '';
+@@ -1231,7 +1231,7 @@ EOF
+     # We use dpkg's rules to determine whether our current version
+     # is newer or older than the remote version.
+     if (!defined $download_version) {
+-	if (system("dpkg", "--compare-versions", "$mangled_lastversion", "gt", "$newversion") == 0) {
++	if (system("dpkg", "--compare-versions", "1:${mangled_lastversion}-0", "gt", "1:${newversion}-0") == 0) {
+ 	    if ($verbose) {
+ 		print " => remote site does not even have current version\n";
+ 	    } elsif ($dehs) {
+@@ -1576,7 +1576,7 @@ sub newest_dir ($$$$$) {
+ 	    }
+ 	}
+ 	if (@hrefs) {
+-	    @hrefs = Devscripts::Versort::versort(@hrefs);
++	    @hrefs = Devscripts::Versort::upstream_versort(@hrefs);
+ 	    if ($debug) {
+ 		print "-- Found the following matching hrefs (newest first):\n";
+ 		foreach my $href (@hrefs) { print "     $$href[1]\n"; }
+@@ -1648,7 +1648,7 @@ sub newest_dir ($$$$$) {
+ 		print STDERR "-- Found the following matching dirs:\n";
+ 		foreach my $dir (@dirs) { print STDERR "     $$dir[1]\n"; }
+ 	    }
+-	    @dirs = Devscripts::Versort::versort(@dirs);
++	    @dirs = Devscripts::Versort::upstream_versort(@dirs);
+ 	    my ($newversion, $newdir) = @{$dirs[0]};
+ 	    return $newdir;
+ 	} else {
+-- 
+1.7.9
+

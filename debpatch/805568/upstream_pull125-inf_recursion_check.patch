@@ -1,0 +1,175 @@
+Description: Perform checks against descending into own mountpoint.
+ This patch is the 1.7.4 version of pull request 125 from
+ https://github.com/vgough/encfs/pull/125 that fixes problems with
+ recursive directory accesses.
+Author: Walter Doekes <walter+github@wjd.nu>
+Forwarded: https://github.com/vgough/encfs/pull/125
+Applied-Upstream: commit:07fb5b8990e0447be775f7871cea2c5f0d2ec38e,
+ v1.8.2(?)
+Last-Update: 2015-11-19
+
+--- a/encfs/DirNode.cpp
++++ b/encfs/DirNode.cpp
+@@ -310,14 +310,9 @@ DirNode::DirNode(EncFS_Context *_ctx,
+     Lock _lock( mutex );
+ 
+     ctx = _ctx;
+-    rootDir = sourceDir;
++    rootDir = sourceDir; // .. and fsConfig->opts->mountPoint have trailing slash
+     fsConfig = _config;
+ 
+-    // make sure rootDir ends in '/', so that we can form a path by appending
+-    // the rest..
+-    if( rootDir[ rootDir.length()-1 ] != '/' )
+-	rootDir.append( 1, '/');
+-
+     naming = fsConfig->nameCoding;
+ }
+ 
+@@ -340,6 +335,28 @@ DirNode::rootDirectory()
+     return string( rootDir, 0, rootDir.length()-1 );
+ }
+ 
++bool
++DirNode::touchesMountpoint( const char *realPath ) const {
++    const string &mountPoint = fsConfig->opts->mountPoint;
++    // compare mountPoint up to the leading slash.
++    // examples:
++    //   mountPoint      = /home/user/Junk/experiment/
++    //   realPath        = /home/user/Junk/experiment
++    //   realPath        = /home/user/Junk/experiment/abc
++    const ssize_t len = mountPoint.length() - 1;
++
++    if (mountPoint.compare(0, len, realPath, len) == 0) {
++        // if next character is a NUL or a slash, then we're referencing our
++        // mount point:
++        //   .../experiment => true
++        //   .../experiment/... => true
++        //   .../experiment2/abc => false
++        return realPath[len] == '\0' || realPath[len] == '/';
++    }
++
++    return false;
++}
++
+ string 
+ DirNode::cipherPath( const char *plaintextPath )
+ {
+--- a/encfs/DirNode.h
++++ b/encfs/DirNode.h
+@@ -97,6 +97,9 @@ public:
+     // return the path to the root directory
+     std::string rootDirectory();
+ 
++    // recursive lookup check
++    bool touchesMountpoint(const char *realPath) const;
++
+     // find files
+     shared_ptr<FileNode> lookupNode( const char *plaintextName, 
+ 	                      const char *requestor );
+--- a/encfs/FileUtils.h
++++ b/encfs/FileUtils.h
+@@ -63,6 +63,7 @@ enum ConfigMode
+ struct EncFS_Opts
+ {
+     std::string rootDir;
++    std::string mountPoint; // where to make filesystem visible
+     bool createIfNotFound;  // create filesystem if not found
+     bool idleTracking; // turn on idle monitoring of filesystem
+     bool mountOnDemand; // mounting on-demand
+--- a/encfs/encfs.cpp
++++ b/encfs/encfs.cpp
+@@ -132,6 +132,14 @@ static int withFileNode( const char *opN
+ 
+ 	rAssert(fnode != NULL);
+ 	rLog(Info, "%s %s", opName, fnode->cipherName());
++
++	// check that we're not recursing into the mount point itself
++	if (FSRoot->touchesMountpoint(fnode->cipherName())) {
++	    rInfo("%s error: Tried to touch mountpoint: '%s'",
++		  opName, fnode->cipherName());
++	    return res; // still -EIO
++	}
++
+ 	res = op( fnode.get(), data );
+ 
+ 	if(res < 0)
+--- a/encfs/main.cpp
++++ b/encfs/main.cpp
+@@ -79,7 +79,6 @@ using boost::scoped_ptr;
+ const int MaxFuseArgs = 32;
+ struct EncFS_Args
+ {
+-    string mountPoint; // where to make filesystem visible
+     bool isDaemon; // true == spawn in background, log to syslog
+     bool isThreaded; // true == threaded
+     bool isVerbose; // false == only enable warning/error messages
+@@ -348,8 +347,10 @@ bool processArgs(int argc, char *argv[],
+     // the mount point.
+     if(optind+2 <= argc)
+     {
++	// both rootDir and mountPoint are assumed to be slash terminated in the
++	// rest of the code.
+ 	out->opts->rootDir = slashTerminate( argv[optind++] );
+-	out->mountPoint = argv[optind++];
++	out->opts->mountPoint = slashTerminate(argv[optind++]);
+     } else
+     {
+ 	// no mount point specified
+@@ -372,7 +373,7 @@ bool processArgs(int argc, char *argv[],
+ 
+     // sanity check
+     if(out->isDaemon && 
+-	    (!isAbsolutePath( out->mountPoint.c_str() ) ||
++	    (!isAbsolutePath( out->opts->mountPoint.c_str() ) ||
+ 	    !isAbsolutePath( out->opts->rootDir.c_str() ) ) 
+       )
+     {
+@@ -386,7 +387,7 @@ bool processArgs(int argc, char *argv[],
+ 
+     // the raw directory may not be a subdirectory of the mount point.
+     {
+-	string testMountPoint = slashTerminate( out->mountPoint );
++	string testMountPoint = out->opts->mountPoint;
+ 	string testRootDir = 
+ 	    out->opts->rootDir.substr(0, testMountPoint.length());
+ 
+@@ -416,15 +417,15 @@ bool processArgs(int argc, char *argv[],
+ 	rWarning(_("Unable to locate root directory, aborting."));
+ 	return false;
+     }
+-    if(!isDirectory( out->mountPoint.c_str() ) && 
+-	    !userAllowMkdir( out->mountPoint.c_str(),0700))
++    if(!isDirectory( out->opts->mountPoint.c_str() ) &&
++	    !userAllowMkdir( out->opts->mountPoint.c_str(),0700))
+     {
+ 	rWarning(_("Unable to locate mount point, aborting."));
+ 	return false;
+     }
+ 
+     // fill in mount path for fuse
+-    out->fuseArgv[1] = out->mountPoint.c_str();
++    out->fuseArgv[1] = out->opts->mountPoint.c_str();
+ 
+     return true;
+ }
+@@ -746,7 +747,7 @@ static bool unmountFS(EncFS_Context *ctx
+     if( arg->opts->mountOnDemand )
+     {
+ 	rDebug("Detaching filesystem %s due to inactivity",
+-		arg->mountPoint.c_str());
++		arg->opts->mountPoint.c_str());
+ 
+ 	ctx->setRoot( shared_ptr<DirNode>() );
+ 	return false;
+@@ -755,8 +756,8 @@ static bool unmountFS(EncFS_Context *ctx
+ 	// Time to unmount!
+ 	// xgroup(diag)
+ 	rWarning(_("Unmounting filesystem %s due to inactivity"),
+-		arg->mountPoint.c_str());
+-	fuse_unmount( arg->mountPoint.c_str() );
++		arg->opts->mountPoint.c_str());
++	fuse_unmount( arg->opts->mountPoint.c_str() );
+ 	return true;
+     }
+ }

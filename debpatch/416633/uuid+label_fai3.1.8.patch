@@ -1,0 +1,220 @@
+diff -Nabru -x changelog fai-3.1.8/bin/setup_harddisks fai-3.1.8zedv0/bin/setup_harddisks
+--- fai-3.1.8/bin/setup_harddisks	2007-03-07 14:50:12.000000000 +0100
++++ fai-3.1.8zedv0/bin/setup_harddisks	2007-06-22 11:15:20.000000000 +0200
+@@ -140,6 +140,11 @@
+ #     reiser       : reiserfs
+ #       -h <hash>  : set reiserfs hash
+ #       -v <ver>   : set reiserfs version
++#     mounttype=<type>: The way the device is refered in /etc/fstab
++#                       Can be "device" (default), "label" or 'uuid'
++#     label="<label>" : A filesystem label, labeled filesystems
++#                       may be mounted with mount -l <label>
++#                       (only for ext2, ext3, reiserfs, jfs, xfs)
+ #
+ use strict;
+ # getopts variables:
+@@ -204,6 +209,11 @@
+ my %MPSize = ();           # size of partition in units
+ my %MPID = ();             # id of partition
+ 
++# Label, UUID
++my %MPMounttype = ();      # way in which each mountpoint is mounted
++my %MPLabel = ();          # the label for each mountpoint
++my %MPuuid = ();           # the UUID for each mountpoint
++
+ # options
+ my %MPfstaboptions = ();   # fstab options for every mountpoint
+ my %MPOptions = ();        # extra options for every mountpoint
+@@ -533,6 +543,17 @@
+ 		($options =~ /\bdosfat16\b/i) && ($MPID{$mountpoint} = 6); # DOS FAT 16bit (>=32MB, will be changed later)
+ 		($options =~ /\bwinfat32\b/i) && ($MPID{$mountpoint} = "b"); # Win 95 FAT 32
+ 		$MPOptions{$mountpoint} = $options;
++                # check for label the extra options
++		if($options =~ /\blabel=(\'|\")([^\'\"]*)\1/i) { 
++		    $MPLabel{$mountpoint} = $2;
++		} elsif($options =~ /\blabel=(\S+)/) {
++		    $MPLabel{$mountpoint} = $1;
++		}
++                ($options =~ /\bmounttype=(\'|\"|)(device|label|uuid)\1/i) && ( $MPMounttype{$mountpoint} = lc($2));
++		 defined($ENV{debug}) && print $MPMounttype{$mountpoint}."\n";
++		if ( ($MPMounttype{$mountpoint} eq 'label') && !defined($MPLabel{$mountpoint})) {
++		    print "ERROR: mountpoint=$mountpoint: mounttype=label, but no label defined\n";
++		}
+ 		if($test == 1){
+ 		    print "$mountpoint,$MPMinSize{$mountpoint}-$MPMaxSize{$mountpoint},";
+ 		    print "$fstaboptions,$options";
+@@ -783,6 +804,11 @@
+             } else {
+ 	        $mountpointname = $mountpoint;
+ 	    }
++            # generate UUID if needed
++            if ($MPMounttype{$mountpoint} eq 'uuid' && $MPOptions{$mountpoint} =~ /\b(ext[23]|auto|reiser|xfs)\b/i) {
++                chomp($MPuuid{$mountpoint} = `uuidgen`);
++		if($ENV{debug}) { print "DEBUG: created UUID for $mountpoint: $MPuuid{$mountpoint}\n"; }
++	    }
+ 	    # preserved partition
+ 	    if ( ($MPPreserve{$mountpoint} eq "yes") && ($MPOptions{$mountpoint} !~ /\bformat\b/i)){
+   	        print "Preserve partition $device";
+@@ -826,6 +852,8 @@
+ 	        $command = "echo y | LC_ALL=C mkreiserfs $mkreiserfs_options";
+ 		($MPOptions{$mountpoint} =~ /(\-h\s*\w+)\b/) && ($command .= " $1");
+ 		($MPOptions{$mountpoint} =~ /(\-v\s*\d+)\b/) && ($command .= " $1");
++                $MPLabel{$mountpoint} && ($command .= " -l '$MPLabel{$mountpoint}'");
++                $MPuuid{$mountpoint}  && ($command .= " -u '$MPuuid{$mountpoint}'");
+ 		$command .= " /dev/$device";
+ 		print "  $command\n";
+ 		if ($test != 1){
+@@ -838,12 +866,23 @@
+ 	    if ($MPOptions{$mountpoint} =~ /\bxfs\b/i) {
+ #	        print "Make XFS Filesystem:\n";
+ 	        $command = "mkfs.xfs $mkxfs_options";
++		$MPLabel{$mountpoint} && ($command .= " -L '$MPLabel{$mountpoint}'");
+ 		$command .= " /dev/$device";
+ 		print "  $command\n";
+ 		if ($test != 1){
+ 		    $result = `$command`;
+ 		    (($? >> 8) == 0) || die "\nMKFS.XFS ERROR:\n $result\n";
+ 		}
++                # mkfs.xfs doesn't support the setting of the UUID
++                # but xfs_admin allows this change for an unmounted system
++                if($MPuuid{$mountpoint}) {
++                    $command = "xfs_admin -U '$MPuuid{$mountpoint}' /dev/$device";
++                    print "  $command\n";
++                    if ($test != 1){
++                          $result = `$command`;
++                          (($? >> 8) == 0) || die "\nXFS_ADMIN ERROR:\n $result\n";
++                    }
++                }
+ 		next;
+ 	    }
+ 	    # Linux Extended 2 file system
+@@ -854,12 +893,23 @@
+ 		($MPOptions{$mountpoint} =~ /(\-i\s*\d+)\b/) && ($command .= " $1");
+ 		($MPOptions{$mountpoint} =~ /(\-m\s*\d+)\b/) && ($command .= " $1");
+ 		($MPOptions{$mountpoint} =~ /(\-j)\b/) && ($command .= " $1");
++		$MPLabel{$mountpoint} && ($command .= " -L '$MPLabel{$mountpoint}'");
+ 		$command .= " /dev/$device";
+ 		print "  $command\n";
+ 		if ($test != 1){
+ 		    $result = `$command`;
+ 		    (($? >> 8) == 0) || die "\nMKE2FS ERROR:\n $result\n";
+ 		}
++                # mke2fs doesn't support the setting of the UUID
++                # but tune2fs allows this change even for a mounted system
++                if($MPuuid{$mountpoint}) {
++                    $command = "tune2fs -U '$MPuuid{$mountpoint}' /dev/$device";
++                    print "  $command\n";
++                    if ($test != 1){
++                          $result = `$command`;
++                          (($? >> 8) == 0) || die "\nTUNE2FS ERROR:\n $result\n";
++                    }
++                }
+ 		next;
+ 	    }
+ 	    # DOS 16bit FAT / Win95 FAT 32
+@@ -893,7 +943,12 @@
+     ($MPOptions{'/'} =~ /\b(xfs)\b/i) && ($type = "xfs");
+     ($MPOptions{'/'} =~ /\b(ext3)\b/i) && ($type = "ext3");
+     ($MPOptions{'/'} =~ /\b(ext2)\b/i) && ($type = "ext2");
+-    $FileSystemTab .= BuildfstabLine("/dev/$MountpointPart{'/'}","/",$type,$MPfstaboptions{'/'},0,1);
++    $device = '/dev/'.$MountpointPart{'/'};
++    if($MPMounttype{'/'} eq 'label' && $MPLabel{'/'} ne '' && $type =~ /ext2|ext3|reiserfs|xfs/) {
++       $device = "LABEL=".$MPLabel{'/'};
++    }
++    $MPuuid{'/'} && ($device = "UUID=".$MPuuid{'/'});
++    $FileSystemTab .= BuildfstabLine($device,"/",$type,$MPfstaboptions{'/'},0,1);
+     # 2. swap partitions
+     foreach my $mountpoint (%PartMountpoint){
+ 	next if( $mountpoint !~ /^swap/i);
+@@ -905,7 +960,6 @@
+     # 4. sorted others
+     foreach my $mountpoint (sort %PartMountpoint){
+ 	next if ( ($mountpoint !~ m#^/#) || ($mountpoint eq "/"));
+-	$device = $MountpointPart{$mountpoint};
+ 	$type = "ext2";
+ 	($MPOptions{$mountpoint} =~ /\b(dosfat16|winfat32)\b/i) && ($type = "vfat");
+ 	($MPOptions{$mountpoint} =~ /\b(ntfs)\b/i) && ($type = "ntfs");
+@@ -913,7 +967,12 @@
+ 	($MPOptions{$mountpoint} =~ /\b(xfs)\b/i) && ($type = "xfs");
+ 	($MPOptions{$mountpoint} =~ /\b(ext3)\b/i) && ($type = "ext3");
+ 	($MPOptions{$mountpoint} =~ /\b(ext2)\b/i) && ($type = "ext2");
+-	$FileSystemTab .= BuildfstabLine("/dev/$device",$mountpoint,$type,$MPfstaboptions{$mountpoint},0,2);
++	$device = '/dev/'.$MountpointPart{$mountpoint};
++        if($MPMounttype{$mountpoint} eq 'label' && $MPLabel{$mountpoint} ne '' && $type =~ /ext2|ext3|reiserfs|xfs/) {
++            $device = "LABEL=".$MPLabel{$mountpoint};
++        }
++        $MPuuid{$mountpoint} && ($device = "UUID=".$MPuuid{$mountpoint});
++        $FileSystemTab .= BuildfstabLine($device,$mountpoint,$type,$MPfstaboptions{$mountpoint},0,2);
+     }
+     # write it
+     $filename = "$ENV{LOGDIR}/fstab";
+@@ -942,12 +1001,26 @@
+   my $swaps;
+ 
+   print "Write FAI variables to file $FAIOutputFile\n" if $verbose;
+-    return if ($test == 1);
++  my $root_partition = "/dev/$MountpointPart{'/'}";
++  my $type = "ext2";
++  ($MPOptions{'/'} =~ /\b(reiser)\b/i) && ($type = "reiserfs");
++  ($MPOptions{'/'} =~ /\b(xfs)\b/i) && ($type = "xfs");
++  ($MPOptions{'/'} =~ /\b(ext3)\b/i) && ($type = "ext3");
++  ($MPOptions{'/'} =~ /\b(ext2)\b/i) && ($type = "ext2");
++  if($MPMounttype{'/'} eq 'label' && $MPLabel{'/'} ne '' && $type =~ /ext2|ext3|reiserfs|xfs/) {
++      $root_partition = "LABEL=".$MPLabel{'/'};
++  }
++  $MPuuid{'/'} && ($root_partition = "UUID=".$MPuuid{'/'});
+   $swaps = join ' ',@swaplist;
++  if($test != 1) {
+     open(FILE, ">$FAIOutputFile") || die "Unable to write file $FAIOutputFile\n";
++  } else {
++      *FILE = *STDOUT;
++      print "___contents of ${FAIOutputFile}___\n";
++  }
+     print FILE << "EOM";
+ BOOT_DEVICE=/dev/$BOOT_DEVICE
+-ROOT_PARTITION=/dev/$MountpointPart{'/'}
++ROOT_PARTITION=$root_partition
+ BOOT_PARTITION=/dev/$BootPartition
+ SWAPLIST="$swaps"
+ EOM
+diff -Nabru -x changelog fai-3.1.8/lib/mount2dir fai-3.1.8zedv0/lib/mount2dir
+--- fai-3.1.8/lib/mount2dir	2007-02-07 22:36:53.000000000 +0100
++++ fai-3.1.8zedv0/lib/mount2dir	2007-06-22 11:26:04.000000000 +0200
+@@ -85,8 +85,36 @@
+ 		[ $verbose ] && echo "Mounting $device to $target$mountpoint"
+ 	    fi
+ 	    # should we fsck the partition first?
+-	    [ "$fscheck" = 1 ] && fsck -nt $fstype $device
++	    [ "$fscheck" = 1 -a \( "$fstype" = "ext2" -o "$fstype" = "ext3" \) ] && fsck -nt $fstype $device
++	    [ $debug ] && echo "$BASH_SOURCE: calling 'mount -t $fstype -o noatime $mopt $device $target$mountpoint'"
+ 	    mount -t $fstype -o noatime $mopt $device $target$mountpoint
++	    ;;
++
++        UUID=*)
++            mopt="-o $mopt"
++            [ "$moptions" ] && mopt="-o $moptions"
++            [ -d $target/$mountpoint ] || mkdir -p $target$mountpoint
++            if [ "$fscheck" = 1 -a \( "$fstype" = "ext2" -o "$fstype" = "ext3" \) ]; then
++                fsck -nt $fstype $device
++                [ $debug ] && echo "$BASH_SOURCE: calling 'fsck -nt $fstype $device'"
++            fi
++            device="-U ${device#UUID=}"
++            [ $debug ] && echo "$BASH_SOURCE: calling 'mount -t $fstype $mopt $device $target$mountpoint'"
++            mount -t $fstype $mopt $device $target$mountpoint
++            ;;
++
++        LABEL=*)
++            mopt="-o $mopt"
++            [ "$moptions" ] && mopt="-o $moptions"
++            [ -d $target/$mountpoint ] || mkdir -p $target$mountpoint
++            if [ "$fscheck" = 1 -a \( "$fstype" = "ext2" -o "$fstype" = "ext3" \) ]; then
++                fsck -nt $fstype $device
++                [ $debug ] && echo "$BASH_SOURCE: calling 'fsck -nt $fstype $device'"
++            fi
++            device="-L ${device#LABEL=}"
++            [ $debug ] && echo "$BASH_SOURCE: calling 'mount -t $fstype $mopt $device $target$mountpoint'"
++            mount -t $fstype $mopt $device $target$mountpoint
++            ;;
+     esac
+ done
+ 

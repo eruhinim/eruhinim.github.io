@@ -1,0 +1,139 @@
+diff -ruN easytag-1.99.7.orig/src/cddb.c easytag-1.99.7/src/cddb.c
+--- easytag-1.99.7.orig/src/cddb.c	2005-07-01 23:54:36.000000000 +0200
++++ easytag-1.99.7/src/cddb.c	2005-08-22 23:02:27.000000000 +0200
+@@ -1861,6 +1861,7 @@
+     gchar *art_alb_tmp = NULL;
+     gboolean use_art_alb = FALSE;
+     gchar *end_str;
++    gchar *html_end_str;
+     gchar  buffer[CDDB_ANSWER_LINE_SIZE+1];
+     gint   bytes_written;
+     gint   bytes_read;
+@@ -1964,10 +1965,11 @@
+     // Read other lines,and get list of matching albums
+     // Composition of a line : 
+     // <a href="http://www.freedb.org/freedb_search_fmt.php?cat=rock&id=8c0f0a0b">Bob Dylan / MTV Unplugged</a><br>
+-    cat_str     = g_strdup("http://www.freedb.org/freedb_search_fmt.php?cat=");
+-    id_str      = g_strdup("&id=");
+-    art_alb_str = g_strdup("\">");
+-    end_str     = g_strdup("</a>"); //"</a><br>");
++    cat_str      = g_strdup("http://www.freedb.org/freedb_search_fmt.php?cat=");
++    id_str       = g_strdup("&id=");
++    art_alb_str  = g_strdup("\">");
++    end_str      = g_strdup("</a>"); //"</a><br>");
++    html_end_str = g_strdup("</body>"); // To avoid the cddb lookups to hang
+     while ( CddbWindow && !CddbStopSearch && (bytes_read=Cddb_Read_Line(socket_id,cddb_out)) > 0 )
+     {
+         gchar *size_str;
+@@ -2063,7 +2065,7 @@
+ 
+             cddbalbum->artist_album = valid;
+ 
+-            if(use_art_alb)
++            if (use_art_alb)
+             {
+                 art_alb_tmp = valid;
+                 use_art_alb = FALSE;
+@@ -2074,8 +2076,18 @@
+ 
+             CddbAlbumList = g_list_append(CddbAlbumList,cddbalbum);
+         }
++        
++        // To avoid the cddb lookups to hang (Patch from Paul Giordano)
++        /* It appears that on some systems that cddb lookups continue to attempt
++         * to get data from the socket even though the other system has completed 
++         * sending. Here we see if the actual end of data is in the last block read.
++         * In the case of the html scan, the /body tag is used because there's
++         * no crlf followint the /html tag.
++         */
++        if (strstr(cddb_out_tmp,html_end_str)!=NULL) 
++            break;
+     }
+-    g_free(cat_str); g_free(id_str); g_free(art_alb_str); g_free(end_str);
++    g_free(cat_str); g_free(id_str); g_free(art_alb_str); g_free(end_str); g_free(html_end_str);
+     
+     gtk_widget_set_sensitive(GTK_WIDGET(CddbStopSearchButton),FALSE);
+     gtk_widget_set_sensitive(GTK_WIDGET(CddbStopSearchAutoButton),FALSE);
+@@ -2120,6 +2132,7 @@
+     gchar *tmp;
+     gchar *query_string;
+     gchar *cddb_discid;
++    gchar *cddb_end_str;
+ 
+     guint total_frames = 150;   /* First offset is (almost) always 150 */
+     guint disc_length  = 2;     /* and 2s elapsed before first track */
+@@ -2296,6 +2309,7 @@
+         return FALSE;
+     }
+     bytes_read_total = bytes_read;
++    cddb_end_str = g_strdup(".");
+ 
+     while ( CddbWindow && !CddbStopSearch && (bytes_read=Cddb_Read_Line(socket_id,cddb_out)) > 0 )
+     {
+@@ -2312,6 +2326,16 @@
+         cddb_out_tmp = cddb_out;
+         //g_print("%s\n",cddb_out);
+ 
++        // To avoid the cddb lookups to hang (Patch from Paul Giordano)
++        /* It appears that on some systems that cddb lookups continue to attempt
++         * to get data from the socket even though the other system has completed 
++         * sending. The fix adds one check to the loops to see if the actual 
++         * end of data is in the last block read. In this case, the last line 
++         * will be a single '.'
++         */
++        if ( bytes_read<=3 && strstr(cddb_out_tmp,cddb_end_str)!=NULL )
++            break;
++        
+         // Reading of lines with albums (skiping return code lines : "211 Found inexact matches, list follows (until terminating `.')")
+         if (cddb_out != NULL && strstr(cddb_out_tmp,"/") != NULL)
+         {
+@@ -2360,6 +2384,7 @@
+             CddbAlbumList = g_list_append(CddbAlbumList,cddbalbum);
+         }
+     }
++    g_free(cddb_end_str);
+ 
+     gtk_widget_set_sensitive(GTK_WIDGET(CddbStopSearchButton),FALSE);
+     gtk_widget_set_sensitive(GTK_WIDGET(CddbStopSearchAutoButton),FALSE);
+@@ -2418,7 +2443,7 @@
+     gint       socket_id;
+     CddbAlbum *cddbalbum = NULL;
+     GList     *TrackOffsetList = NULL;
+-    gchar     *cddb_in, *cddb_out, *msg, *copy, *valid, *proxy_auth;
++    gchar     *cddb_in, *cddb_out, *cddb_end_str, *msg, *copy, *valid, *proxy_auth;
+     gint       bytes_written, bytes_read, bytes_read1, bytes_read_total;
+     gboolean   read_track_offset = FALSE;
+     GtkTreeIter row;
+@@ -2496,6 +2521,7 @@
+         return FALSE;
+     }
+     bytes_read_total = bytes_read + bytes_read1;
++    cddb_end_str = g_strdup(".");
+ 
+     while ( CddbWindow && !CddbStopSearch && (bytes_read=Cddb_Read_Line(socket_id,cddb_out)) > 0 )
+     {
+@@ -2512,6 +2538,16 @@
+         if (!cddb_out) continue; // Empty line?
+         //g_print("%s\n",cddb_out);
+ 
++        // To avoid the cddb lookups to hang (Patch from Paul Giordano)
++        /* It appears that on some systems that cddb lookups continue to attempt
++         * to get data from the socket even though the other system has completed 
++         * sending. The fix adds one check to the loops to see if the actual 
++         * end of data is in the last block read. In this case, the last line 
++         * will be a single '.'
++         */
++        if (bytes_read<=3 && strstr(cddb_out,cddb_end_str)!=NULL) 
++            break;
++        
+         // We are reading a track offset? (generates TrackOffsetList)
+         if (read_track_offset)
+         {
+@@ -2669,6 +2705,7 @@
+                 cddbalbum->genre = g_strdup(Id3tag_Genre_To_String(atoi(genre_ptr+5)));
+         }
+     }
++    g_free(cddb_end_str);
+ 
+     /* Close connection */
+     Cddb_Close_Connection(socket_id);

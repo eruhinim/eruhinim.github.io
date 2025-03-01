@@ -1,0 +1,281 @@
+From: Jonathan Nieder <jrnieder@gmail.com>
+Date: Tue, 29 Sep 2009 21:50:54 -0500
+Subject: [PATCH 5/9] [NEEDSWORK: memlimit] Handle xz compressed source and binary packages
+
+Use the xz command to support xz-compressed source and binary
+packages.
+
+The xz format is very similar to the lzma format, but it fixes
+some omissions in the latter, most notably a magic number for
+identification by file(1).
+
+NEEDSWORK:
+
+xz will refuse to decompress a file if this requires more
+than 40% of the installed RAM on a system.  On systems with less
+than 16 MiB of RAM installed, this means dpkg-deb will refuse to
+unpack packages whose data.tar.xz was compressed by the xz
+command-line encoder with default settings.
+
+Worse, on systems with less than 128 MiB of RAM installed,
+dpkg-deb will refuse to unpack packages generated with
+"dpkg-deb -b -Zxz" with no -z option.
+
+So, we should
+
+ 1) Set the default preset to some appropriately small number.
+
+ 2) Invoke xz -d with a --memory= option that is high enough to at
+    least cover packages compressed with the default preset.
+
+and
+
+ 3) Make the --memory= option passed to xz configurable on the
+    dpkg-deb command line.
+---
+ debian/control               |    4 ++--
+ dpkg-deb/build.c             |    3 +++
+ dpkg-deb/dpkg-deb.h          |    2 ++
+ dpkg-deb/extract.c           |    4 ++++
+ dpkg-deb/main.c              |    5 ++++-
+ lib/dpkg/compression.c       |    4 ++++
+ lib/dpkg/compression.h       |   11 +++++++++++
+ lib/dpkg/dpkg.h              |    2 ++
+ man/deb.5                    |    5 +++--
+ man/dpkg-deb.1               |    4 ++--
+ man/dpkg-source.1            |    2 +-
+ scripts/Dpkg/Compression.pm  |   11 ++++++-----
+ scripts/dpkg-buildpackage.pl |    2 +-
+ 13 files changed, 45 insertions(+), 14 deletions(-)
+
+diff --git a/debian/control b/debian/control
+index 27e1b63..be85e8a 100644
+--- a/debian/control
++++ b/debian/control
+@@ -18,7 +18,7 @@ Build-Depends: debhelper (>= 6.0.7), pkg-config, po4a (>= 0.33.1),
+ Package: dpkg
+ Architecture: any
+ Essential: yes
+-Pre-Depends: ${shlibs:Depends}, coreutils (>= 5.93-1), lzma
++Pre-Depends: ${shlibs:Depends}, coreutils (>= 5.93-1), lzma, xz-utils
+ Conflicts: sysvinit (<< 2.82-1), dpkg-iasearch (<< 0.11),
+  dpkg-dev (<< 1.14.16), apt (<< 0.7.7), aptitude (<< 0.4.7-1)
+ Replaces: manpages-de (<= 0.4-3), manpages-pl (<= 20051117-1)
+@@ -40,7 +40,7 @@ Package: dpkg-dev
+ Section: utils
+ Priority: optional
+ Architecture: all
+-Depends: dpkg (>= 1.15.4), perl5, perl-modules, bzip2, lzma,
++Depends: dpkg (>= 1.15.4), perl5, perl-modules, bzip2, lzma, xz-utils,
+  patch (>= 2.2-1), make, binutils, libtimedate-perl, base-files (>= 5.0.0)
+ Recommends: gcc | c-compiler, build-essential, fakeroot, gnupg, gpgv
+ Suggests: debian-keyring, debian-maintainers
+diff --git a/dpkg-deb/build.c b/dpkg-deb/build.c
+index 124fd79..58531f3 100644
+--- a/dpkg-deb/build.c
++++ b/dpkg-deb/build.c
+@@ -543,6 +543,9 @@ void do_build(const char *const *argv) {
+     case compress_type_lzma:
+       datamember = DATAMEMBER_LZMA;
+       break;
++    case compress_type_xz:
++      datamember = DATAMEMBER_XZ;
++      break;
+     case compress_type_cat:
+       datamember = DATAMEMBER_CAT;
+       break;
+diff --git a/dpkg-deb/dpkg-deb.h b/dpkg-deb/dpkg-deb.h
+index 2bd6d88..0f1103a 100644
+--- a/dpkg-deb/dpkg-deb.h
++++ b/dpkg-deb/dpkg-deb.h
+@@ -62,6 +62,8 @@ extern enum compress_type compress_type;
+ #define DATAMEMBER_COMPAT_BZ2  	"data.tar.bz2/   "
+ #define DATAMEMBER_LZMA		"data.tar.lzma   "
+ #define DATAMEMBER_COMPAT_LZMA	"data.tar.lzma/  "
++#define DATAMEMBER_XZ		"data.tar.xz     "
++#define DATAMEMBER_COMPAT_XZ	"data.tar.xz/    "
+ #define DATAMEMBER_CAT   	"data.tar        "
+ #define DATAMEMBER_COMPAT_CAT  	"data.tar/       "
+ 
+diff --git a/dpkg-deb/extract.c b/dpkg-deb/extract.c
+index 4c429d7..20d6f11 100644
+--- a/dpkg-deb/extract.c
++++ b/dpkg-deb/extract.c
+@@ -185,6 +185,10 @@ void extracthalf(const char *debar, const char *directory,
+ 		     !memcmp(arh.ar_name, DATAMEMBER_COMPAT_LZMA, sizeof(arh.ar_name))) {
+ 	    adminmember = 0;
+ 	    compress_type = compress_type_lzma;
++	  } else if (!memcmp(arh.ar_name, DATAMEMBER_XZ, sizeof(arh.ar_name)) ||
++		     !memcmp(arh.ar_name, DATAMEMBER_COMPAT_XZ, sizeof(arh.ar_name))) {
++	    adminmember = 0;
++	    compress_type = compress_type_xz;
+ 	  } else if (!memcmp(arh.ar_name,DATAMEMBER_CAT,sizeof(arh.ar_name)) ||
+ 		     !memcmp(arh.ar_name,DATAMEMBER_COMPAT_CAT,sizeof(arh.ar_name))) {
+ 	    adminmember= 0;
+diff --git a/dpkg-deb/main.c b/dpkg-deb/main.c
+index c203930..0d859e0 100644
+--- a/dpkg-deb/main.c
++++ b/dpkg-deb/main.c
+@@ -104,7 +104,8 @@ usage(void)
+ "                                     packages).\n"
+ "  -z#                              Set the compression level when building.\n"
+ "  -Z<type>                         Set the compression type used when building.\n"
+-"                                     Allowed values: gzip, bzip2, lzma, none.\n"
++"                                     Allowed values: gzip, bzip2, lzma, xz,\n"
++"                                     none.\n"
+ "\n"));
+ 
+   printf(_(
+@@ -196,6 +197,8 @@ static void setcompresstype(const struct cmdinfo *cip, const char *value) {
+     compress_type = compress_type_bzip2;
+   else if (!strcmp(value, "lzma"))
+     compress_type = compress_type_lzma;
++  else if (!strcmp(value, "xz"))
++    compress_type = compress_type_xz;
+   else if (!strcmp(value, "none"))
+     compress_type = compress_type_cat;
+   else
+diff --git a/lib/dpkg/compression.c b/lib/dpkg/compression.c
+index f01a3f6..39b7abc 100644
+--- a/lib/dpkg/compression.c
++++ b/lib/dpkg/compression.c
+@@ -22,6 +22,8 @@ void decompress_cat(enum compress_type type, int fd_in, int fd_out, char *desc,
+       decompress_bzip2(fd_in, fd_out, v.buf);
+     case compress_type_lzma:
+       decompress_lzma(fd_in, fd_out, v.buf);
++    case compress_type_xz:
++      decompress_xz(fd_in, fd_out, v.buf);
+     case compress_type_cat:
+       decompress_noop(fd_in, fd_out, v.buf);
+     default:
+@@ -48,6 +50,8 @@ void compress_cat(enum compress_type type, int fd_in, int fd_out, const char *co
+       compress_bzip2(fd_in, fd_out, *compression, v.buf);
+     case compress_type_lzma:
+       compress_lzma(fd_in, fd_out, *compression, v.buf);
++    case compress_type_xz:
++      compress_xz(fd_in, fd_out, *compression, v.buf);
+     case compress_type_cat:
+       compress_noop(fd_in, fd_out, *compression, v.buf);
+     default:
+diff --git a/lib/dpkg/compression.h b/lib/dpkg/compression.h
+index f5cff3f..541cd0f 100644
+--- a/lib/dpkg/compression.h
++++ b/lib/dpkg/compression.h
+@@ -208,3 +208,14 @@ static void compress_lzma(int fd_in, int fd_out, char compression,
+ {
+ 	compress_cmd(fd_in, fd_out, LZMA, "lzma", compression, desc);
+ }
++
++static void decompress_xz(int fd_in, int fd_out, const char *desc)
++{
++	decompress_cmd(fd_in, fd_out, XZ, "xz", desc);
++}
++
++static void compress_xz(int fd_in, int fd_out, char compression,
++                          const char *desc)
++{
++	compress_cmd(fd_in, fd_out, XZ, "xz", compression, desc);
++}
+diff --git a/lib/dpkg/dpkg.h b/lib/dpkg/dpkg.h
+index afe650f..f701d0c 100644
+--- a/lib/dpkg/dpkg.h
++++ b/lib/dpkg/dpkg.h
+@@ -111,6 +111,7 @@ DPKG_BEGIN_DECLS
+ #define GZIP		"gzip"
+ #define BZIP2		"bzip2"
+ #define LZMA		"lzma"
++#define XZ		"xz"
+ #define RM		"rm"
+ #define FIND		"find"
+ #define DIFF		"diff"
+@@ -221,6 +222,7 @@ enum compress_type {
+   compress_type_gzip,
+   compress_type_bzip2,
+   compress_type_lzma,
++  compress_type_xz,
+ };
+ 
+ void decompress_cat(enum compress_type type, int fd_in, int fd_out,
+diff --git a/man/deb.5 b/man/deb.5
+index c51ed12..c54e749 100644
+--- a/man/deb.5
++++ b/man/deb.5
+@@ -56,8 +56,9 @@ The third, last required member is named
+ It contains the filesystem as a tar archive, either
+ not compressed (supported since dpkg 1.10.24), or compressed with
+ gzip (with \fB.gz\fP extension),
+-bzip2 (with \fB.bz2\fP extension, supported since dpkg 1.10.24) or
+-lzma (with \fB.lzma\fP extension, supported since dpkg 1.13.25).
++bzip2 (with \fB.bz2\fP extension, supported since dpkg 1.10.24),
++lzma (with \fB.lzma\fP extension, supported since dpkg 1.13.25), or
++xz (with \fB.xz\fP extension, supported since dpkg 1.15.5).
+ .PP
+ These members must occur in this exact order. Current implementations
+ should ignore any additional members after
+diff --git a/man/dpkg-deb.1 b/man/dpkg-deb.1
+index bb08dc9..234c0b2 100644
+--- a/man/dpkg-deb.1
++++ b/man/dpkg-deb.1
+@@ -194,8 +194,8 @@ when building a package.
+ .TP
+ .BI \-Z compress_type
+ Specify which compression type to use when building a package. Allowed
+-values are \fIgzip\fP, \fIbzip2\fP, \fIlzma\fP, and \fInone\fP (default
+-is \fIgzip\fP).
++values are \fIgzip\fP, \fIbzip2\fP, \fIlzma\fP, \fIxz\fP, and \fInone\fP
++(default is \fIgzip\fP).
+ .TP
+ .BR \-\-new
+ Ensures that
+diff --git a/man/dpkg-source.1 b/man/dpkg-source.1
+index f95e85f..37f7bf7 100644
+--- a/man/dpkg-source.1
++++ b/man/dpkg-source.1
+@@ -114,7 +114,7 @@ Remove an output control file field.
+ Specify the compression to use for created files (tarballs and diffs).
+ Note that this option will not cause existing tarballs to be recompressed,
+ it only affects new files. Supported values are:
+-.IR gzip ", " bzip2 ", and " lzma .
++.IR gzip ", " bzip2 ", " lzma ", and " xz .
+ \fIgzip\fP is the default.
+ .TP
+ .BR \-z \fIlevel\fP
+diff --git a/scripts/Dpkg/Compression.pm b/scripts/Dpkg/Compression.pm
+index 414dcfe..e938e78 100644
+--- a/scripts/Dpkg/Compression.pm
++++ b/scripts/Dpkg/Compression.pm
+@@ -8,12 +8,13 @@ our @EXPORT = qw(@comp_supported %comp_supported %comp_ext $comp_regex
+ 		 %comp_prog %comp_decomp_prog
+ 		 get_compression_from_filename);
+ 
+-our @comp_supported = qw(gzip bzip2 lzma);
++our @comp_supported = qw(gzip bzip2 lzma xz);
+ our %comp_supported = map { $_ => 1 } @comp_supported;
+-our %comp_ext = (gzip => 'gz', bzip2 => 'bz2', lzma => 'lzma');
+-our $comp_regex = '(?:gz|bz2|lzma)';
+-our %comp_prog = (gzip => 'gzip', bzip2 => 'bzip2', lzma => 'lzma');
+-our %comp_decomp_prog = (gzip => 'gunzip', bzip2 => 'bunzip2', lzma => 'unlzma');
++our %comp_ext = (gzip => 'gz', bzip2 => 'bz2', lzma => 'lzma', xz => 'xz');
++our $comp_regex = '(?:gz|bz2|lzma|xz)';
++our %comp_prog = (gzip => 'gzip', bzip2 => 'bzip2', lzma => 'lzma', xz => 'xz');
++our %comp_decomp_prog = (gzip => 'gunzip', bzip2 => 'bunzip2', lzma => 'unlzma',
++			xz => 'unxz');
+ 
+ sub get_compression_from_filename {
+     my $filename = shift;
+diff --git a/scripts/dpkg-buildpackage.pl b/scripts/dpkg-buildpackage.pl
+index bdab775..a241da4 100755
+--- a/scripts/dpkg-buildpackage.pl
++++ b/scripts/dpkg-buildpackage.pl
+@@ -67,7 +67,7 @@ Options:
+   -sn            force Debian native source format.      }
+   -s[sAkurKUR]   see dpkg-source for explanation.        } only passed
+   -z<level>      compression level of source             } to dpkg-source
+-  -Z(gz|bz2|lzma) compression to use for source          }
++  -Z(gz|bz2|lzma|xz) compression to use for source       }
+   -nc            do not clean source tree (implies -b).
+   -tc            clean source tree when finished.
+   -ap            add pause before starting signature process.
+-- 
+1.6.5.rc1.199.g596ec
+

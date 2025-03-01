@@ -1,0 +1,165 @@
+diff --git a/cmdline/apt-key b/cmdline/apt-key
+index 7bb3024..b3ffdfe 100755
+--- a/cmdline/apt-key
++++ b/cmdline/apt-key
+@@ -18,6 +18,27 @@ ARCHIVE_KEYRING_URI=""
+ ARCHIVE_KEYRING=/usr/share/keyrings/debian-archive-keyring.gpg
+ REMOVED_KEYS=/usr/share/keyrings/debian-archive-removed-keys.gpg
+ 
++cmd_add() {
++    local FILE="$1"
++    if [ "$INTERACTIVE" = "0" ]; then
++        add_keys_to_keyring "$FILE"
++    else
++        prepare_tmp
++        $GPG_TMP --batch --import "$FILE" || return 1
++        confirm_tmpkeys && add_tmpkeys_to_keyring
++        destroy_tmp
++    fi
++}
++
++add_keys_to_keyring() {
++    local FILE="$1"
++    $GPG --quiet --batch --import "$FILE" && echo "OK"
++}
++
++add_tmpkeys_to_keyring() {
++    $GPG_TMP -q --no-tty --export | add_keys_to_keyring -
++}
++
+ add_keys_with_verify_against_master_keyring() {
+     ADD_KEYRING=$1
+     MASTER=$2
+@@ -102,9 +123,89 @@ update() {
+     done
+ }
+ 
++# variables for handling temporary key data
++TMP=""
++TMP_GPGHOME=""
++GPG_TMP=""
++
++prepare_tmp() {
++    if [ -n "$TMP" ]; then
++        echo "prepare_temp() called twice, aborting"
++        exit 1
++    fi
++    TMP=$(mktemp -d -t apt-key.XXXXXX)
++    TMP_GPGHOME="$TMP/gpg"
++    
++    trap destroy_tmp EXIT INT
++
++    mkdir -p "$TMP_GPGHOME"
++    chmod go-rwx "$TMP_GPGHOME"
++    # create empty keyrings
++    > $TMP_GPGHOME/pubring.gpg
++    > $TMP_GPGHOME/secring.gpg
++
++    GPG_TMP="gpg --homedir $TMP_GPGHOME --no-options --no-default-keyring --batch"
++}
++
++destroy_tmp() {
++     if [ -z "$TMP" ]; then
++        echo "destroy_tmp() called without prepare_tmp() before, aborting"
++        exit 1
++    fi
++    # uninstall handler
++    trap - EXIT INT
++   
++    rm -fr $TMP
++    TMP=""
++    TMP_GPGHOME=""
++    GPG_TMP=""
++}
++
++fetch() {
++    local KEYID="$1"
++    local KEYSERVER="wwwkeys.de.pgp.net"
++
++    if [ "$INTERACTIVE" = "0" ]; then
++        echo "For security reasons, fetching keys from a keyserver does only work in --interactive mode."
++        return 1
++    fi
++
++    if [ -z "$KEYID" ]; then
++        echo "Nothing to fetch"
++        return 1
++    fi
++    
++    $GPG_TMP -q --no-tty --keyserver $KEYSERVER --recv-keys "$KEYID" || return 1
++
++    if confirm_tmpkeys; then
++        # keys confirmed, import them in the keyring
++        add_tmpkeys_to_keyring
++    else
++        echo "Aborted"
++        return 1
++    fi
++}
++
++confirm_tmpkeys() {
++    echo
++    echo "Please compare the key identities and fingerprints below to an"
++    echo "independent source to confirm their integrity."
++    echo
++    
++    $GPG_TMP --fingerprint
++
++    CONFIRMATION="Yes, I will"
++
++    echo "Do your trust this key and wish to add it to your apt keyring?"
++    echo "So answer with '$CONFIRMATION'."
++    read -p " > " ANSWER
++    
++    [ "$ANSWER" = "$CONFIRMATION" ]
++}
++
+ 
+ usage() {
+-    echo "Usage: apt-key [command] [arguments]"
++    echo "Usage: apt-key [--interactive|-i] [command] [arguments]"
+     echo
+     echo "Manage apt's list of trusted keys"
+     echo
+@@ -116,10 +217,18 @@ usage() {
+     echo "  apt-key net-update          - update keys using the network"
+     echo "  apt-key list                - list keys"
+     echo "  apt-key finger              - list fingerprints"
+-    echo "  apt-key adv                 - pass advanced options to gpg (download key)"
++    echo "  apt-key -i fetch <keyid>    - fetch key from keyserver (required interactive mode)"
++    echo "  apt-key adv                 - pass advanced options to gpg"
+     echo
+ }
+ 
++INTERACTIVE=0
++
++if [ "$1" = "--interactive" ] || [ "$1" = "-i" ]; then
++    INTERACTIVE=1
++    shift
++fi
++
+ command="$1"
+ if [ -z "$command" ]; then
+     usage
+@@ -135,8 +244,7 @@ fi
+ 
+ case "$command" in
+     add)
+-        $GPG --quiet --batch --import "$1"
+-        echo "OK"
++        cmd_add "$1"
+         ;;
+     del|rm|remove)
+         $GPG --quiet --batch --delete-key --yes "$1"
+@@ -164,6 +272,11 @@ case "$command" in
+         echo "Executing: $GPG $*"
+         $GPG $*
+         ;;
++    fetch)
++        prepare_tmp;
++        fetch $*
++        destroy_tmp;
++        ;;
+     help)
+         usage
+         ;;

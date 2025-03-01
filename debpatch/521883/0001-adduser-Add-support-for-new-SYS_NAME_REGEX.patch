@@ -1,0 +1,248 @@
+From fb8e6050fc1db053d147cdbeb621527a2f9664a1 Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Sun, 23 Oct 2016 15:44:57 +0200
+Subject: [PATCH] adduser: Add support for new SYS_NAME_REGEX
+
+This variable contains the regex for allowed system users. It will
+fallback to use NAME_REGEX if that is set in the configuration file,
+to preserve backwards compatibility.
+
+The default is set to the same as NAME_REGEX, but it also accepts system
+names starting with an underscore, which is the standard used on several
+BSDs so that the names are namespaced and cannot conflict with normal
+user names.
+
+Closes: #521883
+---
+ AdduserCommon.pm                                  | 85 ++++++++++++++---------
+ adduser                                           | 17 +++--
+ adduser.conf                                      |  3 +
+ doc/adduser.8                                     |  8 ++-
+ doc/adduser.conf.5                                | 11 ++-
+ examples/adduser.local.conf.examples/adduser.conf |  3 +
+ 6 files changed, 86 insertions(+), 41 deletions(-)
+
+diff --git a/AdduserCommon.pm b/AdduserCommon.pm
+index e329bba..6c6f2dd 100644
+--- a/AdduserCommon.pm
++++ b/AdduserCommon.pm
+@@ -93,7 +93,7 @@ sub read_config {
+ 	    next;
+ 	}
+ 	$lcvar = lc $var;
+-	if (!defined($configref->{$lcvar})) {
++	if (!exists($configref->{$lcvar})) {
+ 	    warnf gtx("Unknown variable `%s' at `%s', line %d.\n"),$var,$conf_file,$.;
+ 	    next;
+ 	}
+@@ -176,46 +176,63 @@ sub which {
+     return 0;
+ }
+ 
++my %config_defaults = (
++  system => 0,
++  only_if_empty => 0,
++  remove_home => 0,
++  home => "",
++  remove_all_files => 0,
++  backup => 0,
++  backup_to => ".",
++  dshell => "/bin/bash",
++  first_system_uid => 100,
++  last_system_uid => 999,
++  first_uid => 1000,
++  last_uid => 59999,
++  first_system_gid => 100,
++  last_system_gid => 999,
++  first_gid => 1000,
++  last_gid => 59999,
++  dhome => "/home",
++  skel => "/etc/skel",
++  usergroups => "yes",
++  users_gid => "100",
++  grouphomes => "no",
++  letterhomes => "no",
++  quotauser => "",
++  dir_mode => "0755",
++  setgid_home => "no",
++  no_del_paths => "^/$ ^/lost+found/.* ^/media/.* ^/mnt/.* ^/etc/.* ^/bin/.* ^/boot/.* ^/dev/.* ^/lib/.* ^/proc/.* ^/root/.* ^/sbin/.* ^/tmp/.* ^/sys/.* ^/srv/.* ^/opt/.* ^/initrd/.* ^/usr/.* ^/var/.*",
++  name_regex => "^[a-z][-a-z0-9_]*\$",
++  sys_name_regex => "^[a-z_][-a-z0-9_]*\$",
++  exclude_fstypes => "(proc|sysfs|usbfs|devpts|tmpfs)",
++  skel_ignore_regex => "dpkg-(old|new|dist)\$",
++  extra_groups => "dialout cdrom floppy audio video plugdev users",
++  add_extra_groups => 0,
++);
+ 
+-# preseed the configuration variables 
+-# then read the config file /etc/adduser and overwrite the data hardcoded here
+ sub preseed_config {
+   my ($conflistref, $configref) = @_;
+-  $configref->{"system"} = 0;
+-  $configref->{"only_if_empty"} = 0;
+-  $configref->{"remove_home"} = 0;
+-  $configref->{"home"} = "";
+-  $configref->{"remove_all_files"} = 0;
+-  $configref->{"backup"} = 0;
+-  $configref->{"backup_to"} = ".";
+-  $configref->{"dshell"} = "/bin/bash";
+-  $configref->{"first_system_uid"} = 100;
+-  $configref->{"last_system_uid"} = 999;
+-  $configref->{"first_uid"} = 1000;
+-  $configref->{"last_uid"} = 59999;
+-  $configref->{"first_system_gid"} = 100;
+-  $configref->{"last_system_gid"} = 999;
+-  $configref->{"first_gid"} = 1000;
+-  $configref->{"last_gid"} = 59999;
+-  $configref->{"dhome"} = "/home";
+-  $configref->{"skel"} = "/etc/skel";
+-  $configref->{"usergroups"} = "yes";
+-  $configref->{"users_gid"} = "100";
+-  $configref->{"grouphomes"} = "no";
+-  $configref->{"letterhomes"} = "no";
+-  $configref->{"quotauser"} = "";
+-  $configref->{"dir_mode"} = "0755";
+-  $configref->{"setgid_home"} = "no";
+-  $configref->{"no_del_paths"} = "^/$ ^/lost+found/.* ^/media/.* ^/mnt/.* ^/etc/.* ^/bin/.* ^/boot/.* ^/dev/.* ^/lib/.* ^/proc/.* ^/root/.* ^/sbin/.* ^/tmp/.* ^/sys/.* ^/srv/.* ^/opt/.* ^/initrd/.* ^/usr/.* ^/var/.*";
+-  $configref->{"name_regex"} = "^[a-z][-a-z0-9_]*\$";
+-  $configref->{"exclude_fstypes"} = "(proc|sysfs|usbfs|devpts|tmpfs)";
+-  $configref->{"skel_ignore_regex"} = "dpkg-(old|new|dist)\$";
+-  $configref->{"extra_groups"} = "dialout cdrom floppy audio video plugdev users";
+-  $configref->{"add_extra_groups"} = 0;
+ 
++  # Initialize to the set of known variables.
++  foreach my $key (keys %config_defaults) {
++      $configref->{$key} = undef;
++  }
++
++  # Read the configuration files
+   foreach( @$conflistref ) {
+       read_config($_,$configref);
+   }
++
++  # If name_regex was set in the config file, use that as the default for
++  # backward compatibility (because the user went out of their way to set it
++  # to something they wanted to accept for both normal and system users.
++  $configref->{"sys_name_regex"} //= $configref->{"name_regex"};
++
++  # Fill in any missing variables to their defaults.
++  foreach my $key (keys %config_defaults) {
++      $configref->{$key} //= %config_defaults{$key};
++  }
+ }
+ 
+ # Local Variables:
+diff --git a/adduser b/adduser
+index a5f83f3..cd6ee34 100755
+--- a/adduser
++++ b/adduser
+@@ -871,15 +871,24 @@ a dash (as defined by IEEE Std 1003.1-2001). For compatibility with Samba
+ machine accounts \$ is also supported at the end of the username\n"), $0);
+         exit RET_INVALID_CHARS_IN_NAME;;
+     }
+-    if ($name !~ qr/$config{"name_regex"}/) {
++    my $name_regex_var;
++    my $name_regex;
++    if ($found_sys_opt) {
++        $name_regex_var = 'SYS_NAME_REGEX';
++        $name_regex = $config{"sys_name_regex"};
++    } else {
++        $name_regex_var = 'NAME_REGEX';
++        $name_regex = $config{"name_regex"};
++    }
++    if ($name !~ qr/$name_regex/) {
+       if ($allow_badname) {
+ 	print (gtx("Allowing use of questionable username.\n")) if ($verbose);
+       }
+       else {
+         printf STDERR
+ (gtx("%s: Please enter a username matching the regular expression configured
+-via the NAME_REGEX configuration variable.  Use the `--force-badname'
+-option to relax this check or reconfigure NAME_REGEX.\n"), $0);
++via the %s configuration variable.  Use the `--force-badname'
++option to relax this check or reconfigure %s.\n"), $0, $name_regex_var, $name_regex_var);
+         exit RET_INVALID_CHARS_IN_NAME;
+       }
+     }
+@@ -1026,7 +1035,7 @@ adduser USER GROUP
+ general options:
+   --quiet | -q      don't give process information to stdout
+   --force-badname   allow usernames which do not match the
+-                    NAME_REGEX configuration variable
++                    SYS_NAME_REGEX or NAME_REGEX configuration variables
+   --help | -h       usage message
+   --version | -v    version number and copyright
+   --conf | -c FILE  use FILE as configuration file\n\n");
+diff --git a/adduser.conf b/adduser.conf
+index d045994..0948856 100644
+--- a/adduser.conf
++++ b/adduser.conf
+@@ -83,3 +83,6 @@ SKEL_IGNORE_REGEX="dpkg-(old|new|dist|save)"
+ 
+ # check user and group names also against this regular expression.
+ #NAME_REGEX="^[a-z][-a-z0-9_]*\$"
++
++# check system user and group names also against this regular expression.
++#SYS_NAME_REGEX="^[a-z_][-a-z0-9_]*\$"
+diff --git a/doc/adduser.8 b/doc/adduser.8
+index 039b39c..c6b4e66 100644
+--- a/doc/adduser.8
++++ b/doc/adduser.8
+@@ -203,15 +203,19 @@ SSH RSA keys) but not using password authentication.
+ .TP
+ .B \-\-force\-badname
+ By default, user and group names are checked against the configurable
+-regular expression 
++regular expressions
+ .B NAME_REGEX 
++and
++.B SYS_NAME_REGEX
+ specified in the configuration file. This option forces
+ .B adduser
+ and 
+ .B addgroup
+ to apply only a weak check for validity of the name.
+ .B NAME_REGEX
+-is described in 
++and
++.B SYS_NAME_REGEX
++are described in
+ .BR adduser.conf (5).
+ .TP
+ .B \-\-gecos GECOS
+diff --git a/doc/adduser.conf.5 b/doc/adduser.conf.5
+index d9bdc5f..748e815 100644
+--- a/doc/adduser.conf.5
++++ b/doc/adduser.conf.5
+@@ -121,7 +121,16 @@ that user.  The default is empty.
+ User and group names are checked against this regular expression. If the name
+ doesn't match this regexp, user and group creation in adduser is refused unless
+ --force-badname is set. With --force-badname set, only weak checks are
+-performed. The default is the most conservative ^[a-z][-a-z0-9]*$.
++performed. The default is the most conservative ^[a-z][-a-z0-9_]*$.
++.TP
++.B SYS_NAME_REGEX
++System user and group names are checked against this regular expression. If
++this variable is not set, it falls back to
++.B NAME_REGEX
++for backwards compatibility. If the name doesn't match this regexp, system
++user and group creation in adduser is refused unless --force-badname is
++set. With --force-badname set, only weak checks are performed. The default
++is the most conservative ^[a-z_][-a-z0-9_]*$.
+ .TP
+ \fBSKEL_IGNORE_REGEX\fB
+ Files in /etc/skel/ are checked against this regex, and not copied to
+diff --git a/examples/adduser.local.conf.examples/adduser.conf b/examples/adduser.local.conf.examples/adduser.conf
+index a3b914e..d7c9398 100644
+--- a/examples/adduser.local.conf.examples/adduser.conf
++++ b/examples/adduser.local.conf.examples/adduser.conf
+@@ -88,3 +88,6 @@ SKEL_IGNORE_REGEX="dpkg-(old|new|dist|save)"
+ 
+ # check user and group names also against this regular expression.
+ #NAME_REGEX="^[a-z][-a-z0-9_]*\$"
++
++# check system user and group names also against this regular expression.
++#SYS_NAME_REGEX="^[a-z_][-a-z0-9_]*\$"
+-- 
+2.9.3
+

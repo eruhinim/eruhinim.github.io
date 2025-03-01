@@ -1,0 +1,123 @@
+diff --git a/src/divertcmd.c b/src/divertcmd.c
+index 6d3c8bf..694d8d2 100644
+--- a/src/divertcmd.c
++++ b/src/divertcmd.c
+@@ -382,6 +382,31 @@ divertdb_write(void)
+ 	free(dbname);
+ }
+ 
++static bool
++diversion_is_owned_by_self(struct pkgset *set, struct filenamenode *namenode)
++{
++	struct pkginfo *pkg;
++	struct filepackages_iterator *iter;
++	bool owned = false;
++
++	if (set == NULL)
++		return false;
++
++	for (pkg = &set->pkg; pkg; pkg = pkg->arch_next)
++		ensure_packagefiles_available(pkg);
++
++	iter = filepackages_iter_new(namenode);
++	while ((pkg = filepackages_iter_next(iter))) {
++		if (pkg->set == set) {
++			owned = true;
++			break;
++		}
++	}
++	filepackages_iter_free(iter);
++
++	return owned;
++}
++
+ static int
+ diversion_add(const char *const *argv)
+ {
+@@ -468,6 +493,13 @@ diversion_add(const char *const *argv)
+ 		printf(_("Adding '%s'\n"), diversion_describe(contest));
+ 	if (opt_rename)
+ 		opt_rename = check_rename(&file_from, &file_to);
++	/* Check we are not diverting a file owned by the same set. */
++	if (opt_rename && diversion_is_owned_by_self(pkgset, fnn_from)) {
++		if (opt_verbose > 0)
++			printf(_("Ignoring request to rename self owned diverted file '%s'"),
++			       filename);
++		opt_rename = false;
++	}
+ 	if (!opt_test) {
+ 		divertdb_write();
+ 		if (opt_rename)
+diff --git a/src/t/100_dpkg_divert.t b/src/t/100_dpkg_divert.t
+index 6d62fe5..f1e2775 100644
+--- a/src/t/100_dpkg_divert.t
++++ b/src/t/100_dpkg_divert.t
+@@ -33,11 +33,13 @@ if (! -x "@dd") {
+     exit(0);
+ }
+ 
+-plan tests => 251;
++plan tests => 257;
+ 
+ sub cleanup {
+     system("rm -rf $tmpdir && mkdir -p $testdir");
+-    system("mkdir -p $admindir/updates && touch $admindir/status");
++    system("mkdir -p $admindir/updates");
++    system("rm -f $admindir/status && touch $admindir/status");
++    system("rm -rf $admindir/info && mkdir -p $admindir/info");
+ }
+ 
+ sub install_diversions {
+@@ -47,6 +49,27 @@ sub install_diversions {
+     close(O);
+ }
+ 
++sub install_filelist {
++    my ($pkg, $arch, @files) = @_;
++    open(L, "> $admindir/info/$pkg.list");
++    for my $file (@files) {
++        print L "$file\n";
++    }
++    close(L);
++    # Only installed packages have their files list considered.
++    open(S, ">> $admindir/status");
++    print S <<EOF;
++Package: $pkg
++Status: install ok installed
++Version: 0
++Architecture: $arch
++Maintainer: dummy
++Description: dummy
++
++EOF
++    close(S);
++}
++
+ sub call {
+     my ($prog, $args, %opts) = @_;
+ 
+@@ -392,6 +415,24 @@ EOF
+ 
+ cleanup();
+ 
++note("Adding diversion of file owned by --package");
++
++install_filelist("coreutils", "i386", "$testdir/foo");
++install_diversions('');
++system("touch $testdir/foo");
++
++call_divert(['--quiet', '--rename', '--add', '--package', 'coreutils', "$testdir/foo"],
++            expect_stderr => '', expect_stdout => '');
++ok(-e "$testdir/foo", "foo not renamed");
++ok(!-e "$testdir/foo.distrib", "foo renamed");
++diversions_eq(<<EOF);
++$testdir/foo
++$testdir/foo.distrib
++coreutils
++EOF
++
++cleanup();
++
+ note("Remove diversions");
+ 
+ install_diversions('');

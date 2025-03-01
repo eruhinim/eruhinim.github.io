@@ -1,0 +1,479 @@
+From 3fa1ca8da2df5567a8279982fed6023755e5aab6 Mon Sep 17 00:00:00 2001
+From: Michael Stapelberg <michael@stapelberg.de>
+Date: Sat, 4 May 2013 20:46:01 +0200
+Subject: [PATCH] add new helper dh_systemd
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This helper is called automatically by dh(1). It enables systemd unit
+files and handles start/stop/restart on upgrade for unit files without a
+corresponding SysV init script.
+
+In order to enable systemd unit files, a dependency on
+init-system-helpers is added to the package. This dependency is
+necessary to ensure deb-systemd-helper is present, which will enable
+unit files on any machine, regardless of whether it runs systemd or not.
+This in turn is a requirement for switching from sysvinit to systemd and
+vice-versa.
+
+The raison d'être for dh_systemd is the fact that some packages
+ship multiple service files but only a single SysV init script, i.e.
+there is no 1:1 correlation between systemd unit files and SysV init
+scripts. As an example, samba consists of smbd and nmbd, but both are
+started using /etc/init.d/samba, whereas with systemd, one might use
+smbd.service and nmbd.service instead. For such cases it makes sense to
+have a separate helper instead of trying to cram the functionality into
+dh_installinit.
+
+dh_systemd was tested with numerous packages that use different
+sets of features. Among the tested packages are alsa-utils, rsyslog,
+dbus, nginx, udisks, irker, pyroman, all-knowing-dns and kanla.
+
+In case dh_systemd adds undesirable code to your maintscripts,
+please contact pkg-systemd-maintainers@lists.alioth.debian.org and
+temporarily disable dh_systemd with this make rule:
+
+    # Disable dh_systemd
+    override_dh_systemd:
+---
+ autoscripts/postinst-systemd-enable         |    1 +
+ autoscripts/postinst-systemd-enable-restart |    6 +
+ autoscripts/postinst-systemd-enable-start   |    6 +
+ autoscripts/postinst-systemd-restart        |    3 +
+ autoscripts/postinst-systemd-start          |    3 +
+ autoscripts/postrm-systemd                  |    5 +
+ autoscripts/postrm-systemd-reload           |    9 +
+ autoscripts/postrm-systemd-reload-only      |    3 +
+ autoscripts/prerm-systemd                   |    3 +
+ autoscripts/prerm-systemd-restart           |    3 +
+ dh                                          |    1 +
+ dh_systemd                                  |  292 +++++++++++++++++++++++++++
+ 12 files changed, 335 insertions(+)
+ create mode 100644 autoscripts/postinst-systemd-enable
+ create mode 100644 autoscripts/postinst-systemd-enable-restart
+ create mode 100644 autoscripts/postinst-systemd-enable-start
+ create mode 100644 autoscripts/postinst-systemd-restart
+ create mode 100644 autoscripts/postinst-systemd-start
+ create mode 100644 autoscripts/postrm-systemd
+ create mode 100644 autoscripts/postrm-systemd-reload
+ create mode 100644 autoscripts/postrm-systemd-reload-only
+ create mode 100644 autoscripts/prerm-systemd
+ create mode 100644 autoscripts/prerm-systemd-restart
+ create mode 100755 dh_systemd
+
+diff --git a/autoscripts/postinst-systemd-enable b/autoscripts/postinst-systemd-enable
+new file mode 100644
+index 0000000..052dc0e
+--- /dev/null
++++ b/autoscripts/postinst-systemd-enable
+@@ -0,0 +1 @@
++deb-systemd-helper enable #UNITFILES# >/dev/null || true
+diff --git a/autoscripts/postinst-systemd-enable-restart b/autoscripts/postinst-systemd-enable-restart
+new file mode 100644
+index 0000000..a63aa6b
+--- /dev/null
++++ b/autoscripts/postinst-systemd-enable-restart
+@@ -0,0 +1,6 @@
++deb-systemd-helper enable #UNITFILES# >/dev/null || true
++
++if [ -d /run/systemd/system ]; then
++	systemctl --system daemon-reload >/dev/null || true
++	systemctl try-restart #UNITFILES# >/dev/null || true
++fi
+diff --git a/autoscripts/postinst-systemd-enable-start b/autoscripts/postinst-systemd-enable-start
+new file mode 100644
+index 0000000..6cccdcf
+--- /dev/null
++++ b/autoscripts/postinst-systemd-enable-start
+@@ -0,0 +1,6 @@
++deb-systemd-helper enable #UNITFILES# >/dev/null || true
++
++if [ -d /run/systemd/system ]; then
++	systemctl --system daemon-reload >/dev/null || true
++	systemctl start #UNITFILES# >/dev/null || true
++fi
+diff --git a/autoscripts/postinst-systemd-restart b/autoscripts/postinst-systemd-restart
+new file mode 100644
+index 0000000..e96bc93
+--- /dev/null
++++ b/autoscripts/postinst-systemd-restart
+@@ -0,0 +1,3 @@
++if [ -d /run/systemd/system ]; then
++	systemctl try-restart #UNITFILES# >/dev/null || true
++fi
+diff --git a/autoscripts/postinst-systemd-start b/autoscripts/postinst-systemd-start
+new file mode 100644
+index 0000000..bf6458b
+--- /dev/null
++++ b/autoscripts/postinst-systemd-start
+@@ -0,0 +1,3 @@
++if [ -d /run/systemd/system ]; then
++	systemctl start #UNITFILES# >/dev/null || true
++fi
+diff --git a/autoscripts/postrm-systemd b/autoscripts/postrm-systemd
+new file mode 100644
+index 0000000..ddc2269
+--- /dev/null
++++ b/autoscripts/postrm-systemd
+@@ -0,0 +1,5 @@
++if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
++	if [ -x "/usr/bin/deb-systemd-helper" ]; then
++		deb-systemd-helper disable #UNITFILES# >/dev/null
++	fi
++fi
+diff --git a/autoscripts/postrm-systemd-reload b/autoscripts/postrm-systemd-reload
+new file mode 100644
+index 0000000..d86be20
+--- /dev/null
++++ b/autoscripts/postrm-systemd-reload
+@@ -0,0 +1,9 @@
++if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
++	if [ -x "/usr/bin/deb-systemd-helper" ]; then
++		deb-systemd-helper disable #UNITFILES# >/dev/null
++	fi
++fi
++
++if [ -d /run/systemd/system ]; then
++	systemctl --system daemon-reload >/dev/null || true
++fi
+diff --git a/autoscripts/postrm-systemd-reload-only b/autoscripts/postrm-systemd-reload-only
+new file mode 100644
+index 0000000..91cd9e8
+--- /dev/null
++++ b/autoscripts/postrm-systemd-reload-only
+@@ -0,0 +1,3 @@
++if [ -d /run/systemd/system ]; then
++	systemctl --system daemon-reload >/dev/null || true
++fi
+diff --git a/autoscripts/prerm-systemd b/autoscripts/prerm-systemd
+new file mode 100644
+index 0000000..aa36110
+--- /dev/null
++++ b/autoscripts/prerm-systemd
+@@ -0,0 +1,3 @@
++if [ -d /run/systemd/system ]; then
++	systemctl stop #UNITFILES# >/dev/null
++fi
+diff --git a/autoscripts/prerm-systemd-restart b/autoscripts/prerm-systemd-restart
+new file mode 100644
+index 0000000..6f4e584
+--- /dev/null
++++ b/autoscripts/prerm-systemd-restart
+@@ -0,0 +1,3 @@
++if [ -d /run/systemd/system ] && [ "$1" = remove ]; then
++	systemctl stop #UNITFILES# >/dev/null
++fi
+diff --git a/dh b/dh
+index 7f81661..55672ab 100755
+--- a/dh
++++ b/dh
+@@ -373,6 +373,7 @@ my @i = qw{
+ 	dh_installifupdown
+ 	dh_installinfo
+ 	dh_installinit
++	dh_systemd
+ 	dh_installmenu
+ 	dh_installmime
+ 	dh_installmodules
+diff --git a/dh_systemd b/dh_systemd
+new file mode 100755
+index 0000000..0652be7
+--- /dev/null
++++ b/dh_systemd
+@@ -0,0 +1,292 @@
++#!/usr/bin/perl -w
++
++=head1 NAME
++
++dh_systemd - enable/start/stop/restart systemd unit files
++
++=cut
++
++use strict;
++use Debian::Debhelper::Dh_Lib;
++use File::Find;
++use Text::ParseWords qw(shellwords); # in core since Perl 5
++
++=head1 SYNOPSIS
++
++B<dh_systemd> [S<I<debhelper options>>] [B<--no-enable>] [B<--restart-after-upgrade>] [B<--no-restart-on-upgrade>] [B<--assume-sysv-present>] [S<I<unit file> ...>]
++
++=head1 DESCRIPTION
++
++B<dh_systemd> is a debhelper program that is responsible for enabling,
++starting/stopping or restarting systemd unit files.
++
++In the simple case, it finds all unit files installed by a package (e.g.
++bacula-fd.service) and enables them. It is not necessary that the machine
++actually runs systemd during package installation time, enabling happens on all
++machines in order to be able to switch from sysvinit to systemd and back.
++
++Furthermore, as with B<dh_installinit>, the unit file is stopped before
++upgrades and started afterwards (unless B<--restart-after-upgrade> is
++specified, in which case it will only be restarted after the upgrade).
++This logic is not used when there is a corresponding SysV init script
++because invoke-rc.d performs the stop/start/restart in that case.
++
++In the complex case, you can call B<dh_systemd> manually and specify
++flags per unit file. An example is colord, which ships colord.service, a
++dbus-activated service without an [Install] section. This service file cannot
++be enabled or disabled (a state called "static" by systemd) because it has no
++[Install] section. Therefore, run
++
++    dh_systemd --no-enable colord.service
++
++=head1 OPTIONS
++
++=over 4
++
++=item B<--no-enable>
++
++Do not enable the unit file. This option is most useful when calling
++B<dh_systemd> for a specific unit file.
++
++Example (see DESCRIPTION):
++    dh_systemd --no-enable colord.service
++
++=item B<--restart-after-upgrade>
++
++Do not stop the unit file until after the package upgrade has been completed.
++This is different than the default behavior, which stops the unit file in the
++F<prerm> and starts it again in the F<postinst> maintscript.
++
++This can be useful for daemons that should not have a possibly long
++downtime during upgrade. But you should make sure that the daemon will not
++get confused by the package being upgraded while it's running before using
++this option.
++
++=item B<-r>, B<--no-restart-on-upgrade>
++
++Do not stop service on upgrade.
++
++=item B<--assume-sysv-present>
++
++When running B<dh_systemd> before B<dh_installinit>, init scripts might
++not be installed yet and thus cannot be found by B<dh_systemd>. By
++specifying B<--assume-sysv-present>, start/stop/restart will be done through
++invoke-rc.d, i.e. no systemd-specific code will be generated.
++
++=item B<--no-also>
++
++B<dh_systemd> looks into unit files and processes the Also= contents. In case
++this logic produces wrong results for some reason, you can first report a bug
++to pkg-systemd-maintainers and then use B<--no-also> to make your package work
++in the meantime.
++
++=back
++
++=head1 NOTES
++
++Note that this command is not idempotent. L<dh_prep(1)> should be called
++between invocations of this command (with the same arguments). Otherwise, it
++may cause multiple instances of the same text to be added to maintainer
++scripts.
++
++Note that B<dh_systemd> should be run after B<dh_installinit> so that it
++can detect corresponding SysV init scripts. The default sequence in B<dh> does
++the right thing, this note is only relevant when you are calling
++B<dh_systemd> manually.
++
++=cut
++
++init(options => {
++	"r" => \$dh{R_FLAG},
++	"no-restart-on-upgrade" => \$dh{R_FLAG},
++	"no-start" => \$dh{NO_START},
++	"no-enable" => \$dh{NO_ENABLE},
++	"R|restart-after-upgrade" => \$dh{RESTART_AFTER_UPGRADE},
++	"assume-sysv-present" => \$dh{ASSUME_SYSV_PRESENT},
++	"no-also" => \$dh{NO_ALSO},
++});
++
++# PROMISE: DH NOOP WITHOUT tmp(lib/systemd)
++
++# Extracts the Also= or Alias= line(s) from a unit file.
++# In case this produces horribly wrong results, you can pass --no-also, but
++# that should really not be necessary. Please report bugs to
++# pkg-systemd-maintainers.
++sub extract_key {
++	my ($unit_path, $key) = @_;
++	my @values;
++	my $fh;
++
++	if ($dh{NO_ALSO}) {
++		return @values;
++	}
++
++	if (!open($fh, '<', $unit_path)) {
++		warning("Cannot open($unit_path) for extracting the Also= line(s)");
++		return;
++	}
++	while (my $line = <$fh>) {
++		chomp($line);
++
++		if ($line =~ /^\s*$key=(.+)$/i) {
++			@values = (@values, shellwords($1));
++		}
++	}
++	close($fh);
++	return @values;
++}
++
++foreach my $package (@{$dh{DOPACKAGES}}) {
++	my $tmpdir = tmpdir($package);
++	my @installed_units;
++	my %unitfiles;
++	my %aliases;
++
++	find({
++		wanted => sub {
++			my $name = $File::Find::name;
++			return unless -f $name;
++			return unless $name =~ m,^$tmpdir/lib/systemd/system/[^/]+$,;
++			push @installed_units, $name;
++		},
++		no_chdir => 1,
++	}, $tmpdir);
++
++	# Handle either only the unit files which were passed as arguments or
++	# all unit files that are installed in this package.
++	my @args = @ARGV > 0 ? @ARGV : @installed_units;
++
++	# This hash prevents us from looping forever in the following while loop.
++	# An actual real-world example of such a loop is systemd’s
++	# systemd-readahead-drop.service, which contains
++	# Also=systemd-readahead-collect.service, and that file in turn
++	# contains Also=systemd-readahead-drop.service, thus forming an endless
++	# loop.
++	my %seen;
++
++	# We use while/shift because we push to the list in the body.
++	while (@args) {
++		my $name = shift @args;
++		my $base = basename($name);
++
++		# Skip template service files like e.g. getty@.service.
++		# Enabling, disabling, starting or stopping those services
++		# without specifying the instance (e.g. getty@ttyS0.service) is
++		# not useful.
++		if ($name =~ /\@/) {
++			return;
++		}
++
++		# Handle all unit files specified via Also= explicitly.
++		# This is not necessary for enabling, but for disabling, as we
++		# cannot read the unit file when disabling (it was already
++		# deleted).
++		my @also = grep { !exists($seen{$_}) } extract_key($name, 'Also');
++		$seen{$_} = 1 for @also;
++		@args = (@args, @also);
++
++		$aliases{$name} = [ extract_key($name, 'Alias') ];
++		my @sysv = grep {
++				my $base = $_;
++				$base =~ s/\.service$//g;
++				-f "$tmpdir/etc/init.d/$base"
++			} ($base, @{$aliases{$name}});
++		if (@sysv > 0 || $dh{ASSUME_SYSV_PRESENT}) {
++			$unitfiles{$name} = 'sysv';
++		} else {
++			$unitfiles{$name} = 'systemd-only';
++		}
++	}
++
++	# Calls autoscript() as appropriate.
++	# Called once for all systemd files that have a corresponding SysV init
++	# script (invoke-rc.d handles start/stop/restart) and once for all
++	# systemd files without a corresponding SysV init script (systemctl
++	# handles start/stop/restart).
++	my $add_scripts = sub {
++		my ($units, $sysv_present) = @_;
++
++		return 0 if @$units == 0;
++
++		# The $package and $sed parameters are always the same.
++		# This wrapper function makes the following logic easier to read.
++		my $sd_autoscript = sub {
++			my ($script, $filename) = @_;
++			my $unitargs = join(" ", map { basename($_) } @$units);
++			autoscript($package, $script, $filename, "s/#UNITFILES#/$unitargs/");
++		};
++
++		if (! $dh{NO_ENABLE}) {
++			if ($sysv_present) {
++				$sd_autoscript->("postinst", "postinst-systemd-enable");
++			} elsif ($dh{RESTART_AFTER_UPGRADE}) {
++				$sd_autoscript->("postinst", "postinst-systemd-enable-restart");
++			} elsif ($dh{NO_START}) {
++				# RESTART_AFTER_UPGRADE takes precedence
++				$sd_autoscript->("postinst", "postinst-systemd-enable");
++			} else {
++				$sd_autoscript->("postinst", "postinst-systemd-enable-start");
++			}
++		} else {
++			if (!$sysv_present && $dh{RESTART_AFTER_UPGRADE}) {
++				$sd_autoscript->("postinst", "postinst-systemd-restart");
++			} elsif (!$sysv_present) {
++				# We need to stop/start before/after the upgrade.
++				$sd_autoscript->("postinst", "postinst-systemd-start");
++			}
++		}
++
++		if (! $dh{NO_ENABLE}) {
++			# These autoscripts contain a call to deb-systemd-helper disable,
++			# which needs to have all Aliases passed explicitly
++			# in order to properly cleanup the state file (the
++			# information is stored only in the symlinks which the
++			# admin might have removed).
++			my $filename = 'postrm-systemd';
++			$filename .= '-reload' if !$sysv_present;
++
++			my @both = @$units;
++			for my $unit (@$units) {
++				@both = (@both, @{$aliases{$unit}});
++			}
++
++			my $unitargs = join(" ", map { basename($_) } @both);
++			autoscript($package, "postrm", $filename, "s/#UNITFILES#/$unitargs/");
++		} else {
++			if (!$sysv_present) {
++				$sd_autoscript->("postrm", "postrm-systemd-reload-only");
++			}
++		}
++
++		if (!$sysv_present) {
++			if ($dh{R_FLAG} || $dh{RESTART_AFTER_UPGRADE}) {
++				# stop service only on remove
++				$sd_autoscript->("prerm", "prerm-systemd-restart");
++			} elsif (!$dh{NO_START}) {
++				# always stop service
++				$sd_autoscript->("prerm", "prerm-systemd");
++			}
++		}
++
++		return 1;
++	};
++
++	if (($add_scripts->([ grep { $unitfiles{$_} eq 'systemd-only' } keys %unitfiles ], 0) +
++	     $add_scripts->([ grep { $unitfiles{$_} eq 'sysv' } keys %unitfiles ], 1)) > 0) {
++		# init-system-helpers ships deb-systemd-helper which we use in
++		# our autoscripts
++		addsubstvar($package, "misc:Depends", "init-system-helpers");
++	}
++}
++
++=head1 SEE ALSO
++
++L<debhelper(7)>
++
++This program is a part of debhelper.
++
++=head1 AUTHORS
++
++pkg-systemd-maintainers@lists.alioth.debian.org
++
++=cut
+-- 
+1.7.10.4
+

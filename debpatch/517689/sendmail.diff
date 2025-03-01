@@ -1,0 +1,242 @@
+diff --git a/src/debarchiver.pl b/src/debarchiver.pl
+index 2eaa9bd..ba6ef0e 100755
+--- a/src/debarchiver.pl
++++ b/src/debarchiver.pl
+@@ -72,9 +72,13 @@ use OpaL::read qw(readfile readcommand);
+ #  2007-10-09 Ola Lundqvist <ola@inguza.com>
+ #       Changed force option to ignoredestcheck option.
+ 
++my $use_sendmail = 0;
++my %cmds = ();
++$cmds{'sendmail'} = 'sendmail';
++$cmds{'mail'}     = 'mail';
++
+ $copycmd = "cp -af";
+ $rmcmd = "rm -f";
+-$mailcmd = "mail";
+ $movecmd = "mv";
+ $vrfycmd = "dscverify";
+ $cachedir = "/var/cache/debarchiver";
+@@ -456,9 +460,19 @@ while ($_ = shift @ARGS2) {
+ 	elsif (/^--movecmd$/) {
+ 	    $movecmd = shift @ARGS2;
+ 	}
+-	elsif (/^--mailcmd$/) {
+-	    $mailcmd = shift @ARGS2;
+-	}
++    elsif (/^--mailcmd$/) {
++        my $usercmd = shift @ARGS2;
++        if ($usercmd =~ m|^(.*\/)+(.*)|) {
++            $cmds{$2} = $usercmd;
++            $usercmd = $2;
++
++        } else {
++            $cmds{$usercmd} = $usercmd;
++        }
++        &check_commands({$usercmd => ''}, {});
++        $cmds{'mail'} = $cmds{$usercmd};
++        delete $cmds{'sendmail'};
++    }
+ 	elsif (/^--mailfrom$/) {
+ 	    $mailfrom = shift @ARGS2;
+ 	}
+@@ -557,6 +571,8 @@ while ($_ = shift @ARGS2) {
+     }
+ }
+ 
++&check_commands({}, {});
++
+ ###############################################################################
+ ############################# START ###########################################
+ ###############################################################################
+@@ -742,37 +758,58 @@ sub determineMailTo() {
+ #  2007-10-08 Ola Lundqvist <ola@inguza.com>
+ #       Make it possible to specify mail sender.
+ ###############################################################################
++sub email($$$) {
++    my ($toAddress, $subject, $msg) = @_;
+ 
+-sub email($$$$) {
+-    my ($to, $package, $key, $message) = @_;
+-    if (length($to) > 0) {
+-	pdebug(5, "Executing mail command, $mailcmd -s '$package $key' $to.");
+-	if ($mailfrom ne "") {
+-	    if (open(M, "|$mailcmd -s '$package $key' '$to' -- -f '$mailfrom'")) {
+-		print M $message;
+-		close(M);
+-	    }
+-	    else {
+-		pdebug(2,
+-		       "Error executing mail command, $mailcmd -s '$package $key' '$to' -- -f '$mailfrom'.");
+-	    }
+-	    pdebug(5, "Mail exec done.");
+-	}
+-	else {
+-	    if (open(M, "|$mailcmd -s '$package $key' '$to'")) {
+-		print M $message;
+-		close(M);
+-	    }
+-	    else {
+-		pdebug(2,
+-		       "Error executing mail command, $mailcmd -s '$package $key' '$to'.");
+-	    }
+-	    pdebug(5, "Mail exec done.");
+-	}
++    pdebug(5, "Sending mail ...");
++
++    if ( $use_sendmail && ($mailfrom eq "") ) {
++        pdebug(5, "No sender mail address found, use of the debarchiver user instead.");
+     }
+-    else {
+-	pdebug(3, "No one to send mail to.");
++
++    my $err=1;
++    if ($toAddress eq "") {
++        pdebug(3, "No recipient to send mail to.");
++
++    } elsif ($subject eq "") {
++        pdebug(3, "Empty subject");
++
++    } elsif ($msg eq "") {
++        pdebug(3, "Empty message")
++
++    } else {
++        $err = 0;
+     }
++
++    if ($err) {
++        pdebug(2, "No mail sent due to missing parameters");
++
++    } elsif ($use_sendmail) {
++
++        if (open(M, "| $cmds{'sendmail'} -t")) {
++            print M "From: $mailfrom\n" unless ($mailfrom eq "");
++            print M "To: $toAddress\n",
++                    "Subject: $subject\n\n",
++                    $msg . "\n";
++            close(M);
++
++        } else {
++            pdebug(2, "Could not execute $cmds{'sendmail'} $!");
++        }
++
++    } else {
++
++        if (open(M, "| $cmds{'mail'} -s '$subject' '$toAddress'")) {
++            print M $msg . "\n";
++            close(M);
++
++        } else {
++            pdebug(2, "Could not execute $cmds{'mail'} $!");
++        }
++
++    }
++
++    pdebug(5, "Mail exec done.");
+ }
+ 
+ ###############################################################################
+@@ -790,12 +827,11 @@ sub email($$$$) {
+ 
+ sub mailSuccess() {
+     # OOPS! We can not read that file after it has been moved!
+-    my $message = $CMeta{ChangesContent};
++    my $message   = $CMeta{ChangesContent};
++    my $subject   = "$CConf{'Source'} ACCEPTED";
++    my $recipient = determineMailTo();
+     pdebug(5, "Mail Success.");
+-    email(determineMailTo(),
+-	  $CConf{'Source'},
+-	  "ACCEPTED",
+-	  $message);
++    email($recipient, $subject, $message);
+ }
+ 
+ ###############################################################################
+@@ -816,15 +852,13 @@ sub mailReject() {
+     # OOPS! We can not read that file after it has been moved!
+     my $message;
+     if (length($CConf{ERROR}) > 0) {
+-	$message = "ERROR:\n$CConf{ERROR}\n";
++        $message = "ERROR:\n$CConf{ERROR}\n";
+     }
+-    $message .= $CMeta{ChangesContent};
+-
++    $message     .= $CMeta{ChangesContent};
++    my $subject   = "$CConf{'Source'} REJECTED";
++    my $recipient = determineMailTo();
+     pdebug(5, "Mail Reject.");
+-    email(determineMailTo(),
+-	  $CConf{'Source'},
+-	  "REJECTED",
+-          $message);
++    email($recipient, $subject, $message);
+ }
+ 
+ ###############################################################################
+@@ -2403,8 +2437,65 @@ sub secondIfNotEmpty ($$) {
+     return $p1;
+ }
+ 
++sub check_commands() {
++    my ($include_hr, $exclude_hr) = @_;
++
++    my @path = qw(
++        /bin
++        /sbin
++        /usr/bin
++        /usr/sbin
++        /usr/local/bin
++        /usr/local/sbin
++    );
++
++    for my $cmd (keys %cmds) {
++
++        if (keys %$include_hr) {
++            next unless defined $include_hr->{$cmd};
++        }
++        if (keys %$exclude_hr) {
++            next if defined $exclude_hr->{$cmd};
++        }
++
++        unless (-x $cmds{$cmd}) {
++
++            my $found = 0;
++            pdebug(3, "$cmd not located/executable at $cmds{$cmd}\n");
++
++            PATH: for my $dir (@path) {
++                if (-x "${dir}/${cmd}") {
++                    $cmds{$cmd} = "${dir}/${cmd}";
++                    $found = 1;
++                    last PATH;
++                }
++            }
++
++            if ($found) {
++                pdebug(3,"Found $cmd at $cmds{$cmd}\n");
++
++            } else {
++                pdebug(2,  "Could not find $cmd anywhere.");
++            }
++
++        }
++
++        if (-x $cmds{$cmd}) {
++
++            if ($cmd eq 'sendmail') {
++                $use_sendmail = 1;
++            }
++
++        } else {
++            pdebug(2,  "Command $cmd is located at $cmds{$cmd}, but is not executable by uid: $<");
++        }
++    }
++    return;
++ }
++
+ __END__
+ 
++
+ ###############################################################################
+ ############################# DOCUMENTATION ###################################
+ ###############################################################################

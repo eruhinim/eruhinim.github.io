@@ -1,0 +1,95 @@
+diff --git a/scripts/sadt b/scripts/sadt
+old mode 100755
+new mode 100644
+index aec1024..3845258
+--- a/scripts/sadt
++++ b/scripts/sadt
+@@ -158,6 +158,7 @@ class TestGroup(object):
+ 
+     def __init__(self):
+         self.tests = []
++        self.test_command_field = None
+         self.restrictions = frozenset()
+         self.features = frozenset()
+         self.depends = '@'
+@@ -257,36 +258,41 @@ class TestGroup(object):
+         except Skip as exc:
+             progress.skip(str(exc))
+             raise
+-        path = os.path.join(self.tests_directory, test)
+-        original_mode = None
++
++        if self.test_command_field:
++            command = ["/bin/bash", "-e", "-c", test]
++        else:
++            command = [os.path.join(self.tests_directory, test)]
++        path = command [0]
++
++        cwd = None
+         if rw_build_tree:
+             cwd = os.getcwd()
+             os.chdir(rw_build_tree)
+-            chmod_x(path)
+-        else:
+-            cwd = None
+-            if not os.access(path, os.X_OK):
+-                try:
+-                    original_mode = chmod_x(path)
+-                except OSError as exc:
+-                    progress.skip('{path} could not be made executable: {exc}'.format(path=path, exc=exc))
+-                    raise Skip
++
++        original_mode = None
++        if not (self.test_command_field or os.access(path, os.X_OK)):
++            try:
++                original_mode = chmod_x(path)
++            except OSError as exc:
++                progress.skip('{path} could not be made executable: {exc}'.format(path=path, exc=exc))
++                raise Skip
++
+         try:
+-            self._run(test, progress, allow_stderr=options.allow_stderr)
++            self._run(command, progress, allow_stderr=options.allow_stderr)
+         finally:
+             if original_mode is not None:
+                 os.chmod(path, original_mode)
+             if cwd is not None:
+                 os.chdir(cwd)
+ 
+-    def _run(self, test, progress, allow_stderr=False):
+-        path = os.path.join(self.tests_directory, test)
++    def _run(self, command, progress, allow_stderr=False):
+         tmpdir1 = tempfile.mkdtemp(prefix='sadt.')
+         tmpdir2 = tempfile.mkdtemp(prefix='sadt.')
+         environ = dict(os.environ)
+         environ['ADTTMP'] = tmpdir1
+         environ['TMPDIR'] = tmpdir2 # only for compatibility with old DEP-8 spec.
+-        child = ipc.Popen([path],
++        child = ipc.Popen(command,
+             stdout=ipc.PIPE,
+             stderr=ipc.PIPE,
+             env=environ,
+@@ -320,9 +326,23 @@ class TestGroup(object):
+             raise Fail(fail_reason, ''.join(output))
+ 
+     def add_tests(self, tests):
++        if self.test_command_field == True:
++            print('sadt: error: Tests and Test-Command fields are exclusive', file=sys.stderr)
++            sys.exit(1)
++        if self.test_command_field == False:
++            print('sadt: error: only one Tests field is allowed', file=sys.stderr)
++            sys.exit(1)
++        self.test_command_field = False
+         tests = tests.split()
+         self.tests = frozenset(tests)
+ 
++    def add_test_command(self, command):
++        if self.test_command_field == False:
++            print('sadt: error: Tests and Test-Command fields are exclusive', file=sys.stderr)
++            sys.exit(1)
++        self.test_command_field = True
++        self.tests.append (command)
++
+     def add_restrictions(self, restrictions):
+         restrictions = restrictions.split()
+         self.restrictions = frozenset(restrictions)

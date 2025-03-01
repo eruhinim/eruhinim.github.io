@@ -1,0 +1,512 @@
+From 9811a149637c2680a753862db246199cdc21ee97 Mon Sep 17 00:00:00 2001
+From: Johannes 'josch' Schauer <josch@debian.org>
+Date: Wed, 13 Nov 2019 16:04:37 +0100
+Subject: [PATCH] Add autopkgtest to test dropbear-openssh
+
+Also add debian/salsa-ci.yml to run autopkgtest on salsa CI.
+---
+ debian/salsa-ci.yml          |   4 +
+ debian/tests/control         |   3 +
+ debian/tests/on_lvm_and_luks | 469 +++++++++++++++++++++++++++++++++++
+ 3 files changed, 476 insertions(+)
+ create mode 100644 debian/salsa-ci.yml
+ create mode 100644 debian/tests/control
+ create mode 100644 debian/tests/on_lvm_and_luks
+
+diff --git a/debian/salsa-ci.yml b/debian/salsa-ci.yml
+new file mode 100644
+index 0000000..33c3a64
+--- /dev/null
++++ b/debian/salsa-ci.yml
+@@ -0,0 +1,4 @@
++---
++include:
++  - https://salsa.debian.org/salsa-ci-team/pipeline/raw/master/salsa-ci.yml
++  - https://salsa.debian.org/salsa-ci-team/pipeline/raw/master/pipeline-jobs.yml
+diff --git a/debian/tests/control b/debian/tests/control
+new file mode 100644
+index 0000000..877522d
+--- /dev/null
++++ b/debian/tests/control
+@@ -0,0 +1,3 @@
++Tests: on_lvm_and_luks
++Depends: mmdebstrap, qemu-system-x86, libguestfs-tools, linux-image-amd64, sleepenh, openssh-client, time
++Restrictions: allow-stderr needs-root
+diff --git a/debian/tests/on_lvm_and_luks b/debian/tests/on_lvm_and_luks
+new file mode 100644
+index 0000000..6b9e24b
+--- /dev/null
++++ b/debian/tests/on_lvm_and_luks
+@@ -0,0 +1,469 @@
++#!/bin/sh
++
++# Copyright 2019 Johannes 'josch' Schauer <josch@debian.org>
++#
++# Permission is hereby granted, free of charge, to any person obtaining a copy
++# of this software and associated documentation files (the "Software"), to deal
++# in the Software without restriction, including without limitation the rights
++# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++# copies of the Software, and to permit persons to whom the Software is
++# furnished to do so, subject to the following conditions:
++#
++# The above copyright notice and this permission notice shall be included in all
++# copies or substantial portions of the Software.
++
++
++# dropbear-initramfs is used in situations where the user does not have
++# physical access to a remote machine and still wants to supply a passphrase
++# to unlock an encrypted system. This script tests this setup by creating a
++# bootable (using extlinux) Debian system with guestfish. That system is booted
++# inside qemu and used to setup an encrypted second system. The second system
++# is then booted again using qemu and the encrypted disk is unlocked by
++# connecting to dropbear-initramfs via ssh.
++#
++# We call the first system the "setup" because it is used to setup the second
++# system. We call the second system "crypt" because everything except /boot is
++# encrypted.
++
++set -exu
++
++# We do not use debootstrap to create the chroot tarballs, because debootstrap
++# is not able to create a system containing only essential:yes packages and
++# their dependencies. We do want to create the most minimal system so that we
++# can also find possibly missing dependencies.
++#
++# We don't use multistrap because it's unmaintained. Thus we create the initial
++# tarballs using mmdebstrap.
++
++# Some packages are used in the setup system as well as in the crypt system:
++#   openssh-server:  required on both to connect to them from this script
++#   systemd-sysv:    since init is not Essential:yes anymore, we have to pick
++#                    an init system ourselves. We pick the one that is
++#                    currently the default
++#   ifupdown:        for /etc/network/interfaces
++#   netbase:         for networking
++#   isc-dhcp-client: to acquire the IP address from qemu via dhcp
++#   udev:            to populate /dev
++#   lvm2:            for LVM volumes
++#   policykit-1:     or otherwise systemctl will error with
++#                    "Failed to connect to bus: No such file or directory"
++common_pkgs="openssh-server,systemd-sysv,ifupdown,netbase,isc-dhcp-client,udev,lvm2,policykit-1"
++
++# Some packages are only installed on the setup system
++#   linux-image-amd64: if we install it on the crypt system outside of qemu,
++#                      then the resulting system will not boot with grub - why?
++#   e2fsprogs:         to create filesystems for crypt
++#   cryptsetup:        to encrypt a partition for crypt
++#   fdisk:             to create partitions for crypt
++#   util-linux:        for mkswap
++setup_pkgs="$common_pkgs,linux-image-amd64,e2fsprogs,cryptsetup,fdisk,util-linux"
++
++if [ -z ${AUTOPKGTEST_TMP+x} ]; then
++	# if AUTOPKGTEST_TMP is not set, then this script is probably not
++	# executed under autopkgtest, choose unshare mode for mmdebstrap so
++	# that this script can be run without superuser privileges
++	MODE="unshare"
++else
++	# since AUTOPKGTEST_TMP is set, we assume that this script is executed
++	# under autopkgtest --> switch to the temporary directory
++	cd "$AUTOPKGTEST_TMP"
++	# We have to use root mode on salsa ci because:
++	#  - unshare mode fails because /sys is mounted read-only
++	#    and kernel.unprivileged_userns_clone is not set to 1
++	#  - fakechroot mode fails because of #944929
++	#  - proot mode produces wrong permissions
++	MODE="root"
++fi
++
++# setting up /etc/fstab, /etc/hostname and /etc/hosts is required to raise
++# network interfaces
++mmdebstrap --mode=$MODE --variant=apt --include=$setup_pkgs \
++	--customize-hook='echo host > "$1/etc/hostname"' \
++	--customize-hook='echo "127.0.0.1 localhost host" > "$1/etc/hosts"' \
++	--customize-hook='echo "/dev/vda1 / auto errors=remount-ro 0 1" > "$1/etc/fstab"' \
++	unstable debian-unstable-setup.tar
++
++# we prepare a second tarball now instead of later inside qemu because
++# running mmdebstrap without kvm just wastes cpu cycles
++crypt_pkgs="$common_pkgs,mount,console-setup,cryptsetup-initramfs,dropbear-initramfs,grub2"
++mmdebstrap --mode=$MODE --variant=apt --include=$crypt_pkgs unstable debian-unstable-crypt.tar
++
++# extlinux config to boot from /dev/vda1 with predictable network interface
++# naming and a serial console for logging
++cat << END > extlinux.conf
++default linux
++timeout 0
++
++label linux
++kernel /vmlinuz
++append initrd=/initrd.img root=/dev/vda1 net.ifnames=0 console=ttyS0
++END
++
++# network interface config
++# we can use eth0 because we boot with net.ifnames=0 for predictable interface
++# names
++cat << END > interfaces
++auto lo
++iface lo inet loopback
++
++auto eth0
++iface eth0 inet dhcp
++END
++
++# generate a new ssh key for us, so that we can authenticate ourselves to the
++# setup system, as well as the cryptsystem (both dropbear and openssh) via
++# public key instead of using passwords
++ssh-keygen -q -t rsa -f ./id_rsa -N ""
++
++# use guestfish to prepare the setup system
++#
++#  - create a single 2G partition and unpack the rootfs tarball into it
++#  - copy the public key into .ssh/authorized_keys for the root user
++#  - copy in extlinux.conf and /etc/network/interfaces
++#  - copy the tarball of the crypt system without unpacking it
++#  - put a syslinux MBR into the first 440 bytes of the drive
++#  - install extlinux and make partition bootable
++#
++# useful stuff to debug any errors:
++#   LIBGUESTFS_BACKEND_SETTINGS=force_tcg
++#   libguestfs-test-tool || true
++#   export LIBGUESTFS_DEBUG=1 LIBGUESTFS_TRACE=1
++guestfish -N setup.img=disk:2G -- \
++	part-disk /dev/sda mbr : \
++	mkfs ext2 /dev/sda1 : \
++	mount /dev/sda1 / : \
++	tar-in debian-unstable-setup.tar / : \
++	mkdir /root/.ssh : \
++	upload id_rsa.pub /root/.ssh/authorized_keys : \
++	chown 0 0 /root/.ssh/authorized_keys : \
++	copy-in extlinux.conf / : \
++	copy-in interfaces /etc/network : \
++	copy-in debian-unstable-crypt.tar / : \
++	upload /usr/lib/SYSLINUX/mbr.bin /mbr.bin : \
++	copy-file-to-device /mbr.bin /dev/sda size:440 : \
++	rm /mbr.bin : \
++	extlinux / : \
++	sync : \
++	umount / : \
++	part-set-bootable /dev/sda 1 true : \
++	shutdown
++
++# an empty disk image for the crypt system
++fallocate -l 2G crypt.img
++
++# certain qemu options remain the same for when we run the setup system as well
++# as the crypt system
++#
++# allow unclean environments by ignoring the user configuration
++QEMU_COMMON_OPTS="-no-user-config"
++# avoid entropy starvation by feeding the crypt system with random bits from /dev/urandom
++QEMU_COMMON_OPTS="$QEMU_COMMON_OPTS -object rng-random,filename=/dev/urandom,id=rng0 -device virtio-rng-pci,rng=rng0"
++# the default memory size of 128 MiB is not enough for Debian
++QEMU_COMMON_OPTS="$QEMU_COMMON_OPTS -m 1G"
++# use a virtio network card instead of emulating a real network device
++QEMU_COMMON_OPTS="$QEMU_COMMON_OPTS -net nic,model=virtio"
++# we don't need any graphics
++# this also multiplexes the console and the monitor to stdio
++QEMU_COMMON_OPTS="$QEMU_COMMON_OPTS -nographic"
++# creates a multiplexed stdio backend connected to the serial port and the qemu
++# monitor
++QEMU_COMMON_OPTS="$QEMU_COMMON_OPTS -serial mon:stdio"
++
++# start the setup system
++# redirect tcp connections on port 10022 localhost to the setup system port 22
++# create two virtio drives containing the setup and crypt systems, respectively
++# redirect all output to a file
++# run in the background
++qemu-system-x86_64 \
++	$QEMU_COMMON_OPTS \
++	-net user,hostfwd=tcp:127.0.0.1:10022-:22 \
++	-drive file=setup.img,format=raw,if=virtio \
++	-drive file=crypt.img,format=raw,if=virtio \
++	>qemu1.log </dev/null 2>&1 &
++
++# store the pid
++QEMUPID=$!
++
++# show the log and kill qemu in case the script exits first
++trap "cat --show-nonprinting qemu1.log; kill $QEMUPID" EXIT
++
++# the default ssh command does not store known hosts and even ignores host keys
++# it identifies itself with the rsa key generated above
++# pseudo terminal allocation is disabled or otherwise, programs executed via
++# ssh might wait for input on stdin of the ssh process
++ssh="ssh -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -i id_rsa -T"
++
++# a function that periodically tries connecting to a local port via ssah that
++# qemu connected to another port on the client with an ssh server behind
++try_qemu() {
++	port="$1"
++	# we use sleepenh to make sure that we wait the right number of seconds
++	# independent on how long the command took beforehand
++	TIMESTAMP=$(sleepenh 0 || [ $? -eq 1 ])
++	# the timeout in seconds
++	TIMEOUT=5
++	# the maximum number of tries
++	NUM_TRIES=20
++	i=0
++	while true; do
++		rv=0
++		# the function knows two modes of operation: With only one
++		# argument it simply tries to execute "echo success" on the
++		# remote in an attempt to figure out when the remote ssh
++		# server becomes available. With two arguments it will try
++		# to use the second argument as the passphrase that it gives
++		# to the unlocking script on stdin
++		if [ "$#" -gt 1 ]; then
++			printf "$2" | $ssh -p "$port" -o ConnectTimeout=$TIMEOUT root@localhost || rv=1
++		else
++			$ssh -p "$port" -o ConnectTimeout=$TIMEOUT root@localhost echo success || rv=1
++		fi
++		# with an exit code of zero, the ssh connection was successful
++		# and we break out of the loop
++		[ $rv -eq 0 ] && break
++		# if the command before took less than $TIMEOUT seconds, wait the remaining time
++		TIMESTAMP=$(sleepenh $TIMESTAMP $TIMEOUT || [ $? -eq 1 ]);
++		# increment the counter and break out of the loop if we tried
++		# too often
++		i=$((i+1))
++		if [ $i -ge $NUM_TRIES ]; then
++			break
++		fi
++	done
++
++	# if all tries were exhausted, the process failed
++	if [ $i -eq $NUM_TRIES ]; then
++		echo "timeout reached: unable to connect to qemu via ssh"
++		exit 1
++	fi
++}
++
++# wait until the ssh server becomes available
++try_qemu 10022
++
++# execute a shell script on the setup system to create the crypt system
++/usr/bin/time --verbose \
++$ssh -p 10022 root@localhost << 'SSHSCRIPT'
++set -exu
++
++# format a disk with three partitions. Their function is given by their type:
++# 21686148-6449-6E6F-744E-656564454649: BIOS boot partition
++# 0FC63DAF-8483-4772-8E79-3D69D8477DE4: Linux filesystem data (/boot ext2)
++# CA7D7CCB-63ED-4C53-861C-1742536059CC: LUKS partition
++cat << END | sfdisk /dev/vdb
++label: gpt
++unit: sectors
++
++start=   2048, size=        2048, type=21686148-6449-6E6F-744E-656564454649
++start=   4096, size=      999424, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4
++start=1003520,                    type=CA7D7CCB-63ED-4C53-861C-1742536059CC
++END
++
++# initialize the third partition as a LUKS partition and set the initial
++# passphrase
++# By default, benchmarks will be run to determine PBKDF parameters. This is
++# useless in our scenario, so we supply the simplest possible parameters
++# manually to avoid wasting RAM and CPU cycles.
++# Since the meaning of option values depend on the chosen PBKDF algorithm, we
++# fix the algorithm to argon2id, which requires luks2
++printf myinsecurepassphrase | cryptsetup luksFormat \
++	--type luks2 \
++	--pbkdf argon2id \
++	--pbkdf-force-iterations 4 \
++	--pbkdf-memory 32 \
++	/dev/vdb3 -
++# open the LUKS partition as mycrypt
++printf myinsecurepassphrase | cryptsetup luksOpen /dev/vdb3 mycrypt
++# create an LVM physical volume across the whole decrypted device
++pvcreate /dev/mapper/mycrypt
++# create an LVM volume group myvg across the whole physical volume
++vgcreate myvg /dev/mapper/mycrypt
++# We create an encrypted swap volume just to make the system a bit more
++# realistic
++lvcreate --name swap --size 15M myvg
++mkswap /dev/myvg/swap
++swapon /dev/myvg/swap
++# A volume group for the system
++lvcreate --name root --size 1G myvg
++# Create ext4 filesystem on the root volume group and ext2 for /boot
++mkfs.ext4 /dev/myvg/root
++mkfs.ext2 /dev/vdb2
++
++# Store uuid values for later use
++BOOTUUID=`blkid -s UUID -o value /dev/vdb2`
++VDB3UUID=`blkid -s UUID -o value /dev/vdb3`
++SWAPUUID=`blkid -s UUID -o value /dev/myvg/swap`
++
++# Mount the root filesystem...
++mount /dev/myvg/root /mnt
++
++# ...and unpack the tarball we created initially into it
++tar -C /mnt -xf /debian-unstable-crypt.tar
++
++# Set grub defaults
++# The ip option takes care of acquiring an ip address from dhcp for the
++# initramfs, so that we can connect to dropbear
++# The net.ifnames option makes network interface names reliable
++# The console option allows logging via qemu stdio
++mkdir -p "/mnt/etc/default"
++cat > "/mnt/etc/default/grub" << 'END'
++GRUB_DEFAULT=0
++GRUB_TIMEOUT=5
++GRUB_DISTRIBUTOR=`lsb_release -i -s 2> /dev/null || echo Debian`
++GRUB_CMDLINE_LINUX_DEFAULT="quiet"
++GRUB_CMDLINE_LINUX="net.ifnames=0 console=ttyS0 "
++END
++
++# Write out a valid /etc/fstab for /, /boot and swap
++cat > "/mnt/etc/fstab" << END
++/dev/myvg/root  /     auto    errors=remount-ro 0 1
++UUID=$BOOTUUID  /boot auto    defaults          0 2
++/dev/myvg/swap  none  swap    sw                0 0
++END
++
++# /etc/hostname and /etc/hosts are necessary for networking
++echo host > "/mnt/etc/hostname"
++echo "127.0.0.1 localhost host" > "/mnt/etc/hosts"
++
++# The initramfs needs to know about the encrypted partition
++cat > "/mnt/etc/crypttab" << END
++mycrypt UUID=$VDB3UUID none luks
++END
++
++# We don't test resume though...
++mkdir -p "/mnt/etc/initramfs-tools/conf.d"
++echo RESUME=UUID=$SWAPUUID > "/mnt/etc/initramfs-tools/conf.d/resume"
++
++# Instead of supplying the ip parameter to the kernel cmdline, we tell dropbear
++# about it to test this functionality
++cat > "/mnt/etc/initramfs-tools/conf.d/dropbear" << END
++IP=":::::eth0:dhcp"
++END
++
++# Setup an authorized_keys file that allows us to directly unlock the disk
++mkdir -p /mnt/etc/dropbear-initramfs
++{ printf 'no-port-forwarding,no-agent-forwarding,no-X11-forwarding,command="/bin/cryptroot-unlock" ';
++  head -1 /root/.ssh/authorized_keys;
++} > /mnt/etc/dropbear-initramfs/authorized_keys
++
++# Also setup an authorized_keys file that allows us to connect to the system
++# via openssh once it finished booting
++mkdir -p /mnt/root/.ssh
++cp /root/.ssh/authorized_keys /mnt/root/.ssh/authorized_keys
++
++# Setup the network via dhcp. Since we use persistent network interface naming
++# we can rely on eth0 to exist
++mkdir -p /mnt/etc/network/
++cat << END > /mnt/etc/network/interfaces
++auto lo
++iface lo inet loopback
++
++auto eth0
++iface eth0 inet dhcp
++END
++
++# Start dropbear on a non-default port to also test this functionality
++echo 'DROPBEAR_OPTIONS="-p 2222"' >> /mnt/etc/dropbear-initramfs/config
++
++# Mount /proc, /sys, /dev and /run to make this look more like a real system
++mount -t proc proc "/mnt/proc"
++mount -t sysfs sysfs "/mnt/sys"
++mount --bind /dev "/mnt/dev"
++mount --bind /run "/mnt/run"
++mount /dev/vdb2 "/mnt/boot"
++
++# Prevent any services from starting during package installation
++cat > "/mnt/usr/sbin/policy-rc.d" << END
++#!/bin/sh
++echo "sysvinit: All runlevel operations denied by policy" >&2
++exit 101
++END
++chmod +x "/mnt/usr/sbin/policy-rc.d"
++
++# Prevent any user prompting during package installations
++export DEBIAN_FRONTEND=noninteractive
++export DEBCONF_NONINTERACTIVE_SEEN=true
++
++# Fill the apt package cache
++chroot "/mnt" apt-get update
++
++# Install the single remaining required package: linux-image-amd64
++# It is unknown why the kernel must be installed now and cannot be installed
++# beforehand.
++#
++# installing linux-image-amd64 will also call mkinitramfs so that the dropbear
++# options will take effect
++chroot "/mnt" apt-get --yes --no-install-recommends install linux-image-amd64
++
++# Allow service startup again
++rm "/mnt/usr/sbin/policy-rc.d"
++
++# Install grub
++chroot /mnt grub-install --no-floppy --modules=part_gpt /dev/vdb
++chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
++
++# Unmount everything
++umount "/mnt/proc"
++umount "/mnt/sys"
++umount "/mnt/dev"
++umount "/mnt/run"
++umount "/mnt/boot"
++umount "/mnt"
++swapoff /dev/myvg/swap
++vgchange -an myvg
++cryptsetup luksClose mycrypt
++
++SSHSCRIPT
++
++# remove the exit trap
++trap - EXIT
++
++# Switch the system off
++$ssh -p 10022 root@localhost systemctl poweroff
++
++# Wait for qemu to finish
++wait $QEMUPID
++
++# start the crypt system
++# Redirect tcp connections on port 10022 localhost to the setup system port 22
++# where openssh-server will be listening on.
++# redirect tcp connections on port 12222 localhost to the setup system port
++# 2222 where dropbear will be liestening on.
++# Use crypt.img as a raw virtio device.
++# redirect all output to a file
++# run in the background
++qemu-system-x86_64 \
++	$QEMU_COMMON_OPTS \
++	-net user,hostfwd=tcp:127.0.0.1:10022-:22,hostfwd=tcp:127.0.0.1:12222-:2222 \
++	-drive file=crypt.img,format=raw,if=virtio \
++	>qemu2.log </dev/null 2>&1 &
++
++# store the pid
++QEMUPID=$!
++
++# show the log and kill qemu in case the script exits first
++trap "cat --show-nonprinting qemu2.log; kill $QEMUPID" EXIT
++
++# Try supplying the passphrase to dropbear until it succeeds or the timeout is
++# reached.
++try_qemu 12222 myinsecurepassphrase
++
++# wait until the ssh server becomes available
++try_qemu 10022
++
++# Test that the root fs is mounted as expected
++$ssh -p 10022 root@localhost mount | grep "/dev/mapper/myvg-root on /"
++
++# Switch the system off
++$ssh -p 10022 root@localhost systemctl poweroff
++
++# Wait for qemu to finish
++wait $QEMUPID
++
++# remove the exit trap
++trap - EXIT
++
++# remove all temporary files
++for f in crypt.img setup.img debian-unstable-setup.tar debian-unstable-crypt.tar extlinux.conf id_rsa id_rsa.pub interfaces qemu1.log qemu2.log; do
++	rm "$f"
++done
+-- 
+2.20.1
+

@@ -1,0 +1,60 @@
+--- dkms.orig	2022-10-20 21:04:14.000000000 +0200
++++ dkms	2022-10-28 01:05:07.498924847 +0200
+@@ -872,24 +872,34 @@
+         case "$running_distribution" in
+             debian* )
+                 sign_file="/usr/lib/linux-kbuild-${kernelver%.*}/scripts/sign-file"
++                kconfig="/usr/src/linux-headers-$kernelver/.config"
+                 ;;
+             ubuntu* )
+                 sign_file="$(command -v kmodsign)"
+                 if [[ ! -x "${sign_file}" ]]; then
+                     sign_file="/usr/src/linux-headers-$kernelver/scripts/sign-file"
+                 fi
+-                ;;
+-            * )
+-                sign_file="/lib/modules/$kernelver/build/scripts/sign-file"
++                kconfig="/usr/src/linux-headers-$kernelver/.config"
+                 ;;
+         esac
++        if [[ ! -f "${sign_file}" ]]; then
++            sign_file="/lib/modules/$kernelver/build/scripts/sign-file"
++        fi
++        if [[ ! -f "${kconfig}" ]]; then
++            sign_file="/lib/modules/$kernelver/.config"
++        fi
+     fi
+     echo "Sign command: $sign_file"
++    echo "Kernel config: $kconfig"
+
+     if [[ ! -f "${sign_file}" ]] || [[ ! -x "${sign_file}" ]]; then
+         echo "Binary ${sign_file} not found, modules won't be signed"
+         return
+     fi
++    if [[ ! -f "${kconfig}" ]]; then
++        echo "Kernel config ${kconfig} not found, modules won't be signed"
++        return
++    fi
+
+     if [[ -z "${mok_signing_key}" ]]; then
+         # No custom key specified, use the default key created by update-secureboot-policy for Ubuntu
+@@ -1050,8 +1060,18 @@
+         [[ ${strip[$count]} != no ]] && strip -g "$built_module"
+
+         if [ -n "${do_signing}" ]; then
++            eval " $(grep '^CONFIG_MODULE_SIG_HASH=' $kconfig 2>/dev/null)"
++            case "$CONFIG_MODULE_SIG_HASH" in
++                sha1 | sha224 | sha256 | sha384 | sha512)
++                    hashalgo="$CONFIG_MODULE_SIG_HASH"
++                    ;;
++                *)
++                    hashalgo="sha512"
++                    ;;
++            esac
++            unset CONFIG_MODULE_SIG_HASH
+             echo "Signing module $built_module"
+-            eval '"$sign_file" sha512 "$mok_signing_key" "$mok_certificate" "$built_module"'
++            eval '"$sign_file" "$hashalgo" "$mok_signing_key" "$mok_certificate" "$built_module"'
+         fi
+
+         if [ "$module_compressed_suffix" = ".gz" ]; then

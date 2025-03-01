@@ -1,0 +1,185 @@
+diff -ruN cvs-1.11.1p1.orig/doc/ChangeLog cvs-1.11.1p1/doc/ChangeLog
+--- cvs-1.11.1p1.orig/doc/ChangeLog	Wed Apr 25 15:31:47 2001
++++ cvs-1.11.1p1/doc/ChangeLog	Fri Sep 28 11:23:37 2001
+@@ -1,3 +1,7 @@
++2001-09-28  Philippe Troin  <phil@fifi.org>
++
++	* cvs.texinfo (config): Added MapAllUsersTo.
++
+ 2001-04-25  Derek Price  <dprice@collab.net>
+ 
+ 	* Makefile.in: Regenerated using AM 1.4e as of today at 18:10 -0400.
+diff -ruN cvs-1.11.1p1.orig/doc/cvs.texinfo cvs-1.11.1p1/doc/cvs.texinfo
+--- cvs-1.11.1p1.orig/doc/cvs.texinfo	Tue Apr 24 11:14:52 2001
++++ cvs-1.11.1p1/doc/cvs.texinfo	Fri Sep 28 11:19:57 2001
+@@ -12648,6 +12648,16 @@
+ The default is @samp{yes}.  For more on pserver, see
+ @ref{Password authenticated}.
+ 
++@cindex MapAllUsersTo, in CVSROOT/config
++@item MapAllUsersTo=@var{username}
++If this keyword is used, and @var{username} is a valid
++system user, all @sc{cvs} users connecting via the
++pserver will get mapped to the system user
++@var{username} (unless they get authenticated via
++@file{CVSROOT/passwd} and the @file{CVSROOT/passwd}
++line has a third field containing a system user to map
++to).
++
+ @ignore
+ @cindex PreservePermissions, in CVSROOT/config
+ @item PreservePermissions=@var{value}
+diff -ruN cvs-1.11.1p1.orig/src/ChangeLog cvs-1.11.1p1/src/ChangeLog
+--- cvs-1.11.1p1.orig/src/ChangeLog	Fri Apr 27 12:57:23 2001
++++ cvs-1.11.1p1/src/ChangeLog	Fri Sep 28 11:23:59 2001
+@@ -1,3 +1,20 @@
++2001-09-28  Philippe Troin  <phil@fifi.org>
++
++	* mkmodules.c (config_contents): Added comments to default config
++	file so that MapAllUsersTo shows up in the default config file.
++	
++	* server.c (check_password): If a MapAllUsersTo directive has been
++	encountered and the user has not already been changed by the
++	CVS/passwd routine, then change the user.
++	(check_repository_password): New argument user_specified_ptr.
++
++	* parseinfo.c (parse_config): Read MapAllUsersTo directive from
++	config file.
++
++	* server.c: Add map_all_users_to.
++
++	* server.h: Add extern map_all_users_to.
++
+ 2001-04-27  Larry Jones  <larry.jones@sdrc.com>
+ 
+ 	* main.c (lookup_command_attribute): Lookup specified command, not
+diff -ruN cvs-1.11.1p1.orig/src/mkmodules.c cvs-1.11.1p1/src/mkmodules.c
+--- cvs-1.11.1p1.orig/src/mkmodules.c	Thu Apr 19 12:45:32 2001
++++ cvs-1.11.1p1/src/mkmodules.c	Fri Sep 28 10:29:25 2001
+@@ -280,6 +280,11 @@
+     "# Set this to \"no\" if pserver shouldn't check system users/passwords\n",
+     "#SystemAuth=no\n",
+     "\n",
++    "# Set this to a user name if all pserver users should be mapped to this\n",
++    "# particular user (user remapping specified in the CVS passwd file will still\n",
++    "# be honored though)\n",
++    "#MapAllUsersTo=<username>\n",
++    "\n",
+     "# Put CVS lock files in this directory rather than directly in the repository.\n",
+     "#LockDir=/var/lock/cvs\n",
+     "\n",
+diff -ruN cvs-1.11.1p1.orig/src/parseinfo.c cvs-1.11.1p1/src/parseinfo.c
+--- cvs-1.11.1p1.orig/src/parseinfo.c	Thu Apr 19 12:45:32 2001
++++ cvs-1.11.1p1/src/parseinfo.c	Fri Sep 28 10:06:59 2001
+@@ -384,6 +384,18 @@
+ 		strcpy (logHistory, p);
+ 	    }
+ 	}
++	else if (strcmp (line, "MapAllUsersTo") == 0)
++	{
++	    struct passwd *pw;
++  
++	    pw = getpwnam(p);
++	    if (pw == NULL)
++	    {
++	        error (0, 0, "unknown user '%s' for MapAllUsersTo", p);
++	  	goto error_return;
++	    }
++	    map_all_users_to = xstrdup(p);
++	}    
+ 	else
+ 	{
+ 	    /* We may be dealing with a keyword which was added in a
+diff -ruN cvs-1.11.1p1.orig/src/server.c cvs-1.11.1p1/src/server.c
+--- cvs-1.11.1p1.orig/src/server.c	Thu Apr 19 12:34:04 2001
++++ cvs-1.11.1p1/src/server.c	Fri Sep 28 11:03:27 2001
+@@ -115,6 +115,10 @@
+    CVSROOT/config.  */
+ int system_auth = 1;
+ 
++/* If non-NULL, all users are mapped to this one after authentication
++   (except w/ overriden in the passwd file */
++char *map_all_users_to = NULL;
++
+ # endif /* AUTH_SERVER_SUPPORT */
+ 
+ 
+@@ -5383,11 +5387,14 @@
+  * CVS username) of this user; caller may free this.  Global
+  * CVS_Username will point at an allocated copy of cvs username (i.e.,
+  * the username argument below).
+- * kff todo: FIXME: last sentence is not true, it applies to caller.
+- */
++ * If the user has been changed because of a third field in the CVS
++ * passwd file, *user_specified_ptr is set to 1, 0 otherwise.
++ * kff todo: FIXME: last sentence is not true, it applies to caller.  */
+ static int
+-check_repository_password (username, password, repository, host_user_ptr)
++check_repository_password (username, password, repository, host_user_ptr,
++			   user_specified_ptr)
+      char *username, *password, *repository, **host_user_ptr;
++     int *user_specified_ptr;
+ {
+     int retval = 0;
+     FILE *fp;
+@@ -5397,6 +5404,8 @@
+     int found_it = 0;
+     int namelen;
+ 
++    *user_specified_ptr = 0;
++
+     /* We don't use current_parsed_root->directory because it hasn't been set yet
+      * -- our `repository' argument came from the authentication
+      * protocol, not the regular CVS protocol.
+@@ -5497,6 +5506,8 @@
+         /* Of course, maybe there was no system user portion... */
+ 	if (host_user_tmp == NULL)
+             host_user_tmp = username;
++	else
++	    *user_specified_ptr = 1;
+ 
+         /* Verify blank passwords directly, otherwise use crypt(). */
+         if ((found_password == NULL)
+@@ -5534,13 +5545,14 @@
+ {
+     int rc;
+     char *host_user = NULL;
++    int user_specified = 0;
+ 
+     /* First we see if this user has a password in the CVS-specific
+        password file.  If so, that's enough to authenticate with.  If
+        not, we'll check /etc/passwd. */
+ 
+     rc = check_repository_password (username, password, repository,
+-				    &host_user);
++				    &host_user, &user_specified);
+ 
+     if (rc == 2)
+ 	return NULL;
+@@ -5649,6 +5661,15 @@
+            It might or might not be the same as host_user. */
+         CVS_Username = xmalloc (strlen (username) + 1);
+         strcpy (CVS_Username, username);
++
++	/* If the username has not been already changed by the
++	   CVSROOT/passwd file, and we have a mapping directive in the
++	   config file, remap to this user */
++	if (map_all_users_to != NULL && ! user_specified)
++	{
++	    free(host_user);
++	    host_user = xstrdup(map_all_users_to);
++	}
+     }
+ 
+     return host_user;
+diff -ruN cvs-1.11.1p1.orig/src/server.h cvs-1.11.1p1/src/server.h
+--- cvs-1.11.1p1.orig/src/server.h	Thu Apr 19 12:29:12 2001
++++ cvs-1.11.1p1/src/server.h	Fri Sep 28 09:57:31 2001
+@@ -131,6 +131,7 @@
+ #ifdef AUTH_SERVER_SUPPORT
+ extern char *CVS_Username;
+ extern int system_auth;
++extern char* map_all_users_to;
+ #endif /* AUTH_SERVER_SUPPORT */
+ 
+ #endif /* SERVER_SUPPORT */

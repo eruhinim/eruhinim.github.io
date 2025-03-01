@@ -1,0 +1,99 @@
+From 17a229641fb1acd3b11000ae528dac54deedd191 Mon Sep 17 00:00:00 2001
+From: Andreas Henriksson <andreas@fatal.se>
+Date: Mon, 23 May 2016 17:10:15 +0200
+Subject: [PATCH] bootlogd: mention it won't do anything under systemd
+
+Update package description as well as the initial log file that's
+created under /var/log/boot to indicate that system console messages
+aren't universally available.
+
+Also make the main bootlogd init script writes a message to
+/var/log/boot suggesting journalctl instead when starting.
+This should avoid outdated and confusing boot logs lingering for
+systems upgraded from wheezy or for people switching back and
+forth between init systems.
+Note that systemd package will need to drop the mask of bootlogd.service
+for this to work. Also note that systemd package might not be carrying
+the rcS support patch for much longer which means this script will
+not be executed at all under systemd in the future.
+
+Closes: #791907
+---
+ debian/bootlogd.postinst                            | 2 +-
+ debian/control                                      | 4 ++++
+ debian/src/bootlogd/etc/init.d/bootlogd             | 8 ++++++++
+ debian/src/bootlogd/etc/init.d/stop-bootlogd        | 1 +
+ debian/src/bootlogd/etc/init.d/stop-bootlogd-single | 1 +
+ 5 files changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/debian/bootlogd.postinst b/debian/bootlogd.postinst
+index cc0dedb..eddd421 100644
+--- a/debian/bootlogd.postinst
++++ b/debian/bootlogd.postinst
+@@ -18,7 +18,7 @@ for F in /var/log/boot
+ do
+ 	if [ ! -f "$F" ] && touch "$F" >/dev/null 2>&1
+ 	then
+-		echo "(Nothing has been logged yet.)" >| "$F"
++		echo "(Nothing has been logged yet. If you're still seeing this message your current init system might not write bootup messages to the system console at all.)" >| "$F"
+ 		chown root:adm "$F"
+ 		chmod 640 "$F"
+ 	fi
+diff --git a/debian/control b/debian/control
+index f9efc03..7add446 100644
+--- a/debian/control
++++ b/debian/control
+@@ -153,3 +153,7 @@ Breaks: sysvinit-utils (<< 2.88dsf-17), initscripts (<< 2.88dsf-17)
+ Description: daemon to log boot messages
+  bootlogd logs all messages printed to the system console during system boot,
+  and records those messages to a logfile.
++ .
++ Note that not all init systems print messages to the system console,
++ so that the logfile may remain empty; this is the case with systemd
++ (the default init system). Try "journalctl -b" instead.
+diff --git a/debian/src/bootlogd/etc/init.d/bootlogd b/debian/src/bootlogd/etc/init.d/bootlogd
+index 3460b2d..3615eb2 100644
+--- a/debian/src/bootlogd/etc/init.d/bootlogd
++++ b/debian/src/bootlogd/etc/init.d/bootlogd
+@@ -35,6 +35,14 @@ case "$0" in
+ 	;;
+ esac
+ 
++if [ -d /run/system/system ]; then
++	if [ "$ACTION" = start ] && [ -f /var/log/boot ]; then
++		echo "(Booted up using systemd which doesn't write logs to system console. Please check 'journalctl -b' instead.)" > /var/log/boot
++	fi
++	log_daemon_msg "Skipping $NAME while running systemd"
++	exit 0
++fi
++
+ case "$ACTION" in
+   start)
+   	# PATH is set above
+diff --git a/debian/src/bootlogd/etc/init.d/stop-bootlogd b/debian/src/bootlogd/etc/init.d/stop-bootlogd
+index 1797b7d..7c17328 100644
+--- a/debian/src/bootlogd/etc/init.d/stop-bootlogd
++++ b/debian/src/bootlogd/etc/init.d/stop-bootlogd
+@@ -13,6 +13,7 @@ NAME=stop-bootlogd
+ DAEMON=/sbin/bootlogd
+ 
+ [ -x "$DAEMON" ] || exit 0
++[ -d /run/systemd/system ] && exit 0
+ 
+ case "$1" in
+   start)
+diff --git a/debian/src/bootlogd/etc/init.d/stop-bootlogd-single b/debian/src/bootlogd/etc/init.d/stop-bootlogd-single
+index 2e76f16..a926158 100644
+--- a/debian/src/bootlogd/etc/init.d/stop-bootlogd-single
++++ b/debian/src/bootlogd/etc/init.d/stop-bootlogd-single
+@@ -21,6 +21,7 @@ NAME=stop-bootlogd-single
+ DAEMON=/sbin/bootlogd
+ 
+ [ -x "$DAEMON" ] || exit 0
++[ -d /run/systemd/system ] && exit 0
+ 
+ case "$1" in
+   start)
+-- 
+2.8.1
+

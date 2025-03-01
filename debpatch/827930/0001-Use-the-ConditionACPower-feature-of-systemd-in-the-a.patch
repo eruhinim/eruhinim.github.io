@@ -1,0 +1,123 @@
+From 4dab1ed3d3a4ad430134e1d49fb3b0ede9b0a8d1 Mon Sep 17 00:00:00 2001
+From: Nicolas Le Cam <niko.lecam@gmail.com>
+Date: Wed, 22 Jun 2016 21:39:38 +0200
+Subject: Use the ConditionACPower feature of systemd in the apt-daily service
+
+.. instead of hardcoding the functionnality in the apt.systemd.daily
+script.
+
+Also make the compatibility cron job provide the same functionnality
+for systems that do not use systemd.
+---
+ debian/apt-daily.service         |  1 +
+ debian/apt.apt-compat.cron.daily | 24 +++++++++++++++++++++++-
+ debian/apt.systemd.daily         | 26 --------------------------
+ 3 files changed, 24 insertions(+), 27 deletions(-)
+
+diff --git a/debian/apt-daily.service b/debian/apt-daily.service
+index 941263d..904ed5d 100644
+--- a/debian/apt-daily.service
++++ b/debian/apt-daily.service
+@@ -1,6 +1,7 @@
+ [Unit]
+ Description=Daily apt activities
+ Documentation=man:apt(8)
++ConditionACPower=true
+ 
+ [Service]
+ Type=oneshot
+diff --git a/debian/apt.apt-compat.cron.daily b/debian/apt.apt-compat.cron.daily
+index 1ea8430..095a44c 100644
+--- a/debian/apt.apt-compat.cron.daily
++++ b/debian/apt.apt-compat.cron.daily
+@@ -11,6 +11,23 @@ if [ -d /run/systemd/system ]; then
+     exit 0
+ fi
+ 
++check_power()
++{
++    # laptop check, on_ac_power returns:
++    #       0 (true)    System is on main power
++    #       1 (false)   System is not on main power
++    #       255 (false) Power status could not be determined
++    # Desktop systems always return 255 it seems
++    if which on_ac_power >/dev/null 2>&1; then
++        on_ac_power
++        POWER=$?
++        if [ $POWER -eq 1 ]; then
++            return 1
++        fi
++    fi
++    return 0
++}
++
+ # sleep for a random interval of time (default 30min)
+ # (some code taken from cron-apt, thanks)
+ random_sleep()
+@@ -28,6 +45,11 @@ random_sleep()
+     sleep $TIME
+ }
+ 
+-# run daily job
++# delay the job execution by a random amount of time
+ random_sleep
++
++# ensure we don't do this on battery
++check_power || exit 0
++
++# run daily job
+ exec /usr/lib/apt/apt.systemd.daily
+diff --git a/debian/apt.systemd.daily b/debian/apt.systemd.daily
+index 15024c8..d034d8c 100644
+--- a/debian/apt.systemd.daily
++++ b/debian/apt.systemd.daily
+@@ -290,27 +290,6 @@ debug_echo()
+     fi
+ }
+ 
+-check_power()
+-{
+-    # laptop check, on_ac_power returns:
+-    #       0 (true)    System is on main power
+-    #       1 (false)   System is not on main power
+-    #       255 (false) Power status could not be determined
+-    # Desktop systems always return 255 it seems
+-    if which on_ac_power >/dev/null 2>&1; then
+-        on_ac_power
+-        POWER=$?
+-        if [ $POWER -eq 1 ]; then
+-	    debug_echo "exit: system NOT on main power"
+-	    return 1
+-        elif [ $POWER -ne 0 ]; then
+-	    debug_echo "power status ($POWER) undetermined, continuing"
+-        fi
+-        debug_echo "system is on main power."
+-    fi
+-    return 0
+-}
+-
+ # ------------------------ main ----------------------------
+ 
+ if test -r /var/lib/apt/extended_states; then
+@@ -358,8 +337,6 @@ if [ "$VERBOSE" -ge 3 ]; then
+     set -x
+ fi
+ 
+-check_power || exit 0
+-
+ # check if we can lock the cache and if the cache is clean
+ if which apt-get >/dev/null 2>&1 && ! eval apt-get check $XAPTOPT $XSTDERR ; then
+     debug_echo "error encountered in cron job with \"apt-get check\"."
+@@ -410,9 +387,6 @@ fi
+ # deal with BackupArchiveInterval
+ do_cache_backup $BackupArchiveInterval
+ 
+-# ensure we don't do this on battery
+-check_power || exit 0
+-
+ # include default system language so that "apt-get update" will
+ # fetch the right translated package descriptions
+ if [ -r /etc/default/locale ]; then
+-- 
+2.8.1
+

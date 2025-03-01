@@ -1,0 +1,94 @@
+diff --git a/debmirror b/debmirror
+index 7f24cf8..1f0c585 100755
+--- a/debmirror
++++ b/debmirror
+@@ -269,7 +269,8 @@ Don't fail if the F<Release> file is missing.
+ 
+ =item --ignore-release-gpg
+ 
+-Don't fail if the F<Release.gpg> file is missing.
++Don't fail if the F<Release.gpg> file is missing. If the file does exist, it
++will be mirrored but the signature will not be verified.
+ 
+ =item --ignore=regex
+ 
+@@ -840,12 +841,14 @@ foreach my $dist (@dists) {
+     make_dir ("$tempdir/dists/$codename$dist_sdir");
+     rename("$tdir/Release", "$tempdir/dists/$codename$dist_sdir/Release")
+       or die "Error while moving $tdir/Release: $!\n";
+-    rename("$tdir/Release.gpg", "$tempdir/dists/$codename$dist_sdir/Release.gpg")
+-      or die "Error while moving $tdir/Release.gpg: $!\n";
+     $files{"dists/$codename$dist_sdir/Release"}=1;
+     $files{$tempdir."/"."dists/$codename$dist_sdir/Release"}=1;
+-    $files{"dists/$codename$dist_sdir/Release.gpg"}=1;
+-    $files{$tempdir."/"."dists/$codename$dist_sdir/Release.gpg"}=1;
++    if (-f "$tdir/Release.gpg") {
++      rename("$tdir/Release.gpg", "$tempdir/dists/$codename$dist_sdir/Release.gpg")
++	or die "Error while moving $tdir/Release.gpg: $!\n";
++      $files{"dists/$codename$dist_sdir/Release.gpg"}=1;
++      $files{$tempdir."/"."dists/$codename$dist_sdir/Release.gpg"}=1;
++    }
+   }
+ }
+ 
+@@ -1778,41 +1781,39 @@ sub get_release {
+ 
+   make_dir ("$tdir");
+   return 0 unless remote_get("dists/$dist/Release", "$tempdir/.tmp");
+-  my $t = $num_errors;
+-  return 0 unless remote_get("dists/$dist/Release.gpg", "$tempdir/.tmp");
+-  # Check for gpg
+-  if (!$ignore_release_gpg) {
++  remote_get("dists/$dist/Release.gpg", "$tempdir/.tmp");
++
++  if (-f "$tdir/Release" && -f "$tdir/Release.gpg") {
++    # Check for gpg
+     if (system("gpgv --version >/dev/null 2>/dev/null")) {
+       say("gpgv failed: --ignore-release-gpg or gpgv binary missing?");
+-      push (@errlog,"gpgv failed: --ignore-release-gpg or gpgv binary missing?\n");
+-      $num_errors++;
+-    }
+-    # Verify Release signature
+-    if (-f "$tdir/Release.gpg" || -f "$tdir/Release") {
+-      my $gpgv_res="failed";
++      push (@errlog,"gpgv failed: gpgv binary missing?\n") unless $ignore_release_gpg;
++      $num_errors++ unless $ignore_release_gpg;
++    } else {
++      # Verify Release signature
++      my $gpgv_res = 0;
+       open GPGV, "gpgv 2>/dev/null --status-fd 1 $tdir/Release.gpg $tdir/Release|";
+       while (<GPGV>) {
+-	$gpgv_res="valid" if /^\[GNUPG:\] VALIDSIG/;
++	$gpgv_res = 1 if /^\[GNUPG:\] VALIDSIG/;
+       }
+       close GPGV;
+-      if ($gpgv_res eq "failed" || $debug) {
++      if (! $gpgv_res || $debug) {
+ 	system("gpgv --status-fd 1 $tdir/Release.gpg $tdir/Release");
+       }
+-      if ($verbose && !$debug) {
++      if ($verbose && ! $debug) {
+ 	system("gpgv --status-fd 1 $tdir/Release.gpg $tdir/Release >/dev/null");
+       }
+-      if ($gpgv_res eq "failed") {
++      if (! $gpgv_res) {
+ 	say("Release signature does not verify.");
+-	push (@errlog,"Release signature does not verify\n");
+-	$num_errors++;
++	push (@errlog,"Release signature does not verify\n") unless $ignore_release_gpg;
++	$num_errors++ unless $ignore_release_gpg;
+       }
+-    } else {
+-      say("Release signature does not verify, file missing.");
+-      push (@errlog,"Release signature does not verify\n");
+-      $num_errors++;
+     }
++  } else {
++    say("Release signature does not verify, file missing.");
++    push (@errlog,"Release signature does not verify\n") unless $ignore_release_gpg;
++    $num_errors++ unless $ignore_release_gpg;
+   }
+-  $num_errors=$t if ($ignore_release_gpg);
+   return 1
+ }
+ 

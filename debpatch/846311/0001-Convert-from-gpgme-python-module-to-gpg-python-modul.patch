@@ -1,0 +1,509 @@
+>From 0826424165d542e8d1248f94f07efd55840871a8 Mon Sep 17 00:00:00 2001
+From: Daniel Kahn Gillmor <dkg@fifthhorseman.net>
+Date: Wed, 23 Nov 2016 17:52:35 -0500
+Subject: [PATCH] Convert from "gpgme" python module to "gpg" python module
+
+The "gpg" python module is maintained by the upstream maintainers of
+GPGME and is now released with each new version of GPGME.  The "gpgme"
+python module is maintained externally, and has lagged behind gpgme
+development.
+
+It makes more sense to rely in a consolidated way on the active
+upstream maintainers where possible.
+---
+ debian/control          |   2 +-
+ debian/pydist-overrides |   5 --
+ dput/crypto.py          |  29 +++++----
+ dput/dput.py            |   2 +-
+ setup.py                |   4 +-
+ test/test_crypto.py     | 161 +++++++++++++++++++++++++-----------------------
+ test/test_dput.py       |   4 +-
+ 7 files changed, 103 insertions(+), 104 deletions(-)
+ delete mode 100644 debian/pydist-overrides
+
+diff --git a/debian/control b/debian/control
+index 3b3310b..bae5b9e 100644
+--- a/debian/control
++++ b/debian/control
+@@ -9,7 +9,7 @@ Build-Depends-Indep:
+     python-testscenarios,
+     python-httpretty,
+     python-debian,
+-    python-gpgme,
++    python-gpg,
+     python-setuptools,
+     python (>= 2.7),
+     debconf-utils (>= 1.1.1),
+diff --git a/debian/pydist-overrides b/debian/pydist-overrides
+deleted file mode 100644
+index 704af8e..0000000
+--- a/debian/pydist-overrides
++++ /dev/null
+@@ -1,5 +0,0 @@
+-# debian/pydist-overrides
+-# Mapping from distribution name to Debian package name.
+-# Documentation: ‘/usr/share/doc/dh-python/README.PyDist’.
+-
+-pygpgme python-gpgme; PEP386
+diff --git a/dput/crypto.py b/dput/crypto.py
+index c527eda..f84f195 100644
+--- a/dput/crypto.py
++++ b/dput/crypto.py
+@@ -13,13 +13,13 @@ from __future__ import (absolute_import, unicode_literals)
+ 
+ import sys
+ 
+-import gpgme
++import gpg,gpg.results
+ 
+ 
+ def characterise_signature(signature):
+     """ Make a phrase characterising a GnuPG signature.
+ 
+-        :param signature: A `gpgme.Signature` instance.
++        :param signature: A `gpg.results.Signature` instance.
+         :return: A simple text phrase characterising the `signature`.
+ 
+         * If the signature is valid, the result is "valid".
+@@ -29,11 +29,11 @@ def characterise_signature(signature):
+ 
+         """
+     text = "UNKNOWN"
+-    if (signature.summary & gpgme.SIGSUM_VALID):
++    if (signature.summary & gpg.constants.SIGSUM_VALID):
+         text = "valid"
+-    elif (signature.summary & gpgme.SIGSUM_RED):
++    elif (signature.summary & gpg.constants.SIGSUM_RED):
+         text = "bad"
+-    elif (signature.summary & gpgme.SIGSUM_GREEN):
++    elif (signature.summary & gpg.constants.SIGSUM_GREEN):
+         text = "good"
+ 
+     return text
+@@ -42,7 +42,7 @@ def characterise_signature(signature):
+ def describe_signature(signature):
+     """ Make a message describing a GnuPG signature.
+ 
+-        :param signature: A `gpgme.Signature` instance.
++        :param signature: A `gpg.result.Signature` instance.
+         :return: A text description of the salient points of the
+             `signature`.
+ 
+@@ -65,26 +65,25 @@ def check_file_signature(infile):
+ 
+         :param infile: The file containing a signed message.
+         :return: ``None``.
+-        :raise gpgme.GpgmeError: When the signature verification fails.
++        :raise gpg.errors.GPGMEError: When the signature verification fails.
+ 
+         The `infile` is a file-like object, open for reading, that
+         contains a message signed with OpenPGP (e.g. GnuPG).
+ 
+         """
+-    context = gpgme.Context()
++    context = gpg.Context()
+     try:
+         with infile:
+-            signatures = context.verify(infile, None, None)
+-    except gpgme.GpgmeError as exc:
+-        (__, code, message) = exc.args
+-        sys.stderr.write("gpgme: {path}: error {code}: {message}\n".format(
+-                path=infile.name, code=code, message=message))
++            (_, verify_result) = context.verify(infile)
++    except gpg.errors.GPGMEError as exc:
++        sys.stderr.write("gpg: {path}: error {code}: {message}\n".format(
++                path=infile.name, code=exc.getcode(), message=exc.message))
+         raise
+ 
+-    for signature in signatures:
++    for signature in verify_result.signatures:
+         description = describe_signature(signature)
+         sys.stderr.write(
+-                "gpgme: {path}: {description}\n".format(
++                "gpg: {path}: {description}\n".format(
+                     path=infile.name, sig=signature, description=description))
+ 
+ 
+diff --git a/dput/dput.py b/dput/dput.py
+index aa50ef9..d2bff73 100755
+--- a/dput/dput.py
++++ b/dput/dput.py
+@@ -255,7 +255,7 @@ def verify_signature(
+             with open(path) as infile:
+                 crypto.check_file_signature(infile)
+         except Exception as exc:
+-            if isinstance(exc, crypto.gpgme.GpgmeError):
++            if isinstance(exc, crypto.gpg.errors.GPGMEError):
+                 sys.stdout.write("{}\n".format(exc))
+                 sys.exit(1)
+             else:
+diff --git a/setup.py b/setup.py
+index 26cd71a..046a97f 100644
+--- a/setup.py
++++ b/setup.py
+@@ -65,13 +65,13 @@ setup(
+             "testscenarios >=0.4",
+             "mock >=1.3",
+             "python-debian",
+-            "pygpgme",
++            "gpg",
+             "httpretty",
+             ],
+         install_requires=[
+             "setuptools",
+             "python-debian",
+-            "pygpgme",
++            "gpg",
+             ],
+         entry_points={
+             'console_scripts': [
+diff --git a/test/test_crypto.py b/test/test_crypto.py
+index 4f25301..ec1c8b5 100644
+--- a/test/test_crypto.py
++++ b/test/test_crypto.py
+@@ -17,7 +17,7 @@ import operator
+ import sys
+ import textwrap
+ 
+-import gpgme
++import gpg,gpg.results
+ import testscenarios
+ import testtools
+ 
+@@ -31,66 +31,71 @@ from .helper import (
+         )
+ 
+ 
+-def make_gpgme_signature_scenarios():
+-    """ Make a collection of scenarios for `gpgme.Signature` instances. """
++def make_gpg_signature_scenarios():
++    """ Make a collection of scenarios for `gpg.result.Signature` instances. """
+ 
+     scenarios = [
+             ('signature-good validity-unknown', {
+-                'signature': mock.MagicMock(
+-                    gpgme.Signature,
++                'verify_result': mock.MagicMock(gpg.results.VerifyResult,file_name=None,
++                    signatures=[mock.MagicMock(
++                    gpg.results.Signature,
+                     fpr="BADBEEF2FACEDCADF00DBEEFDECAFBAD",
+-                    status=gpgme.ERR_NO_ERROR,
++                    status=gpg.errors.NO_ERROR,
+                     summary=functools.reduce(
+-                        operator.ior, [gpgme.SIGSUM_GREEN]),
+-                    validity=gpgme.VALIDITY_UNKNOWN),
++                        operator.ior, [gpg.constants.SIGSUM_GREEN]),
++                    validity=gpg.constants.VALIDITY_UNKNOWN)]),
+                 'expected_character': "good",
+                 'expected_description': (
+                     "Good signature from F00DBEEFDECAFBAD"),
+                 }),
+             ('signature-good validity-never', {
+-                'signature': mock.MagicMock(
+-                    gpgme.Signature,
++                'verify_result': mock.MagicMock(gpg.results.VerifyResult,file_name=None,
++                    signatures=[mock.MagicMock(
++                    gpg.results.Signature,
+                     fpr="BADBEEF2FACEDCADF00DBEEFDECAFBAD",
+-                    status=gpgme.ERR_NO_ERROR,
++                    status=gpg.errors.NO_ERROR,
+                     summary=functools.reduce(
+-                        operator.ior, [gpgme.SIGSUM_GREEN]),
+-                    validity=gpgme.VALIDITY_NEVER),
++                        operator.ior, [gpg.constants.SIGSUM_GREEN]),
++                    validity=gpg.constants.VALIDITY_NEVER)]),
+                 'expected_character': "good",
+                 'expected_description': (
+                     "Good signature from F00DBEEFDECAFBAD"),
+                 }),
+             ('signature-good validity-full key-expired', {
+-                'signature': mock.MagicMock(
+-                    gpgme.Signature,
++                'verify_result': mock.MagicMock(gpg.results.VerifyResult,file_name=None,
++                    signatures=[mock.MagicMock(
++                    gpg.results.Signature,
+                     fpr="BADBEEF2FACEDCADF00DBEEFDECAFBAD",
+-                    status=gpgme.ERR_NO_ERROR,
++                    status=gpg.errors.NO_ERROR,
+                     summary=functools.reduce(operator.ior, [
+-                        gpgme.SIGSUM_GREEN, gpgme.SIGSUM_KEY_EXPIRED]),
+-                    validity=gpgme.VALIDITY_FULL),
++                        gpg.constants.SIGSUM_GREEN, gpg.constants.SIGSUM_KEY_EXPIRED]),
++                    validity=gpg.constants.VALIDITY_FULL)]),
+                 'expected_character': "good",
+                 'expected_description': (
+                     "Good signature from F00DBEEFDECAFBAD"),
+                 }),
+             ('signature-good validity-full', {
+-                'signature': mock.MagicMock(
+-                    gpgme.Signature,
++                'verify_result': mock.MagicMock(gpg.results.VerifyResult,file_name=None,
++                    signatures= [mock.MagicMock(
++                    gpg.results.Signature,
+                     fpr="BADBEEF2FACEDCADF00DBEEFDECAFBAD",
+-                    status=gpgme.ERR_NO_ERROR,
++                    status=gpg.errors.NO_ERROR,
+                     summary=functools.reduce(operator.ior, [
+-                        gpgme.SIGSUM_VALID, gpgme.SIGSUM_GREEN]),
+-                    validity=gpgme.VALIDITY_FULL),
++                        gpg.constants.SIGSUM_VALID, gpg.constants.SIGSUM_GREEN]),
++                    validity=gpg.constants.VALIDITY_FULL)]),
+                 'expected_character': "valid",
+                 'expected_description': (
+                     "Valid signature from F00DBEEFDECAFBAD"),
+                 }),
+             ('signature-bad', {
+-                'signature': mock.MagicMock(
+-                    gpgme.Signature,
++                'verify_result': mock.MagicMock(gpg.results.VerifyResult,file_name=None,
++                    signatures=[mock.MagicMock(
++                    gpg.results.Signature,
+                     fpr="BADBEEF2FACEDCADF00DBEEFDECAFBAD",
+-                    status=gpgme.ERR_BAD_SIGNATURE,
++                    status=gpg.errors.BAD_SIGNATURE,
+                     summary=functools.reduce(
+-                        operator.ior, [gpgme.SIGSUM_RED]),
+-                    validity=gpgme.VALIDITY_FULL),
++                        operator.ior, [gpg.constants.SIGSUM_RED]),
++                    validity=gpg.constants.VALIDITY_FULL)]),
+                 'expected_character': "bad",
+                 'expected_description': (
+                     "Bad signature from F00DBEEFDECAFBAD"),
+@@ -105,11 +110,11 @@ class characterise_signature_TestCase(
+         testtools.TestCase):
+     """ Test cases for function `characterise_signature`. """
+ 
+-    scenarios = make_gpgme_signature_scenarios()
++    scenarios = make_gpg_signature_scenarios()
+ 
+     def test_returns_expected_character(self):
+         """ Should return expected character for signature. """
+-        result = dput.crypto.characterise_signature(self.signature)
++        result = dput.crypto.characterise_signature(self.verify_result.signatures[0])
+         self.assertEqual(result, self.expected_character)
+ 
+ 
+@@ -118,15 +123,15 @@ class describe_signature_TestCase(
+         testtools.TestCase):
+     """ Test cases for function `describe_signature`. """
+ 
+-    scenarios = make_gpgme_signature_scenarios()
++    scenarios = make_gpg_signature_scenarios()
+ 
+     def test_returns_expected_character(self):
+         """ Should return expected character for signature. """
+-        result = dput.crypto.describe_signature(self.signature)
++        result = dput.crypto.describe_signature(self.verify_result.signatures[0])
+         self.assertEqual(result, self.expected_description)
+ 
+ 
+-def make_gpgme_verify_scenarios():
++def make_gpg_verify_scenarios():
+     """ Make a collection of scenarios for ‘Context.verify’ method.
+ 
+         :return: A collection of scenarios for tests.
+@@ -137,33 +142,33 @@ def make_gpgme_verify_scenarios():
+         """
+ 
+     signatures_by_name = {
+-            name: scenario['signature']
+-            for (name, scenario) in make_gpgme_signature_scenarios()}
++            name: scenario['verify_result']
++            for (name, scenario) in make_gpg_signature_scenarios()}
+ 
+     scenarios_by_name = {
+             'goodsig': {
+-                'result': [
++                'result': [ None,
+                     signatures_by_name['signature-good validity-unknown'],
+                     ],
+                 },
+             'validsig': {
+-                'result': [
++                'result': [ None,
+                     signatures_by_name['signature-good validity-full'],
+                     ],
+                 },
+             'badsig': {
+-                'exception': gpgme.GpgmeError(
+-                    gpgme.ERR_SOURCE_GPGME, gpgme.ERR_BAD_SIGNATURE,
++                'exception': gpg.errors.GPGMEError(
++                    gpg._gpgme.gpgme_err_make(gpg.errors.SOURCE_GPGME, gpg.errors.BAD_SIGNATURE),
+                     "Bad signature"),
+                 },
+             'errsig': {
+-                'exception': gpgme.GpgmeError(
+-                    gpgme.ERR_SOURCE_GPGME, gpgme.ERR_SIG_EXPIRED,
++                'exception': gpg.errors.GPGMEError(
++                    gpg._gpgme.gpgme_err_make(gpg.errors.SOURCE_GPGME, gpg.errors.SIG_EXPIRED),
+                     "Signature expired"),
+                 },
+             'nodata': {
+-                'exception': gpgme.GpgmeError(
+-                    gpgme.ERR_SOURCE_GPGME, gpgme.ERR_NO_DATA,
++                'exception': gpg.errors.GPGMEError(
++                    gpg._gpgme.gpgme_err_make(gpg.errors.SOURCE_GPGME, gpg.errors.NO_DATA),
+                     "No data"),
+                 },
+             'bogus': {
+@@ -181,10 +186,10 @@ def make_gpgme_verify_scenarios():
+     return scenarios
+ 
+ 
+-def setup_gpgme_verify_fixtures(testcase):
+-    """ Set up fixtures for GPGME interaction behaviour. """
+-    scenarios = make_gpgme_verify_scenarios()
+-    testcase.gpgme_verify_scenarios = scenarios
++def setup_gpg_verify_fixtures(testcase):
++    """ Set up fixtures for GPG interaction behaviour. """
++    scenarios = make_gpg_verify_scenarios()
++    testcase.gpg_verify_scenarios = scenarios
+ 
+ 
+ class check_file_signature_TestCase(testtools.TestCase):
+@@ -200,10 +205,10 @@ class check_file_signature_TestCase(testtools.TestCase):
+ 
+         self.set_test_args()
+ 
+-        self.patch_gpgme_context()
++        self.patch_gpg_context()
+ 
+-        setup_gpgme_verify_fixtures(self)
+-        self.set_gpgme_verify_scenario('default')
++        setup_gpg_verify_fixtures(self)
++        self.set_gpg_verify_scenario('default')
+ 
+     def set_test_args(self):
+         """ Set the arguments for the test call to the function. """
+@@ -211,27 +216,27 @@ class check_file_signature_TestCase(testtools.TestCase):
+                 infile=self.file_double.fake_file,
+                 )
+ 
+-    def patch_gpgme_context(self):
+-        """ Patch the ‘gpgme.Context’ class for this test case. """
+-        class_patcher = mock.patch.object(gpgme, 'Context')
++    def patch_gpg_context(self):
++        """ Patch the ‘gpg.Context’ class for this test case. """
++        class_patcher = mock.patch.object(gpg, 'Context')
+         class_patcher.start()
+         self.addCleanup(class_patcher.stop)
+ 
+-    def set_gpgme_verify_scenario(self, name):
++    def set_gpg_verify_scenario(self, name):
+         """ Set the status scenario for the ‘Context.verify’ call. """
+-        scenario = self.gpgme_verify_scenarios[name]
+-        mock_class = gpgme.Context
+-        self.mock_gpgme_context = mock_class.return_value
+-        mock_func = self.mock_gpgme_context.verify
++        scenario = self.gpg_verify_scenarios[name]
++        mock_class = gpg.Context
++        self.mock_gpg_context = mock_class.return_value
++        mock_func = self.mock_gpg_context.verify
+         if 'exception' in scenario:
+             mock_func.side_effect = scenario['exception']
+         else:
+             mock_func.return_value = scenario['result']
+ 
+-    def assert_stderr_contains_gpgme_error(self, code):
+-        """ Assert the `stderr` content contains the GPGME message. """
++    def assert_stderr_contains_gpg_error(self, code):
++        """ Assert the `stderr` content contains the GPG message. """
+         expected_output = textwrap.dedent("""\
+-                gpgme: {path}: error {code}: ...
++                gpg: {path}: error {code}: ...
+                 """).format(
+                     path=self.file_double.path, code=code)
+         self.assertThat(
+@@ -239,39 +244,39 @@ class check_file_signature_TestCase(testtools.TestCase):
+                 testtools.matchers.DocTestMatches(
+                     expected_output, doctest.ELLIPSIS))
+ 
+-    def test_calls_gpgme_verify_with_expected_args(self):
+-        """ Should call `gpgme.Context.verify` with expected args. """
++    def test_calls_gpg_verify_with_expected_args(self):
++        """ Should call `gpg.Context.verify` with expected args. """
+         dput.crypto.check_file_signature(**self.test_args)
+-        gpgme.Context.return_value.verify.assert_called_with(
+-            self.file_double.fake_file, None, None)
++        gpg.Context.return_value.verify.assert_called_with(
++            self.file_double.fake_file)
+ 
+     def test_calls_sys_exit_if_gnupg_reports_bad_signature(self):
+         """ Should call `sys.exit` if GnuPG reports bad signature. """
+-        self.set_gpgme_verify_scenario('badsig')
+-        with testtools.ExpectedException(gpgme.GpgmeError):
++        self.set_gpg_verify_scenario('badsig')
++        with testtools.ExpectedException(gpg.errors.GPGMEError):
+             dput.crypto.check_file_signature(**self.test_args)
+-        self.assert_stderr_contains_gpgme_error(gpgme.ERR_BAD_SIGNATURE)
++        self.assert_stderr_contains_gpg_error(gpg.errors.BAD_SIGNATURE)
+ 
+     def test_calls_sys_exit_if_gnupg_reports_sig_expired(self):
+         """ Should call `sys.exit` if GnuPG reports signature expired. """
+-        self.set_gpgme_verify_scenario('errsig')
+-        with testtools.ExpectedException(gpgme.GpgmeError):
++        self.set_gpg_verify_scenario('errsig')
++        with testtools.ExpectedException(gpg.errors.GPGMEError):
+             dput.crypto.check_file_signature(**self.test_args)
+-        self.assert_stderr_contains_gpgme_error(gpgme.ERR_SIG_EXPIRED)
++        self.assert_stderr_contains_gpg_error(gpg.errors.SIG_EXPIRED)
+ 
+     def test_calls_sys_exit_if_gnupg_reports_nodata(self):
+         """ Should call `sys.exit` if GnuPG reports no data. """
+-        self.set_gpgme_verify_scenario('nodata')
+-        with testtools.ExpectedException(gpgme.GpgmeError):
++        self.set_gpg_verify_scenario('nodata')
++        with testtools.ExpectedException(gpg.errors.GPGMEError):
+             dput.crypto.check_file_signature(**self.test_args)
+-        self.assert_stderr_contains_gpgme_error(gpgme.ERR_NO_DATA)
++        self.assert_stderr_contains_gpg_error(gpg.errors.NO_DATA)
+ 
+     def test_outputs_message_if_gnupg_reports_goodsig(self):
+         """ Should output a message if GnuPG reports a good signature. """
+-        self.set_gpgme_verify_scenario('goodsig')
++        self.set_gpg_verify_scenario('goodsig')
+         dput.crypto.check_file_signature(**self.test_args)
+         expected_output = textwrap.dedent("""\
+-                gpgme: {path}: Good signature from ...
++                gpg: {path}: Good signature from ...
+                 """).format(path=self.file_double.path)
+         self.assertThat(
+                 sys.stderr.getvalue(),
+@@ -280,10 +285,10 @@ class check_file_signature_TestCase(testtools.TestCase):
+ 
+     def test_outputs_message_if_gnupg_reports_validsig(self):
+         """ Should output a message if GnuPG reports a valid signature. """
+-        self.set_gpgme_verify_scenario('validsig')
++        self.set_gpg_verify_scenario('validsig')
+         dput.crypto.check_file_signature(**self.test_args)
+         expected_output = textwrap.dedent("""\
+-                gpgme: {path}: Valid signature from ...
++                gpg: {path}: Valid signature from ...
+                 """).format(path=self.file_double.path)
+         self.assertThat(
+                 sys.stderr.getvalue(),
+diff --git a/test/test_dput.py b/test/test_dput.py
+index 4fcbd5c..157ccc1 100644
+--- a/test/test_dput.py
++++ b/test/test_dput.py
+@@ -22,7 +22,7 @@ import sys
+ import tempfile
+ import textwrap
+ 
+-import gpgme
++import gpg
+ import testscenarios
+ import testtools
+ import testtools.matchers
+@@ -366,7 +366,7 @@ class verify_signature_ChecksTestCase(verify_signature_TestCase):
+         """ Should call `sys.exit` when `check_file_signature` error. """
+         if not self.expected_checks:
+             self.skipTest("No signature checks requested")
+-        dput.crypto.check_file_signature.side_effect = gpgme.GpgmeError
++        dput.crypto.check_file_signature.side_effect = gpg.errors.GPGMEError(0)
+         with testtools.ExpectedException(FakeSystemExit):
+             dput.dput.verify_signature(**self.test_args)
+         sys.exit.assert_called_with(EXIT_STATUS_FAILURE)
+-- 
+2.10.2
+

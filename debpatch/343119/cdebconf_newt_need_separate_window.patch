@@ -1,0 +1,98 @@
+This fix the computation and usage of the window's height. If the height
+is not computed correctly, the newt frontend may decide to put the input
+box and the explanatory text on the same window, but the text will overlap
+on the input box, which render the input impossible.
+#508042 is an example for a multiselect, although I think it could appear
+with a select window (not for string and password windows because I think
+the input field is always forced to be on the same window).
+
+	* src/modules/frontend/newt/newt.c (min_window_height): Document
+	the computation of the window's height.
+	* src/modules/frontend/newt/newt.c (min_window_height): Use the
+	full description instead of the extended description when
+	possible. This should make min_window_height() more independent
+	from the get_full_description() internals.
+	* src/modules/frontend/newt/newt.c (min_window_height): The height
+	of the text needs to be added to the original size (decoration &
+	buttons).
+	* src/modules/frontend/newt/newt.c (need_separate_window):
+	Document why we subtract 5 for the comparison of the window's
+	height.
+	* src/modules/frontend/newt/newt.c (need_separate_window): Do not
+	use an extra window if the text fits exactly
+	(min_window_height() == height-5)
+diff -aruN ../orig/cdebconf-0.139/src/template.c ./cdebconf-0.139/src/template.c
+--- ../orig/cdebconf-0.139/src/template.c	2008-12-26 14:46:33.000000000 +0100
++++ ./cdebconf-0.139/src/template.c	2009-02-26 10:31:41.214635082 +0100
+@@ -619,17 +619,14 @@
+ 				in+=2;
+ 				asis=0;
+ 			}
++			else if (*(in+1) == 0)
++				*out = 0;
+ 			else if (*(in+1) == ' ')
+ 				asis=1;
+ 			else if (asis)
+ 				asis=0;
+ 			else
+-			{
+-				if (*(in+1) != 0)
+-					*out = ' ';
+-				else
+-					*out = 0;
+-			}
++				*out = ' ';
+ 		}
+ 		out++;
+ 	}
+diff -aruN ../orig/cdebconf-0.139/src/modules/frontend/newt/newt.c ./cdebconf-0.139/src/modules/frontend/newt/newt.c
+--- ../orig/cdebconf-0.139/src/modules/frontend/newt/newt.c	2009-02-13 17:43:37.000000000 +0100
++++ ./cdebconf-0.139/src/modules/frontend/newt/newt.c	2009-02-26 16:17:12.907008645 +0100
+@@ -119,6 +119,9 @@
+ 
+ static void newt_progress_stop(struct frontend *obj);
+ 
++/* Result must be freed by the caller */
++static char *get_full_description(struct frontend *obj, struct question *q);
++
+ #include "cdebconf_newt.h"
+ 
+ /*  Padding of title width, allows for leading "[!!] " before title
+@@ -275,15 +278,22 @@
+ static int
+ min_window_height(struct frontend *obj, struct question *q, int win_width)
+ {
++    // start with a blank or description (note and error)
++    // End with <Continue>/boolean buttons + blank
+     int height = 3;
+     char *type = q->template->type;
+-    char *q_ext_text;
++    char *q_text;
+ 
+-    q_ext_text = q_get_extended_description(obj, q);
+-    if (q_ext_text != NULL)
+-        height = cdebconf_newt_get_text_height(q_ext_text, win_width) + 1;
++    if (strcmp(q->template->type, "note") == 0 || strcmp(q->template->type, "error") == 0)
++        q_text = q_get_extended_description(obj, q);
++    else
++        q_text = get_full_description(obj, q);
++    if (q_text != NULL) {
++        height += cdebconf_newt_get_text_height(q_text, win_width) + 1;
++        free (q_text);
++    }
+     if (strcmp(type, "multiselect") == 0 || strcmp(type, "select") == 0)
+-        height += 4; // at least three lines for choices + blank line
++        height += 4; // x lines for choices + blank line
+     else if (strcmp(type, "string") == 0 || strcmp(type, "password") == 0)
+         height += 2; // input line + blank line
+     // the others don't need more space
+@@ -298,7 +308,8 @@
+ 
+     newtGetScreenSize(&width, &height);
+     x = min_window_height(obj, q, width-7);
+-    return (x >= height-5);
++    return (x > height-5);
++    // 5: blue border + title + bottom frame + shadow + menu
+ }
+ 
+ static char *

@@ -1,0 +1,155 @@
+From: "Georgios M. Zarkadas" <gz@member.fsf.org>
+Date: Fri, 8 Mar 2019 21:47:15 +0200
+Subject: [PATCH 1/2] Support partial mirroring by appending an
+ include packages regex (filter) to the end of each associated
+ deb-line of the configuration file.
+
+Signed-off-by: Georgios M. Zarkadas <gz@member.fsf.org>
+---
+
+diff --git a/apt-mirror b/apt-mirror
+index effac7e..fafd482 100755
+--- a/apt-mirror
++++ b/apt-mirror
+@@ -288,7 +288,11 @@ sub download_urls
+ 
+ sub parse_config_line
+ {
+-    my $pattern_deb_line = qr/^[\t ]*(?<type>deb-src|deb)(?:-(?<arch>[\w\-]+))?[\t ]+(?:\[(?<options>[^\]]+)\][\t ]+)?(?<uri>[^\s]+)[\t ]+(?<components>.+)$/;
++    # first of 'components' is the distribution; an optional include filter
++    # may follow at the end, inside a [] pair so that it cannot be mistaken
++    # as a component
++
++    my $pattern_deb_line = qr/^[\t ]*(?<type>deb-src|deb)(?:-(?<arch>[\w\-]+))?[\t ]+(?:\[(?<options>[^\]]+)\][\t ]+)?(?<uri>[^\s]+)[\t ]+(?<components>[^[]+)(?<filter>\[.*\])?$/;
+     my $line = $_;
+     my %config;
+     if ( $line =~ $pattern_deb_line ) {
+@@ -301,6 +305,9 @@ sub parse_config_line
+             $config{'arch'} = $+{arch};
+         }
+         $config{'components'} = [ split /\s+/, $config{'components'} ];
++        # the filter cannot be empty, since we always pop it;
++        # if missing, set it equal to an empty [] pair
++        $config{'filter'} = $+{filter} ? $+{filter} : "[]";
+     } elsif ( $line =~ /set[\t ]+(?<key>[^\s]+)[\t ]+(?<value>"[^"]+"|'[^']+'|[^\s]+)/ ) {
+         $config{'type'} = 'set';
+         $config{'key'} = $+{key};
+@@ -329,10 +336,10 @@ while (<CONFIG>)
+     } elsif ( $config_line{'type'} eq "deb" ) {
+         my $arch = $config_line{'arch'};
+         $arch = get_variable("defaultarch") if ! defined $config_line{'arch'};
+-        push @config_binaries, [ $arch, $config_line{'uri'}, @{$config_line{'components'}} ];
++        push @config_binaries, [ $arch, $config_line{'uri'}, @{$config_line{'components'}}, $config_line{'filter'} ];
+         next;
+     } elsif ( $config_line{'type'} eq "deb-src" ) {
+-        push @config_sources, [ $config_line{'uri'}, @{$config_line{'components'}} ];
++        push @config_sources, [ $config_line{'uri'}, @{$config_line{'components'}}, $config_line{'filter'} ];
+         next;
+     } elsif ( $config_line{'type'} =~ /(skip-clean|clean)/ ) {
+         my $link = $config_line{'uri'};
+@@ -393,6 +400,7 @@ sub add_url_to_download
+ foreach (@config_sources)
+ {
+     my ( $uri, $distribution, @components ) = @{$_};
++    my $filter = pop @components;
+ 
+     if (@components)
+     {
+@@ -422,6 +430,7 @@ foreach (@config_sources)
+ foreach (@config_binaries)
+ {
+     my ( $arch, $uri, $distribution, @components ) = @{$_};
++    my $filter = pop @components;
+ 
+     if (@components)
+     {
+@@ -605,6 +614,8 @@ print "Processing translation indexes: [";
+ foreach (@config_binaries)
+ {
+     my ( $arch, $uri, $distribution, @components ) = @{$_};
++    my $filter = pop @components;
++
+     print "T";
+     if (@components)
+     {
+@@ -696,6 +707,8 @@ print "Processing DEP-11 indexes: [";
+ foreach (@config_binaries)
+ {
+     my ( $arch, $uri, $distribution, @components ) = @{$_};
++    my $filter = pop @components;
++
+     print "D";
+     if (@components)
+     {
+@@ -776,6 +789,13 @@ sub process_index
+ {
+     my $uri   = shift;
+     my $index = shift;
++    my $filter = shift;
++
++    # remove the enclosing brackets & compile (will be used many times)
++
++    $filter = substr($filter, 1, length($filter) - 2);
++    my $filter_reg = ( $filter ) ? qr/$filter/ : "" ;
++
+     my ( $path, $package, $mirror, $files ) = '';
+ 
+     $path = sanitise_uri($uri);
+@@ -811,6 +831,12 @@ sub process_index
+         chomp(%lines);
+         remove_spaces( \%lines );
+ 
++        # if a filter is supplied, download only those packages
++        #  that match the filter regex
++        if ( $filter )
++        {
++            next unless ( $lines{"Package:"} =~ $filter_reg );
++        }
+         if ( exists $lines{"Filename:"} )
+         {    # Packages index
+             $skipclean{ remove_double_slashes( $path . "/" . $lines{"Filename:"} ) } = 1;
+@@ -851,36 +877,40 @@ print "Processing indexes: [";
+ foreach (@config_sources)
+ {
+     my ( $uri, $distribution, @components ) = @{$_};
++    my $filter = pop @components;
++
+     print "S";
+     if (@components)
+     {
+         my $component;
+         foreach $component (@components)
+         {
+-            process_index( $uri, "/dists/$distribution/$component/source/Sources" );
++            process_index( $uri, "/dists/$distribution/$component/source/Sources", $filter );
+         }
+     }
+     else
+     {
+-        process_index( $uri, "/$distribution/Sources" );
++        process_index( $uri, "/$distribution/Sources", $filter );
+     }
+ }
+ 
+ foreach (@config_binaries)
+ {
+     my ( $arch, $uri, $distribution, @components ) = @{$_};
++    my $filter = pop @components;
++
+     print "P";
+     if (@components)
+     {
+         my $component;
+         foreach $component (@components)
+         {
+-            process_index( $uri, "/dists/$distribution/$component/binary-$arch/Packages" );
++            process_index( $uri, "/dists/$distribution/$component/binary-$arch/Packages", $filter );
+         }
+     }
+     else
+     {
+-        process_index( $uri, "/$distribution/Packages" );
++        process_index( $uri, "/$distribution/Packages", $filter );
+     }
+ }
+ 

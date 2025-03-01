@@ -1,0 +1,2148 @@
+diff --git a/scripts/Dpkg/Log.pm b/scripts/Dpkg/Log.pm
+new file mode 100644
+index 0000000..3add1ed
+--- /dev/null
++++ b/scripts/Dpkg/Log.pm
+@@ -0,0 +1,410 @@
++=head1 NAME
++
++Dpkg::Log - Common base class for dpkg logfile parsers
++
++=head1 SYNOPSIS
++
++  package Dpkg::Log::<Type>
++  
++  use base qw(Dpkg::Log);
++  
++  sub new {
++    ($package, %params) = @_;
++    $package = ref($package) if ref($package);
++    my $self =  {};
++    bless ($self, $package);
++    $self = $self->SUPER::new('<ENTRY PACKAGE NAME>', %params)
++  
++    # Set defaults specific for this pother unless already defined
++  
++    return $self
++  }
++  
++  # Initialize dpkg log parser object with default filename
++  $dpkg_log = new Dpkg::Log::<Type>();
++  
++  # Initialize dpkg log parser object with a specific filename
++  $dpkg_log = new Dpkg::Log::<Type>(filename => '/var/log/dpkg.log');
++  
++  # Initialize dpkg log parser object and instruct it to parse the file
++  $dpkg_log = new Dpkg::Log::<Type>(parse => 1);
++  
++  # Get or set filename
++  $filename = $dpkg_log->filename;
++  $dpkg_log->filename('/path/to/logfile')
++  
++  # Parse the logfile
++  $dpkg_log->parse
++  
++  # Return all entries as <ENTRY PACKAGE NAME> objects
++  @entries = $dpkg_log->entries;
++  
++  # Loop over entries
++  while ($entry = $dpkg_log->next_entry) {
++      ...
++  }
++
++  # Filter entries stored in the object by time 
++  @filtered_entries = $dpkg_log->filter_by_time(from => DateTime(...),
++                                                to => DateTime(..));
++
++
++  # Filter given entries by date/time
++  @filtered_entries = $dpkg_log->filter_by_time(from => DateTime(),
++                                                 entry_ref => \@entries)
++
++  # Get datetime from logfile or object, depending on weither
++  # object stores from/to values or not
++  ($from, $to) = $dpkg_log->get_datetime_info();
++
++=head1 DESCRIPTION
++
++This module is intended to be used as a base-class for modules implementing
++a dpkg logfile parser. A dpkg logfile parser is intended to inherit
++from this class and extend it as needed.
++
++=head1 USAGE
++
++A module implementing a specific dpkg logfile parser has to inherit
++from this class and at least implement two methods.
++
++=head2 Constructor
++
++The class constructor should initialize itself by calling the
++constructor of this class with at least one argument specifying the class
++which entries should be created as (usually Dpkg::Log::Entry::* objects,
++but formally they only have to provide the same interface) via SUPER.
++
++Typically the constructor should define a default filename,
++which is passed to the constructor of this class as an attribute
++in the %params hash or defined after calling SUPER::new().
++
++=head2 parse - Method
++
++Must implement the actual parsing part. The parse function may assume that
++$self->{filename} is set to a filename and open it.
++
++For each parsed line it should create an anonymous hashref with at least three
++keys B<line>, B<lineno> and B<timestamp> storing the full line, the current
++line number in the processed file and the timestamp as DateTime object,
++respectively, and store it into $self->{entries}.
++
++=head1 ATTRIBUTES
++
++The class defines some object attributes, which should be used by
++implementing objects.
++
++=over 4
++
++=item B<filename>
++
++Specifies the filename of the logfile to be processed. Should be set to a
++default value unless a value is given during object construction.
++
++=item B<entry_class>
++
++Module name to be used for entry object construction.
++
++=item B<entries>
++
++An array which should contain hashrefs after the parse function
++has been run.
++
++=item B<invalid_lines>
++
++An array storing all lines which could not be parsed.
++
++=item B<time_zone>
++
++A scalar specifying the time_zone in which the logfile is assumed to be.
++This is used when parsing timestamps into DateTime objects.
++
++=item B<timestamp_pattern>
++
++Specifies the pattern for dpkg timestamps to be used as pattern for
++DateTime::Format::Strptime. Defaults to '%F %T' which equls the timestamp
++format used in dpkg.log files.
++
++=item B<from> / B<to>
++
++Specifies a range as DateTime objects or strings parseable by
++DateTime::Format::Strptime, with the B<timestamp_pattern> attribute described
++above.
++
++=back
++
++=cut
++
++package Dpkg::Log;
++
++use strict;
++use warnings;
++
++use Carp;
++use DateTime::Format::Strptime;
++use DateTime::TimeZone;
++
++=head1 METHODS
++
++=head2 Constructor
++
++This class method requires the first argument to be the
++name of a class, which will be used to create entry objects.
++
++It also accepts a hash as second argument which contains all attributes
++that are to be stored in $self. Usually this will be a subset of the attributes
++described in the ATTRIBUTES section.
++
++Additionally it can be B<parse>, which, if set to a true value, will be
++interpreted as instruction to immediately call the parse method once
++the object has been initialized.
++
++Dpkg::Log validates the first argument (entry class) and will die if it
++does not provide a new method. Note that no additional checking is done.
++It also checks weither a given filename exists.
++
++=cut
++sub new {
++    my ($package, $entry_class, %params) = @_;
++    $package = ref($package) if ref($package);
++
++    croak "odd number of arguments" if not $entry_class;
++    croak "wrong argument type: argument '$entry_class' should be a module"
++        unless UNIVERSAL::can($entry_class, 'new');
++
++    if ($params{filename}) {
++        croak "specified log filname ($params{filename}) does not exist"
++            unless -e $params{filename};
++    }
++
++    my $self = {
++        entry_class => $entry_class,
++        entries => [],
++        invalid_lines => [],
++        from => undef,
++        to => undef,
++        offset => 0,
++        filename => undef,
++        parse => 0,
++        time_zone => 'local',
++        timestamp_pattern => '%F %T',
++        from => 0,
++        to => 0,
++        %params
++    };
++
++    bless($self, $package);
++    $self->parse if $params{'parse'};
++    return $self;
++}
++
++=head2 Setting/Getting the filename
++
++Its possible to set the filename during object initialisation as described
++above, but also to set it via the filename method. 
++
++=over 3
++
++=item $dpkg_log->filename
++
++This will return the filename as stored in the object.
++Defaults to undef, unless the inheriting class sets a default filename
++or one is passed as a param to the object constructor.
++
++=item $dpkg_log->filename('newfilename.log')
++
++This will set the filename to newfilename.log.
++If a filename argument is supplied it will be checked for existence.
++
++=back
++
++=cut
++sub filename {
++    my ($self, $filename) = @_;
++    if ($filename) {
++        if (not -e $filename) {
++            carp "specified dpkg log filename ($filename) does not exist";
++        }
++        $self->{filename} = $filename;
++    } else {
++        $filename = $self->{filename};
++    }
++    return $filename;
++}
++
++=head2 Processing the logfile
++
++=over 4
++
++=item $dpkg_log->parse()
++
++This is a stub method which has to be implemented by an inherting class.
++
++=back
++=cut
++sub parse {
++    croak "Not yet implemented."
++}
++
++
++=head2 Working with the logfile
++
++These methods are to retrieve entries from the parsed logfile. All these
++methods require that the parse method has been run.
++
++Be aware that if the object does not store entries these methods will die.
++This is also true, if a parsed logfile is empty or contains invalid lines only.
++
++=over 4
++
++=item @entries = $dpkg_log->entries();
++
++Returns all entries, stored in the object, as entry objects. The identity of
++an entry object is defined by the parameter passed to the object constructor.
++
++This method accepts a hash with params, which can contain the keys B<from>
++and B<to>, which, if specified, will be used to filter the entries by date and
++time.
++=cut
++sub entries {
++    my ($self, %params) = @_;
++    my $package = $self->{entry_class};
++
++    croak "Object does not store entries. Eventually parse function were not" .
++        " run or log is empty." if (not @{$self->{entries}});
++
++    if (not ($params{from} or $params{to})) {
++        return map { $package->new($_) } @{$self->{entries}};
++    } else {
++        return $self->filter_by_time($package, %params);
++    }
++}
++
++=item $entry = $dpkg_log->next_entry;
++
++Returns the next entry, stored in the object, as entry object.
++The identity of an entry object is defined by the parameter
++passed to the object constructor.
++
++=cut
++sub next_entry {
++    my ($self) = @_;
++    my $package = $self->{entry_class};
++   
++    croak "Object does not store entries. Eventually parse function were not" .
++        " run or log is empty." if (not @{$self->{entries}});
++
++    my $offset = $self->{offset}++;
++    if (not defined(@{$self->{entries}}[$offset])) {
++        return undef;
++    } else {
++        return $package->new(@{$self->{entries}}[$offset]);
++    }
++}
++
++=item @entries = $dpkg_log->filter_by_time(from => ts, to => ts)
++
++=item @entries = $dpkg_log->filter_by_time(from => ts)
++
++=item @entries = $dpkg_log->filter_by_time(to => ts)
++
++=item @entries = $dpkg_log->filter_by_time(from => ts, entry_ref => $entry_ref)
++
++This method filters entries by a certain date/time range and returns
++entry object. The identity of an entry object is defined by the parameter
++passed to the object constructor.
++
++The range can be specified by passing B<from> and B<to> arguments,
++otherwise it will use whatever is stored in the object.
++If for any value no explicit parameter is given the timestamp used for filtering
++will be measured by the first and last entry in the logfile.
++
++If the given from and to values are not DateTime objects, they will be
++interpreted as strings and will be passed to DateTime::Format::Strptime.
++
++=cut
++sub filter_by_time {
++    my ($self, %params) = @_;
++    my $package = $self->{entry_class};
++
++    my $entry_ref;
++    if (not defined $params{entry_ref}) {
++        $entry_ref = $self->{entries};
++    } else {
++        $entry_ref = $params{entry_ref};
++    }
++
++    croak "Object does not store entries. Eventually parse function were not" .
++        " run or log is empty." if (not @{$entry_ref});
++
++    my $ts_parser = DateTime::Format::Strptime->new(
++        pattern => $self->{timestamp_pattern},
++        time_zone => $self->{time_zone}
++    );
++
++    for my $field qw(from to) {
++        if (not defined $params{$field} and not defined $self->{$field}) {
++            my $e_index = ($field eq "from") ? 0 : -1;
++            $params{$field} = $package->new($entry_ref->[$e_index])->timestamp;
++        } elsif (defined $self->{$field} and not defined $params{$field}) {
++            $params{$field} = $self->{$field};
++        } elsif (defined $params{$field} and not reftype($params{$field})) {
++            $params{$field} = $ts_parser->parse_datetime($params{$field});
++        }
++    }
++    my ($from, $to) = ($params{from}, $params{to});
++
++    my @entries = map { $package->new($_) } @{$entry_ref};
++    return grep { $_->timestamp >= $from and $_->timestamp <= $to } @entries;
++}
++
++=item ($from, $to) = $dpkg_log->get_datetime_info()
++
++Returns the date/time period of the logfile or the one
++defined in the object.
++If object is initialized with from and/or to parameters it should return
++these parameters, otherwise the timestamp of the first and the last entry
++are returned.
++
++=cut
++sub get_datetime_info {
++    my ($self) = @_;
++    my $package = $self->{entry_class};
++
++    my ($from, $to);
++    if ($self->{from}) {
++        $from = $self->{from};
++    } else {
++        $from = $package->new(\%{$self->{entries}->[0]})->timestamp;
++    }
++
++    if ($self->{to}) {
++        $to = $self->{to};
++    } else {
++        $to = $package->new(\%{$self->{entries}->[-1]})->timestamp;
++    }
++
++    return ($from, $to);
++}
++
++=back
++
++=head1 SEE ALSO
++
++L<Dpkg::Log::Entry>, L<DateTime>, L<DateTime::TimeZone>
++
++=head1 AUTHOR
++
++Patrick Schoenfeld <schoenfeld@debian.org>.
++
++=head1 COPYRIGHT AND LICENSE
++
++Copyright (C) 2011 Patrick Schoenfeld <schoenfeld@debian.org>
++
++This library is free software.
++You can redistribute it and/or modify it under the same terms as perl itself.
++
++=cut
++
++1;
++# vim: expandtab:ts=4:sw=4
+diff --git a/scripts/Dpkg/Log/Analyse.pm b/scripts/Dpkg/Log/Analyse.pm
+new file mode 100644
+index 0000000..83d04fe
+--- /dev/null
++++ b/scripts/Dpkg/Log/Analyse.pm
+@@ -0,0 +1,93 @@
++package Dpkg::Log::Analyse;
++
++
++=head1 NAME
++
++Dpkg::Log::Analyse - Common base class for dpkg logfile analysers
++
++=head1 SYNOPSIS
++
++use Dpkg::Log::Analyse;
++
++my $analyser = Dpkg::Log::Analyse->new('filename' => 'dpkg.log');
++$analyser->analyse;
++
++=head1 DESCRIPTION
++
++This module is used to analyse a dpkg log.
++
++=head1 METHODS
++
++=over 4
++
++=cut
++
++use strict;
++use warnings;
++use 5.010;
++
++use Carp;
++use Dpkg::Log;
++use Dpkg::Log::Analyse::Package;
++
++=item $analser = Dpkg::Log::Analyse->new('filename' => 'dpkg.log')
++
++=item $analyser = Dpkg::Log::Analyse->new('log_handle' => \$log_handle)
++
++Returns a new Dpkg::Log::Analyse object.
++Filename parameter can be ommitted, it defaults to /var/log/dpkg.log.
++
++Its possible to specify an existing Dpkg::Log object instead of a filename.
++This will be used and overrides any filename setting.
++
++=cut
++sub new {
++    my ($package, $log_class, %params) = @_;
++    $package = ref($package) if ref($package);
++
++    my $params = {
++        'filename' => '/var/log/dpkg.log',
++        'log_handle' => undef,
++        %params
++    };
++    
++    my $self = {
++        total_entries => 0,
++        analysed_entries => 0,
++        ignored_entries => 0,
++        filename => undef,
++        log_handle => undef,
++
++    };
++
++    if ($params->{'filename'}) {
++        $self->{'filename'} = $params->{'filename'};
++    }
++    if ($params->{'log_handle'}) {
++        $self->{log_handle} = $params->{'log_handle'};
++    } else {
++        $self->{log_handle} = $log_class->new('filename' => $self->{'filename'});
++    }
++    $self->{log_handle}->parse;
++
++    bless($self, $package);
++    return $self;
++}
++
++=item $analyser->analyse;
++
++Analyse the debian package log.
++
++=cut
++sub analyse {
++    my $self = shift;
++    my $log_handle = $self->{log_handle};
++
++    $self->{from} = $log_handle->{from};
++    $self->{to} = $log_handle->{to};
++
++    return 1;
++}
++
++1;
++
+diff --git a/scripts/Dpkg/Log/Analyse/Package.pm b/scripts/Dpkg/Log/Analyse/Package.pm
+new file mode 100644
+index 0000000..b03ced6
+--- /dev/null
++++ b/scripts/Dpkg/Log/Analyse/Package.pm
+@@ -0,0 +1,243 @@
++=head1 NAME
++
++Dpkg::Log::Analyse::Package - Describe a package as analysed from a dpkg.log
++
++=head1 SYNOPSIS
++
++use Dpkg::Log;
++
++my $package = Dpkg::Log::Analyse::Package->new('package' => 'foobar');
++
++=head1 DESCRIPTION
++
++This module is used to analyse a dpkg log.
++
++=head1 METHODS
++
++=over 4
++
++=cut
++
++package Dpkg::Log::Analyse::Package;
++
++use strict;
++use warnings;
++use 5.010;
++
++use Carp;
++use Scalar::Util qw(reftype);
++use Dpkg::Version;
++
++use overload (
++    '""' => 'as_string',
++    'eq' => 'equals',
++    'cmp' => 'compare',
++    '<=>' => 'compare'
++);
++
++=item $package = Dpkg::Log::Analyse::Package->new('package' => 'foobar')
++
++Returns a new Dpkg::Log::Analyse::Package object.
++
++=cut
++sub new {
++    my ($package, %params) = @_;
++    $package = ref($package) if ref($package);
++    # Check for required arguments
++    croak "argument 'package' is required"
++        unless defined($params{package});
++
++    # Check types
++    for my $v qw(version previous_version) {
++        if (defined $params{$v}) {
++            croak "wrong argument type: argument '$v' should be a Dpkg::Version"
++                unless reftype($params{$v} eq "Dpkg::Version");
++        }
++    }
++    for my $s qw(package status) {
++        if (defined $params{$s}) {
++            croak "wrong argument type: argument '$s' must not be a ref"
++                if reftype($params{$s});
++        }
++    }
++
++    my $self = {
++        package => "",
++        version => "",
++        previous_version => "",
++        status => "",
++        %params
++    };
++
++    bless($self, $package);
++    return $self;
++}
++
++=item $package_name = $package->name;
++
++Returns the name of this package.
++
++=cut
++sub name {
++    my $self = shift;
++    return $self->{package};
++}
++
++=item $package->version
++
++Return or set the version of this package.
++
++=cut
++sub version {
++    my ($self, $version) = @_;
++    if ($version) {
++        $self->_set_version('version', $version);
++    } else {
++        $version = $self->{version};
++    }
++    return $version;
++}
++
++=item $package->previous_version
++
++Return or set the previous version of this package.
++
++=cut
++sub previous_version {
++    my ($self, $previous_version) = @_;
++    if ($previous_version) {
++        $self->_set_version('previous_version', $previous_version);
++    } else {
++        $previous_version = $self->{previous_version};
++    }
++    return $previous_version;
++}
++
++=item $package->status
++
++Return or set the status of this package.
++
++=cut
++sub status {
++    my ($self, $status) = @_;
++    if ($status) {
++        $self->{status} = $status;
++    } else {
++        $status = $self->{status}
++    }
++    return $status;
++}
++
++=item equals($package1, $package2);
++
++=item print "equal" if $package1 eq $package2
++
++Compares two packages in their string representation.
++
++=cut
++sub equals {
++    my ($first, $second) = @_;
++    return ($first->as_string eq $second->as_string);
++}
++
++
++=item compare($package1, $package2)
++
++=item print "greater" if $package1 > $package2
++
++Compare two packages. See B<OVERLOADING> for details on how
++the comparison works.
++=cut
++sub compare {
++    my ($first, $second) = @_;
++    return -1 if ($first->name ne $second->name);
++    if ((not $first->previous_version) and (not $second->previous_version)) {
++        return ($first->version <=> $second->version);
++    } elsif ((not $first->previous_version) or (not $second->previous_version)) {
++        return -1;
++    } elsif ($first->previous_version != $second->previous_version) {
++        return -1;
++    }
++    
++    return (($first->version <=> $second->version));
++
++}
++
++=item $package_str = $package->as_string
++
++=item printf("Package name: %s", $package);
++
++Return this package as a string. This will return the package name
++and the version (if set) in the form package_name/version.
++If version is not set, it will return the package name only.
++
++=cut
++sub as_string {
++    my $self = shift;
++
++    my $string = $self->{package};
++    if ($self->version) {
++        $string = $string . "/" . $self->version;
++    }
++    return $string;
++}
++
++sub _set_version {
++    my ($self, $type, $version) = @_;
++
++    croak "odd number of arguments to _set_version, expected type and version"
++        if not $version;
++
++    croak "invalid version type '$type'"
++        if $type ne "version" and $type ne "previous_version";
++
++    if (reftype($version) and reftype($version) eq "Dpkg::Version") {
++        $self->{$type} = $version;
++    } else {
++        my $version_obj = Dpkg::Version->new($version);
++        $self->{$type} = $version_obj;
++    }
++    return $self->{$type};
++}
++
++=back
++
++=head1 Overloading
++
++This module explicitly overloads some operators.
++Each operand is expected to be a Dpkg::Log::Analyse::Package object.
++
++The string comparison operators, "eq" or "ne" will use the string value for the
++comparison.
++
++The numerical operators will use the package name and package version for
++comparison. That means a package1 == package2 if package1->name equals
++package2->name AND package1->version == package2->version.
++
++The module stores versions as Dpkg::Version objects, therefore sorting
++different versions of the same package will work.
++
++This module also overloads stringification returning either the package
++name if no version is set or "package_name/version" if a version is set. 
++
++=cut
++
++=head1 SEE ALSO
++
++L<Dpkg::Log>, L<Dpkg::Version>
++
++=head1 AUTHOR
++
++Patrick Schoenfeld <schoenfeld@debian.org>.
++
++=head1 COPYRIGHT AND LICENSE
++
++Copyright (C) 2011 Patrick Schoenfeld <schoenfeld@debian.org>
++
++This library is free software.
++You can redistribute it and/or modify it under the same terms as perl itself.
++
++=cut
++
++1;
++# vim: expandtab:ts=4:sw=4
+diff --git a/scripts/Dpkg/Log/Analyse/Status.pm b/scripts/Dpkg/Log/Analyse/Status.pm
+new file mode 100644
+index 0000000..2dd1b99
+--- /dev/null
++++ b/scripts/Dpkg/Log/Analyse/Status.pm
+@@ -0,0 +1,235 @@
++package Dpkg::Log::Analyse::Status;
++
++
++=head1 NAME
++
++Dpkg::Log::Analyse::Status - Common base class for dpkg logfile analysers
++
++=head1 SYNOPSIS
++
++use Dpkg::Log::Analyse::Status;
++
++my $analyser = Dpkg::Log::Analyse::Status->new('filename' => 'dpkg.log');
++$analyser->analyse;
++
++=head1 DESCRIPTION
++
++This module is used to analyse a dpkg log.
++
++=head1 METHODS
++
++=over 4
++
++=cut
++
++use strict;
++use warnings;
++use 5.010;
++
++use Carp;
++use Dpkg::Log::Status;
++use Dpkg::Log::Analyse::Package;
++
++use base qw(Dpkg::Log::Analyse);
++
++=item $analser = Dpkg::Log::Analyse::Status->new('filename' => 'dpkg.log')
++
++=item $analyser = Dpkg::Log::Analyse::Status->new('log_handle' => \$log_handle)
++
++Returns a new Dpkg::Log::Analyse::Status object.
++Filename parameter can be ommitted, it defaults to /var/log/dpkg.log.
++
++Its possible to specify an existing Dpkg::Log object instead of a filename.
++This will be used and overrides any filename setting.
++
++=cut
++sub new {
++    my ($package, %params) = @_;
++    $package = ref($package) if ref($package);
++
++    my $self = {};
++
++    # Set module specific default values
++    if (not defined $params{filename} and not defined $params{log_handle}) {
++        $params{filename} = '/var/log/dpkg.log';
++    }
++
++    bless($self, $package);
++    $self = $self->SUPER::new('Dpkg::Log::Status', %params);
++
++    # Initialize objects data storage with default values
++    for my $data_key qw(newly_installed_packages installed_and_removed
++        removed_packages upgraded_packages halfinstalled_packages
++        halfconfigured_packages unpacked_packages
++        installed_and_removed_packages) {
++            $self->{$data_key} = {};
++    }
++
++    return $self;
++}
++
++=item $analyser->analyse;
++
++Analyse the debian package log.
++
++=cut
++sub analyse {
++    my $self = shift;
++    my $log_handle = $self->{log_handle};
++
++    $self->{from} = $log_handle->{from};
++    $self->{to} = $log_handle->{to};
++
++    my $analysed_entries=0;
++    foreach my $entry ($log_handle->entries) {
++        next if not $entry->associated_package;
++       
++        $analysed_entries++;
++
++        # Initialize data structure if this is a package
++        my $package = $entry->associated_package;
++        if (not defined $self->{packages}->{$package}) {
++            $self->{packages}->{$package} = Dpkg::Log::Analyse::Package->new('package' => $package);
++        }
++
++        if ($entry->type eq 'action') {
++            my $obj = $self->{packages}->{$package};
++            if ($entry->action eq 'install') {
++                $self->{newly_installed_packages}->{$package} = $obj;
++                $self->{packages}->{$package}->version($entry->available_version);
++            } elsif ($entry->action eq 'upgrade') {
++                $self->{upgraded_packages}->{$package} = $obj;
++                $self->{packages}->{$package}->previous_version($entry->installed_version);
++                $self->{packages}->{$package}->version($entry->available_version);
++            } elsif ($entry->action eq 'remove') {
++                $self->{removed_packages}->{$package} = $obj;
++                $self->{packages}->{$package}->previous_version($entry->installed_version);
++            }
++        } elsif ($entry->type eq 'status') {
++            $self->{packages}->{$package}->status($entry->status);
++            $self->{packages}->{$package}->version($entry->installed_version);
++        }
++    }
++
++    while (my ($package, $package_obj) = each %{$self->{packages}}) {
++        if ($self->{packages}->{$package}->status eq "half-installed") {
++            $self->{half_installed_packages}->{$package} = \$package_obj;
++        }
++        if ($self->{packages}->{$package}->status eq "half-configured") {
++            $self->{half_configured_packages}->{$package} = \$package_obj;
++        }
++        if ($self->{packages}->{$package}->status eq "unpacked") {
++            $self->{unpacked_packages}->{$package} = \$package_obj;
++        }
++    }
++
++    # Remove packages from "newly_installed" if installed_version is empty
++    while (my ($package, $package_obj) = each %{$self->{newly_installed_packages}}) {
++        if (not $package_obj->version) {
++            delete($self->{newly_installed_packages}->{$package});
++            $self->{installed_and_removed_packages}->{$package} = $package_obj;
++        }
++    }
++
++    # Forget about the log object once analysis is done
++    $self->{log_handle} = undef;
++
++    return 1;
++}
++
++=item $analyser->newly_installed_packages
++
++Return all packages which were newly installed in the dpkg.log.
++
++=cut
++sub newly_installed_packages {
++    my $self = shift;
++    return $self->{newly_installed_packages};
++}
++
++=item $analyser->upgraded_packages
++
++
++Return all packages which were upgraded in the dpkg.log.
++
++=cut
++sub upgraded_packages {
++    my $self = shift;
++    return $self->{upgraded_packages};
++}
++
++=item $analyser->removed_packages
++
++
++Return all packages which were removed in the dpkg.log.
++
++=cut
++sub removed_packages {
++    my $self = shift;
++    return $self->{removed_packages};
++}
++
++=item $analyser->unpacked_packages
++
++
++Return all packages which are left in state 'unpacked'.
++
++=cut
++sub unpacked_packages {
++    my $self = shift;
++    return $self->{unpacked_packages};
++}
++
++=item $analyser->halfinstalled_packages
++
++
++Return all packages which are left in state 'half-installed'.
++
++=cut
++sub halfinstalled_packages {
++    my $self = shift;
++    return $self->{halfinstalled_packages};
++}
++
++=item $analyser->halfconfigured_packages
++
++
++Return all packages which are left in state 'half-configured'.
++
++=cut
++sub halfconfigured_packages {
++    my $self = shift;
++    return $self->{halfconfigured_packages};
++}
++
++=item $analyser->installed_and_removed_packages
++
++Return all packages which got installed and removed.
++
++=cut
++sub installed_and_removed_packages {
++    my $self = shift;
++    return $self->{installed_and_removed_packages};
++}
++
++=back
++
++=head1 SEE ALSO
++
++L<Dpkg::Log>, L<Dpkg::Log::Status::Package>
++
++=head1 AUTHOR
++
++Patrick Schoenfeld <schoenfeld@debian.org>.
++
++=head1 COPYRIGHT AND LICENSE
++
++Copyright (C) 2011 Patrick Schoenfeld <schoenfeld@debian.org>
++
++This library is free software.
++You can redistribute it and/or modify it under the same terms as perl itself.
++
++=cut
++
++1;
++# vim: expandtab:ts=4:sw=4
+diff --git a/scripts/Dpkg/Log/Entry.pm b/scripts/Dpkg/Log/Entry.pm
+new file mode 100644
+index 0000000..3ba4c32
+--- /dev/null
++++ b/scripts/Dpkg/Log/Entry.pm
+@@ -0,0 +1,96 @@
++=head1 NAME
++
++Dpkg::Log::Entry - base class for modules implementing a dpkg log entry object
++
++=head1 SYNOPSIS
++
++use base qw(Dpkg::Log::Entry)
++...
++
++=head1 DESCRIPTION
++
++This class is a base class for classes, which implement an object
++describing certain dpkg log type lines.
++
++It should not be used directly and instead beeing used as a base
++for a Dpkg::Log::Entry::<Type> class.
++=cut
++
++package Dpkg::Log::Entry;
++
++use strict;
++use warnings;
++
++use overload ( '""' => 'line' );
++
++=head1 METHODS
++
++=over 4
++
++=item $dpkg_log_entry = PACKAGE->new($line, $lineno, %params)
++
++Returns a new PACKAGE object.
++The arguments B<line> and B<lineno> are mandatory.
++They store the complete line as stored in the log and the line number.
++
++=back
++
++=cut
++sub new {
++    my ($package, $line, $lineno, %params) = @_;
++    $package = ref($package) if ref($package);
++
++    my $self = {
++        line => $line,
++        lineno => $lineno,
++        timestamp => '',
++        %params
++    };
++
++    bless($self, $package);
++    return $self;
++}
++
++=over 4
++
++=item $obj->line;
++
++Return the full log line.
++
++=cut
++sub line {
++    my ($self) = @_;
++    return $self->{line};
++}
++
++=item $dpkg_log_entry->lineno() / lineno
++
++Return the line number of this entry.
++
++=cut
++sub lineno {
++    my ($self) = @_;
++    return $self->{lineno};
++}
++
++=item $dpkg_log_entry->timestamp() / timestamp
++
++Get or set the timestamp of this object. Should be a DateTime object.
++
++=cut
++sub timestamp {
++    my ($self, $timestamp) = @_;
++
++    if ($timestamp) {
++        if ((not ref($timestamp)) or (ref($timestamp) ne "DateTime")) {
++            croak("timestamp has to be a DateTime object");
++        }
++        $self->{timestamp} = $timestamp;
++    } else {
++        $timestamp = $self->{timestamp};
++    }
++    return $timestamp;
++}
++
++
++1;
+diff --git a/scripts/Dpkg/Log/Status.pm b/scripts/Dpkg/Log/Status.pm
+new file mode 100644
+index 0000000..de970ee
+--- /dev/null
++++ b/scripts/Dpkg/Log/Status.pm
+@@ -0,0 +1,229 @@
++=head1 NAME
++
++Dpkg::Log::Status - Parse the dpkg log
++
++=head1 SYNOPSIS
++
++use Dpkg::Log::Status;
++
++my $dpkg_log = Dpkg::Log::Status->new('filename' => 'dpkg.log', 'parse' => 1);
++
++=head1 DESCRIPTION
++
++This module is used to parse a logfile and store each line
++as a Dpkg::Log::Status::Entry object.
++
++=head1 METHODS
++
++=over 4
++
++=cut
++
++package Dpkg::Log::Status;
++
++use strict;
++use warnings;
++
++use Carp;
++use Dpkg::Log::Status::Entry;
++use DateTime::Format::Strptime;
++use DateTime::TimeZone;
++
++use base qw(Dpkg::Log);
++
++=item $dpkg_log = Dpkg::Log::Status->new()
++
++=item $dpkg_log = Dpkg::Log::Status->new('filename' => 'dpkg.log')
++
++=item $dpkg_log = Dpkg::Log::Status->new('filename' => 'dpkg.log', 'parse' => 1 )
++
++Returns a new Dpkg::Log::Status object. If parse is set to a true value the logfile
++specified by filename is parsed at the end of the object initialisation.
++Otherwise the parse routine has to be called.
++Filename parameter can be ommitted, it defaults to /var/log/dpkg.log.
++
++Optionally its possible to specify B<from> or B<to> arguments as timestamps
++in the standard dpkg.log format or as DateTime objects.
++This will limit the entries which will be stored in the object to entries in the
++given timerange.
++Note that, if this is not what you want, you may ommit these attributes and
++can use B<filter_by_time()> instead.
++
++By default the module will assume that those timestamps are in the local timezone
++as determined by DateTime::TimeZone. This can be overriden by giving the
++argument B<time_zone> which takes a timezone string (e.g. 'Europe/Berlin')
++or a DateTime::TimeZone object.
++Additionally its possible to override the timestamp_pattern by specifying
++B<timestamp_format>. This has to be a valid pattern for DateTime::Format::Strptime.
++
++=cut
++sub new {
++    my ($package, %params) = @_;
++    $package = ref($package) if ref($package);
++
++    my $self = {};
++
++    # Set module specific default values
++    if (not defined $params{filename}) {
++        $params{filename} = '/var/log/dpkg.log';
++    }
++
++    bless($self, $package);
++    $self = $self->SUPER::new('Dpkg::Log::Status::Entry', %params);
++
++    return $self;
++}
++
++=item $dpkg_log->parse
++
++=item $dpkg_log->parse('time_zone' => 'Europe/Berlin')
++
++=item $dpkg_log->parse('time_zone' => $dt_tz )
++
++Call the parser.
++
++The B<time_zone> parameter is optional and specifies in which time zone
++the dpkg log timestamps are.  If its omitted it will use the default
++local time zone.
++Its possible to specify either a DateTime::TimeZone object or a string.
++=cut
++sub parse {
++    my ($self, %params) = @_;
++    open(my $log_fh, "<", $self->{filename})
++        or croak("unable to open logfile for reading: $!");
++ 
++    my $params = {
++        'from' => $self->{from},
++        'to' => $self->{to}, 
++        'time_zone' => $self->{time_zone},
++        'timestamp_pattern' => $self->{timestamp_pattern},
++        %params
++    };
++
++    # Determine system timezone
++    my $tz;
++    if (ref($params->{time_zone}) and (ref($params->{time_zone}) eq "DateTime::TimeZone")) {
++        $tz = $params->{time_zone};
++    } elsif (ref($params->{time_zone})) {
++        croak "time_zone argument has to be a string or a DateTime::TimeZone object";
++    } else {
++        $tz =  DateTime::TimeZone->new( 'name' => $params->{time_zone} );
++    }
++    my $ts_parser = DateTime::Format::Strptime->new( 
++        pattern => $params->{timestamp_pattern},
++        time_zone => $params->{time_zone}
++    );
++
++    my $lineno = 0;
++    while  (my $line = <$log_fh>) {
++        $lineno++;
++        chomp $line;
++        next if $line =~ /^$/;
++
++        my $timestamp;
++              
++        my @entry = split(/\s/, $line);
++        if (not $entry[0] and not $entry[1]) {
++            push(@{$self->{invalid_lines}}, $line);
++            next;
++        }
++
++        my ($year, $month, $day) = split('-', $entry[0]);
++        my ($hour, $minute, $second) = split(':', $entry[1]);
++
++        if ($year and $month and $day and $hour and $minute and $second) {
++            $timestamp = DateTime->new(
++                year => $year,
++                month => $month,
++                day => $day,
++                hour => $hour,
++                minute => $minute,
++                second => $second,
++                time_zone => $tz
++            );
++        } else {
++            push(@{$self->{invalid_lines}}, $line);
++            next;
++        }
++
++        my $entry_obj;
++        if ($entry[2] eq "update-alternatives:") {
++            next;
++        } elsif ($entry[2] eq "startup") {
++            $entry_obj = {  line => $line,
++                lineno => $lineno,
++                timestamp => $timestamp,
++                type => 'startup',
++                subject => $entry[3],
++                action => $entry[4]
++            };
++        } elsif ($entry[2] eq "status") {
++            $entry_obj = { line => $line,
++                lineno => $lineno,
++                timestamp => $timestamp,
++                type => 'status',
++                subject => 'package',
++                status => $entry[3],
++                associated_package => $entry[4],
++                installed_version => $entry[5]
++            };
++         } elsif (defined($valid_actions->{$entry[2]}) ) {
++            $entry_obj = { line => $line,
++                lineno => $lineno,
++                timestamp => $timestamp,
++                subject => 'package',
++                type => 'action',
++                action => $entry[2],
++                associated_package => $entry[3],
++                installed_version => $entry[4],
++                available_version => $entry[5]
++            };
++        } elsif ($entry[2] eq "conffile") {
++            $entry_obj = { line => $line,
++                lineno => $lineno,
++                timestamp => $timestamp,
++                subject => 'conffile',
++                type => 'conffile_action',
++                conffile => $entry[3],
++                decision => $entry[4]
++            };
++        } else {
++            print $line . " invalid\n";
++            push(@{$self->{invalid_lines}}, $line);
++            next;
++        }
++
++        push(@{$self->{entries}}, $entry_obj);
++    }
++    close($log_fh);
++    if ($lineno == 0) {
++        croak "logfile is empty";
++
++    }
++
++    if ($self->{from} or $self->{to}) {
++        @{$self->{entries}} = $self->filter_by_time( entry_ref => $self->{entries}, %params);
++    }
++
++    return scalar(@{$self->{entries}});
++}
++
++=head1 SEE ALSO
++
++L<Dpkg::Log::Status::Entry>, L<DateTime>, L<DateTime::TimeZone>
++
++=head1 AUTHOR
++
++Patrick Schoenfeld <schoenfeld@debian.org>.
++
++=head1 COPYRIGHT AND LICENSE
++
++Copyright (C) 2011 Patrick Schoenfeld <schoenfeld@debian.org>
++
++This library is free software.
++You can redistribute it and/or modify it under the same terms as perl itself.
++
++=cut
++
++1;
++# vim: expandtab:ts=4:sw=4
+diff --git a/scripts/Dpkg/Log/Status/Entry.pm b/scripts/Dpkg/Log/Status/Entry.pm
+new file mode 100644
+index 0000000..3233257
+--- /dev/null
++++ b/scripts/Dpkg/Log/Status/Entry.pm
+@@ -0,0 +1,297 @@
++=head1 NAME
++
++Dpkg::Log::Status::Entry - Describe a log entry in a dpkg.log
++
++=head1 SYNOPSIS
++
++use Dpkg::Log::Status::Entry;
++
++$dpkg_log_entry = Dpkg::Log::Status::Entry->new( line => $line, $lineno => 1)
++
++$dpkg_log_entry->timestamp($dt);
++
++$dpkg_log_entry->associated_package("foo");
++
++
++=head1 DESCRIPTION
++
++This module is used to describe one line in a dpkg log
++by parameterizing every line into generic parameters like
++
++=over 3
++
++=item * Type of log entry (startup-, status-, action-lines)
++
++=item * Timestamp
++
++=item * Subject of log entry (e.g. package, packages or archives)
++
++=item * Package name (if log entry refers to a package subject)
++
++=back
++
++and so on.
++
++The various parameters are described below together with
++the various methods to access or modify them. 
++
++=head1 METHODS
++
++
++=over 4
++
++=cut
++package Dpkg::Log::Status::Entry;
++
++use strict;
++use warnings;
++
++use Carp;
++
++use base qw(Dpkg::Log::Entry Exporter);
++
++require Exporter;
++#our @ISA = qw(Exporter);
++our @EXPORT = qw( $valid_types $valid_actions );
++
++our $valid_types = {
++    status => 1,
++    action => 1,
++    startup => 1,
++    conffile_action => 1
++    
++};
++
++our $valid_actions = {
++   'install' => 1,
++   'configure' => 1,
++   'trigproc' => 1,
++   'upgrade' => 1,
++   'remove' => 1,
++   'purge' => 1,
++};
++
++=item $dpkg_log_entry = PACKAGE->new( $line, $lineno, %params )
++
++Returns a new Dpkg::Log::Status::Entry object.
++The arguments B<line> and B<lineno> are mandatory. They store the complete line
++as stored in the log and the line number.
++
++Additionally its possible to specify every attribute the object can store,
++as 'key' => 'value' pairs.
++
++=back
++
++=cut
++sub new {
++    my ($package, @args) = @_;
++    $package = ref($package) if ref($package);
++
++    my $line;
++    my $lineno;
++    my %options;
++    if (scalar(@args) >= 2) {
++        ($line, $lineno, %options) = @args;
++    } else {
++        my $option_ref = shift @args;
++        croak "odd number of arguments to new method" unless $option_ref;
++        %options = %{$option_ref};
++    }
++
++    my $self = {
++        'associated_package' => '',
++        'action' => '',
++        'status' => '',
++        'subject' => '',
++        'type' => '',
++        'installed_version' => '',
++        'available_version' => '',
++        'decision' => '',
++        'conffile' => '',
++        %options
++    };
++
++    bless($self, $package);
++    $self = $self->SUPER::new($line, $lineno, %options);
++    return $self;
++}
++
++=head1 ATTRIBUTES
++
++=over 4
++
++=item $dpkg_log_entry->type() / type
++
++Get or set the type of this entry. Specifies weither this is a startup,
++status or action line.
++
++=cut 
++sub type {
++    my ($self, $type) = @_;
++
++    if ($type) {
++        if (not defined($valid_types->{$type})) {
++            croak("$type is not a valid type. has to be one of ".join(",", keys %{$valid_types}));
++        }
++        $self->{type} = $type;
++    } else {
++        $type = $self->{type}
++    }
++    return $type;
++}
++
++=item $dpkg_log_entry->associated_package() / associated_package
++
++Get or set the associated_package of this entry. This is for lines that are associated to a certain
++package like in action or status lines. Its usually unset for startup and status lines.
++
++=cut 
++sub associated_package {
++    my ($self, $associated_package) = @_;
++
++    if ($associated_package) {
++        $self->{associated_package} = $associated_package;
++    } else {
++        $associated_package = $self->{associated_package};
++    }
++    return $associated_package;
++}
++
++=item $dpkg_log_entry->action() / action
++
++Get or set the action of this entry. This is for lines that have a certain action,
++like in startup-lines (unpack, configure) or action lines (install, remove).
++It is usally unset for status lines.
++
++=cut 
++sub action {
++    my ($self, $action) = @_;
++
++    if ($action) {
++        if (not defined($valid_actions->{$action})) {
++            croak("$action is not a valid action. has to be one of ".join(",", keys %{$valid_actions}));
++        }
++        $self->{action} = $action;
++    } else {
++        $action = $self->{action};
++    }
++    return $action;
++}
++
++=item $dpkg_log_entry->status() / status
++
++Get or set the status of the package this entry refers to.
++
++=cut 
++sub status {
++    my ($self, $status) = @_;
++
++    if ($status) {
++        $self->{'status'} = $status;
++    } else {
++        $status = $self->{status}
++    }
++    return $status;
++}
++
++=item $dpkg_log_entry->subject() / subject
++
++Gets or Defines the subject of the entry. For startup lines this is usually 'archives' or 'packages'
++for all other lines its 'package'.
++
++=cut 
++
++sub subject {
++    my ($self, $subject) = @_;
++
++    if ($subject) {
++        $self->{subject} = $subject;
++    } else {
++        $subject = $self->{subject};
++    }
++    return $subject;
++}
++
++=item $dpkg_log_entry->installed_version() / installed_version
++
++Gets or Defines the installed_version of the package this entry refers to.
++It refers to the current installed version of the package depending on the
++current status. Is "<none>" (or similar) if action is 'install', old version in
++case of an upgrade.
++=cut 
++sub installed_version {
++    my ($self, $installed_version) = @_;
++
++    if ($installed_version) {
++        $self->{'installed_version'} = $installed_version;
++    } else {
++        $installed_version = $self->{installed_version};
++    }
++    return $installed_version;
++}
++
++=item $dpkg_log_entry->available_version() / available_version
++
++Gets or Defines the available_version of the package this entry refers to.
++It refers to the currently available version of the package depending on the
++current status. Is different from installed_version if the action is install or upgrade.
++=cut 
++sub available_version {
++    my ($self, $available_version) = @_;
++    if ($available_version) {
++       $self->{'available_version'} = $available_version;
++    } else {
++        $available_version = $self->{available_version};
++    }
++    return $available_version;
++}
++
++=item $dpkg_log_entry->conffile() / conffile
++
++Get or set a conffile for a line indicating a conffile change.
++
++=cut
++sub conffile {
++    my ($self, $conffile) = @_;
++    if ($conffile) {
++        $self->{conffile} = $conffile;
++    } else {
++        $conffile = $self->{conffile};
++    }
++}
++
++=item $dpkg_log_entry->decision() / decision
++
++Gets or defines the decision for a line indicating a conffile change.
++
++=cut
++sub decision {
++    my ($self, $decision) = @_;
++    if ($decision) {
++        $self->{decision} = $decision;
++    } else {
++        $decision = $self->{decision}
++    }
++}
++
++=back
++
++=head1 SEE ALSO
++
++L<Dpkg::Log::Entry>, L<DateTime>
++
++=head1 AUTHOR
++
++Patrick Schoenfeld <schoenfeld@debian.org>.
++
++=head1 COPYRIGHT AND LICENSE
++
++Copyright (C) 2011 Patrick Schoenfeld <schoenfeld@debian.org>
++
++This library is free software.
++You can redistribute it and/or modify it under the same terms as perl itself.
++
++=cut
++
++1;
++# vim: expandtab:ts=4:sw=4
+diff --git a/scripts/dpkg-report.pl b/scripts/dpkg-report.pl
+new file mode 100644
+index 0000000..6d75e0e
+--- /dev/null
++++ b/scripts/dpkg-report.pl
+@@ -0,0 +1,251 @@
++#!/usr/bin/perl
++#
++# dpkg-report
++#
++# Copyright © 2011 Patrick Schoenfeld <schoenfeld@debian.org>
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 2 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++use strict;
++use warnings;
++
++use Getopt::Long qw(:config posix_default bundling no_ignorecase);
++use File::Basename qw(basename);
++use Sys::Hostname;
++use Data::Dumper;
++use DateTime;
++use Template;
++
++use Dpkg;
++use Dpkg::Gettext;
++use Dpkg::Log::Status;
++use Dpkg::Log::Analyse::Status;
++
++# Initialize default values
++my $hostname = hostname;
++my @logfiles;
++our %date_options;
++our $overall_packages;
++our $debug;
++our @keys = qw(  newly_installed_packages upgraded_packages removed_packages
++                halfinstalled_packages halfconfigured_packages installed_and_removed_packages );
++
++our $data_g;
++
++sub version {
++    printf(_g("Debian %s version %s.\n"), $progname, $version);
++    exit(0);
++}
++
++sub usage {
++    printf _g(
++"Usage: %s <options> -f /path/to/logfile [<-f logfile> ..]
++
++generate reports from dpkg logfiles
++
++General Options:
++  -f, --filename <filename>  specify path and filename of a logfile
++                             (default: /var/log/dpkg.log)
++      --hostname <hostname>  specify the hostname for the report title
++                             (default: return value of gethostname ($hostname)
++
++Limit reporting period by fixed patterns:
++(the following options can only be used standalone)
++
++      --today                limit reporting period to current day
++      --last-two-days        limit reporting period to the last two days
++      --last-week            limit reporting period to the last week
++      --last-month           limit reporting period to the last month
++
++or by specifying start-/end dates (the following options can be combined):
++      --from YYYY-MM-DD      limit reporting period to entries after
++                             YYYY-MM-DD 00:00:00
++      --to YYYY-MM-DD        limit reporting period to entries before
++                             YYYY-MM-DD 23:59:59 
++Other Options:
++  -h, --help                 show this help message.
++      --version              show the version.
++"), $progname;
++}
++
++sub calculate_start_and_endtimes {
++    my %date_options = @_;
++
++    my $from;
++    my $to;
++    if ($date_options{from}) {
++       my ($year, $month, $day) = split(/-/, $date_options{from});
++        $from = DateTime->new(year => $year, month => $month, day => $day);
++        if ($date_options{to}) {
++            ($year, $month, $day) = split(/-/, $date_options{to});
++            $to = DateTime->new(year => $year, month => $month, day => $day);
++            $to = $to->add( days => 1 )->subtract(seconds => 1);
++
++        } 
++    } elsif ($date_options{today}) {
++        $from = DateTime->now->truncate(to => 'day');
++    } elsif ($date_options{last_two_days}) {
++        $from = DateTime->now->truncate(to => 'day')->subtract(days => 1);
++    } elsif ($date_options{last_week}) {
++        $from = DateTime->now->truncate(to => 'day')->subtract(weeks => 1);
++    } elsif ($date_options{last_month}) {
++        $from = DateTime->now->truncate(to => 'day')->subtract (months => 1);
++    }
++    if (not $to) {
++        $to = DateTime->now->truncate(to => 'day')->add( days => 1 )->subtract(seconds => 1);
++    }
++
++    return ($from, $to);
++}
++
++
++sub gather_data {
++    my ($logfile, %params) = @_;
++    # Set defaults
++    if (not $params{hostname}) {
++        $params{hostname} = $hostname;
++    }
++
++    # Guess right hostname from file name if logfile matches *.dpkg.log
++    if (basename($logfile) =~ /(.*).dpkg.log/) {
++        $params{'hostname'} = $1;
++    }
++
++    my $no_data = 0;
++    my ($from, $to) = calculate_start_and_endtimes(%date_options);
++    my $dpkg_log = Dpkg::Log::Status->new(filename => $logfile,
++        from => $from,
++        to => $to,
++    );
++    my $data;
++    my $analyser;
++      eval {
++        $analyser = Dpkg::Log::Analyse::Status->new(log_handle => $dpkg_log);
++        $analyser->analyse;
++    } or do {
++       $data->{no_data} = 1;
++    };
++
++    # Get data
++    if ($analyser) {
++        $data = {
++            hostname => $params{'hostname'},
++            newly_installed_packages => $analyser->newly_installed_packages,
++            upgraded_packages => $analyser->upgraded_packages,
++            removed_packages => $analyser->removed_packages,
++            halfinstalled_packages => $analyser->halfinstalled_packages,
++            halfconfigured_packages => $analyser->halfconfigured_packages,
++            installed_and_removed_packages => $analyser->installed_and_removed_packages,
++        };
++
++        foreach my $key (@keys) {
++            if (not $overall_packages->{$key}) {
++                $overall_packages->{$key} = [];
++            }
++            while (my ($package, $package_obj) = (each %{$data->{$key}})) {
++                push(@{$overall_packages->{$key}}, $package_obj);
++            }
++        }
++    }
++        
++    return $data;
++}
++
++sub generate_report {
++    my ($input, %params) = @_;
++    my $tt = Template->new(
++        {
++            INCLUDE_PATH => '.',
++            INTERPOLATE  => 1,
++            POST_CHOMP   => 1,
++
++        }
++    );
++    my $output = {
++        hostname => $input->{hostname},
++        no_data => $input->{no_data}
++    };
++
++    foreach my $key (@keys) {
++        while (my ($package, $package_obj) = each %{$input->{$key}}) {
++            if (not $output->{$key}) {
++                $output->{$key} = [];
++            }
++            push(@{$output->{$key}},
++                {
++                    name => $package_obj->name,
++                    version =>  sprintf("%s", $package_obj->version),
++                    old_version =>  sprintf("%s", $package_obj->previous_version),
++                    status => $package_obj->status
++                }
++            );
++        }
++    }
++    $tt->process('dpkg-report.tt2', $output) or die $tt->error;
++}
++
++if (!GetOptions("hostname=s", \$hostname,
++                "f|filename=s", \@logfiles,
++                "from=s" => \$date_options{from},
++                "to=s" => \$date_options{to},
++                "today" => \$date_options{today},
++                "last-two-days" => \$date_options{last_two_days},
++                "last-week" => \$date_options{last_week},
++                "last-month" => \$date_options{last_month},
++                "debug" => \$debug,
++                "version" => \&version,
++                "help|h" => sub { usage(); exit(0); } )) {
++    usage();
++    exit(2);
++}
++
++# Check specified time options for conflicts
++my $opt_used;
++foreach my $opt (keys %date_options) {
++    if (defined($date_options{$opt}) and not $opt_used) {
++        $opt_used = $opt;
++    } elsif (defined($date_options{$opt}) and $opt_used) {
++        $opt_used =~ s/_/-/g; $opt_used =~ s/^/--/g;
++        $opt =~ s/_/-/g; $opt =~ s/^/--/g;
++        printf(STDERR
++            _g("%s: option $opt_used and $opt can not be used together.\n"),
++                $progname);
++        usage();
++        exit(2);
++    }
++}
++
++if (not @logfiles) {
++    @logfiles = ('/var/log/dpkg.log');
++    printf(STDERR "DEBUG: Logfiles that will be processed: %s\n",  
++        join(", ", @logfiles));
++}
++
++foreach my $logfile (@logfiles) {
++    my $data;
++    if (-d $logfile) {
++        map { 
++            $data = gather_data($_);
++            $data_g->{$data->{hostname}} = $data;
++        } glob($logfile."/*");
++    } else {
++        $data = gather_data($logfile);
++        $data_g->{$data->{hostname}} = $data;
++    }
++}
++
++foreach my $hostname(sort keys %{$data_g}) {
++    my $data = $data_g->{$hostname};
++    generate_report($data, identifier => $hostname);
++}
+diff --git a/scripts/t/950_Dpkg_Log.t b/scripts/t/950_Dpkg_Log.t
+new file mode 100644
+index 0000000..722a114
+--- /dev/null
++++ b/scripts/t/950_Dpkg_Log.t
+@@ -0,0 +1,219 @@
++# -*- mode: cperl;-*-
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 2 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++use Test::More;
++use DateTime;
++use Dpkg::Log::Entry;
++use Dpkg::Log::Status::Entry;
++use File::Temp qw(tempfile);
++
++use strict;
++use warnings;
++
++my $srcdir = $ENV{srcdir} || '.';
++my $datadir = $srcdir . '/t/950_Dpkg_Log';
++
++my ($entry, $dpkg_log);
++
++my $line = "2011-04-21 11:25:58 status installed trickle 1.07-9";
++my $lineno = 12;
++my $dt = DateTime->now();
++my $subject = "package";
++my $package = "trickle";
++my $action = "install";
++my $type = "action";
++my $status = "installed";
++my $installed_version = "1.0.0-1";
++my $available_version = "1.0.0-2";
++my $conffile = "/etc/fstab";
++my $decision = "keep";
++
++# Dpkg::Log::Entry
++use_ok('Dpkg::Log::Entry');
++$entry = new_ok('Dpkg::Log::Entry',[$line, $lineno]);
++can_ok($entry, 'line');
++can_ok($entry, 'lineno');
++can_ok($entry, 'timestamp');
++
++# Dpkg::Log::Status::Entry
++use_ok('Dpkg::Log::Status::Entry');
++$entry = new_ok('Dpkg::Log::Status::Entry', [$line, $lineno]); 
++can_ok($entry, 'line');
++can_ok($entry, 'lineno');
++can_ok($entry, 'timestamp');
++can_ok($entry, 'type');
++can_ok($entry, 'associated_package');
++can_ok($entry, 'action');
++can_ok($entry, 'status');
++can_ok($entry, 'subject');
++can_ok($entry, 'installed_version');
++can_ok($entry, 'available_version');
++can_ok($entry, 'conffile');
++can_ok($entry, 'decision');
++
++is($entry->line, $line, "getting line on entry returns expected value");
++is($entry->lineno, $lineno, "getting lineno on entry returns expected value");
++ok($entry->timestamp($dt), "setting timestamp on entry works");
++is($entry->timestamp, $dt, "getting timestamp returns expected value");
++isa_ok($entry->timestamp, 'DateTime', "timestamp in entry");
++ok($entry->type($type), "setting type on entry works");
++is($entry->type, $type, "getting type on entry returns expected value");
++ok($entry->associated_package($package), "setting package on entry works");
++is($entry->associated_package, $package, "getting package on entry returns expected value");
++ok($entry->action($action), "setting action on entry works");
++is($entry->action, $action, "getting action on entry returns expected value");
++ok($entry->status($status), "setting status on entry works");
++is($entry->status, $status, "getting status on entry returns expected value");
++ok($entry->subject($subject), "setting subject on entry works");
++is($entry->subject, $subject, "getting subject on entry returns expected value");
++ok($entry->installed_version($installed_version), "setting installed_version on entry works");
++is($entry->installed_version, $installed_version, "getting installed_version on entry returns expected value");
++ok($entry->available_version($available_version), "setting available_version on entry works");
++is($entry->available_version, $available_version, "getting available_version on entry returns expected value");
++ok($entry->conffile($conffile), "setting conffile on entry works");
++is($entry->conffile, $conffile, "getting conffile on entry returns expected value");
++ok($entry->decision($decision), "setting decision on entry works");
++is($entry->decision, $decision, "getting decision on entry returns expected value");
++
++# Dpkg::Log
++use_ok('Dpkg::Log');
++$dpkg_log = new_ok('Dpkg::Log', [ 'Dpkg::Log::Entry' ]);
++can_ok($dpkg_log, 'filename');
++can_ok($dpkg_log, 'entries');
++can_ok($dpkg_log, 'parse');
++can_ok($dpkg_log, 'next_entry');
++can_ok($dpkg_log, 'filter_by_time');
++can_ok($dpkg_log, 'get_datetime_info');
++my $tempfile = tempfile( "XXXXX", UNLINK => 1);
++ok($dpkg_log->filename($tempfile), "setting log filename work");
++is($dpkg_log->filename, $tempfile, "getting filename returns expected value");
++
++# Dpkg::Log::Status
++use_ok('Dpkg::Log::Status');
++my $logfile = "$datadir/dpkg.log.mini";
++$dpkg_log = new_ok('Dpkg::Log::Status', ["filename", $logfile]);
++can_ok($dpkg_log, 'filename');
++can_ok($dpkg_log, 'parse');
++can_ok($dpkg_log, 'entries');
++can_ok($dpkg_log, 'next_entry');
++can_ok($dpkg_log, 'filter_by_time');
++can_ok($dpkg_log, 'get_datetime_info');
++is($dpkg_log->filename, $logfile, "getting filename returns expected value");
++is(scalar(@{$dpkg_log->{invalid_lines}}), 0, "parsing result in 0 invalid lines" );
++is($dpkg_log->parse, 15, "parsing results in 15 parsed entries");
++ok ( eval { $dpkg_log->entries >= 0 } , "object stores entries");
++$entry = $dpkg_log->next_entry;
++isa_ok($entry, "Dpkg::Log::Status::Entry", "next entry");
++ok( my ($from, $to) = $dpkg_log->get_datetime_info(), "get_datetime_info returns two values");
++isa_ok($from, "DateTime", "from value returned by get_datetime_info");
++isa_ok($to, "DateTime", "to value returned by get_datetime_info");
++ok ($dpkg_log = $dpkg_log->new(filename => $logfile), 'initialize object from existing ref');
++
++$dpkg_log = undef;
++$entry = undef;
++
++$dpkg_log = Dpkg::Log::Status->new('filename' => "$datadir/dpkg.log.all_entry_types");
++$dpkg_log->parse;
++
++my @expected_entries = (
++    # tests
++    [
++        # [ $method, $expected_value ]
++        [ "type", "startup" ],
++        [ "subject", "archives" ],
++        [ "action", "unpack" ],
++        [ "timestamp", DateTime->new(
++                year => 2011,
++                month => 04,
++                day => 28,
++                hour => 13,
++                minute => 00,
++                second => 01,
++                time_zone => "local"
++            )
++        ]
++    ],
++    [
++        [ "type", "status" ],
++        [ "subject", "package" ],
++        [ "action", undef ],
++        [ "status", "installed" ],
++        [ "associated_package", "libreoffice-core"],
++        [ "installed_version", "1:3.3.1~rc1-2"],
++    ],
++    [
++        [ "type", "conffile_action" ],
++        [ "subject", "conffile" ],
++        [ "decision", "keep" ]
++    ],
++    [
++        [ "type", "action" ],
++        [ "action", "configure" ],
++        [ "associated_package", "libselinux1" ],
++        [ "available_version", "2.0.98-1" ],
++        [ "installed_version", "2.0.97-1" ]
++    ]
++
++);
++
++use Data::Dumper;
++my $i=0;
++foreach my $expect_entry (@expected_entries) {
++    $i++;
++    my $entry = $dpkg_log->next_entry;
++    is($entry->lineno, $i, "Dpkg::log::Status::Entry->lineno() is $i");
++    foreach my $test (@{$expect_entry}) {
++        my $method = $test->[0];
++        my $expected_value = $test->[1];
++        is($entry->$method, $expected_value,
++            "Dpkg::Log::Status::Entry->$method() for entry $i returns "
++            . "expected value");
++    }
++}
++
++# Dpkg::Log::Analyse::Package
++use_ok('Dpkg::Log::Analyse::Package');
++can_ok('Dpkg::Log::Analyse::Package', 'name');
++can_ok('Dpkg::Log::Analyse::Package', 'version');
++can_ok('Dpkg::Log::Analyse::Package', 'previous_version');
++can_ok('Dpkg::Log::Analyse::Package', 'status');
++
++# Dpkg::Log::Analyse
++use_ok('Dpkg::Log::Analyse');
++can_ok('Dpkg::Log::Analyse', 'analyse');
++
++# Dpkg::Log::Analyse::Status
++use_ok('Dpkg::Log::Analyse::Status');
++can_ok('Dpkg::Log::Analyse::Status', 'analyse');
++can_ok('Dpkg::Log::Analyse::Status', 'newly_installed_packages');
++can_ok('Dpkg::Log::Analyse::Status', 'upgraded_packages');
++can_ok('Dpkg::Log::Analyse::Status', 'removed_packages');
++can_ok('Dpkg::Log::Analyse::Status', 'unpacked_packages');
++can_ok('Dpkg::Log::Analyse::Status', 'halfinstalled_packages');
++can_ok('Dpkg::Log::Analyse::Status', 'halfconfigured_packages');
++can_ok('Dpkg::Log::Analyse::Status', 'installed_and_removed_packages');
++my $analyzer = new_ok('Dpkg::Log::Analyse::Status', ['filename',
++        "$datadir/dpkg.log.big"]);
++isa_ok($analyzer->{log_handle}, 'Dpkg::Log::Status');
++ok($analyzer->analyse, "calling analyse");
++is(scalar(keys %{$analyzer->newly_installed_packages}), 40, "newly installed packages");
++is(scalar(keys %{$analyzer->upgraded_packages}), 4, "upgraded packages");
++is(scalar(keys %{$analyzer->removed_packages}), 1, "removed packages");
++is(scalar(keys %{$analyzer->unpacked_packages}), 0, "unpackaged packages");
++is(scalar(keys %{$analyzer->halfinstalled_packages}), 0, "halfinstalled packages");
++is(scalar(keys %{$analyzer->halfconfigured_packages}), 0, "halfconfigured packages");
++is(scalar(keys %{$analyzer->installed_and_removed_packages}), 1, "installed and removed packages");
++
++done_testing();
+diff --git a/scripts/t/950_Dpkg_Log/dpkg.log.mini b/scripts/t/950_Dpkg_Log/dpkg.log.mini
+new file mode 100644
+index 0000000..40b1224
+--- /dev/null
++++ b/scripts/t/950_Dpkg_Log/dpkg.log.mini
+@@ -0,0 +1,15 @@
++2011-02-02 11:15:33 startup archives unpack
++2011-02-02 11:15:44 install live-boot-initramfs-tools <keine> 2.0.14-1
++2011-02-02 11:15:44 status triggers-pending initramfs-tools 0.98.5
++2011-02-02 11:15:44 status not-installed live-boot-initramfs-tools <keine>
++2011-02-02 11:15:44 status half-installed live-boot-initramfs-tools 2.0.14-1
++2011-02-02 11:15:44 status unpacked live-boot-initramfs-tools 2.0.14-1
++2011-02-02 11:15:44 status unpacked live-boot-initramfs-tools 2.0.14-1
++2011-02-02 11:16:30 startup packages configure
++2011-02-02 11:16:30 configure live-boot-initramfs-tools 2.0.14-1 2.0.14-1
++2011-02-02 11:16:30 status triggers-pending initramfs-tools 0.98.5
++2011-02-02 11:16:30 status unpacked live-boot-initramfs-tools 2.0.14-1
++2011-02-02 11:16:30 status unpacked live-boot-initramfs-tools 2.0.14-1
++2011-02-02 11:16:30 status half-configured live-boot-initramfs-tools 2.0.14-1
++2011-02-02 11:16:30 status triggers-awaited live-boot-initramfs-tools 2.0.14-1
++2011-02-02 11:16:33 status installed live-boot-initramfs-tools 2.0.14-1

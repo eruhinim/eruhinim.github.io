@@ -1,0 +1,92 @@
+diff --git a/compose/cli/docker_client.py b/compose/cli/docker_client.py
+index e4a0fea6..4c54567e 100644
+--- a/compose/cli/docker_client.py
++++ b/compose/cli/docker_client.py
+@@ -40,7 +40,7 @@ def load_context(name=None):
+ def get_client(environment, verbose=False, version=None, context=None):
+     client = docker_client(
+         version=version, context=context,
+-        environment=environment, tls_version=get_tls_version(environment)
++        environment=environment
+     )
+     if verbose:
+         version_info = client.version().items()
+@@ -52,23 +52,6 @@ def get_client(environment, verbose=False, version=None, context=None):
+     return client
+ 
+ 
+-def get_tls_version(environment):
+-    compose_tls_version = environment.get('COMPOSE_TLS_VERSION', None)
+-    if not compose_tls_version:
+-        return None
+-
+-    tls_attr_name = "PROTOCOL_{}".format(compose_tls_version)
+-    if not hasattr(ssl, tls_attr_name):
+-        log.warning(
+-            'The "{}" protocol is unavailable. You may need to update your '
+-            'version of Python or OpenSSL. Falling back to TLSv1 (default).'
+-            .format(compose_tls_version)
+-        )
+-        return None
+-
+-    return getattr(ssl, tls_attr_name)
+-
+-
+ def tls_config_from_options(options, environment=None):
+     environment = environment or Environment()
+     cert_path = environment.get('DOCKER_CERT_PATH') or None
+@@ -82,7 +65,6 @@ def tls_config_from_options(options, environment=None):
+     # see https://github.com/docker/compose/issues/5632
+     verify = options.get('--tlsverify') or environment.get_boolean('DOCKER_TLS_VERIFY')
+ 
+-    skip_hostname_check = options.get('--skip-hostname-check', False)
+     if cert_path is not None and not any((ca_cert, cert, key)):
+         # FIXME: Modify TLSConfig to take a cert_path argument and do this internally
+         cert = os.path.join(cert_path, 'cert.pem')
+@@ -95,9 +77,7 @@ def tls_config_from_options(options, environment=None):
+         cert = os.path.join(default_cert_path(), 'cert.pem')
+         key = os.path.join(default_cert_path(), 'key.pem')
+ 
+-    tls_version = get_tls_version(environment)
+-
+-    advanced_opts = any([ca_cert, cert, key, verify, tls_version])
++    advanced_opts = any([ca_cert, cert, key, verify])
+ 
+     if tls is True and not advanced_opts:
+         return True
+@@ -108,20 +88,18 @@ def tls_config_from_options(options, environment=None):
+ 
+         return TLSConfig(
+             client_cert=client_cert, verify=verify, ca_cert=ca_cert,
+-            assert_hostname=False if skip_hostname_check else None,
+-            ssl_version=tls_version
+         )
+ 
+     return None
+ 
+ 
+-def docker_client(environment, version=None, context=None, tls_version=None):
++def docker_client(environment, version=None, context=None):
+     """
+     Returns a docker-py client configured using environment variables
+     according to the same logic as the official Docker client.
+     """
+     try:
+-        kwargs = kwargs_from_env(environment=environment, ssl_version=tls_version)
++        kwargs = kwargs_from_env(environment=environment)
+     except TLSParameterError:
+         raise UserError(
+             "TLS configuration is invalid - make sure your DOCKER_TLS_VERIFY "
+diff --git a/compose/cli/main.py b/compose/cli/main.py
+index fabd6087..220a6cdb 100644
+--- a/compose/cli/main.py
++++ b/compose/cli/main.py
+@@ -281,8 +281,6 @@ class TopLevelCommand:
+       --tlscert CLIENT_CERT_PATH  Path to TLS certificate file
+       --tlskey TLS_KEY_PATH       Path to TLS key file
+       --tlsverify                 Use TLS and verify the remote
+-      --skip-hostname-check       Don't check the daemon's hostname against the
+-                                  name specified in the client certificate
+       --project-directory PATH    Specify an alternate working directory
+                                   (default: the path of the Compose file)
+       --compatibility             If set, Compose will attempt to convert keys

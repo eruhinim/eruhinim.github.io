@@ -1,0 +1,156 @@
+From 89c328064fe30e7644402f9dc2d6b975d35050cb Mon Sep 17 00:00:00 2001
+From: Jean-Baptiste Lallement <jeanbaptiste.lallement@gmail.com>
+Date: Wed, 4 Jun 2014 12:07:12 +0200
+Subject: [PATCH] Fixed shstring handling
+
+* Merged print-auxverb-command and print-shstring-command into
+  print-execute-command which return the right command string depending on
+  downkind
+* Drop perl script when command is an shstring. In this case auxverb and
+* shstring are the same
+* Added cmd_quote_shstring that returns a shell escaped version of a string if
+  downkind is shstring
+* Quote the script to run test with quote-shstring
+---
+ lib/VirtSubproc.py | 43 +++++++++++++++++++------------------------
+ runner/adt-run     | 10 ++++++----
+ 2 files changed, 25 insertions(+), 28 deletions(-)
+
+diff --git a/lib/VirtSubproc.py b/lib/VirtSubproc.py
+index b099879..7f2a858 100644
+--- a/lib/VirtSubproc.py
++++ b/lib/VirtSubproc.py
+@@ -34,6 +34,7 @@ import time
+ import re
+ import pipes
+ import socket
++import shlex
+ import shutil
+ 
+ debuglevel = None
+@@ -123,12 +124,12 @@ def cmd_close(c, ce):
+     cleanup()
+ 
+ 
+-def cmd_print_auxverb_command(c, ce):
+-    return print_command('auxverb', c, ce)
+-
+-
+-def cmd_print_shstring_command(c, ce):
+-    return print_command('shstring', c, ce)
++def cmd_print_execute_command(c, ce):
++    global downkind
++    if downkind == 'shstring':
++        return print_command('shstring', c, ce)
++    else:
++        return print_command('auxverb', c, ce)
+ 
+ 
+ def print_command(which, c, ce):
+@@ -167,7 +168,7 @@ def execute_raw(what, instr, timeout, *popenargs, **popenargsk):
+ 
+ 
+ def execute(cmd_string, cmd_list=[], downp=False, outp=False, timeout=0):
+-    cmdl = cmd_string.split()
++    cmdl = shlex.split(cmd_string)
+ 
+     if downp:
+         perhaps_down = downs['auxverb']
+@@ -267,16 +268,6 @@ def downtmp_remove():
+     global downtmp
+     execute('rm -rf --', [downtmp], downp=True)
+ 
+-perl_quote_re = re.compile('[^-+=_.,;:() 0-9a-zA-Z]')
+-
+-
+-def perl_quote_1chargroup(m):
+-    return '\\x%02x' % ord(m.group(0))
+-
+-
+-def perl_quote(s):
+-    return '"' + perl_quote_re.sub(perl_quote_1chargroup, s) + '"'
+-
+ 
+ def opened1():
+     global down, downkind, downs
+@@ -286,13 +277,7 @@ def opened1():
+                  'shstring': down + ['sh', '-c']}
+     elif downkind == 'shstring':
+         downs = {'shstring': down,
+-                 'auxverb': ['perl', '-e', '''
+-                @cmd=(''' + (','.join(map(perl_quote, down))) + ''');
+-                s/'/'\\\\''/g foreach @ARGV;
+-                push @cmd, "'$_'" foreach @ARGV;
+-                my $argv0=$cmd[0];
+-                exec $argv0 @cmd;
+-                die "$argv0: $!"''']}
++                 'auxverb': down }
+     debug("downs = %s" % str(downs))
+ 
+ 
+@@ -649,6 +634,16 @@ def cmd_shell(c, ce):
+         raise FailedCmd(['not supported by virt server'])
+ 
+ 
++def cmd_quote_shstring(c, ce):
++    """ Return a shell escaped version of c if downkind is shstring
++    """
++    global downkind
++    if downkind == 'shstring':
++        return [urllib.quote(pipes.quote(c[1]))]
++    else:
++        return [ce[1]]
++
++
+ def command():
+     sys.stdout.flush()
+     while True:
+diff --git a/runner/adt-run b/runner/adt-run
+index d6f24c8..c3c71e9 100755
+--- a/runner/adt-run
++++ b/runner/adt-run
+@@ -903,7 +903,7 @@ class Testbed:
+ 
+         Return exit code.
+         '''
+-        auxverb = map(urllib.unquote, self.commandr('print-auxverb-command')[0].split(','))
++        cmde = map(urllib.unquote, self.commandr('print-execute-command')[0].split(','))
+         timeout = timeouts[kind]
+ 
+         env = list(xenv)  # copy
+@@ -917,7 +917,7 @@ class Testbed:
+ 
+         VirtSubproc.timeout_start(timeout)
+         try:
+-            proc = subprocess.Popen(auxverb + cmdl)
++            proc = subprocess.Popen(cmde + cmdl)
+             proc.communicate()
+             VirtSubproc.timeout_stop()
+         except VirtSubproc.Timeout:
+@@ -1352,6 +1352,7 @@ class Test:
+         testbed.prepare(dn, 'needs-recommends' in self.restriction_names)
+ 
+     def run(self, tree):
++        global testbed
+         # record installed package versions
+         if opts.output_dir:
+             pkglist = TempTestbedPath(testbed, self.what + '-packages.all', autoclean=False)
+@@ -1400,12 +1401,13 @@ class Test:
+                      %(t)s 2> >(tee %(e)s >&2) > >(tee %(o)s)
+                   ''' % {'t': tb_test_path, 'o': so.tb, 'e': se.tb}
+ 
++        quoted = testbed.commandr('quote-shstring', [script])[0]
+         if 'needs-root' not in self.restriction_names and opts.user is not None:
+             if 'root-on-testbed' not in testbed.caps:
+                 bomb('cannot change to user %s without root-on-testbed' % opts.user)
+-            test_argv = ['su', '-s', '/bin/bash', opts.user, '-c', script]
++            test_argv = ['su', '-s', '/bin/bash', opts.user, '-c', quoted]
+         else:
+-            test_argv = ['bash', '-c', script]
++            test_argv = ['bash', '-c', quoted]
+ 
+         # run test script
+         self._debug('[-----------------------', True)
+-- 
+2.0.0
+

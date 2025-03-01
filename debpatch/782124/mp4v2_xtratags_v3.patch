@@ -1,0 +1,2163 @@
+Index: include/mp4v2/mp4v2.h
+===================================================================
+--- include/mp4v2/mp4v2.h	(revision 504)
++++ include/mp4v2/mp4v2.h	(working copy)
+@@ -66,6 +66,10 @@
+ #include <mp4v2/streaming.h>
+ #include <mp4v2/isma.h>
+ 
++#ifdef MP4V2_XTRA_TAGS
++    #include <mp4v2/xtra_tags.h>
++#endif
++
+ /*****************************************************************************/
+ 
+ /* restore macro DEFAULT to state prior to mp4v2 headers */
+Index: include/mp4v2/platform.h
+===================================================================
+--- include/mp4v2/platform.h	(revision 504)
++++ include/mp4v2/platform.h	(working copy)
+@@ -26,6 +26,15 @@
+     #endif
+ #endif
+ 
++// Support for the MP4 Xtra atom is Windows-only for now. Reason is that metadata value strings are stored
++// as UTF-16 in the atom, and the API/implementation currently use wchar_t, which is UTF-16 only on
++// Windows. To make this cross-platform, the API/implementation should use UTF-8 strings instead, and
++// convert to UTF-16 just before writing the atom. This would require addition of a UTF-8 - UTF-16
++// conversion routine to mp4v2.
++#ifdef _WIN32
++    #define MP4V2_XTRA_TAGS
++#endif
++
+ #if defined( _WIN32 ) || defined( __MINGW32__ )
+ #   if defined( MP4V2_EXPORTS )
+ #       define MP4V2_EXPORT __declspec(dllexport)
+Index: include/mp4v2/xtra_tags.h
+===================================================================
+--- include/mp4v2/xtra_tags.h	(revision 0)
++++ include/mp4v2/xtra_tags.h	(working copy)
+@@ -0,0 +1,54 @@
++#ifndef MP4V2_XTRA_TAGS_H
++#define MP4V2_XTRA_TAGS_H
++
++typedef struct MP4FILETIME_s
++{
++    unsigned long dwLowDateTime;
++    unsigned long dwHighDateTime;
++} MP4FILETIME;
++
++typedef struct MP4GUID_s {
++    unsigned long  Data1;
++    unsigned short Data2;
++    unsigned short Data3;
++    unsigned char  Data4[ 8 ];
++} MP4GUID;
++
++typedef enum MP4XtraBasicType_e
++{
++    MP4_XTRA_BT_UNICODE   =  8,
++    MP4_XTRA_BT_INT64     = 19,
++    MP4_XTRA_BT_FILETIME  = 21,
++    MP4_XTRA_BT_GUID      = 72,
++} MP4XtraBasicType;
++
++typedef struct MP4XtraTag_s
++{
++    void* __handle; /* internal use only */
++
++	const char*         name;
++	MP4XtraBasicType    type;
++	union {
++		const wchar_t*  pwstr;
++		uint64_t        number;
++		MP4GUID         guid;
++		MP4FILETIME	    fileTime;
++	};
++} MP4XtraTag;
++
++MP4V2_EXPORT const MP4XtraTag *MP4XtraTagsGet( MP4FileHandle hFile, const char *name );
++MP4V2_EXPORT void MP4XtraTagFree        ( const MP4XtraTag* tag );
++MP4V2_EXPORT bool MP4XtraTagsSetString  ( MP4FileHandle hFile, const char*, const wchar_t * );
++MP4V2_EXPORT bool MP4XtraTagsSetInt     ( MP4FileHandle hFile, const char*, const uint64_t * );
++MP4V2_EXPORT bool MP4XtraTagsSetFileTime( MP4FileHandle hFile, const char*, const MP4FILETIME * );
++MP4V2_EXPORT bool MP4XtraTagsSetGUID    ( MP4FileHandle hFile, const char*, const MP4GUID * );
++MP4V2_EXPORT bool MP4XtraTagsRemove     ( MP4FileHandle hFile, const char* );
++
++#endif /* MP4V2_XTRA_TAGS_H */
+Index: src/atom_Xtra.cpp
+===================================================================
+--- src/atom_Xtra.cpp	(revision 0)
++++ src/atom_Xtra.cpp	(working copy)
+@@ -0,0 +1,166 @@
++
++#include "src/impl.h"
++
++namespace mp4v2 {
++namespace impl {
++
++///////////////////////////////////////////////////////////////////////////////
++
++void XtraTagProperty::initData( uint8_t* valueData )
++{
++    if( !valueData )
++        throw new Exception( "Invalid pointer",  __FILE__, __LINE__, __FUNCTION__ );
++    this->valueData = (uint8_t*)MP4Malloc( valueSize );
++    memcpy( this->valueData, valueData, valueSize );
++}
++
++XtraTagProperty::XtraTagProperty( uint16_t type, uint32_t valueSize,
++                                  uint8_t* valueData )
++    : type      ( type )
++    , valueSize ( valueSize )
++{
++    initData( valueData );
++}
++
++XtraTagProperty::XtraTagProperty( const XtraTagProperty& prop )
++    : type      ( prop.type )
++    , valueSize ( prop.valueSize )
++{
++    if( prop.valueData )
++        initData( prop.valueData );
++    else
++    {
++        valueData = NULL;
++        valueSize = 0;
++    }
++}
++
++XtraTagProperty::XtraTagProperty()
++    : type      ( 0 )
++    , valueSize ( 0 )
++    , valueData ( 0 )
++{
++}
++
++XtraTagProperty::~XtraTagProperty()
++{
++    MP4Free( valueData );
++}
++
++void XtraTagProperty::swap( XtraTagProperty& other )
++{
++    std::swap( type, other.type );
++    std::swap( valueSize, other.valueSize );
++    std::swap( valueData, other.valueData );
++}
++
++XtraTagProperty& XtraTagProperty::operator=( XtraTagProperty other )
++{
++    swap( other );
++    return *this;
++    // other is destroyed, releasing the memory
++}
++
++///////////////////////////////////////////////////////////////////////////////
++
++MP4XtraAtom::MP4XtraAtom( MP4File &file )
++        : MP4Atom( file, "Xtra" )
++{
++}
++
++void MP4XtraAtom::Set( const char* name, const XtraTagProperty& prop )
++{
++    tags[name] = prop;
++}
++
++const XtraTagProperty* MP4XtraAtom::Get( const char *name )
++{
++    XtraTagMap::const_iterator it = tags.find( name );
++    if( it == tags.end() )
++        return NULL;
++    else
++        return &it->second;
++}
++
++bool MP4XtraAtom::Remove( const char *name )
++{
++    return tags.erase( name ) > 0;
++}
++
++void MP4XtraAtom::Read ()
++{
++    while( m_File.GetPosition() < GetEnd() )
++    {
++        uint32_t dataSize = m_File.ReadUInt32();
++        if( dataSize >= sizeof(uint32_t) * 2 )
++        {
++            dataSize -= sizeof(uint32_t) * 2;
++            if( dataSize > 0 )
++            {
++                uint32_t idNameSize = m_File.ReadUInt32();
++                if( idNameSize > 0 )
++                {
++                    char* idName = new char[idNameSize + 1];
++                    m_File.ReadBytes( (uint8_t *)idName, idNameSize );
++                    idName[idNameSize] = '\0';
++
++                    uint32_t versionFlags = m_File.ReadUInt32();
++                    assert( versionFlags == 0x00000001 );
++                    uint32_t propSize = m_File.ReadUInt32();
++                    if( propSize >= sizeof(uint32_t) + sizeof(uint16_t) )
++                    {
++                        uint32_t propType = m_File.ReadUInt16();
++                        uint32_t propValueSize = propSize - sizeof(uint32_t) - sizeof(uint16_t);
++
++                        uint8_t* propDataValue = new uint8_t[propValueSize];
++                        m_File.ReadBytes( propDataValue, propValueSize );
++
++                        tags.insert( XtraTagMap::value_type( idName,
++                            XtraTagProperty(propType, propValueSize, propDataValue ) ) );
++
++                        delete[] propDataValue;
++                        delete[] idName;
++
++                    } else assert( 0 );
++                } else assert( 0 );
++            } else assert( 0 );
++        } else assert( 0 );
++    }
++}
++
++void MP4XtraAtom::Write()
++{
++    BeginWrite();
++
++    for( XtraTagMap::const_iterator it = tags.begin(); it != tags.end(); ++it )
++    {
++        uint16_t propType = it->second.type;
++        uint32_t propValueSize = it->second.valueSize;
++        const uint8_t *propValueData = it->second.valueData;
++
++        if( !propValueSize || !propValueData )
++            continue;
++
++        unsigned atomHeaderSize = sizeof(uint32_t) * 2 + it->first.size();
++        unsigned propSize = sizeof(uint32_t) + sizeof(uint16_t) + propValueSize;
++
++        // Atom header
++        m_File.WriteUInt32( atomHeaderSize + sizeof(uint32_t) + propSize );
++        m_File.WriteUInt32( it->first.size() );
++        m_File.WriteBytes( (uint8_t *)it->first.c_str(), it->first.size() );
++
++        m_File.WriteUInt32( 0x00000001 );
++
++        // Property
++        m_File.WriteUInt32( propSize );
++        m_File.WriteUInt16( propType );
++        m_File.WriteBytes( const_cast<uint8_t *>(propValueData), propValueSize );
++    }
++    
++    FinishWrite();
++}
++
++///////////////////////////////////////////////////////////////////////////////
++
++}
++} // namespace mp4v2::impl
+Index: src/atoms.h
+===================================================================
+--- src/atoms.h	(revision 504)
++++ src/atoms.h	(working copy)
+@@ -824,6 +824,45 @@
+ 
+ ///////////////////////////////////////////////////////////////////////////////
+ 
++#ifdef MP4V2_XTRA_TAGS
++
++class XtraTagProperty
++{
++public:
++    XtraTagProperty( uint16_t type, uint32_t valueSize, uint8_t* valueData );
++    XtraTagProperty( const XtraTagProperty& );
++    XtraTagProperty();
++    ~XtraTagProperty();
++    XtraTagProperty& operator=( XtraTagProperty );
++    void swap( XtraTagProperty& );
++
++    uint16_t    type;
++    uint32_t    valueSize;
++    uint8_t*    valueData;
++private:
++    void initData( uint8_t* valueData );
++};
++
++typedef map<string, XtraTagProperty> XtraTagMap;
++
++class MP4XtraAtom : public MP4Atom
++{
++public:
++    MP4XtraAtom( MP4File &file );
++    void Read();
++    void Write();
++
++    void Set( const char* name, const XtraTagProperty& prop );
++    const XtraTagProperty* Get( const char *name );
++    bool Remove( const char *name );
++
++    XtraTagMap tags;
++};
++
++#endif // MP4V2_XTRA_TAGS
++
++///////////////////////////////////////////////////////////////////////////////
++
+ }} // namespace mp4v2::impl
+ 
+ #endif // MP4V2_IMPL_ATOMS_H
+Index: src/cxtra.cpp
+===================================================================
+--- src/cxtra.cpp	(revision 0)
++++ src/cxtra.cpp	(working copy)
+@@ -0,0 +1,278 @@
++#include "src/impl.h"
++#include "src/itmf/Xtra.h"
++
++#define PRINT_ERROR(e) VERBOSE_ERROR(((MP4File*)hFile)->GetVerbosity(), e->Print());
++
++using namespace mp4v2::impl;
++
++extern "C" {
++
++bool MP4XtraTagsSetString(MP4FileHandle hFile, const char *name, const wchar_t *value)
++{
++    if( !name || !value )
++        return false;
++
++    MP4File& file = *static_cast<MP4File*>(hFile);
++
++    try {
++        XtraTagProperty prop(MP4_XTRA_BT_UNICODE,
++            (wcslen(value) + 1) * sizeof(wchar_t), (uint8_t*)value);
++        Xtra::xtraSetItem(file, name, prop);
++        return true;
++    }
++    catch( Exception* x ) {
++        mp4v2::impl::log.errorf(*x);
++        delete x;
++    }
++    catch( ... ) {
++        mp4v2::impl::log.errorf("%s: failed",__FUNCTION__);
++    }
++
++    return false;
++}
++
++bool MP4XtraTagsSetInt(MP4FileHandle hFile, const char *name, const uint64_t *value)
++{
++    if( !name || !value )
++        return false;
++
++    MP4File& file = *static_cast<MP4File*>(hFile);
++
++    try {
++        XtraTagProperty prop(MP4_XTRA_BT_INT64, sizeof(uint64_t), (uint8_t*)value);
++        Xtra::xtraSetItem(file, name, prop);
++        return true;
++    }
++    catch( Exception* x ) {
++        mp4v2::impl::log.errorf(*x);
++        delete x;
++    }
++    catch( ... ) {
++        mp4v2::impl::log.errorf("%s: failed",__FUNCTION__);
++    }
++
++    return false;
++}
++
++bool MP4XtraTagsSetFileTime(MP4FileHandle hFile, const char *name, const MP4FILETIME *value)
++{
++    if( !name || !value )
++        return false;
++
++    MP4File& file = *static_cast<MP4File*>(hFile);
++
++    try {
++        XtraTagProperty prop(MP4_XTRA_BT_FILETIME, sizeof(MP4FILETIME),
++            (uint8_t*)value);
++        Xtra::xtraSetItem(file, name, prop);
++        return true;
++    }
++    catch( Exception* x ) {
++        mp4v2::impl::log.errorf(*x);
++        delete x;
++    }
++    catch( ... ) {
++        mp4v2::impl::log.errorf("%s: failed",__FUNCTION__);
++    }
++
++    return false;
++}
++
++bool MP4XtraTagsSetGUID(MP4FileHandle hFile, const char *name, const MP4GUID *value)
++{
++    if( !name || !value )
++        return false;
++
++    MP4File& file = *static_cast<MP4File*>(hFile);
++
++    try {
++        XtraTagProperty prop(MP4_XTRA_BT_GUID, sizeof(MP4GUID), (uint8_t*)value);
++        Xtra::xtraSetItem(file, name, prop);
++        return true;
++    }
++    catch( Exception* x ) {
++        mp4v2::impl::log.errorf(*x);
++        delete x;
++    }
++    catch( ... ) {
++        mp4v2::impl::log.errorf("%s: failed",__FUNCTION__);
++    }
++
++    return false;
++}
++
++const MP4XtraTag *MP4XtraTagsGet(MP4FileHandle hFile, const char *name)
++{
++    MP4File& file = *static_cast<MP4File*>(hFile);
++
++    const XtraTagProperty *prop = NULL;
++    try {
++        prop = Xtra::xtraGetItem(file, name);
++    }
++    catch( Exception* x ) {
++        mp4v2::impl::log.errorf(*x);
++        delete x;
++    }
++    catch( ... ) {
++        mp4v2::impl::log.errorf("%s: failed",__FUNCTION__);
++    }
++
++    if( !prop )
++        return NULL;
++
++    MP4XtraTag* result = NULL;
++    Xtra::XtraTag* tag = NULL;
++
++    try {
++
++        switch( prop->type )
++        {
++
++            case MP4_XTRA_BT_UNICODE:
++                if( prop->valueSize % sizeof(wchar_t) == 0 )
++                    tag = new Xtra::XtraTag( name, (const wchar_t *)prop->valueData,
++                        prop->valueSize / sizeof(wchar_t) );
++                else
++                    return NULL;
++                break;
++
++            case MP4_XTRA_BT_INT64:
++                tag = new Xtra::XtraTag( name, *(const uint64_t *)prop->valueData );
++                break;
++
++            case MP4_XTRA_BT_FILETIME:
++                tag = new Xtra::XtraTag( name, *(const MP4FILETIME *)prop->valueData );
++                break;
++
++            case MP4_XTRA_BT_GUID:
++                tag = new Xtra::XtraTag( name, *(const MP4GUID *)prop->valueData );
++                break;
++
++        }
++
++        tag->c_alloc( result );
++        tag->c_fetch( result );
++        return result;
++    }
++    catch( std::bad_alloc ) {
++        // This could be a failure to allocate Xtra::XtraTag or
++        // a failure to allocate inside c_alloc.
++        mp4v2::impl::log.errorf("%s: memory allocation error", __FUNCTION__);
++    }
++    catch( Exception* x ) {
++        mp4v2::impl::log.errorf(*x);
++        delete x;
++    }
++    catch( ... ) {
++        mp4v2::impl::log.errorf("%s: failed", __FUNCTION__ );
++    }
++
++    if( result )
++        delete result;
++
++    if( tag )
++        delete tag;
++
++    return NULL;
++}
++
++void MP4XtraTagFree( const MP4XtraTag* tag )
++{
++    if( !tag || !tag->__handle )
++        return;
++
++    Xtra::XtraTag* cpp = static_cast<Xtra::XtraTag*>(tag->__handle);
++    MP4XtraTag* c = const_cast<MP4XtraTag*>(tag);
++
++    try {
++        cpp->c_free( c );
++        delete cpp;
++    }
++    catch( Exception* x ) {
++        mp4v2::impl::log.errorf(*x);
++        delete x;
++    }
++    catch( ... ) {
++        mp4v2::impl::log.errorf("%s: failed", __FUNCTION__ );
++    }
++}
++
++bool MP4XtraTagsRemove(MP4FileHandle hFile, const char *name)
++{
++    MP4File& file = *static_cast<MP4File*>(hFile);
++
++    bool modified = false;
++    try {
++        modified = Xtra::xtraRemoveItem(file, name);
++    }
++    catch( Exception* x ) {
++        mp4v2::impl::log.errorf(*x);
++        delete x;
++    }
++    catch( ... ) {
++        mp4v2::impl::log.errorf("%s: failed",__FUNCTION__);
++    }
++    return modified;
++}
++
++} // extern "C"
+Index: src/itmf/itmf.h
+===================================================================
+--- src/itmf/itmf.h	(revision 504)
++++ src/itmf/itmf.h	(working copy)
+@@ -40,6 +40,10 @@
+ #include "Tags.h"
+ #include "generic.h"
+ 
++#ifdef MP4V2_XTRA_TAGS
++    #include "Xtra.h"
++#endif
++
+ ///////////////////////////////////////////////////////////////////////////////
+ 
+ #endif // MP4V2_IMPL_ITMF_ITMF_H
+Index: src/itmf/Xtra.cpp
+===================================================================
+--- src/itmf/Xtra.cpp	(revision 0)
++++ src/itmf/Xtra.cpp	(working copy)
+@@ -0,0 +1,102 @@
++#include "src/impl.h"
++
++namespace mp4v2 { namespace impl { namespace Xtra {
++
++///////////////////////////////////////////////////////////////////////////////
++
++void
++XtraTag::c_alloc( MP4XtraTag*& tag )
++{
++    tag = new MP4XtraTag();
++    memset( tag, 0, sizeof(MP4XtraTag) ); // safe: pure C-struct
++    tag->__handle = this;
++}
++
++///////////////////////////////////////////////////////////////////////////////
++
++void
++XtraTag::c_fetch( MP4XtraTag*& tag )
++{
++    tag->name = name.c_str();
++    tag->type = type;
++
++    switch( type )
++    {
++        case MP4_XTRA_BT_UNICODE:
++            tag->pwstr = pwstr->c_str();
++            break;
++        case MP4_XTRA_BT_INT64:
++            tag->number = number;
++            break;
++        case MP4_XTRA_BT_FILETIME:
++            tag->fileTime = fileTime;
++            break;
++        case MP4_XTRA_BT_GUID:
++            tag->guid = guid;
++            break;
++    }
++}
++
++///////////////////////////////////////////////////////////////////////////////
++
++void
++XtraTag::c_free( MP4XtraTag*& tag )
++{
++    MP4XtraTag* c = const_cast<MP4XtraTag*>(tag);
++
++    delete c;
++
++    tag = NULL;
++}
++
++///////////////////////////////////////////////////////////////////////////////
++
++void
++xtraGetItems( MP4File& file, XtraTagMap &items )
++{
++    MP4XtraAtom *xtraAtom = (MP4XtraAtom *)file.FindAtom( "moov.udta.Xtra" );
++    if( !xtraAtom )
++        return;
++    items = xtraAtom->tags;
++}
++
++const XtraTagProperty*
++xtraGetItem( MP4File& file, const char *name )
++{
++    MP4XtraAtom *xtraAtom = (MP4XtraAtom *)file.FindAtom( "moov.udta.Xtra" );
++    if( !xtraAtom )
++        return NULL;
++    return xtraAtom->Get(name);
++}
++
++///////////////////////////////////////////////////////////////////////////////
++
++bool
++xtraSetItem( MP4File& file, const char* name, const XtraTagProperty& item )
++{
++    MP4Atom* xtra = file.FindAtom( "moov.udta.Xtra" );
++    if( !xtra ) {
++        file.AddDescendantAtoms( "moov", "udta.Xtra" );
++        xtra = file.FindAtom( "moov.udta.Xtra" );
++        ASSERT( xtra );
++    }
++    MP4XtraAtom* xtraAtom = (MP4XtraAtom *)xtra;
++    xtraAtom->Set(name, item);
++    return true;
++}
++
++///////////////////////////////////////////////////////////////////////////////
++
++bool
++xtraRemoveItem( MP4File& file, const char *name )
++{
++    MP4Atom* xtra = file.FindAtom( "moov.udta.Xtra" );
++    if( !xtra )
++        return false;
++    MP4XtraAtom* xtraAtom = (MP4XtraAtom *)xtra;
++    return xtraAtom->Remove(name);
++}
++
++///////////////////////////////////////////////////////////////////////////////
++
++}}} // namespace mp4v2::impl::Xtra
+Index: src/itmf/Xtra.h
+===================================================================
+--- src/itmf/Xtra.h	(revision 0)
++++ src/itmf/Xtra.h	(working copy)
+@@ -0,0 +1,85 @@
++#ifndef MP4V2_IMPL_XTRA_H
++#define MP4V2_IMPL_XTRA_H
++
++namespace mp4v2 { namespace impl { namespace Xtra {
++
++///////////////////////////////////////////////////////////////////////////////
++
++class XtraTag
++{
++public:
++    std::string name;
++    MP4XtraBasicType type;
++    union {
++        std::wstring *pwstr;
++        uint64_t	number;
++        MP4GUID		guid;
++        MP4FILETIME	fileTime;
++    };
++
++public:
++    XtraTag(const char *pszName, const wchar_t *pwsz, const size_t len)
++        : name(pszName)
++    {
++        type = MP4_XTRA_BT_UNICODE;
++        this->pwstr = new std::wstring(pwsz, len);
++    }
++    XtraTag(const char *pszName, const uint64_t &number)
++        : name(pszName)
++    {
++        type = MP4_XTRA_BT_INT64;
++        this->number = number;
++    }
++    XtraTag(const char *pszName, const MP4FILETIME &fileTime)
++        : name(pszName)
++    {
++        type = MP4_XTRA_BT_FILETIME;
++        this->fileTime = fileTime;
++    }
++    XtraTag(const char *pszName, const MP4GUID &guid)
++        : name(pszName)
++    {
++        type = MP4_XTRA_BT_GUID;
++        this->guid = guid;
++    }
++    XtraTag(const XtraTag &other)
++        : name(other.name)
++        , type(other.type)
++    {
++        if (type == MP4_XTRA_BT_UNICODE)
++            pwstr = new std::wstring(*other.pwstr);
++        else if (type == MP4_XTRA_BT_INT64)
++            number = other.number;
++        else if (type == MP4_XTRA_BT_FILETIME)
++            fileTime = other.fileTime;
++        else if (type == MP4_XTRA_BT_GUID)
++            guid = other.guid;
++    }
++    ~XtraTag()
++    {
++        if (type == MP4_XTRA_BT_UNICODE)
++            delete pwstr;
++    }
++
++    void c_alloc ( MP4XtraTag*& );
++    void c_fetch ( MP4XtraTag*& );
++    void c_free  ( MP4XtraTag*& );
++};
++
++///////////////////////////////////////////////////////////////////////////////
++
++void xtraGetItems( MP4File& file, list<MP4XtraTag> &items );
++
++///////////////////////////////////////////////////////////////////////////////
++
++const XtraTagProperty* xtraGetItem( MP4File& file, const char *name );
++
++bool xtraSetItem( MP4File& file, const char* name, const XtraTagProperty& item );
++
++bool xtraRemoveItem( MP4File& file, const char *name );
++
++///////////////////////////////////////////////////////////////////////////////
++
++}}} // namespace mp4v2::impl::Xtra
++
++#endif // MP4V2_IMPL_XTRA_H
+Index: src/mp4atom.cpp
+===================================================================
+--- src/mp4atom.cpp	(revision 504)
++++ src/mp4atom.cpp	(working copy)
+@@ -800,6 +800,10 @@
+                 return new MP4HntiAtom(file);
+             if( ATOMID( type ) == ATOMID( "hinf" ))
+                 return new MP4HinfAtom(file);
++#ifdef MP4V2_XTRA_TAGS
++            if( ATOMID( type ) == ATOMID( "Xtra" ))
++                return new MP4XtraAtom(file);
++#endif
+             for( const char* const* p = UDTA_ELEMENTS; *p; p++ )
+                 if( !strcmp( type, *p ))
+                     return new MP4UdtaElementAtom( file, type );
+@@ -1004,6 +1008,13 @@
+                 return new MP4VideoAtom( file, type );
+             break;
+ 
++        case 'X':
++#ifdef MP4V2_XTRA_TAGS
++            if( ATOMID(type) == ATOMID("Xtra") )
++                return new MP4XtraAtom(file);
++#endif
++            break;
++
+         default:
+             break;
+     }
+Index: util/mp4xtratags.cpp
+===================================================================
+--- util/mp4xtratags.cpp	(revision 0)
++++ util/mp4xtratags.cpp	(working copy)
+@@ -0,0 +1,348 @@
++#include "util/impl.h"
++
++using namespace mp4v2::util;
++
++// TODO-TDB: add POSIX UUID support, see http://trac.xapian.org/browser/trunk/xapian-core/common/safeuuid.h
++#include <rpc.h>
++
++///////////////////////////////////////////////////////////////////////////////
++
++/* One-letter options -- if you want to rearrange these, change them
++   here, immediately below in OPT_STRING, and in the help text. */
++#define OPT_HELP         0x01ff
++#define OPT_VERSION      0x02ff
++#define OPT_LIST         'l'
++#define OPT_SET          's'
++#define OPT_STRING       'S'
++#define OPT_INT          'i'
++#define OPT_TIME         't'
++#define OPT_GUID         'g'
++#define OPT_REMOVE       'r'
++
++static const char* const MP4_XTRA_WMPTAGS[] = {
++    "WM/EncodingTime",
++    "WM/MediaClassSecondaryID",
++    "WM/MediaClassPrimaryID",
++    "WM/Provider",
++    "WM/WMContentID",
++    "WM/WMCollectionID",
++    "WM/WMCollectionGroupID",
++    "WM/Publisher",
++    "WM/UniqueFileIdentifier",
++    "WM/ProviderStyle",
++    "WM/SharedUserRating",
++    "AverageLevel",
++    "PeakValue",
++    NULL, // must be last
++};
++
++#define OPT_STR  "l:s:S:i:t:g:r:"
++
++#define ELEMENT_OF(x,i) x[int(i)]
++
++static const char* const help_text =
++    "OPTION... FILE...\n"
++    "Lists, adds or modifies WMP-specific tags on MP4 files (Xtra atom).\n"
++    "\n"
++    "      -help            Display this help text and exit\n"
++    "      -version         Display version information and exit\n"
++    "  -l, -list            List all WMP-specific tags in the file (default)\n"
++    "  -s, -set         STR  Set the value of the specified WMP tag\n"
++    "  -S, -string      STR  String value to set\n"
++    "  -i, -int         NUM  Integer value to set\n"
++    "  -t, -time        TIME Filetime value to set (YYYY-MM-DD hh:mm:ss)\n"
++    "  -g, -guid        GUID GUID value to set (excluding brackets)\n"
++    "  -r, -remove      STR  Remove the specified WMP tag\n";
++
++const time_t FileTime_to_POSIX_time( const MP4FILETIME ft )
++{
++    uint64_t date = ((uint64_t)ft.dwHighDateTime << 32) + ft.dwLowDateTime;
++    // 100-nanoseconds = milliseconds * 10000
++    uint64_t adjust = 11644473600000 * 10000;
++    // removes the diff between 1970 and 1601
++    date -= adjust;
++    // converts back from 100-nanoseconds to seconds
++    return date / 10000000;
++}
++
++void POSIX_time_to_FileTime( const time_t time, MP4FILETIME *ft )
++{
++    // converts from seconds to 100-nanoseconds
++    uint64_t date = time * 10000000;
++    // 100-nanoseconds = milliseconds * 10000
++    uint64_t adjust = 11644473600000 * 10000;
++    // adds the diff between 1970 and 1601
++    date += adjust;
++    ft->dwLowDateTime = (unsigned long)date;
++    ft->dwHighDateTime = (unsigned long)(date >> 32);
++}
++
++/// The size of a UUID in bytes.
++const size_t UUID_SIZE = 16;
++
++/// The size of a UUID string in bytes (not including trailing '\0').
++const size_t UUID_STRING_SIZE = 36;
++
++// Unfortunately Windows defines uuid_t as GUID, so we redefine it to match the
++// Unix definition.
++typedef unsigned char uuid_t_[16];
++
++int uuid_parse( const char * in, uuid_t_ uu )
++{
++    UUID uuid;
++    if( UuidFromStringA( (unsigned char*)in, &uuid ) != RPC_S_OK )
++        return -1;
++    memcpy( (void *)uu, &uuid, UUID_SIZE );
++    return 0;
++}
++
++void uuid_unparse_lower( const uuid_t_ uu, char * out )
++{
++    UUID uuid;
++    char *uuidstr;
++    memcpy( (void *)&uuid, (const void *)uu, UUID_SIZE );
++    if( (UuidToStringA( &uuid, (unsigned char **)(&uuidstr) ) != RPC_S_OK) ) {
++        // The only documented (or really conceivable) error code is
++        // RPC_S_OUT_OF_MEMORY.
++        throw std::bad_alloc();
++    }
++    memcpy( out, strlwr( uuidstr ), UUID_STRING_SIZE );
++    out[UUID_STRING_SIZE] = '\0';
++    RpcStringFreeA( (unsigned char**)(&uuidstr) );
++}
++
++extern "C" int main( int argc, char** argv )
++{
++    const prog::Option long_options[] = {
++        { "help",        prog::Option::NO_ARG,       0, OPT_HELP         },
++        { "version",     prog::Option::NO_ARG,       0, OPT_VERSION      },
++        { "list",        prog::Option::NO_ARG,       0, OPT_LIST         },
++        { "set",         prog::Option::REQUIRED_ARG, 0, OPT_SET          },
++        { "string",      prog::Option::REQUIRED_ARG, 0, OPT_STRING       },
++        { "int",         prog::Option::REQUIRED_ARG, 0, OPT_INT          },
++        { "time",        prog::Option::REQUIRED_ARG, 0, OPT_TIME         },
++        { "guid",        prog::Option::REQUIRED_ARG, 0, OPT_GUID         },
++        { "remove",      prog::Option::REQUIRED_ARG, 0, OPT_REMOVE       },
++        { NULL, prog::Option::NO_ARG, 0, 0 }
++    };
++
++    const char *mods[UCHAR_MAX];
++
++    memset( mods, 0, sizeof( mods ) );
++
++    /* Any modifications requested? */
++    int nummods = 0;
++
++    /* Number of tag data types specified */
++    int numtypes = 0;
++
++    /* Integer value to set */
++    uint64_t intvalue;
++
++    /* Filetime value to set */
++    time_t timevalue;
++
++    /* GUID value to set */
++    uuid_t_ guidvalue = {0};
++
++    /* Option-processing loop. */
++    tm time = {0};
++    int c = prog::getOptionSingle( argc, argv, OPT_STR, long_options, NULL );
++    while ( c != -1 ) {
++        int r = 2;
++        switch ( c ) {
++                /* getopt() returns '?' if there was an error.  It already
++                   printed the error message, so just return. */
++            case '?':
++                return 1;
++
++                /* Help and version requests handled here. */
++
++            case OPT_HELP:
++                fprintf( stderr, "usage %s %s\n", argv[0], help_text );
++                return 0;
++            case OPT_VERSION:
++                fprintf( stderr, "%s - %s\n", argv[0], MP4V2_PROJECT_name_formal );
++                return 0;
++
++                /* Integer arguments: convert them using sscanf(). */
++            case OPT_INT:
++                r = sscanf( prog::optarg, "%llu", &intvalue );
++                if ( r < 1 ) {
++                    fprintf( stderr, "%s: option requires integer argument -- %c\n",
++                             argv[0], c );
++                    return 2;
++                }
++
++                mods[c] = prog::optarg;
++                nummods++;
++                numtypes++;
++                break;
++
++                /* Time arguments: convert them using sscanf()/mktime(). */
++            case OPT_TIME:
++                r = sscanf( prog::optarg, "%04d-%02d-%02d %02d:%02d:%02d",
++                    &time.tm_year, &time.tm_mon, &time.tm_mday,
++                    &time.tm_hour, &time.tm_min, &time.tm_sec );
++                if ( r < 1 ) {
++                    fprintf( stderr, "%s: option requires a time argument -- %c\n",
++                             argv[0], c );
++                    return 3;
++                }
++                else {
++                    time.tm_year -= 1900;
++                    time.tm_mon -= 1;
++                    timevalue = mktime( &time );
++                }
++
++                mods[c] = prog::optarg;
++                nummods++;
++                numtypes++;
++                break;
++
++                /* GUID arguments: convert them using uuid_parse(). */
++            case OPT_GUID:
++                if ( uuid_parse( prog::optarg, guidvalue ) == -1) {
++                    fprintf( stderr, "%s: option requires a GUID argument -- %c\n",
++                             argv[0], c );
++                    return 4;
++                }
++
++                mods[c] = prog::optarg;
++                nummods++;
++                numtypes++;
++                break;
++
++            case OPT_STRING:
++
++                mods[c] = prog::optarg;
++                nummods++;
++                numtypes++;
++                break;
++
++            default:
++                mods[c] = prog::optarg;
++                nummods++;
++        } /* end switch */
++
++        c = prog::getOptionSingle( argc, argv, OPT_STR, long_options, NULL );
++    } /* end while */
++
++    /* Check that at most one tag set is requested */
++    if ( numtypes > 1 ) {
++        fprintf( stderr,
++                 "%s: Only one tag data type (string/int/time/GUID) is allowed at a time.\n",
++                 argv[0] );
++        fprintf( stderr, "usage %s %s\n", argv[0], help_text );
++        return 5;
++    }
++    else if ( numtypes == 1 ) {
++        /* A value to set was specified; check that we have a -set argument */
++        if ( !mods[OPT_SET] ) {
++            fprintf( stderr,
++                     "%s: You must specify a WMP tag to set.\n",
++                     argv[0] );
++            fprintf( stderr, "usage %s %s\n", argv[0], help_text );
++            return 6;
++        }
++    }
++    
++    /* If -set was specified, check that we have a value to set */
++    if ( mods[OPT_SET] && numtypes == 0 ) {
++        fprintf( stderr,
++                 "%s: You must specify a value to set.\n",
++                 argv[0] );
++        fprintf( stderr, "usage %s %s\n", argv[0], help_text );
++        return 7;
++    }
++
++    /* Check that we have at least one non-option argument */
++    if ( ( argc - prog::optind ) < 1 ) {
++        fprintf( stderr,
++                 "%s: You must specify at least one MP4 file.\n",
++                 argv[0] );
++        fprintf( stderr, "usage %s %s\n", argv[0], help_text );
++        return 8;
++    }
++
++    /* Check that we have at least one requested modification.  List all tags
++       if no modifications are requested */
++    if ( !nummods ) {
++        mods[OPT_LIST] = "";
++    }
++
++    /* Loop through the non-option arguments, and modify the tags as
++       requested. */
++    while ( prog::optind < argc ) {
++        char *mp4 = argv[prog::optind++];
++
++        MP4FileHandle h = MP4Modify( mp4 );
++        if ( h == MP4_INVALID_FILE_HANDLE ) {
++            fprintf( stderr, "Could not open '%s'... aborting\n", mp4 );
++            return 9;
++        }
++
++        /* List tags */
++        const MP4XtraTag *tag;
++        char *uuidstr[UUID_STRING_SIZE + 1];
++        if ( ELEMENT_OF(mods,OPT_LIST) ) {
++            for( const char* const* p = MP4_XTRA_WMPTAGS; *p; p++ ) {
++                tag = MP4XtraTagsGet( h, *p );
++                if( tag ) {
++                    printf( "%s type=%d\n", tag->name, tag->type );
++
++                    switch( tag->type ) {
++
++                        case MP4_XTRA_BT_UNICODE:
++                            printf( "    (Unicode) %ls\n", tag->pwstr );
++                            break;
++
++                        case MP4_XTRA_BT_INT64:
++                            printf( "    (Int64) %ld\n", tag->number );
++                            break;
++
++                        case MP4_XTRA_BT_GUID:
++                            uuid_unparse_lower( (const unsigned char*)&tag->guid, (char *)uuidstr );
++                            printf( "    (GUID) {%s}\n", uuidstr );
++                            break;
++
++                        case MP4_XTRA_BT_FILETIME:
++                            time_t time = FileTime_to_POSIX_time( tag->fileTime );
++                            tm *t = localtime( &time ); 
++                            if( t )
++                                printf( "    (Filetime) %04d-%02d-%02d %02d:%02d:%02d\n",
++                                    t->tm_year+1900,t->tm_mon+1,t->tm_mday,
++                                    t->tm_hour,t->tm_min,t->tm_sec );
++                            break;
++
++                    }
++
++                    MP4XtraTagFree( tag );
++                }
++            }
++        }
++
++        if ( ELEMENT_OF(mods, OPT_STRING) ) {
++            /* No Unicode support needed */
++            std::string value( mods[OPT_STRING] );
++            std::wstring widevalue( value.begin(), value.end() );
++            MP4XtraTagsSetString( h, mods[OPT_SET], widevalue.c_str() );
++        }
++        else if ( ELEMENT_OF(mods, OPT_INT) )
++            MP4XtraTagsSetInt( h, mods[OPT_SET], &intvalue );
++        else if ( ELEMENT_OF(mods, OPT_TIME) ) {
++            MP4FILETIME ft;
++            POSIX_time_to_FileTime( timevalue, &ft );
++            MP4XtraTagsSetFileTime( h, mods[OPT_SET], &ft );
++        }
++        else if ( ELEMENT_OF(mods, OPT_GUID) )
++            MP4XtraTagsSetGUID( h, mods[OPT_SET], (const MP4GUID *)&guidvalue );
++
++        if ( ELEMENT_OF(mods, OPT_REMOVE) )
++            MP4XtraTagsRemove( h, mods[OPT_REMOVE] );
++
++        MP4Close( h );
++    } /* end while optind < argc */
++    return 0;
++}
++
+Index: vstudio9.0/libmp4v2/libmp4v2.vcproj
+===================================================================
+--- vstudio9.0/libmp4v2/libmp4v2.vcproj	(revision 483)
++++ vstudio9.0/libmp4v2/libmp4v2.vcproj	(revision 484)
+@@ -921,6 +921,10 @@
+ 				RelativePath="..\..\include\mp4v2\track_prop.h"
+ 				>
+ 			</File>
++			<File
++				RelativePath="..\..\include\mp4v2\xtra_tags.h"
++				>
++			</File>
+ 		</Filter>
+ 		<Filter
+ 			Name="impl"
+@@ -1154,6 +1158,10 @@
+ 				>
+ 			</File>
+ 			<File
++				RelativePath="..\..\src\atom_Xtra.cpp"
++				>
++			</File>
++			<File
+ 				RelativePath="..\..\src\atoms.h"
+ 				>
+ 			</File>
+@@ -1162,6 +1170,10 @@
+ 				>
+ 			</File>
+ 			<File
++				RelativePath="..\..\src\cxtra.cpp"
++				>
++			</File>
++			<File
+ 				RelativePath="..\..\src\descriptors.cpp"
+ 				>
+ 			</File>
+@@ -1384,6 +1396,14 @@
+ 					RelativePath="..\..\src\itmf\type.h"
+ 					>
+ 				</File>
++				<File
++					RelativePath="..\..\src\itmf\Xtra.cpp"
++					>
++				</File>
++				<File
++					RelativePath="..\..\src\itmf\Xtra.h"
++					>
++				</File>
+ 			</Filter>
+ 			<Filter
+ 				Name="qtff"
+Index: vstudio9.0/mp4v2.sln
+===================================================================
+--- vstudio9.0/mp4v2.sln	(revision 483)
++++ vstudio9.0/mp4v2.sln	(revision 484)
+@@ -50,6 +50,11 @@
+ 		{BDB97A37-90B8-4906-BCAB-663D983E33E3} = {BDB97A37-90B8-4906-BCAB-663D983E33E3}
+ 	EndProjectSection
+ EndProject
++Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "mp4xtratags", "mp4xtratags\mp4xtratags.vcproj", "{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}"
++	ProjectSection(ProjectDependencies) = postProject
++		{BDB97A37-90B8-4906-BCAB-663D983E33E3} = {BDB97A37-90B8-4906-BCAB-663D983E33E3}
++	EndProjectSection
++EndProject
+ Global
+ 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+ 		Debug Static (MDd)|Win32 = Debug Static (MDd)|Win32
+@@ -300,6 +305,30 @@
+ 		{B2B082CA-748D-48A2-9AF1-4BD4F54E5604}.Release|Win32.ActiveCfg = Release|Win32
+ 		{B2B082CA-748D-48A2-9AF1-4BD4F54E5604}.Release|Win32.Build.0 = Release|Win32
+ 		{B2B082CA-748D-48A2-9AF1-4BD4F54E5604}.Release|x64.ActiveCfg = Release|Win32
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Debug Static (MDd)|Win32.ActiveCfg = Debug Static (MDd)|Win32
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Debug Static (MDd)|Win32.Build.0 = Debug Static (MDd)|Win32
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Debug Static (MDd)|x64.ActiveCfg = Debug Static (MDd)|x64
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Debug Static (MDd)|x64.Build.0 = Debug Static (MDd)|x64
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Debug Static (MTd)|Win32.ActiveCfg = Debug Static (MTd)|Win32
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Debug Static (MTd)|Win32.Build.0 = Debug Static (MTd)|Win32
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Debug Static (MTd)|x64.ActiveCfg = Debug Static (MTd)|x64
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Debug Static (MTd)|x64.Build.0 = Debug Static (MTd)|x64
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Debug|Win32.ActiveCfg = Debug|Win32
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Debug|Win32.Build.0 = Debug|Win32
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Debug|x64.ActiveCfg = Debug|x64
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Debug|x64.Build.0 = Debug|x64
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Release Static (MD)|Win32.ActiveCfg = Release Static (MD)|Win32
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Release Static (MD)|Win32.Build.0 = Release Static (MD)|Win32
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Release Static (MD)|x64.ActiveCfg = Release Static (MD)|x64
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Release Static (MD)|x64.Build.0 = Release Static (MD)|x64
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Release Static (MT)|Win32.ActiveCfg = Release Static (MT)|Win32
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Release Static (MT)|Win32.Build.0 = Release Static (MT)|Win32
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Release Static (MT)|x64.ActiveCfg = Release Static (MT)|x64
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Release Static (MT)|x64.Build.0 = Release Static (MT)|x64
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Release|Win32.ActiveCfg = Release|Win32
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Release|Win32.Build.0 = Release|Win32
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Release|x64.ActiveCfg = Release|x64
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}.Release|x64.Build.0 = Release|x64
+ 	EndGlobalSection
+ 	GlobalSection(SolutionProperties) = preSolution
+ 		HideSolutionNode = FALSE
+@@ -314,5 +343,6 @@
+ 		{C97FBF72-8249-4782-A34A-BEA222E9A257} = {A7FD8B52-7D83-474D-8CE3-BBB9B72384EE}
+ 		{EC1C77A7-E226-4B23-B12E-B94016DFB9D3} = {A7FD8B52-7D83-474D-8CE3-BBB9B72384EE}
+ 		{B2B082CA-748D-48A2-9AF1-4BD4F54E5604} = {A7FD8B52-7D83-474D-8CE3-BBB9B72384EE}
++		{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A} = {A7FD8B52-7D83-474D-8CE3-BBB9B72384EE}
+ 	EndGlobalSection
+ EndGlobal
+Index: vstudio9.0/mp4xtratags/mp4xtratags.vcproj
+===================================================================
+--- vstudio9.0/mp4xtratags/mp4xtratags.vcproj	(revision 0)
++++ vstudio9.0/mp4xtratags/mp4xtratags.vcproj	(revision 484)
+@@ -0,0 +1,927 @@
++<?xml version="1.0" encoding="Windows-1252"?>
++<VisualStudioProject
++	ProjectType="Visual C++"
++	Version="9.00"
++	Name="mp4xtratags"
++	ProjectGUID="{45BC931E-0BBE-4AF4-92C2-91ECBD0AF83A}"
++	RootNamespace="mp4xtratags"
++	Keyword="Win32Proj"
++	TargetFrameworkVersion="196613"
++	>
++	<Platforms>
++		<Platform
++			Name="Win32"
++		/>
++		<Platform
++			Name="x64"
++		/>
++	</Platforms>
++	<ToolFiles>
++	</ToolFiles>
++	<Configurations>
++		<Configuration
++			Name="Debug|Win32"
++			OutputDirectory="..\..\bin\Windows-$(PlatformName)\$(ConfigurationName)"
++			IntermediateDirectory="..\..\obj\Windows-$(PlatformName)\$(ConfigurationName)\$(ProjectName)"
++			ConfigurationType="1"
++			CharacterSet="1"
++			>
++			<Tool
++				Name="VCPreBuildEventTool"
++			/>
++			<Tool
++				Name="VCCustomBuildTool"
++			/>
++			<Tool
++				Name="VCXMLDataGeneratorTool"
++			/>
++			<Tool
++				Name="VCWebServiceProxyGeneratorTool"
++			/>
++			<Tool
++				Name="VCMIDLTool"
++			/>
++			<Tool
++				Name="VCCLCompilerTool"
++				Optimization="0"
++				AdditionalIncludeDirectories="&quot;$(SolutionDir)\..\include&quot;;&quot;$(SolutionDir)\include&quot;;&quot;$(SolutionDir)\..&quot;"
++				PreprocessorDefinitions="WIN32;_DEBUG;_CONSOLE"
++				MinimalRebuild="true"
++				BasicRuntimeChecks="3"
++				RuntimeLibrary="3"
++				RuntimeTypeInfo="false"
++				UsePrecompiledHeader="0"
++				WarningLevel="3"
++				DebugInformationFormat="3"
++			/>
++			<Tool
++				Name="VCManagedResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCPreLinkEventTool"
++			/>
++			<Tool
++				Name="VCLinkerTool"
++				AdditionalDependencies="Rpcrt4.lib"
++				LinkIncremental="2"
++				GenerateDebugInformation="true"
++				SubSystem="1"
++			/>
++			<Tool
++				Name="VCALinkTool"
++			/>
++			<Tool
++				Name="VCManifestTool"
++			/>
++			<Tool
++				Name="VCXDCMakeTool"
++			/>
++			<Tool
++				Name="VCBscMakeTool"
++			/>
++			<Tool
++				Name="VCFxCopTool"
++			/>
++			<Tool
++				Name="VCAppVerifierTool"
++			/>
++			<Tool
++				Name="VCPostBuildEventTool"
++			/>
++		</Configuration>
++		<Configuration
++			Name="Debug|x64"
++			OutputDirectory="..\..\bin\Windows-$(PlatformName)\$(ConfigurationName)"
++			IntermediateDirectory="..\..\obj\Windows-$(PlatformName)\$(ConfigurationName)\$(ProjectName)"
++			ConfigurationType="1"
++			CharacterSet="1"
++			>
++			<Tool
++				Name="VCPreBuildEventTool"
++			/>
++			<Tool
++				Name="VCCustomBuildTool"
++			/>
++			<Tool
++				Name="VCXMLDataGeneratorTool"
++			/>
++			<Tool
++				Name="VCWebServiceProxyGeneratorTool"
++			/>
++			<Tool
++				Name="VCMIDLTool"
++				TargetEnvironment="3"
++			/>
++			<Tool
++				Name="VCCLCompilerTool"
++				Optimization="0"
++				AdditionalIncludeDirectories="&quot;$(SolutionDir)\..\include&quot;;&quot;$(SolutionDir)\include&quot;;&quot;$(SolutionDir)\..&quot;"
++				PreprocessorDefinitions="WIN32;_DEBUG;_CONSOLE"
++				MinimalRebuild="true"
++				BasicRuntimeChecks="3"
++				RuntimeLibrary="3"
++				RuntimeTypeInfo="false"
++				UsePrecompiledHeader="0"
++				WarningLevel="3"
++				DebugInformationFormat="3"
++			/>
++			<Tool
++				Name="VCManagedResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCPreLinkEventTool"
++			/>
++			<Tool
++				Name="VCLinkerTool"
++				AdditionalDependencies="Rpcrt4.lib"
++				LinkIncremental="2"
++				GenerateDebugInformation="true"
++				TargetMachine="17"
++			/>
++			<Tool
++				Name="VCALinkTool"
++			/>
++			<Tool
++				Name="VCManifestTool"
++			/>
++			<Tool
++				Name="VCXDCMakeTool"
++			/>
++			<Tool
++				Name="VCBscMakeTool"
++			/>
++			<Tool
++				Name="VCFxCopTool"
++			/>
++			<Tool
++				Name="VCAppVerifierTool"
++			/>
++			<Tool
++				Name="VCPostBuildEventTool"
++			/>
++		</Configuration>
++		<Configuration
++			Name="Release|Win32"
++			OutputDirectory="..\..\bin\Windows-$(PlatformName)\$(ConfigurationName)"
++			IntermediateDirectory="..\..\obj\Windows-$(PlatformName)\$(ConfigurationName)\$(ProjectName)"
++			ConfigurationType="1"
++			CharacterSet="1"
++			WholeProgramOptimization="1"
++			>
++			<Tool
++				Name="VCPreBuildEventTool"
++			/>
++			<Tool
++				Name="VCCustomBuildTool"
++			/>
++			<Tool
++				Name="VCXMLDataGeneratorTool"
++			/>
++			<Tool
++				Name="VCWebServiceProxyGeneratorTool"
++			/>
++			<Tool
++				Name="VCMIDLTool"
++			/>
++			<Tool
++				Name="VCCLCompilerTool"
++				Optimization="1"
++				InlineFunctionExpansion="2"
++				EnableIntrinsicFunctions="true"
++				FavorSizeOrSpeed="2"
++				AdditionalIncludeDirectories="&quot;$(SolutionDir)\..\include&quot;;&quot;$(SolutionDir)\include&quot;;&quot;$(SolutionDir)\..&quot;"
++				PreprocessorDefinitions="WIN32;NDEBUG;_CONSOLE"
++				RuntimeLibrary="2"
++				EnableFunctionLevelLinking="true"
++				RuntimeTypeInfo="false"
++				UsePrecompiledHeader="0"
++				WarningLevel="3"
++				DebugInformationFormat="3"
++			/>
++			<Tool
++				Name="VCManagedResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCPreLinkEventTool"
++			/>
++			<Tool
++				Name="VCLinkerTool"
++				AdditionalDependencies="Rpcrt4.lib"
++				LinkIncremental="1"
++				GenerateDebugInformation="true"
++				SubSystem="1"
++				SetChecksum="true"
++			/>
++			<Tool
++				Name="VCALinkTool"
++			/>
++			<Tool
++				Name="VCManifestTool"
++			/>
++			<Tool
++				Name="VCXDCMakeTool"
++			/>
++			<Tool
++				Name="VCBscMakeTool"
++			/>
++			<Tool
++				Name="VCFxCopTool"
++			/>
++			<Tool
++				Name="VCAppVerifierTool"
++			/>
++			<Tool
++				Name="VCPostBuildEventTool"
++			/>
++		</Configuration>
++		<Configuration
++			Name="Release|x64"
++			OutputDirectory="..\..\bin\Windows-$(PlatformName)\$(ConfigurationName)"
++			IntermediateDirectory="..\..\obj\Windows-$(PlatformName)\$(ConfigurationName)\$(ProjectName)"
++			ConfigurationType="1"
++			CharacterSet="1"
++			WholeProgramOptimization="1"
++			>
++			<Tool
++				Name="VCPreBuildEventTool"
++			/>
++			<Tool
++				Name="VCCustomBuildTool"
++			/>
++			<Tool
++				Name="VCXMLDataGeneratorTool"
++			/>
++			<Tool
++				Name="VCWebServiceProxyGeneratorTool"
++			/>
++			<Tool
++				Name="VCMIDLTool"
++				TargetEnvironment="3"
++			/>
++			<Tool
++				Name="VCCLCompilerTool"
++				Optimization="1"
++				InlineFunctionExpansion="2"
++				EnableIntrinsicFunctions="true"
++				FavorSizeOrSpeed="2"
++				AdditionalIncludeDirectories="&quot;$(SolutionDir)\..\include&quot;;&quot;$(SolutionDir)\include&quot;;&quot;$(SolutionDir)\..&quot;"
++				PreprocessorDefinitions="WIN32;NDEBUG;_CONSOLE"
++				RuntimeLibrary="2"
++				EnableFunctionLevelLinking="true"
++				RuntimeTypeInfo="false"
++				UsePrecompiledHeader="0"
++				WarningLevel="3"
++				DebugInformationFormat="3"
++			/>
++			<Tool
++				Name="VCManagedResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCPreLinkEventTool"
++			/>
++			<Tool
++				Name="VCLinkerTool"
++				AdditionalDependencies="Rpcrt4.lib"
++				LinkIncremental="1"
++				GenerateDebugInformation="true"
++				SetChecksum="true"
++				TargetMachine="17"
++			/>
++			<Tool
++				Name="VCALinkTool"
++			/>
++			<Tool
++				Name="VCManifestTool"
++			/>
++			<Tool
++				Name="VCXDCMakeTool"
++			/>
++			<Tool
++				Name="VCBscMakeTool"
++			/>
++			<Tool
++				Name="VCFxCopTool"
++			/>
++			<Tool
++				Name="VCAppVerifierTool"
++			/>
++			<Tool
++				Name="VCPostBuildEventTool"
++			/>
++		</Configuration>
++		<Configuration
++			Name="Release Static (MT)|Win32"
++			OutputDirectory="..\..\bin\Windows-$(PlatformName)\$(ConfigurationName)"
++			IntermediateDirectory="..\..\obj\Windows-$(PlatformName)\$(ConfigurationName)\$(ProjectName)"
++			ConfigurationType="1"
++			CharacterSet="1"
++			WholeProgramOptimization="1"
++			>
++			<Tool
++				Name="VCPreBuildEventTool"
++			/>
++			<Tool
++				Name="VCCustomBuildTool"
++			/>
++			<Tool
++				Name="VCXMLDataGeneratorTool"
++			/>
++			<Tool
++				Name="VCWebServiceProxyGeneratorTool"
++			/>
++			<Tool
++				Name="VCMIDLTool"
++			/>
++			<Tool
++				Name="VCCLCompilerTool"
++				Optimization="1"
++				InlineFunctionExpansion="2"
++				EnableIntrinsicFunctions="true"
++				FavorSizeOrSpeed="2"
++				AdditionalIncludeDirectories="&quot;$(SolutionDir)\..\include&quot;;&quot;$(SolutionDir)\include&quot;;&quot;$(SolutionDir)\..&quot;"
++				PreprocessorDefinitions="WIN32;NDEBUG;_CONSOLE;MP4V2_USE_STATIC_LIB"
++				RuntimeLibrary="0"
++				EnableFunctionLevelLinking="true"
++				RuntimeTypeInfo="false"
++				UsePrecompiledHeader="0"
++				WarningLevel="3"
++				DebugInformationFormat="3"
++			/>
++			<Tool
++				Name="VCManagedResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCPreLinkEventTool"
++			/>
++			<Tool
++				Name="VCLinkerTool"
++				AdditionalDependencies="Rpcrt4.lib"
++				GenerateDebugInformation="true"
++				SubSystem="1"
++			/>
++			<Tool
++				Name="VCALinkTool"
++			/>
++			<Tool
++				Name="VCManifestTool"
++			/>
++			<Tool
++				Name="VCXDCMakeTool"
++			/>
++			<Tool
++				Name="VCBscMakeTool"
++			/>
++			<Tool
++				Name="VCFxCopTool"
++			/>
++			<Tool
++				Name="VCAppVerifierTool"
++			/>
++			<Tool
++				Name="VCPostBuildEventTool"
++			/>
++		</Configuration>
++		<Configuration
++			Name="Release Static (MT)|x64"
++			OutputDirectory="..\..\bin\Windows-$(PlatformName)\$(ConfigurationName)"
++			IntermediateDirectory="..\..\obj\Windows-$(PlatformName)\$(ConfigurationName)\$(ProjectName)"
++			ConfigurationType="1"
++			CharacterSet="1"
++			WholeProgramOptimization="1"
++			>
++			<Tool
++				Name="VCPreBuildEventTool"
++			/>
++			<Tool
++				Name="VCCustomBuildTool"
++			/>
++			<Tool
++				Name="VCXMLDataGeneratorTool"
++			/>
++			<Tool
++				Name="VCWebServiceProxyGeneratorTool"
++			/>
++			<Tool
++				Name="VCMIDLTool"
++				TargetEnvironment="3"
++			/>
++			<Tool
++				Name="VCCLCompilerTool"
++				Optimization="1"
++				InlineFunctionExpansion="2"
++				EnableIntrinsicFunctions="true"
++				FavorSizeOrSpeed="2"
++				AdditionalIncludeDirectories="&quot;$(SolutionDir)\..\include&quot;;&quot;$(SolutionDir)\include&quot;;&quot;$(SolutionDir)\..&quot;"
++				PreprocessorDefinitions="WIN32;NDEBUG;_CONSOLE;MP4V2_USE_STATIC_LIB"
++				RuntimeLibrary="0"
++				EnableFunctionLevelLinking="true"
++				RuntimeTypeInfo="false"
++				UsePrecompiledHeader="0"
++				WarningLevel="3"
++				DebugInformationFormat="3"
++			/>
++			<Tool
++				Name="VCManagedResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCPreLinkEventTool"
++			/>
++			<Tool
++				Name="VCLinkerTool"
++				AdditionalDependencies="Rpcrt4.lib"
++				GenerateDebugInformation="true"
++				TargetMachine="17"
++			/>
++			<Tool
++				Name="VCALinkTool"
++			/>
++			<Tool
++				Name="VCManifestTool"
++			/>
++			<Tool
++				Name="VCXDCMakeTool"
++			/>
++			<Tool
++				Name="VCBscMakeTool"
++			/>
++			<Tool
++				Name="VCFxCopTool"
++			/>
++			<Tool
++				Name="VCAppVerifierTool"
++			/>
++			<Tool
++				Name="VCPostBuildEventTool"
++			/>
++		</Configuration>
++		<Configuration
++			Name="Debug Static (MTd)|Win32"
++			OutputDirectory="..\..\bin\Windows-$(PlatformName)\$(ConfigurationName)"
++			IntermediateDirectory="..\..\obj\Windows-$(PlatformName)\$(ConfigurationName)\$(ProjectName)"
++			ConfigurationType="1"
++			CharacterSet="1"
++			>
++			<Tool
++				Name="VCPreBuildEventTool"
++			/>
++			<Tool
++				Name="VCCustomBuildTool"
++			/>
++			<Tool
++				Name="VCXMLDataGeneratorTool"
++			/>
++			<Tool
++				Name="VCWebServiceProxyGeneratorTool"
++			/>
++			<Tool
++				Name="VCMIDLTool"
++			/>
++			<Tool
++				Name="VCCLCompilerTool"
++				Optimization="0"
++				AdditionalIncludeDirectories="&quot;$(SolutionDir)\..\include&quot;;&quot;$(SolutionDir)\include&quot;;&quot;$(SolutionDir)\..&quot;"
++				PreprocessorDefinitions="WIN32;_DEBUG;_CONSOLE;MP4V2_USE_STATIC_LIB"
++				MinimalRebuild="true"
++				BasicRuntimeChecks="3"
++				RuntimeLibrary="1"
++				RuntimeTypeInfo="false"
++				UsePrecompiledHeader="0"
++				WarningLevel="3"
++				DebugInformationFormat="3"
++			/>
++			<Tool
++				Name="VCManagedResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCPreLinkEventTool"
++			/>
++			<Tool
++				Name="VCLinkerTool"
++				AdditionalDependencies="Rpcrt4.lib"
++				GenerateDebugInformation="true"
++				SubSystem="1"
++			/>
++			<Tool
++				Name="VCALinkTool"
++			/>
++			<Tool
++				Name="VCManifestTool"
++			/>
++			<Tool
++				Name="VCXDCMakeTool"
++			/>
++			<Tool
++				Name="VCBscMakeTool"
++			/>
++			<Tool
++				Name="VCFxCopTool"
++			/>
++			<Tool
++				Name="VCAppVerifierTool"
++			/>
++			<Tool
++				Name="VCPostBuildEventTool"
++			/>
++		</Configuration>
++		<Configuration
++			Name="Debug Static (MTd)|x64"
++			OutputDirectory="..\..\bin\Windows-$(PlatformName)\$(ConfigurationName)"
++			IntermediateDirectory="..\..\obj\Windows-$(PlatformName)\$(ConfigurationName)\$(ProjectName)"
++			ConfigurationType="1"
++			CharacterSet="1"
++			>
++			<Tool
++				Name="VCPreBuildEventTool"
++			/>
++			<Tool
++				Name="VCCustomBuildTool"
++			/>
++			<Tool
++				Name="VCXMLDataGeneratorTool"
++			/>
++			<Tool
++				Name="VCWebServiceProxyGeneratorTool"
++			/>
++			<Tool
++				Name="VCMIDLTool"
++				TargetEnvironment="3"
++			/>
++			<Tool
++				Name="VCCLCompilerTool"
++				Optimization="0"
++				AdditionalIncludeDirectories="&quot;$(SolutionDir)\..\include&quot;;&quot;$(SolutionDir)\include&quot;;&quot;$(SolutionDir)\..&quot;"
++				PreprocessorDefinitions="WIN32;_DEBUG;_CONSOLE;MP4V2_USE_STATIC_LIB"
++				MinimalRebuild="true"
++				BasicRuntimeChecks="3"
++				RuntimeLibrary="1"
++				RuntimeTypeInfo="false"
++				UsePrecompiledHeader="0"
++				WarningLevel="3"
++				DebugInformationFormat="3"
++			/>
++			<Tool
++				Name="VCManagedResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCPreLinkEventTool"
++			/>
++			<Tool
++				Name="VCLinkerTool"
++				AdditionalDependencies="Rpcrt4.lib"
++				GenerateDebugInformation="true"
++				TargetMachine="17"
++			/>
++			<Tool
++				Name="VCALinkTool"
++			/>
++			<Tool
++				Name="VCManifestTool"
++			/>
++			<Tool
++				Name="VCXDCMakeTool"
++			/>
++			<Tool
++				Name="VCBscMakeTool"
++			/>
++			<Tool
++				Name="VCFxCopTool"
++			/>
++			<Tool
++				Name="VCAppVerifierTool"
++			/>
++			<Tool
++				Name="VCPostBuildEventTool"
++			/>
++		</Configuration>
++		<Configuration
++			Name="Debug Static (MDd)|Win32"
++			OutputDirectory="..\..\bin\Windows-$(PlatformName)\$(ConfigurationName)"
++			IntermediateDirectory="..\..\obj\Windows-$(PlatformName)\$(ConfigurationName)\$(ProjectName)"
++			ConfigurationType="1"
++			CharacterSet="1"
++			>
++			<Tool
++				Name="VCPreBuildEventTool"
++			/>
++			<Tool
++				Name="VCCustomBuildTool"
++			/>
++			<Tool
++				Name="VCXMLDataGeneratorTool"
++			/>
++			<Tool
++				Name="VCWebServiceProxyGeneratorTool"
++			/>
++			<Tool
++				Name="VCMIDLTool"
++			/>
++			<Tool
++				Name="VCCLCompilerTool"
++				Optimization="0"
++				AdditionalIncludeDirectories="&quot;$(SolutionDir)\..\include&quot;;&quot;$(SolutionDir)\include&quot;;&quot;$(SolutionDir)\..&quot;"
++				PreprocessorDefinitions="WIN32;_DEBUG;_CONSOLE;MP4V2_USE_STATIC_LIB"
++				MinimalRebuild="true"
++				BasicRuntimeChecks="3"
++				RuntimeLibrary="3"
++				RuntimeTypeInfo="false"
++				UsePrecompiledHeader="0"
++				WarningLevel="3"
++				DebugInformationFormat="3"
++			/>
++			<Tool
++				Name="VCManagedResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCPreLinkEventTool"
++			/>
++			<Tool
++				Name="VCLinkerTool"
++				AdditionalDependencies="Rpcrt4.lib"
++				GenerateDebugInformation="true"
++				SubSystem="1"
++			/>
++			<Tool
++				Name="VCALinkTool"
++			/>
++			<Tool
++				Name="VCManifestTool"
++			/>
++			<Tool
++				Name="VCXDCMakeTool"
++			/>
++			<Tool
++				Name="VCBscMakeTool"
++			/>
++			<Tool
++				Name="VCFxCopTool"
++			/>
++			<Tool
++				Name="VCAppVerifierTool"
++			/>
++			<Tool
++				Name="VCPostBuildEventTool"
++			/>
++		</Configuration>
++		<Configuration
++			Name="Debug Static (MDd)|x64"
++			OutputDirectory="..\..\bin\Windows-$(PlatformName)\$(ConfigurationName)"
++			IntermediateDirectory="..\..\obj\Windows-$(PlatformName)\$(ConfigurationName)\$(ProjectName)"
++			ConfigurationType="1"
++			CharacterSet="1"
++			>
++			<Tool
++				Name="VCPreBuildEventTool"
++			/>
++			<Tool
++				Name="VCCustomBuildTool"
++			/>
++			<Tool
++				Name="VCXMLDataGeneratorTool"
++			/>
++			<Tool
++				Name="VCWebServiceProxyGeneratorTool"
++			/>
++			<Tool
++				Name="VCMIDLTool"
++				TargetEnvironment="3"
++			/>
++			<Tool
++				Name="VCCLCompilerTool"
++				Optimization="0"
++				AdditionalIncludeDirectories="&quot;$(SolutionDir)\..\include&quot;;&quot;$(SolutionDir)\include&quot;;&quot;$(SolutionDir)\..&quot;"
++				PreprocessorDefinitions="WIN32;_DEBUG;_CONSOLE;MP4V2_USE_STATIC_LIB"
++				MinimalRebuild="true"
++				BasicRuntimeChecks="3"
++				RuntimeLibrary="3"
++				RuntimeTypeInfo="false"
++				UsePrecompiledHeader="0"
++				WarningLevel="3"
++				DebugInformationFormat="3"
++			/>
++			<Tool
++				Name="VCManagedResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCPreLinkEventTool"
++			/>
++			<Tool
++				Name="VCLinkerTool"
++				AdditionalDependencies="Rpcrt4.lib"
++				GenerateDebugInformation="true"
++				TargetMachine="17"
++			/>
++			<Tool
++				Name="VCALinkTool"
++			/>
++			<Tool
++				Name="VCManifestTool"
++			/>
++			<Tool
++				Name="VCXDCMakeTool"
++			/>
++			<Tool
++				Name="VCBscMakeTool"
++			/>
++			<Tool
++				Name="VCFxCopTool"
++			/>
++			<Tool
++				Name="VCAppVerifierTool"
++			/>
++			<Tool
++				Name="VCPostBuildEventTool"
++			/>
++		</Configuration>
++		<Configuration
++			Name="Release Static (MD)|Win32"
++			OutputDirectory="..\..\bin\Windows-$(PlatformName)\$(ConfigurationName)"
++			IntermediateDirectory="..\..\obj\Windows-$(PlatformName)\$(ConfigurationName)\$(ProjectName)"
++			ConfigurationType="1"
++			CharacterSet="1"
++			WholeProgramOptimization="1"
++			>
++			<Tool
++				Name="VCPreBuildEventTool"
++			/>
++			<Tool
++				Name="VCCustomBuildTool"
++			/>
++			<Tool
++				Name="VCXMLDataGeneratorTool"
++			/>
++			<Tool
++				Name="VCWebServiceProxyGeneratorTool"
++			/>
++			<Tool
++				Name="VCMIDLTool"
++			/>
++			<Tool
++				Name="VCCLCompilerTool"
++				Optimization="1"
++				InlineFunctionExpansion="2"
++				EnableIntrinsicFunctions="true"
++				FavorSizeOrSpeed="2"
++				AdditionalIncludeDirectories="&quot;$(SolutionDir)\..\include&quot;;&quot;$(SolutionDir)\include&quot;;&quot;$(SolutionDir)\..&quot;"
++				PreprocessorDefinitions="WIN32;NDEBUG;_CONSOLE;MP4V2_USE_STATIC_LIB"
++				RuntimeLibrary="2"
++				EnableFunctionLevelLinking="true"
++				RuntimeTypeInfo="false"
++				UsePrecompiledHeader="0"
++				WarningLevel="3"
++				DebugInformationFormat="3"
++			/>
++			<Tool
++				Name="VCManagedResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCPreLinkEventTool"
++			/>
++			<Tool
++				Name="VCLinkerTool"
++				AdditionalDependencies="Rpcrt4.lib"
++				GenerateDebugInformation="true"
++				SubSystem="1"
++			/>
++			<Tool
++				Name="VCALinkTool"
++			/>
++			<Tool
++				Name="VCManifestTool"
++			/>
++			<Tool
++				Name="VCXDCMakeTool"
++			/>
++			<Tool
++				Name="VCBscMakeTool"
++			/>
++			<Tool
++				Name="VCFxCopTool"
++			/>
++			<Tool
++				Name="VCAppVerifierTool"
++			/>
++			<Tool
++				Name="VCPostBuildEventTool"
++			/>
++		</Configuration>
++		<Configuration
++			Name="Release Static (MD)|x64"
++			OutputDirectory="..\..\bin\Windows-$(PlatformName)\$(ConfigurationName)"
++			IntermediateDirectory="..\..\obj\Windows-$(PlatformName)\$(ConfigurationName)\$(ProjectName)"
++			ConfigurationType="1"
++			CharacterSet="1"
++			WholeProgramOptimization="1"
++			>
++			<Tool
++				Name="VCPreBuildEventTool"
++			/>
++			<Tool
++				Name="VCCustomBuildTool"
++			/>
++			<Tool
++				Name="VCXMLDataGeneratorTool"
++			/>
++			<Tool
++				Name="VCWebServiceProxyGeneratorTool"
++			/>
++			<Tool
++				Name="VCMIDLTool"
++				TargetEnvironment="3"
++			/>
++			<Tool
++				Name="VCCLCompilerTool"
++				Optimization="1"
++				InlineFunctionExpansion="2"
++				EnableIntrinsicFunctions="true"
++				FavorSizeOrSpeed="2"
++				AdditionalIncludeDirectories="&quot;$(SolutionDir)\..\include&quot;;&quot;$(SolutionDir)\include&quot;;&quot;$(SolutionDir)\..&quot;"
++				PreprocessorDefinitions="WIN32;NDEBUG;_CONSOLE;MP4V2_USE_STATIC_LIB"
++				RuntimeLibrary="2"
++				EnableFunctionLevelLinking="true"
++				RuntimeTypeInfo="false"
++				UsePrecompiledHeader="0"
++				WarningLevel="3"
++				DebugInformationFormat="3"
++			/>
++			<Tool
++				Name="VCManagedResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCResourceCompilerTool"
++			/>
++			<Tool
++				Name="VCPreLinkEventTool"
++			/>
++			<Tool
++				Name="VCLinkerTool"
++				AdditionalDependencies="Rpcrt4.lib"
++				GenerateDebugInformation="true"
++				TargetMachine="17"
++			/>
++			<Tool
++				Name="VCALinkTool"
++			/>
++			<Tool
++				Name="VCManifestTool"
++			/>
++			<Tool
++				Name="VCXDCMakeTool"
++			/>
++			<Tool
++				Name="VCBscMakeTool"
++			/>
++			<Tool
++				Name="VCFxCopTool"
++			/>
++			<Tool
++				Name="VCAppVerifierTool"
++			/>
++			<Tool
++				Name="VCPostBuildEventTool"
++			/>
++		</Configuration>
++	</Configurations>
++	<References>
++	</References>
++	<Files>
++		<File
++			RelativePath="..\..\util\mp4xtratags.cpp"
++			>
++		</File>
++	</Files>
++	<Globals>
++	</Globals>
++</VisualStudioProject>

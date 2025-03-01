@@ -1,0 +1,73 @@
+From 886a33ef7d516945f9ff7dd730435ba59ffbacaf Mon Sep 17 00:00:00 2001
+From: Simon McVittie <smcv@collabora.com>
+Date: Thu, 11 May 2017 17:26:36 +0100
+Subject: [PATCH] Only set up base image device if requested
+
+Adding a second virtual disk with the same UUIDs, partition labels,
+filesystem labels etc. can interfere with anything that mounts filesystems
+post-boot, and the attempts to address this in #842299 do not seem to
+have been completely successful. Nested virtualization is a rare thing
+to need, so let's make this opt-in.
+
+Signed-off-by: Simon McVittie <smcv@collabora.com>
+---
+ virt/autopkgtest-virt-qemu | 22 +++++++++++++++-------
+ 1 file changed, 15 insertions(+), 7 deletions(-)
+
+diff --git a/virt/autopkgtest-virt-qemu b/virt/autopkgtest-virt-qemu
+index eb3b162..5d55d2d 100755
+--- a/virt/autopkgtest-virt-qemu
++++ b/virt/autopkgtest-virt-qemu
+@@ -88,6 +88,11 @@ def parse_args():
+                         help='Enable debugging output')
+     parser.add_argument('--qemu-options',
+                         help='Pass through arguments to QEMU command.')
++    parser.add_argument('--baseimage', action='store_true', default=False,
++                        help='Provide a read-only copy of the base image at /dev/baseimage')
++    parser.add_argument('--no-baseimage', dest='baseimage',
++                        action='store_false',
++                        help='Provide a read-only copy of the base image at /dev/baseimage')
+     parser.add_argument('image', nargs='+',
+                         help='disk image to add to the VM (in order)')
+ 
+@@ -565,7 +570,8 @@ def hook_open():
+             # files; let QEMU run with the deleted inode
+             os.unlink(overlay)
+         setup_shell()
+-        setup_baseimage()
++        if args.baseimage:
++            setup_baseimage()
+         setup_shared(shareddir)
+         setup_config(shareddir)
+         make_auxverb(shareddir)
+@@ -604,11 +610,12 @@ def hook_cleanup():
+ 
+ 
+ def hook_prepare_reboot():
+-    # Remove baseimage drive again, so that it does not break the subsequent
+-    # boot due to the duplicate UUID
+-    monitor = VirtSubproc.get_unix_socket(os.path.join(workdir, 'monitor'))
+-    monitor.send(b'device_del virtio-baseimage\n')
+-    VirtSubproc.expect(monitor, b'(qemu)', 10)
++    if args.baseimage:
++        # Remove baseimage drive again, so that it does not break the subsequent
++        # boot due to the duplicate UUID
++        monitor = VirtSubproc.get_unix_socket(os.path.join(workdir, 'monitor'))
++        monitor.send(b'device_del virtio-baseimage\n')
++        VirtSubproc.expect(monitor, b'(qemu)', 10)
+ 
+ 
+ def hook_wait_reboot():
+@@ -618,7 +625,8 @@ def hook_wait_reboot():
+     wait_boot()
+     setup_shell()
+     setup_shared(shareddir)
+-    setup_baseimage()
++    if args.baseimage:
++        setup_baseimage()
+ 
+ 
+ def hook_capabilities():
+-- 
+2.11.0
+

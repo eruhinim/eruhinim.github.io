@@ -1,0 +1,126 @@
+diff -ruN amanda-2.5.2p1-orig/amanda-2.5.2p1/debian/amanda-client.dirs amanda-2.5.2p1-tar-escape-wrapper/amanda-2.5.2p1/debian/amanda-client.dirs
+--- amanda-2.5.2p1-orig/amanda-2.5.2p1/debian/amanda-client.dirs	2009-05-08 14:05:15.000000000 +0000
++++ amanda-2.5.2p1-tar-escape-wrapper/amanda-2.5.2p1/debian/amanda-client.dirs	2009-05-08 12:50:37.000000000 +0000
+@@ -1,3 +1,4 @@
+ usr/share/doc/amanda-client
+ usr/share/lintian/overrides
+ var/lib/amanda/gnutar-lists
++usr/bin
+diff -ruN amanda-2.5.2p1-orig/amanda-2.5.2p1/debian/changelog amanda-2.5.2p1-tar-escape-wrapper/amanda-2.5.2p1/debian/changelog
+--- amanda-2.5.2p1-orig/amanda-2.5.2p1/debian/changelog	2009-05-08 14:05:15.000000000 +0000
++++ amanda-2.5.2p1-tar-escape-wrapper/amanda-2.5.2p1/debian/changelog	2009-05-08 12:36:40.000000000 +0000
+@@ -1,3 +1,13 @@
++amanda (1:2.5.2p1-5ms0) unstable; urgency=low
++
++  * Add #define GNUTAR "/usr/bin/tar-escape-wrapper" to recover-src/amrecover.h
++  * Add revocer-src/tar-escape-wrapper that is only called by amrecover
++    and escapes all "\?*" with one additional "\".
++    It seems not to be necessary to escape [] as tar seems to accept them
++    without \.
++
++ -- Martin <martin.stern@jpberlin.de>  Thu,  7 May 2009 09:55:43 +0000
++
+ amanda (1:2.5.2p1-5) unstable; urgency=low
+ 
+   * add --without-ipv6 as a short-term fix for amdump connectivity problems,
+diff -ruN amanda-2.5.2p1-orig/amanda-2.5.2p1/debian/rules amanda-2.5.2p1-tar-escape-wrapper/amanda-2.5.2p1/debian/rules
+--- amanda-2.5.2p1-orig/amanda-2.5.2p1/debian/rules	2009-05-08 14:05:15.000000000 +0000
++++ amanda-2.5.2p1-tar-escape-wrapper/amanda-2.5.2p1/debian/rules	2009-05-08 12:50:11.000000000 +0000
+@@ -70,6 +70,7 @@
+ 	dh_installdirs -a
+ 	make install DESTDIR=$(r)
+ 	install -m 644 debian/amandahosts $(r)/etc/amandahosts
++	install -m 755 recover-src/tar-escape-wrapper $(c)/usr/bin/tar-escape-wrapper
+ 	dh_installdocs -a
+ 	dh_installexamples -a
+ 	cp ChangeLog $(r)/usr/share/doc/amanda-common/changelog
+diff -ruN amanda-2.5.2p1-orig/amanda-2.5.2p1/recover-src/amrecover.h amanda-2.5.2p1-tar-escape-wrapper/amanda-2.5.2p1/recover-src/amrecover.h
+--- amanda-2.5.2p1-orig/amanda-2.5.2p1/recover-src/amrecover.h	2007-05-04 11:38:58.000000000 +0000
++++ amanda-2.5.2p1-tar-escape-wrapper/amanda-2.5.2p1/recover-src/amrecover.h	2009-05-08 10:22:40.000000000 +0000
+@@ -33,6 +33,7 @@
+ #include "amfeatures.h"
+ 
+ #define STARTUP_TIMEOUT 60
++#define GNUTAR "/usr/bin/tar-escape-wrapper"
+ 
+ typedef struct DIR_ITEM
+ {
+diff -ruN amanda-2.5.2p1-orig/amanda-2.5.2p1/recover-src/tar-escape-wrapper amanda-2.5.2p1-tar-escape-wrapper/amanda-2.5.2p1/recover-src/tar-escape-wrapper
+--- amanda-2.5.2p1-orig/amanda-2.5.2p1/recover-src/tar-escape-wrapper	1970-01-01 00:00:00.000000000 +0000
++++ amanda-2.5.2p1-tar-escape-wrapper/amanda-2.5.2p1/recover-src/tar-escape-wrapper	2009-05-08 11:53:30.000000000 +0000
+@@ -0,0 +1,75 @@
++#!/usr/bin/perl -w
++
++# Tar Wrapper for Amrecover
++# This wrapper escapes all tar wildcards with "\"
++# to allow amrecover to restore files that have "\", "[" or "]" in their path.
++
++
++#
++# Globals
++#
++my $scriptname     = "tar-escape-wrapper";
++my $SyslogFacility = "user";
++
++
++#
++# Functions
++#
++sub logger {
++        my $priority = shift;
++        my $message  = shift;
++        system("logger", "-t", $scriptname, "-p", "$SyslogFacility.$priority", $message) ;
++}
++
++
++
++#
++#1) Get options list
++#
++
++#Copy option list
++my  @OLDoptions = @ARGV;
++my  @NEWoptions;
++
++
++#
++# 2) Escape wildcards in file an directory arguments
++#
++my $opt;
++foreach $opt (@OLDoptions) {
++  # Check if $opt start with "-". If not assume that it is
++  # a file or directory argument.
++  my $firstchar = substr($opt,0,1);
++  if ( $firstchar eq '-' ){
++    #print "Option: >$opt< \n";
++    logger "debug", "Option:$opt\n";
++  } else {
++    #print "Pre File: >$opt< \n";
++    logger "debug", "Pre File:$opt\n";
++
++    #Escape
++    #$opt =~ s/([\\?*\[\]])/\\$1/g;
++    # Do not escape [], tar seems to accept them without \.
++    $opt =~ s/([\\?*])/\\$1/g;
++
++    #print "PostFile: >$opt< \n";
++    logger "debug", "PostFile:$opt\n";
++  }
++
++  #Build new options list
++  push @NEWoptions, $opt
++
++}
++
++
++
++
++#
++# 3) Call real tar
++logger "debug", "CALL: /bin/tar @NEWoptions \n";
++my $status;
++$status = system("/bin/tar", @NEWoptions);
++my $rc = $status >> 8;
++logger "debug", "Tar exited with exit code $rc \n";
++
++exit $rc;

@@ -1,0 +1,144 @@
+From 2771a78fdd60808430a69d123029920646b5ac7b Mon Sep 17 00:00:00 2001
+From: Osamu Aoki <osamu@debian.org>
+Date: Tue, 25 Jul 2017 18:44:11 +0900
+Subject: [PATCH] Refine SSH PIPE
+
+This has been tested by using people.debian.org host:
+
+ARC-Authentication-Results: i=1; mx.google.com;
+  spf=pass (google.com: best guess record for domain of
+  osamu@debian.org designates 2001:41b8:202:deb:6564:a62:52c3:4b72 as
+  permitted sender) smtp.mailfrom=osamu@debian.org
+---
+ debian/README.ssh                                  | 51 ++++++++++++++++++++++
+ .../debconf/conf.d/router/200_exim4-config_primary |  5 +--
+ .../conf.d/transport/30_exim4-config_ssh_pipe      | 12 +++--
+ debian/exim4-config.install                        |  2 +-
+ debian/ssh_hosts                                   |  7 ---
+ 5 files changed, 59 insertions(+), 18 deletions(-)
+ create mode 100644 debian/README.ssh
+ delete mode 100644 debian/ssh_hosts
+
+diff --git a/debian/README.ssh b/debian/README.ssh
+new file mode 100644
+index 0000000..98863b3
+--- /dev/null
++++ b/debian/README.ssh
+@@ -0,0 +1,51 @@
++SSH PIPE
++--------
++
++If you wish to send mails with the particular email address in the
++"From:" header automatically via a remote SSH service host, you place a
++script file and a key file here at /etc/exim4/ssh/ as described below.
++
++ * foo@example.org                    -- email address in the "From:" header
++ * /etc/exim4/ssh/foo@example.org.sh  -- script file
++ * /etc/exim4/ssh/foo@example.org.key -- key file
++ * foo@host.example.org               -- SSH account and host address
++
++This is valid only if smarthost or satellite configuration are chosen.
++
++Here, foo@example.org.sh should be as follows:
++
++    #!/bin/sh
++    /usr/bin/ssh -p 22 \
++    -i /etc/exim4/ssh/foo@host.example.org.key \
++    -o "StrictHostKeyChecking no" \
++    foo@host.example.org \
++    /usr/bin/sendmail -bm -ti \
++    -f foo@example.org
++
++Of course, the above is for a lazy person.  It is better to keep up
++/etc/ssh/ssh_known_hosts properly and to replace the command option with
++'-o "StrictHostKeyChecking yes"'.
++
++You can change envelope address by adjusting the '-f' option.
++
++foo@example.org.key should be copied from your secret SSH key
++~/.ssh/id_rsa used for foo@host.example.org.
++
++These files should be given proper file permissions:
++
++    $ sudo chown Debian-exim:Debian-exim /etc/exim4/ssh/
++    $ sudo chmod 4775                    /etc/exim4/ssh/
++    $ sudo chown Debian-exim:Debian-exim /etc/exim4/ssh/foo@example.org.sh
++    $ sudo chmod 770                     /etc/exim4/ssh/foo@example.org.sh
++    $ sudo chown Debian-exim:Debian-exim /etc/exim4/ssh/foo@example.org.key
++    $ sudo chmod 600                     /etc/exim4/ssh/foo@example.org.key
++
++
++If you get error such as "R=ssh T=ssh_pipe: Child process of ssh_pipe
++transport returned 255 ...", your script may have file permission issue.
++For Debugging your script, test it from shell opened by "sudo -u
++Debian-exim bash".  When running pipe transport, exim uses
++UID=Debian-exim GID=Debian-exim.
++
++
++                             Osamu Aoki Tue, 25 Jul 2017 18:55:23 +0900
+diff --git a/debian/debconf/conf.d/router/200_exim4-config_primary b/debian/debconf/conf.d/router/200_exim4-config_primary
+index b50901e..88e5d5d 100644
+--- a/debian/debconf/conf.d/router/200_exim4-config_primary
++++ b/debian/debconf/conf.d/router/200_exim4-config_primary
+@@ -76,9 +76,8 @@ nonlocal:
+ ssh:
+   debug_print = "R: ssh for $local_part@$domain from ${address:$h_from:}"
+   driver = accept
+-  condition = ${if exists{CONFDIR/ssh_hosts}\
+-      {${lookup{${address:$h_from:}}lsearch{CONFDIR/ssh_hosts}{$value}fail}}fail}
+-  domains = *
++  condition = ${if exists{CONFDIR/ssh/${address:$h_from:}.sh}}
++  domains = ! +local_domains
+   transport = ssh_pipe
+   no_verify
+   no_expn
+diff --git a/debian/debconf/conf.d/transport/30_exim4-config_ssh_pipe b/debian/debconf/conf.d/transport/30_exim4-config_ssh_pipe
+index 47e754b..f9514c4 100644
+--- a/debian/debconf/conf.d/transport/30_exim4-config_ssh_pipe
++++ b/debian/debconf/conf.d/transport/30_exim4-config_ssh_pipe
+@@ -2,14 +2,12 @@
+ ### transport/30_exim4-config_ssh_pipe
+ #################################
+ 
+-SSH_LINE = ${lookup{${address:$h_from:}}lsearch{CONFDIR/ssh_hosts}}
+-
+ ssh_pipe:
+-  debug_print = "T: ssh_pipe for $local_part@$domain from ${address:$h_from:} via SSH_LINE"
++  debug_print = "T: ssh_pipe for $local_part@$domain from ${address:$h_from:}"
+   driver = pipe
+   path = "/bin:/usr/bin:/usr/local/bin"
+-  command = "SSH_LINE"
+-  return_path_add
+-  delivery_date_add
+-  envelope_to_add
++  command = CONFDIR/ssh/${address:$h_from:}.sh
++  headers_remove = Received
++# This last line ensures to hide the mail once has gone through this
++# exim program.
+ 
+diff --git a/debian/exim4-config.install b/debian/exim4-config.install
+index afa367b..df305b4 100644
+--- a/debian/exim4-config.install
++++ b/debian/exim4-config.install
+@@ -1,4 +1,4 @@
+ debian/debconf/update-exim4.conf.template usr/sbin
+ debian/debconf/exim4.conf.template etc/exim4
+-debian/ssh_hosts etc/exim4
++debian/README.ssh etc/exim4/ssh
+ debian/script usr/share/bug/exim4-config
+diff --git a/debian/ssh_hosts b/debian/ssh_hosts
+deleted file mode 100644
+index 0a120b1..0000000
+--- a/debian/ssh_hosts
++++ /dev/null
+@@ -1,7 +0,0 @@
+-# configuration file used when the local exim is
+-# authenticating to the remote SSH service host
+-# with the account corresponding to the From address as a client.
+-# (smarthost,sattelite)
+-#
+-# Example:
+-### header-From:  /usr/bin/ssh -p 22 -i /path/to/ssh-id_rsa foo@example.org /usr/bin/sendmail -bm -ti
+-- 
+2.11.0
+

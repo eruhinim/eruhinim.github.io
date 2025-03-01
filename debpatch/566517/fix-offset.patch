@@ -1,0 +1,227 @@
+Description: Fix incorrect HTTP size info by rewriting offset handling
+ The offset handling (stripping ID3 info) was rewritten to fix the following
+ problem (reported in Debian bug #566517): The HTTP "Content-Length" header was
+ giving lengths that were inconsistent with the data actually sent over the
+ wire. The change couldn't be done without changing the function structure, so
+ some more code had to be rewritten. As a positive side effect of the rewrite,
+ two more (so far undetected) problems were solved: 1. The interpretation of
+ the positioning information in the HTTP "Range" header was not consistent with
+ the offsets (stripping ID3 info). 2. Regardless the "Range" information, ample
+ always sent the complete file, not only the requested range (although its
+ response header suggested partial content).
+Author: Martin SteghÃ¶fer <martin@steghoefer.eu>
+Bug-Debian: https://bugs.debian.org/566517
+
+--- a/src/client.c
++++ b/src/client.c
+@@ -125,37 +125,29 @@
+ 
+ 
+ /*
+- * Positions the stream at the correct start and decides where to stop.
++ * Calculates the offsets at start and end of file due to stripping of
++ * metadata (ID3v1 and ID3v2)
+  *
+  * Arguments: cconf - session information
+- *            stream - the stream to position
+  *            entry - the file that is about to be played
+- *
+- * Returns: the offset where to stop
++ *            startOffset - pointer to the variable used as out-parameter
++ *                          for the offset at the beginning of the file
++ *            endOffset - pointer to the variable used as out-parameter
++ *                        for the offset at the end of the file
+  */
+-static long 
+-setoffsets(struct client_config *cconf, FILE *stream, mp3entry *entry) 
++void
++getoffsets(struct client_config *cconf, mp3entry *entry, long *startOffset, long *endOffset)
+ {
+-	long start;
+-	long end;
+-
+-	if(cconf->startpos > 0 && cconf->startpos < entry->filesize)
+-		start = cconf->startpos;
+-	else if(!MODE_ISSET(MODE_SINGLE) && entry->id3v2len)
+-		start = entry->id3v2len;
+-	else
+-		start = 0;
+-	fseek(stream, start, SEEK_SET);
++	*startOffset = 0;
++	if (!(MODE_ISSET(MODE_SINGLE) || MODE_ISSET(MODE_PARTIAL)))
++	    *startOffset += entry->id3v2len;
+ 
+-	if(cconf->endpos > 0 && cconf->endpos < entry->filesize)
+-		end = cconf->endpos;
+-	else if(HASID3V1(entry) && end > entry->id3v1len)
+-		end = entry->filesize - entry->id3v1len;
++	if (HASID3V1(entry))
++		*endOffset = entry->id3v1len;
+ 	else
+-		end = entry->filesize;
++		*endOffset = 0;
+ 
+-	debug(4, "Start offset is %li, end offset is %li\n", start, end);
+-	return end;
++	debug(4, "Start offset is %li, end offset is %li\n", *startOffset, *endOffset);
+ }
+ 
+ 
+@@ -168,12 +160,39 @@
+  * Returns: void
+  */
+ static void 
+-playfile(struct client_config *cconf, mp3entry *entry) 
++playfile(struct client_config *cconf, mp3entry *entry)
+ {
+ 	FILE *file;
+-	char buf[NETBUFFSIZE];
+-	int amount;
+-	long end;
++	long startOffset, endOffset, end;
++	
++	file = preparefile(cconf, entry, &startOffset, &endOffset);
++	if (file)
++	{
++		end = endOffset > 0 ? entry->filesize - endOffset : -1;
++		playopenfile(cconf, entry, file, end);
++	}
++}
++
++/*
++ * Prepared a file for streaming: Opens the file, determines the offsets and seeks to the
++ * initial streaming position (skipping metadata, if desired, and skipping initial bytes,
++ * if cconf->startpos is given)
++ *
++ * Arguments: cconf - session information
++ *            entry - the entry to play
++ *            startOffset - pointer to the variable used as out-parameter
++ *                          for the offset at the beginning of the file
++ *                          (due to stripping of metadata)
++ *            endOffset - pointer to the variable used as out-parameter
++ *                        for the offset at the end of the file
++ *                        (due to stripping of metadata)
++ *
++ * Returns: the opened file, if successfully opened; NULL otherwise
++ */
++static FILE * preparefile(struct client_config *cconf, mp3entry *entry, long *startOffset, long *endOffset)
++{
++	FILE *file = NULL;
++	long seek;
+ 	
+ 	cconf->metadata = TRUE;
+ 	debug(1, "Playing file %s\n", entry->path);
+@@ -183,14 +202,41 @@
+ 	if(gconf.filter != NULL) {
+ 		if((file = popen(replacevariables(gconf.filter, 
+ 						  cconf, NULL), "r")) == NULL)
+-			die("popen()\n");
+-		end = -1;
++			return NULL;
++		*startOffset = 0;
++		*endOffset = 0;
+ 	} else {
+ 		if ((file = fopen(entry->path,"r")) == NULL)
+-			die("fopen()\n");
+-		end = setoffsets(cconf, file, entry);
++			return NULL;
++		getoffsets(cconf, entry, startOffset, endOffset);
+ 	}
+ 	
++	seek = *startOffset + cconf->startpos;
++	if (*endOffset >= 0 && seek > entry->filesize - *endOffset)
++		seek = entry->filesize - *endOffset;
++	fseek(file, seek, SEEK_SET);
++	
++	return file;
++}
++
++
++/*
++ * Plays a file that has already been opened to the client
++ *
++ * Arguments: cconf - session information
++ *            entry - the entry to play
++ *            file - file handle that is already at the initial streaming
++ *                   position
++ *            end - positon of the first byte (in absolute stream positions,
++ *                  NOT relative to the current positioning in the stream!)
++ *                  that is outside the range to play
++ *
++ * Returns: void
++ */
++void playopenfile(struct client_config *cconf, mp3entry *entry, FILE *file, long end)
++{
++	int amount;
++	char buf[NETBUFFSIZE];
+ 
+ 	while((amount = preparedata(buf, end, file)))
+ 		senddata(cconf, buf, amount, entry);
+@@ -450,6 +496,8 @@
+ 	int max;
+ 	/* Client and session configuration */
+ 	struct client_config *cconf = NULL;
++	FILE *file;
++	long filesize, startOffset, endOffset, end;
+ 	
+ 	/* Prepare configuration struct */
+ 	cconf = malloc(sizeof(struct client_config));
+@@ -508,25 +556,34 @@
+ 		debug(1, "Entering MP3-Partial mode\n");
+ 		sendstatusmsg(cconf->statussock, 
+ 			      "%d:Sending partial MP3", getpid());
+-		if(cconf->endpos = 0 || cconf->endpos > cconf->mp3base->filesize)
+-			fprintf(cconf->stream, PARTIALSERVMSG, AMPLE_VERSION, 
+-				cconf->startpos, cconf->mp3base->filesize, 
+-				cconf->mp3base->filesize);
+-		else
++		file = preparefile(cconf, cconf->mp3base, &startOffset, &endOffset);
++		if (file)
++		{
++			filesize = cconf->mp3base->filesize - startOffset - endOffset;
++			if(cconf->endpos == 0 || cconf->endpos + 1 > filesize)
++				end = filesize;
++			else
++				end = cconf->endpos + 1; // +1 because HTTP ranges are inclusive
+ 			fprintf(cconf->stream, PARTIALSERVMSG, AMPLE_VERSION, 
+-				cconf->startpos, cconf->endpos, 
+-				cconf->mp3base->filesize);
+-		fflush(cconf->stream);
+-		playfile(cconf, cconf->mp3base);
++				cconf->startpos, end, filesize);
++			fflush(cconf->stream);
++			end += startOffset;
++			playopenfile(cconf, cconf->mp3base, file, end);
++		}
+ 
+ 	} else if(MODE_ISSET(MODE_SINGLE)) {
+ 		debug(1, "Entering MP3-Single mode\n");
+ 		sendstatusmsg(cconf->statussock, 
+ 			      "%d:Sending single MP3", getpid());
+-		fprintf(cconf->stream, SINGLESERVMSG, AMPLE_VERSION, 
+-			cconf->mp3base->filesize);
+-		fflush(cconf->stream);
+-		playfile(cconf, cconf->mp3base);
++		file = preparefile(cconf, cconf->mp3base, &startOffset, &endOffset);
++		if (file)
++		{
++			filesize = cconf->mp3base->filesize - startOffset - endOffset;
++			fprintf(cconf->stream, SINGLESERVMSG, AMPLE_VERSION, filesize);
++			fflush(cconf->stream);
++			end = endOffset > 0 ? cconf->mp3base->filesize - endOffset : -1;
++			playopenfile(cconf, cconf->mp3base, file, end);
++		}
+ 
+ 	} else if (MODE_ISSET(MODE_METADATA)) {
+ 		getrange(cconf->mp3base, gconf.recursive, &min, &max);
+--- a/src/client.h
++++ b/src/client.h
+@@ -109,3 +109,8 @@
+ </center></body></html>"
+ 
+ extern int handleclient(int conn, int udpsock);
++
++static FILE * preparefile(struct client_config *cconf, mp3entry *entry, long *startOffset, long *endOffset);
++void playopenfile(struct client_config *cconf, mp3entry *entry, FILE *file, long end);
++
++

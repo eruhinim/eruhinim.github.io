@@ -1,0 +1,200 @@
+From 18c960d4503b514f28e13f1954770bc1978def13 Mon Sep 17 00:00:00 2001
+Message-Id: <18c960d4503b514f28e13f1954770bc1978def13.1396053512.git.agx@sigxcpu.org>
+From: =?UTF-8?q?Guido=20G=C3=BCnther?= <agx@sigxcpu.org>
+Date: Mon, 27 May 2013 15:34:01 +0200
+Subject: [PATCH] Add GSSAPI/Kerberos authentication via Negotiate
+
+When the service name is set via the servicename config option and
+pykerberos is installed allow authentication via the negotiate header.
+
+Since this is not using basic auth and it's on top of all other
+authenciation schemes it's not implemented as an acl module. This will
+also allow us to make the whole negotiate auth be connection based in
+the future.
+
+This has been succesfully tested with iceowl.
+---
+ calypso/__init__.py | 37 +++++++++++++++++-----
+ calypso/gssapi.py   | 90 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 119 insertions(+), 8 deletions(-)
+ create mode 100644 calypso/gssapi.py
+
+diff --git a/calypso/__init__.py b/calypso/__init__.py
+index ba53288..74918f8 100644
+--- a/calypso/__init__.py
++++ b/calypso/__init__.py
+@@ -53,13 +53,14 @@ except ImportError:
+     import BaseHTTPServer as server
+ # pylint: enable=F0401
+ 
+-from . import acl, config, webdav, xmlutils, paths
++from . import acl, config, webdav, xmlutils, paths, gssapi
+ 
+ log = logging.getLogger()
+ ch = logging.StreamHandler()
+ formatter = logging.Formatter("%(message)s")
+ ch.setFormatter (formatter)
+ log.addHandler(ch)
++negotiate = gssapi.Negotiate(log)
+ 
+ VERSION = "1.3"
+ 
+@@ -67,25 +68,30 @@ def _check(request, function):
+     """Check if user has sufficient rights for performing ``request``."""
+     # ``_check`` decorator can access ``request`` protected functions
+     # pylint: disable=W0212
++    owner = user = password = None
++    negotiate_success = False
+ 
+     authorization = request.headers.get("Authorization", None)
+     if authorization:
+-        challenge = authorization.lstrip("Basic").strip().encode("ascii")
+-        plain = request._decode(base64.b64decode(challenge))
+-        user, password = plain.split(":")
+-    else:
+-        user = password = None
++        if authorization.startswith("Basic"):
++            challenge = authorization.lstrip("Basic").strip().encode("ascii")
++            plain = request._decode(base64.b64decode(challenge))
++            user, password = plain.split(":")
++        elif negotiate.enabled():
++            user, negotiate_success = negotiate.step(authorization, request)
+ 
+-    owner = None
+     if request._collection:
+         owner = request._collection.owner
+ 
+     # Also send UNAUTHORIZED if there's no collection. Otherwise one
+     # could probe the server for (non-)existing collections.
+-    if request.server.acl.has_right(owner, user, password):
++    if (request.server.acl.has_right(owner, user, password) or
++        negotiate_success):
+         function(request, context={"user": user, "user-agent": request.headers.get("User-Agent", None)})
+     else:
+         request.send_calypso_response(client.UNAUTHORIZED, 0)
++        if negotiate.enabled():
++            request.send_header("WWW-Authenticate", "Negotiate")
+         request.send_header(
+             "WWW-Authenticate",
+             "Basic realm=\"Calypso %s - password required\"" % VERSION)
+@@ -138,6 +144,21 @@ class CollectionHTTPHandler(server.BaseHTTPRequestHandler):
+     timeout = 90
+ 
+     server_version = "Calypso/%s" % VERSION
++    queued_headers = {}
++
++    def queue_header(self, keyword, value):
++        self.queued_headers[keyword] = value
++
++    def end_headers(self):
++        """
++        Send out all queued headers and invoke or super classes
++        end_header.
++        """
++        if self.queued_headers:
++            for keyword, val in self.queued_headers.items():
++                self.send_header(keyword, val)
++            self.queued_headers = {}
++        return server.BaseHTTPRequestHandler.end_headers(self)
+ 
+     def address_string(self):
+         return str(self.client_address[0])
+diff --git a/calypso/gssapi.py b/calypso/gssapi.py
+new file mode 100644
+index 0000000..6633483
+--- /dev/null
++++ b/calypso/gssapi.py
+@@ -0,0 +1,90 @@
++# -*- coding: utf-8 -*-
++#
++# This file is part of Calypso - CalDAV/CardDAV/WebDAV Server
++# Copyright © 2013 Guido Günther <agx@sigxcpu.org>
++#
++# This library is free software: you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation, either version 3 of the License, or
++# (at your option) any later version.
++#
++# This library is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with Calypso.  If not, see <http://www.gnu.org/licenses/>.
++
++"""
++Gssapi module.
++
++This module handles kerberos authenticatien via gssapi
++"""
++
++import os
++
++from . import config
++
++# pylint: disable=F0401
++try:
++    import kerberos as krb
++except ImportError:
++    krb = None
++# pylint: disable=F0401
++
++class Negotiate(object):
++    _gssapi = False
++
++    def __init__(self, log):
++        self.log = log
++        try:
++            self.servicename = os.path.expanduser(config.get("server",
++                                                             "servicename"))
++        except:
++            self.servicename = None
++
++        if self.servicename and krb:
++            self._gssapi = True
++
++    def enabled(self):
++        return self._gssapi
++
++    def step(self, authorization, request):
++        """
++        Try to authenticate the client and if succesful authenticate
++        ourselfes to the client.
++        """
++        user = None
++
++        if not self.enabled():
++            return (None, False)
++
++        try:
++            (neg, challenge) = authorization.split()
++            if neg.lower().strip() != 'negotiate':
++                return (None, False)
++
++            self.log.debug("Negotiate header found, trying Kerberos")
++            result, context = krb.authGSSServerInit(self.servicename);
++            result = krb.authGSSServerStep(context, challenge);
++
++            if result == -1:
++                return (None, False)
++
++            response = krb.authGSSServerResponse(context)
++            # Client authenticated successfully, so authenticate to the client:
++            request.queue_header("www-authenticate",
++                                 "negotiate " + response)
++            user = krb.authGSSServerUserName(context)
++
++            self.log.debug("Negotiate: found user %s" % user)
++            result = krb.authGSSServerClean(context)
++            if result != 1:
++                self.log.error("Failed to cleanup gss context")
++            return (user, True)
++        except krb.GSSError, err:
++            self.log.error("gssapi error: %s", err)
++
++        return None, False
++
+-- 
+1.9.0
+

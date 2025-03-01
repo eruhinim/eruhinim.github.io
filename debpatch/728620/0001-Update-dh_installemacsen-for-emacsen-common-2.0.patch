@@ -1,0 +1,131 @@
+From 4ac1cbece54c93f764316a1d733a73ee98604c5d Mon Sep 17 00:00:00 2001
+From: Modestas Vainius <modax@debian.org>
+Date: Sun, 3 Nov 2013 14:28:43 +0200
+Subject: [PATCH] Update dh_installemacsen for emacsen-common 2.0.
+
+Update dh_installemacsen and related scripts to follow
+/usr/share/doc/emacsen-common/debian-emacs-policy.gz as of
+emacsen-common package version 2.0.5. The changes include:
+
+* Install debian/package.emacsen-compat into
+  usr/lib/emacsen-common/packages/compat/package if present
+* All maintainer scripts test for existance of
+  /var/lib/emacsen-common/state/package/installed/emacsen-common as
+  mandated by policy.
+* Generate and install preinst maintainer script if needed.
+
+/usr/share/doc/emacsen-common/debian-emacs-policy.gz
+---
+ autoscripts/postinst-emacsen |  4 ++--
+ autoscripts/preinst-emacsen  |  5 +++++
+ autoscripts/prerm-emacsen    |  4 ++--
+ dh_installemacsen            | 26 +++++++++++++++++++++-----
+ 4 files changed, 30 insertions(+), 9 deletions(-)
+ create mode 100644 autoscripts/preinst-emacsen
+
+diff --git a/autoscripts/postinst-emacsen b/autoscripts/postinst-emacsen
+index f80e1db..6a46d79 100644
+--- a/autoscripts/postinst-emacsen
++++ b/autoscripts/postinst-emacsen
+@@ -1,4 +1,4 @@
+-if [ "$1" = "configure" ] && [ -x /usr/lib/emacsen-common/emacs-package-install ]
++if [ "$1" = "configure" ] && [ -e /var/lib/emacsen-common/state/package/installed/emacsen-common ]
+ then
+-	/usr/lib/emacsen-common/emacs-package-install #PACKAGE#
++	/usr/lib/emacsen-common/emacs-package-install --postinst #PACKAGE#
+ fi
+diff --git a/autoscripts/preinst-emacsen b/autoscripts/preinst-emacsen
+new file mode 100644
+index 0000000..780fc69
+--- /dev/null
++++ b/autoscripts/preinst-emacsen
+@@ -0,0 +1,5 @@
++if ( [ "$1" = "install" ] || [ "$1" = "upgrade" ] ) \
++	&& [ -e /var/lib/emacsen-common/state/package/installed/emacsen-common ]
++then
++	/usr/lib/emacsen-common/emacs-package-install --preinst #PACKAGE#
++fi
+diff --git a/autoscripts/prerm-emacsen b/autoscripts/prerm-emacsen
+index 8c3ca64..31ecfaa 100644
+--- a/autoscripts/prerm-emacsen
++++ b/autoscripts/prerm-emacsen
+@@ -1,3 +1,3 @@
+-if [ -x /usr/lib/emacsen-common/emacs-package-remove ] ; then
+-	/usr/lib/emacsen-common/emacs-package-remove #PACKAGE#
++if [ -e /var/lib/emacsen-common/state/package/installed/emacsen-common ] ; then
++	/usr/lib/emacsen-common/emacs-package-remove --prerm #PACKAGE#
+ fi
+diff --git a/dh_installemacsen b/dh_installemacsen
+index 92037f2..b2ee142 100755
+--- a/dh_installemacsen
++++ b/dh_installemacsen
+@@ -19,15 +19,20 @@ B<dh_installemacsen> is a debhelper program that is responsible for installing
+ files used by the Debian B<emacsen-common> package into package build
+ directories.
+ 
+-It also automatically generates the F<postinst> and F<prerm> commands needed to
+-register a package as an Emacs add on package. The commands are added to
+-the maintainer scripts by B<dh_installdeb>. See L<dh_installdeb(1)>
+-for an explanation of how this works.
++It also automatically generates the F<preinst> F<postinst> and F<prerm>
++commands needed to register a package as an Emacs add on package. The commands
++are added to the maintainer scripts by B<dh_installdeb>. See
++L<dh_installdeb(1)> for an explanation of how this works.
+ 
+ =head1 FILES
+ 
+ =over 4
+ 
++=item debian/I<package>.emacsen-compat
++
++Installed into F<usr/lib/emacsen-common/packages/compat/package> in the
++package build directory.
++
+ =item debian/I<package>.emacsen-install
+ 
+ Installed into F<usr/lib/emacsen-common/packages/install/package> in the
+@@ -83,15 +88,23 @@ if (! defined $dh{FLAVOR}) {
+ 	$dh{FLAVOR}='emacs';
+ }
+ 
+-# PROMISE: DH NOOP WITHOUT emacsen-install emacsen-remove emacsen-startup
++# PROMISE: DH NOOP WITHOUT emacsen-common emacsen-install emacsen-remove emacsen-startup
+ 
+ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 	my $tmp=tmpdir($package);
+ 
++	my $emacsen_compat=pkgfile($package,"emacsen-compat");
+ 	my $emacsen_install=pkgfile($package,"emacsen-install");
+ 	my $emacsen_remove=pkgfile($package,"emacsen-remove");
+ 	my $emacsen_startup=pkgfile($package,"emacsen-startup");
+ 
++	if ($emacsen_compat ne '') {
++		if (! -d "$tmp/usr/lib/emacsen-common/packages/compat") {
++			doit("install","-d","$tmp/usr/lib/emacsen-common/packages/compat");
++		}
++		doit("install","-m0644",$emacsen_compat,"$tmp/usr/lib/emacsen-common/packages/compat/$package");
++	}
++
+ 	if ($emacsen_install ne '') {
+ 		if (! -d "$tmp/usr/lib/emacsen-common/packages/install") {
+ 			doit("install","-d","$tmp/usr/lib/emacsen-common/packages/install");
+@@ -115,6 +128,8 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 
+ 	if ($emacsen_install ne '' || $emacsen_remove ne '') {
+ 		if (! $dh{NOSCRIPTS}) {
++			autoscript($package,"preinst","preinst-emacsen",
++				"s/#PACKAGE#/$package/");
+ 			autoscript($package,"postinst","postinst-emacsen",
+ 				"s/#PACKAGE#/$package/");
+ 			autoscript($package,"prerm","prerm-emacsen",
+@@ -126,6 +141,7 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ =head1 SEE ALSO
+ 
+ L<debhelper(7)>
++L</usr/share/doc/emacsen-common/debian-emacs-policy.gz>
+ 
+ This program is a part of debhelper.
+ 
+-- 
+1.8.4.2
+

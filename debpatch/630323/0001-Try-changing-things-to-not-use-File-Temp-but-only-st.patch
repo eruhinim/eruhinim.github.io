@@ -1,0 +1,149 @@
+From 720570bc6786d3b66d425af730da357251dfcf2c Mon Sep 17 00:00:00 2001
+From: Agustin Martin Domingo <agmartin@debian.org>
+Date: Thu, 10 Feb 2011 18:56:24 +0100
+Subject: [PATCH] Try changing things to not use File::Temp, but only stuff in
+ Debian perl-base.
+
+---
+ debian/rules                        |    2 +-
+ scripts/system/ispell-autobuildhash |   38 ++++++++++++++++++++++++++++++----
+ 2 files changed, 34 insertions(+), 6 deletions(-)
+
+diff --git a/debian/rules b/debian/rules
+index f5f97b1..34f84aa 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -64,7 +64,7 @@ binary-indep: build install
+ 	dh_installdebconf
+ 	dh_fixperms
+ 	dh_installdeb
+-	dh_perl scripts/system/*
++	dh_perl -d scripts/system/*
+ 	dh_gencontrol
+ 	dh_md5sums
+ 	dh_builddeb
+diff --git a/scripts/system/ispell-autobuildhash b/scripts/system/ispell-autobuildhash
+index 21aa1c2..07ebad3 100755
+--- a/scripts/system/ispell-autobuildhash
++++ b/scripts/system/ispell-autobuildhash
+@@ -33,7 +33,9 @@ my $compatdir    = "/var/lib/ispell";
+ # Set tmpdir base, honouring TMPDIR. Real tmpdir is set after options parsing.
+ my $tmpdir    = $ENV{'TMPDIR'} || '/tmp';
+ 
++# ---------------------------------------------------------------------
+ sub usage {
++# ---------------------------------------------------------------------
+   print STDERR "\nUsage:\tispell-autobuildhash [options]\n"
+     . "\n"
+     . "Options:\n"
+@@ -43,11 +45,15 @@ sub usage {
+     . "\t--triggered     Tell the script that is run in the triggers stage.\n";
+ }
+ 
++# ---------------------------------------------------------------------
+ sub debugprint {
++# ---------------------------------------------------------------------
+   print STDERR "@_\n" if $debug;
+ }
+ 
++# ---------------------------------------------------------------------
+ sub mymessage{
++# ---------------------------------------------------------------------
+   my $dict     = shift;
+   my $message  = join(" ",@_);
+   my $question = "dictionaries-common/ispell-autobuildhash-message";
+@@ -71,16 +77,27 @@ This error was caused by package providing hash $dict, although it
+ can be made evident during other package postinst. Please complain
+ to the maintainer of package providing hash $dict. In the meantime
+ you might need to remove package providing $dict.hash\n";
+-  myclean();
++  &auto_clean;
+   exit 1;
+ }
+ 
++# ---------------------------------------------------------------------
+ sub myerror {
++# ---------------------------------------------------------------------
+   my $dict = shift;
+   mymessage $dict,@_;
+ }
+ 
+ # ---------------------------------------------------------------------
++sub auto_clean {
++# ---------------------------------------------------------------------
++  if ( -d $tmpdir ){
++    unlink <$tmpdir/*>;
++    rmdir $tmpdir;
++  }
++}
++
++# ---------------------------------------------------------------------
+ #      Handle autorebuilding
+ # ---------------------------------------------------------------------
+ 
+@@ -93,7 +110,7 @@ sub autorebuild {
+ 
+   die "ispell-autobuildhash: No argument passed to function autorebuild.\n" unless $dict;
+ 
+-  print STDERR "ispell-autobuildhash: Processing \'$dict\' dict\n";
++  print STDERR "ispell-autobuildhash: Processing \'$dict\' dict.\n";
+ 
+   my $tempfile = "$tmpdir/$dict-mwl";
+   if ( -e $aff ){
+@@ -104,8 +121,10 @@ sub autorebuild {
+ 	print STDERR "$gzip_cmd\n";
+ 	print STDERR "$build_cmd\n";
+       } else {
++	print STDERR "$gzip_cmd\n" if $debug;
+ 	system ("$gzip_cmd") == 0
+ 	  or myerror($dict,"Could not gunzip the munched wordlist for $dict");
++	print STDERR "$build_cmd\n" if $debug;
+ 	system ("$build_cmd") == 0
+ 	  or myerror($dict,"Could not build the hash file for $dict") ;
+       }
+@@ -115,6 +134,7 @@ sub autorebuild {
+ 	if ( $dry_run ) {
+ 	  print STDERR "$cmd\n";
+ 	} else {
++	  print STDERR "$cmd\n" if $debug;
+ 	  system ("$cmd") == 0
+ 	    or myerror($dict,"Problems running update-ispell-hash for $dict");
+ 	}
+@@ -124,6 +144,7 @@ sub autorebuild {
+ 	if ( $dry_run ) {
+ 	  print STDERR "$cmd\n";
+ 	} else {
++	  print STDERR "$cmd\n" if $debug;
+ 	  system ("$cmd") == 0
+ 	    or myerror($dict,"Problems running update-ipolish-hash for $dict");
+ 	}
+@@ -177,9 +198,14 @@ unless ( $triggered or $force ){
+ }
+ 
+ # Prepare temporary directory
+-$tmpdir = tempdir("ispell-auto.XXXXXXXXXX",
+-		  CLEANUP => ( ! $debug ), # Remove tempdir tree on exit unless $debug
+-		  DIR => "$tmpdir");
++$tmpdir = `mktemp -d ispell-auto.XXXXXXXXXX --tmpdir=$tmpdir`
++      or die "Cannot make temporary directory. Aborting ...\n";
++chomp $tmpdir;
++
++$SIG{INT}     = \&auto_clean;
++$SIG{KILL}    = \&auto_clean;
++$SIG{TERM}    = \&auto_clean;
++$SIG{__DIE__} = \&auto_clean;
+ 
+ print STDERR "ispell-autobuildhash: Using temporary directory\"$tmpdir\"\n"
+   if $debug;
+@@ -219,6 +245,8 @@ if ( my $ispell_compat = get_ispell_compat() ){
+   debugprint "ispell-autobuildhash: no ispell compat info. ispell may not be installed. Aborting ...\n";
+ }
+ 
++&auto_clean unless $debug;
++
+ __END__
+ 
+ =head1 NAME
+-- 
+1.7.5.4
+

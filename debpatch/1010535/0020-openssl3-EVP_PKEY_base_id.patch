@@ -1,0 +1,63 @@
+Description: OpenSSL 3 compatibility fix for EVP_PKEY_base_id usage
+ The WARNING section of the EVP_PKEY_base_id manpage in OpenSSL 3 says that
+ EVP_PKEY_base_id is "only reliable with EVP_PKEYs that have been assigned an
+ internal key with EVP_PKEY_assign_*", and the usage here of base_id seems to
+ be without a EVP_PKEY_assign usage.
+
+ This same warning points to EVP_PKEY_is_a, which seems fine for this purpose
+ but is part of OpenSSL 3.
+Bug-Ubuntu: https://bugs.launchpad.net/ubuntu/+source/cyrus-imapd/+bug/1971469
+Last-Update: 2022-05-03
+--- a/imap/http_jwt.c
++++ b/imap/http_jwt.c
+@@ -120,10 +120,15 @@
+     EVP_PKEY *pkey = PEM_read_bio_PUBKEY(bp, NULL, NULL, NULL);
+ 
+     if (pkey) {
++#if OPENSSL_VERSION_NUMBER >= 0x30000000L
++        if (!EVP_PKEY_is_a(pkey, "RSA")) {
++            xsyslog(LOG_ERR, "Unsupported public key", NULL);
++#else
+         int nid = EVP_PKEY_base_id(pkey);
+         if (nid != EVP_PKEY_RSA) {
+             xsyslog(LOG_ERR, "Unsupported public key",
+                     "type=<%s>", OBJ_nid2ln(nid));
++#endif
+             EVP_PKEY_free(pkey);
+             pkey = NULL;
+         }
+@@ -318,6 +323,25 @@
+     return 1;
+ }
+ 
++static int validate_pkey_type(struct jwt *jwt, EVP_PKEY *pkey)
++{
++    if (!jwt->nid)
++        return 0;
++
++    if (jwt->nid == EVP_PKEY_base_id(pkey))
++        return 1;
++
++#if OPENSSL_VERSION_NUMBER >= 0x30000000L
++    if (jwt->nid == EVP_PKEY_HMAC && EVP_PKEY_is_a(pkey, "HMAC"))
++        return 1;
++
++    if (jwt->nid == EVP_PKEY_RSA && EVP_PKEY_is_a(pkey, "RSA"))
++        return 1;
++#endif
++
++    return 0;
++}
++
+ static int validate_signature(struct jwt *jwt)
+ {
+     buf_reset(&jwt->buf);
+@@ -339,7 +363,7 @@
+         EVP_PKEY *pkey = ptrarray_nth(&pkeys, i);
+         EVP_MD_CTX_reset(ctx);
+ 
+-        if (jwt->nid != EVP_PKEY_base_id(pkey))
++        if (!validate_pkey_type(jwt, pkey))
+             continue;
+ 
+         if (jwt->nid == EVP_PKEY_HMAC) {

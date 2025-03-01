@@ -1,0 +1,219 @@
+Index: utils.c
+===================================================================
+--- utils.c	(revision 305)
++++ utils.c	(revision 306)
+@@ -508,6 +508,7 @@
+ 	data->body_len = 0;
+ 	data->empty = 1;
+ 	data->port = 0;
++	data->http_version = -1;
+ 	data->headers = NULL;
+ 	data->method = NULL;
+ 	data->url = NULL;
+@@ -535,6 +536,7 @@
+ 	dst->body_len = src->body_len;
+ 	dst->empty = src->empty;
+ 	dst->port = src->port;
++	dst->http_version = src->http_version;
+ 
+ 	if (src->headers)
+ 		dst->headers = hlist_dup(src->headers);
+@@ -584,6 +586,7 @@
+ 	data->body_len = 0;
+ 	data->empty = 1;
+ 	data->port = 0;
++	data->http_version = -1;
+ 
+ 	if (data->headers) hlist_free(data->headers);
+ 	if (data->method) free(data->method);
+@@ -623,6 +626,7 @@
+ 	if (data->http) free(data->http);
+ 	if (data->msg) free(data->msg);
+ 	if (data->body) free(data->body);
++	memset(data, 0, sizeof(struct rr_data_s));
+ 	free(data);
+ }
+ 
+Index: forward.c
+===================================================================
+--- forward.c	(revision 305)
++++ forward.c	(revision 306)
+@@ -446,7 +447,9 @@
+ 					&& strcasecmp(hostname, data[0]->hostname)) {
+ 				if (debug)
+ 					printf("\n******* F RETURN: %s *******\n", data[0]->url);
+-				if (authok)
++				if (authok && data[0]->http_version >= 11
++						&& (hlist_subcmp(data[0]->headers, "Proxy-Connection", "keep-alive")
++							|| hlist_subcmp(data[0]->headers, "Connection", "keep-alive")))
+ 					proxy_alive = 1;
+ 
+ 				rc = dup_rr_data(data[0]);
+@@ -465,7 +468,7 @@
+ 			/*
+ 			 * Modify request headers.
+ 			 *
+-			 * Try to request keep-alive for every connection. We keep them in a pool
++			 * Try to request keep-alive for every client supporting HTTP/1.1+. We keep them in a pool
+ 			 * for future reuse.
+ 			 */
+ 			if (loop == 0 && data[0]->req) {
+@@ -499,13 +503,14 @@
+ 				}
+ 
+ 				/*
+-				 * Also remove runaway P-A from the client (e.g. Basic from N-t-B), which might 
+-				 * cause some ISAs to deny us, even if the connection is already auth'd.
++				 * Force proxy keep-alive if the client can handle it (HTTP >= 1.1)
+ 				 */
+-				data[0]->headers = hlist_mod(data[0]->headers, "Proxy-Connection", "keep-alive", 1);
++				if (data[0]->http_version >= 11)
++					data[0]->headers = hlist_mod(data[0]->headers, "Proxy-Connection", "keep-alive", 1);
+ 
+ 				/*
+-				 * Remove all Proxy-Authorization headers from client
++				 * Also remove runaway P-A from the client (e.g. Basic from N-t-B), which might 
++				 * cause some ISAs to deny us, even if the connection is already auth'd.
+ 				 */
+ 				while (hlist_get(data[loop]->headers, "Proxy-Authorization")) {
+ 					data[loop]->headers = hlist_del(data[loop]->headers, "Proxy-Authorization");
+@@ -672,8 +679,14 @@
+ 			 * This way, we also tell our caller that proxy keep-alive is impossible.
+ 			 */
+ 			if (loop == 1) {
+-				proxy_alive = hlist_subcmp(data[loop]->headers, "Proxy-Connection", "keep-alive");
+-				if (!proxy_alive) {
++				proxy_alive = hlist_subcmp(data[1]->headers, "Proxy-Connection", "keep-alive")
++					&& data[0]->http_version >= 11;
++				if (proxy_alive) {
++					data[1]->headers = hlist_mod(data[1]->headers, "Proxy-Connection", "keep-alive", 1);
++					data[1]->headers = hlist_mod(data[1]->headers, "Connection", "keep-alive", 1);
++				} else {
++					data[1]->headers = hlist_mod(data[1]->headers, "Proxy-Connection", "close", 1);
++					data[1]->headers = hlist_mod(data[1]->headers, "Connection", "close", 1);
+ 					if (debug)
+ 						printf("PROXY CLOSING CONNECTION\n");
+ 					rc = (void *)-1;
+Index: utils.h
+===================================================================
+--- utils.h	(revision 305)
++++ utils.h	(revision 306)
+@@ -89,6 +89,7 @@
+ 	int body_len;
+ 	int empty;
+ 	int port;
++	int http_version;
+ 	char *method;
+ 	char *url;
+ 	char *rel_url;
+Index: http.c
+===================================================================
+--- http.c	(revision 305)
++++ http.c	(revision 306)
+@@ -84,7 +84,7 @@
+  */
+ int headers_recv(int fd, rr_data_t data) {
+ 	int i, bsize;
+-	int len;
++	int len, is_http = 0;
+ 	char *buf;
+ 	char *tok, *s3 = 0;
+ 	char *orig = NULL;
+@@ -108,12 +108,22 @@
+ 	orig = strdup(buf);
+ 	len = strlen(buf);
+ 	tok = strtok_r(buf, " ", &s3);
+-	if (tok && (!strncasecmp(buf, "HTTP/", 5) || !strncasecmp(tok, "ICY", 3))) {
++	if (tok && ((is_http = !strncasecmp(tok, "HTTP/", 5)) || !strncasecmp(tok, "ICY", 3))) {
+ 		data->req = 0;
+ 		data->empty = 0;
+ 		data->http = strdup(tok);
+ 		data->msg = NULL;
+ 
++		/*
++		 * Let's find out the numeric version of the HTTP version: 09, 10, 11.
++		 * Set to -1 if header is misformatted.
++		 */
++		if (is_http && (tok = strchr(data->http, '/')) && strlen(tok) >= 4 && isdigit(tok[1]) && isdigit(tok[3])) {
++			data->http_version = (tok[1] - 0x30) * 10 + (tok[3] - 0x30);
++		} else {
++			data->http_version = -1;
++		}
++
+ 		tok = strtok_r(NULL, " ", &s3);
+ 		if (tok) {
+ 			ccode = strdup(tok);
+@@ -156,6 +166,16 @@
+ 			goto bailout;
+ 		}
+ 
++		/*
++		 * Let's find out the numeric version of the HTTP version: 09, 10, 11.
++		 * Set to -1 if header is misformatted.
++		 */
++		if ((tok = strchr(data->http, '/')) && strlen(tok) >= 4 && isdigit(tok[1]) && isdigit(tok[3])) {
++			data->http_version = (tok[1] - 0x30) * 10 + (tok[3] - 0x30);
++		} else {
++			data->http_version = -1;
++		}
++
+ 		if ((tok = strstr(data->url, "://"))) {
+ 			tok += 3;
+ 		} else {
+Index: direct.c
+===================================================================
+--- direct.c	(revision 305)
++++ direct.c	(revision 306)
+@@ -282,10 +284,21 @@
+ 					data[0]->url = strdup(data[0]->rel_url);
+ 				}
+ 
+-				data[0]->headers = hlist_mod(data[0]->headers, "Connection", "keep-alive", 1);
+-				data[0]->headers = hlist_del(data[0]->headers, "Proxy-Authorization");
++				/*
++				 * Force proxy keep-alive if the client can handle it (HTTP >= 1.1)
++				 */
++				if (data[0]->http_version >= 11)
++					data[0]->headers = hlist_mod(data[0]->headers, "Connection", "keep-alive", 1);
+ 
+ 				/*
++				 * Also remove runaway P-A from the client (e.g. Basic from N-t-B), which might 
++				 * cause some ISAs to deny us, even if the connection is already auth'd.
++				 */
++				while (hlist_get(data[loop]->headers, "Proxy-Authorization")) {
++					data[loop]->headers = hlist_del(data[loop]->headers, "Proxy-Authorization");
++				}
++
++				/*
+ 				 * Try to get auth from client if present
+ 				 */
+ 				if (http_parse_basic(data[0]->headers, "Authorization", tcreds) > 0 && debug)
+@@ -373,18 +386,25 @@
+ 			 */
+ 			if (loop == 1) {
+ 				conn_alive = !hlist_subcmp(data[1]->headers, "Connection", "close")
+-					&& http_has_body(data[0], data[1]) != -1;
++					&& http_has_body(data[0], data[1]) != -1
++					&& data[0]->http_version >= 11;
+ 				if (conn_alive) {
+ 					data[1]->headers = hlist_mod(data[1]->headers, "Proxy-Connection", "keep-alive", 1);
+ 					data[1]->headers = hlist_mod(data[1]->headers, "Connection", "keep-alive", 1);
+ 				} else {
+ 					data[1]->headers = hlist_mod(data[1]->headers, "Proxy-Connection", "close", 1);
++					data[1]->headers = hlist_mod(data[1]->headers, "Connection", "close", 1);
+ 					rc = (void *)-1;
+ 				}
+ 			}
+ 
+-			if (debug)
++			if (debug) {
+ 				printf("Sending headers (%d)...\n", *wsocket[loop]);
++				if (loop == 0) {
++					printf("HEAD: %s %s %s\n", data[loop]->method, data[loop]->url, data[loop]->http);
++					hlist_dump(data[loop]->headers);
++				}
++			}
+ 
+ 			/*
+ 			 * Send headers
+

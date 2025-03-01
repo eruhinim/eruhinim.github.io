@@ -1,0 +1,174 @@
+diff --git a/arpwatch.8 b/arpwatch.8
+index 1bee166..266020b 100644
+--- a/arpwatch.8
++++ b/arpwatch.8
+@@ -44,6 +44,14 @@ arpwatch \- keep track of ethernet/ip address pairings
+ .br
+ .ti +8
+ [
++.B -F
++.I filter
++]
++.\" **
++.\" **
++.br
++.ti +8
++[
+ .B -i
+ .I interface
+ ]
+@@ -189,6 +197,13 @@ does not fork.
+ .\" **
+ .LP
+ (Debian) The
++.B -f
++flag is used to specify a pcap filter used to ignore packages.
++It is prefixed with "(arp or rarp) and".
++.\" **
++.\" **
++.LP
++(Debian) The
+ .B -s
+ flag is used to specify the path to the sendmail program.
+ Any program that takes the option -odi and then text from stdin
+diff --git a/arpwatch.c b/arpwatch.c
+index 9892894..52fa1dc 100644
+--- a/arpwatch.c
++++ b/arpwatch.c
+@@ -166,6 +166,48 @@ void dropprivileges(const char* user)
+       syslog(LOG_INFO, "Running as uid=%d gid=%d", getuid(), getgid());
+ }
+ 
++int compile_filter(pcap_t *p, struct bpf_program *fp, const char *filter_user,
++	bpf_u_int32 netmask)
++{
++	int len, result;
++
++	char *filter = NULL;
++	static const char filter_extended[] = "(arp or rarp) and ";
++	static const char filter_default[] = "arp or rarp";
++
++	/* calculate needed space for filter string. it is unlikely that
++	 * filter_efault becomes longer that filter_extended + 1, however we use
++	 * strncpy() later, which will behave badly when there is no \0 within
++	 * the first n bytes */
++	len = strlen(filter_user) + strlen(filter_extended) + 1;
++	len = len < strlen(filter_default) ? strlen(filter_default) : len;
++
++	filter = malloc(len);
++	if (!filter) {
++		syslog(LOG_ERR, "compile_filter: out of memory");
++		return -1;
++	}
++
++	if (!filter_user) {
++		/* while copying this string is not needed, this way shortens
++		 * the amount of code we need ant should be easier to read even
++		 * if a tiny bit slower */
++		strncpy(filter, filter_default, len);
++	} else {
++		result = snprintf(filter, len, "%s%s", filter_extended, filter_user);
++		if (result != len - 1) {
++			syslog(LOG_ERR, "compile_filter: snprintf() error");
++			return -1;
++		}
++	}
++	syslog(LOG_INFO, "using pcap filter '%s'", filter);
++
++	result = pcap_compile(p, fp, filter, 1, netmask);
++	free(filter);
++
++	return result;
++}
++
+ int
+ main(int argc, char **argv)
+ {
+@@ -179,6 +221,7 @@ main(int argc, char **argv)
+ 	struct bpf_program code;
+ 	char errbuf[PCAP_ERRBUF_SIZE];
+ 	char* username = NULL;
++	char *filter_user = NULL;
+ 	int restart = 0;
+ 	char options[] =
+ 		"d"
+@@ -187,6 +230,9 @@ main(int argc, char **argv)
+ 		"f:"
+ 		/**/
+ 		/**/
++		"F:"
++		/**/
++		/**/
+ 		"i:"
+ 		/**/
+ 		/**/
+@@ -262,6 +308,10 @@ main(int argc, char **argv)
+ 			arpfile = optarg;
+ 			break;
+ 
++		case 'F':
++			filter_user = strdup(optarg);
++			break;
++
+ 		case 'i':
+ 			interface = optarg;
+ 			break;
+@@ -429,10 +479,12 @@ label_restart:
+ 	}
+ 
+ 	/* Compile and install filter */
+-	if (pcap_compile(pd, &code, "arp or rarp", 1, netmask) < 0) {
++	if (compile_filter(pd, &code, filter_user, netmask) < 0) {
+ 		syslog(LOG_ERR, "pcap_compile: %s", pcap_geterr(pd));
+ 		exit(1);
+ 	}
++	free(filter_user);
++
+ 	if (pcap_setfilter(pd, &code) < 0) {
+ 		syslog(LOG_ERR, "pcap_setfilter: %s", pcap_geterr(pd));
+ 		exit(1);
+@@ -901,6 +953,9 @@ usage(void)
+ 		"[-f datafile] "
+ 		/**/
+ 		/**/
++		"[-F \"filter\" ]"
++		/**/
++		/**/
+ 		"[-i interface] "
+ 		/**/
+ 		/**/
+diff --git a/debian/arpwatch.default b/debian/arpwatch.default
+index b0a7d8f..42faf28 100644
+--- a/debian/arpwatch.default
++++ b/debian/arpwatch.default
+@@ -3,5 +3,8 @@
+ # Debian: don't report bogons, don't use PROMISC.
+ ARGS="-N -p"
+ 
++# If you want to use pcap filters, you must suround them by single quotes, e.g.
++# ARGS="-N -p -F 'not host 192.168.0.1'"
++
+ # Debian: run as `arpwatch' user.  Empty this to run as root.
+ RUNAS="arpwatch"
+diff --git a/debian/init.d b/debian/init.d
+index 4641fa6..469ca08 100644
+--- a/debian/init.d
++++ b/debian/init.d
+@@ -58,7 +58,7 @@ start_instance () {
+ 		echo -n "(chown $RUNAS $DATAFILE) "
+ 		chown $RUNAS $DATAFILE
+ 	fi
+-	start-stop-daemon --start --quiet \
++	exec start-stop-daemon --start --quiet \
+ 		--pidfile /var/run/${INSTANCE}.pid \
+ 		--exec $DAEMON -- $IFACE_OPTS $ARGS
+ 	echo "${INSTANCE}."
+@@ -105,7 +105,7 @@ start_default () {
+ 		echo -n "(chown $RUNAS $DATADIR/arp.dat) "
+ 		chown $RUNAS $DATADIR/arp.dat
+ 	fi
+-	start-stop-daemon --start --quiet \
++	exec start-stop-daemon --start --quiet \
+ 		--exec $DAEMON -- $ARGS
+ 	echo "$NAME."
+ }

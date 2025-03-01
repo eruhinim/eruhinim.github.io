@@ -1,0 +1,114 @@
+--- modules/cloop/compressed_loop.c.orig	2005-03-05 01:16:13.000000000 -0500
++++ modules/cloop/compressed_loop.c	2005-03-05 01:20:25.000000000 -0500
+@@ -120,6 +120,7 @@
+ 
+  struct file   *backing_file;  /* associated file */
+  struct inode  *backing_inode; /* for bmap */
++ char           backing_file_name[LO_NAME_SIZE];
+ 
+  unsigned int underlying_blksize;
+  int refcnt;
+@@ -448,6 +449,8 @@
+   }
+ 
+  clo->backing_file = file;
++ memcpy(clo->backing_file_name, filename, LO_NAME_SIZE);
++ clo->backing_file_name[LO_NAME_SIZE-1] = 0;
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0)
+  clo->dev = dev;
+ #endif
+@@ -625,6 +628,7 @@
+ error_release:
+  if(bbuf) vfree(bbuf);
+  clo->backing_file=NULL;
++ memset(clo->backing_file_name, 0, LO_NAME_SIZE);
+  return error;
+ }
+ 
+@@ -663,6 +667,7 @@
+  else { filp_close(initial_file,0); initial_file=NULL; }
+  clo->backing_file  = NULL;
+  clo->backing_inode = NULL;
++ memset(clo->backing_file_name, 0, LO_NAME_SIZE);
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0)
+  cloop_sizes[cloop_num] = 0;
+  cloop_blksizes[cloop_num] = 0;
+@@ -678,6 +683,7 @@
+ {
+ 	struct cloop_device *clo;
+ 	int cloop_num, err=0;
++	struct loop_info info;
+ 
+ 	if (!inode) return -EINVAL;
+ 	if (MAJOR(inode->i_rdev) != MAJOR_NR) {
+@@ -700,8 +706,36 @@
+ 	 err = clo_clr_fd(cloop_num, inode->i_bdev);
+ 	 break;
+         case LOOP_SET_STATUS:
++	  if(copy_from_user(&info,(struct loop_info __user *)arg,sizeof(info)))
++	    err = -EFAULT;
++	  else if (clo->backing_file) {
++	    memcpy(clo->backing_file_name, info.lo_name, LO_NAME_SIZE);
++	    clo->backing_file_name[LO_NAME_SIZE-1] = 0;
++	  } else
++	    err = -ENXIO;
++	  break;
+         case LOOP_GET_STATUS:
+-	 err=0; break;
++	  memset(&info, 0, sizeof(info));
++	  if (clo->backing_file) {
++#if LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0)
++	    info.lo_device = kdev_t_to_nr(clo->backing_inode->i_dev);
++	    info.lo_rdevice = kdev_t_to_nr(clo->dev);
++#else
++	    struct kstat stat;
++	    err = vfs_getattr(clo->backing_file->f_vfsmnt,
++			      clo->backing_file->f_dentry, &stat);
++	    if(err) return err;
++	    info.lo_device = new_encode_dev(stat.dev);
++	    info.lo_rdevice = new_encode_dev(clo->bdev ? stat.rdev : stat.dev);
++#endif
++	    info.lo_number = cloop_num;
++	    info.lo_inode = clo->backing_inode->i_ino;
++	    memcpy(info.lo_name, clo->backing_file_name, LO_NAME_SIZE);
++	    if(copy_to_user((struct loop_info __user *)arg,&info,sizeof(info)))
++	      err = -EFAULT;
++	  } else
++	    err = -ENXIO;
++	  break;
+ 	default:
+ 	 err = -EINVAL;
+ 	}
+@@ -832,13 +866,19 @@
+ 
+  if(file) /* global file name for first cloop-Device is a module option string. */
+   {
+-   initial_file=filp_open(file,0x00,0x00);
+-   if(initial_file==NULL||IS_ERR(initial_file))
++    initial_file=filp_open(file, O_RDONLY | O_LARGEFILE, 0);
++    if(initial_file==NULL||IS_ERR(initial_file))
+     {
+      printk(KERN_ERR
+-            "%s: Unable to get file %s for cloop device\n",
+-            cloop_name, file);
+-     return -EINVAL;
++            "%s: Unable to get file %s for cloop device (%ld)\n",
++            cloop_name, file, PTR_ERR(initial_file));
++     if (initial_file) {
++       error = PTR_ERR(initial_file);
++       initial_file = NULL;
++     } else
++       error = -EINVAL;
++     i=max_cloop;
++     goto out_mem;
+     }
+    error=clo_set_file(0,initial_file,file);
+    if(error) { i=max_cloop; goto out_mem; }
+@@ -857,6 +897,7 @@
+ /* error_filp_close: */
+  if(initial_file) filp_close(initial_file,0); initial_file=NULL;
+  cloop_dev[0].backing_file=NULL;
++ memset(cloop_dev[0].backing_file_name, 0, LO_NAME_SIZE);
+  return error;
+ }
+ 

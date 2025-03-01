@@ -1,0 +1,444 @@
+diff --git a/dicod/accesslog.c b/dicod/accesslog.c
+index 09991a0..4bd2af5 100644
+--- a/dicod/accesslog.c
++++ b/dicod/accesslog.c
+@@ -18,6 +18,10 @@
+ #include <fprintftime.h>
+ #include <xgethostname.h>
+ 
++#ifndef   NI_MAXHOST
++#define   NI_MAXHOST 1025
++#endif
++
+ static char status[2][4];
+ 
+ void
+@@ -130,60 +134,19 @@ alog_print(FILE *fp, struct alog_instr *instr, int argc, char **argv)
+ static char *
+ sockaddr_to_hostname(struct sockaddr *sa, int resolve)
+ {
+-    struct sockaddr_in *s_in;
+-    char *ret;
++    char ret[NI_MAXHOST];
+     
+-    switch (sa->sa_family) {
+-    case AF_INET:
+-	s_in = (struct sockaddr_in*)sa;
+-	if (resolve) {
+-	    struct hostent *hp;
+-	    hp = gethostbyaddr((char*) &s_in->sin_addr,
+-			       sizeof(s_in->sin_addr),
+-			       AF_INET);
+-	    if (hp)
+-		return xstrdup(hp->h_name);
+-	}
+-	ret = xstrdup(inet_ntoa(s_in->sin_addr));
+-	break;
+-	
+-    case AF_UNIX:
+-	ret = xstrdup("localhost");
+-	break;
+-		
+-    default:
+-	ret = xstrdup("{unsupported family}");
+-    }
+-
++    getnameinfo(sa, sizeof(*sa), ret, NI_MAXHOST, NULL, 0, (resolve ? 0: NI_NUMERICHOST)) ;
+     return ret;
+ }
+ 
+ static char *
+ sockaddr_to_portname(struct sockaddr *sa, int salen)
+ {
+-    struct sockaddr_in *s_in;
+-    struct sockaddr_un *s_un;
+     char buf[UINTMAX_STRSIZE_BOUND];
+-    char *ret;
+     
+-    switch (sa->sa_family) {
+-    case AF_UNIX:
+-	s_un = (struct sockaddr_un*)sa;
+-	if (_S_UN_NAME(s_un, salen)[0] == 0)
+-	    ret = xstrdup("{AF_UNIX}");
+-	else
+-	    ret = xstrdup(s_un->sun_path);
+-	break;
+-
+-    case AF_INET:
+-	s_in = (struct sockaddr_in*)sa;
+-	ret = xstrdup(umaxtostr(ntohs(s_in->sin_port), buf));
+-	break;
+-
+-    default:
+-	ret = xstrdup("{unsupported family}");
+-    }
+-    return ret;
++    getnameinfo(sa, sizeof(*sa), NULL, 0, buf, UINTMAX_STRSIZE_BOUND, NI_NUMERICSERV) ;
++    return buf;
+ }
+ 	
+ static void
+diff --git a/dicod/dicod.c b/dicod/dicod.c
+index fa4c323..bd03646 100644
+--- a/dicod/dicod.c
++++ b/dicod/dicod.c
+@@ -336,9 +336,9 @@ dicod_loop(dico_stream_t str)
+     }
+     replace_io_stream(str);
+     
+-    if (identity_check && server_addr.sa_family == AF_INET) 
+-	identity_name = query_ident_name((struct sockaddr_in *)&server_addr,
+-					 (struct sockaddr_in *)&client_addr);
++    if (identity_check && ((server_addr.sa_family == AF_INET) || (server_addr.sa_family == AF_INET6))) 
++	identity_name = query_ident_name(&server_addr,
++					 &client_addr);
+     log_connection(_("connection from"));
+     
+     open_databases();
+diff --git a/dicod/dicod.h b/dicod/dicod.h
+index 1260e63..127ff14 100644
+--- a/dicod/dicod.h
++++ b/dicod/dicod.h
+@@ -335,8 +335,8 @@ void compile_access_log(void);
+ void access_log_free_cache(void);
+ 
+ /* ident.c */
+-char *query_ident_name(struct sockaddr_in *srv_addr,
+-		       struct sockaddr_in *clt_addr);
++char *query_ident_name(struct sockaddr *srv_addr,
++		       struct sockaddr *clt_addr);
+ 
+ /* alias.c */
+ int alias_install(const char *kw, int argc, char **argv, grecs_locus_t *ploc);
+diff --git a/dicod/ident.c b/dicod/ident.c
+index cf2c18c..5f55849 100644
+--- a/dicod/ident.c
++++ b/dicod/ident.c
+@@ -371,19 +371,20 @@ socket_io(int fd, int conflag, long timeout,
+ }
+ 
+ char *
+-query_ident_name(struct sockaddr_in *srv_addr, struct sockaddr_in *clt_addr)
++query_ident_name(struct sockaddr *srv_addr, struct sockaddr *clt_addr)
+ {
+     int fd;
+     int rc;
+     int conflag;
+     char buf[UINTMAX_STRSIZE_BOUND];
+-    struct sockaddr_in s;
++    struct sockaddr s;
+     struct io_buffer ib, ob;
+     char *name = NULL;
++    char clt_addr_str[NI_MAXHOST];
+     RETSIGTYPE (*sighan) (int);
+     enum socket_io_retval retval;
+     
+-    fd = socket(PF_INET, SOCK_STREAM, 0);
++    fd = socket(srv_addr->sa_family, SOCK_STREAM, 0);
+     if (fd == -1) {
+ 	dico_log(L_ERR, errno,
+ 		 _("cannot create socket for AUTH identification"));
+@@ -393,10 +394,13 @@ query_ident_name(struct sockaddr_in *srv_addr, struct sockaddr_in *clt_addr)
+     rc |= O_NONBLOCK;
+     fcntl(fd, F_SETFL, rc);
+ 
+-    s.sin_family = AF_INET;
+-    s.sin_addr.s_addr = srv_addr->sin_addr.s_addr;
+-    s.sin_port = 0;
+-    if (bind(fd, (struct sockaddr*) &s, sizeof(s)) < 0) {
++    s = *srv_addr;
++    if(s.sa_family == AF_INET)
++      ((struct sockaddr_in *) &s)->sin_port = 0;
++    else
++      ((struct sockaddr_in6 *) &s)->sin6_port = 0;
++
++    if (bind(fd, &s, sizeof(s)) < 0) {
+ 	dico_log(L_ERR, errno,
+ 		 _("cannot bind AUTH socket"));
+ 	close(fd);
+@@ -404,15 +408,19 @@ query_ident_name(struct sockaddr_in *srv_addr, struct sockaddr_in *clt_addr)
+     }
+ 
+     s = *clt_addr;
+-    s.sin_port = htons(113);
++    if(s.sa_family == AF_INET)
++      ((struct sockaddr_in *) &s)->sin_port = htons(113);
++    else
++      ((struct sockaddr_in6 *) &s)->sin6_port = htons(113);
+     
+-    if (connect(fd, (struct sockaddr*) &s, sizeof(s)) == -1) {
++    getnameinfo(&s, sizeof(s), clt_addr_str, NI_MAXHOST, NULL, 0, 0);
++    if (connect(fd, &s, sizeof(s)) == -1) {
+ 	if (errno == EINPROGRESS)
+ 	    conflag = 0;
+ 	else {
+ 	    dico_log(L_ERR, errno,
+ 		     _("cannot connect to AUTH server %s"),
+-		     inet_ntoa(s.sin_addr));
++		     clt_addr_str);
+ 	    close(fd);
+ 	    return NULL;
+ 	}
+@@ -424,8 +432,8 @@ query_ident_name(struct sockaddr_in *srv_addr, struct sockaddr_in *clt_addr)
+     io_buffer_init(&ib);
+     io_buffer_init(&ob);
+     asprintf(&ob.buffer, "%u , %u\r\n",
+-	     ntohs(clt_addr->sin_port),
+-	     ntohs(srv_addr->sin_port));
++	     ntohs((clt_addr->sa_family == AF_INET)?((struct sockaddr_in *) clt_addr)->sin_port:((struct sockaddr_in6 *) clt_addr)->sin6_port),
++	     ntohs((srv_addr->sa_family == AF_INET)?((struct sockaddr_in *) srv_addr)->sin_port:((struct sockaddr_in6 *) srv_addr)->sin6_port));
+     ob.size = strlen(ob.buffer);
+     
+     retval = socket_io(fd, conflag, ident_timeout, &ib, &ob);
+@@ -438,7 +446,7 @@ query_ident_name(struct sockaddr_in *srv_addr, struct sockaddr_in *clt_addr)
+ 	if (!name) {
+ 	    dico_log(L_ERR, 0,
+ 		     _("Malformed IDENT response: `%s', from %s"),
+-		     ib.buffer, inet_ntoa(s.sin_addr));
++		     ib.buffer, clt_addr_str);
+ 	} else if (is_des_p(name)) {
+ 	    if (!ident_keyfile) {
+ 		dico_log (L_ERR, 0,
+@@ -459,24 +467,24 @@ query_ident_name(struct sockaddr_in *srv_addr, struct sockaddr_in *clt_addr)
+     case socket_io_failure:
+ 	dico_log(L_ERR, errno,
+ 		 _("failure while communicating with AUTH server %s"),
+-		 inet_ntoa(s.sin_addr));
++		 clt_addr_str);
+ 	break;
+ 	
+     case socket_io_connect:
+ 	dico_log(L_ERR, errno,
+ 		 _("cannot connect to AUTH server %s"),
+-		 inet_ntoa(s.sin_addr));
++		 clt_addr_str);
+ 	break;
+ 	    
+     case socket_io_noreply:
+ 	dico_log(L_ERR, errno, _("no reply from AUTH server %s"),
+-		 inet_ntoa(s.sin_addr));
++		 clt_addr_str);
+ 	break;
+ 	
+     case socket_io_error:
+ 	dico_log(L_ERR, errno,
+ 		 _("I/O error while communicating with AUTH server %s"),
+-		 inet_ntoa(s.sin_addr));
++		 clt_addr_str);
+     }
+ 
+     io_buffer_free(&ib);
+diff --git a/dicod/main.c b/dicod/main.c
+index 374fa12..cd0c64c 100644
+--- a/dicod/main.c
++++ b/dicod/main.c
+@@ -1320,7 +1320,7 @@ config_init()
+ 			      DEFAULT_INCLUDE_DIR, NULL);
+     grecs_preprocessor = DEFAULT_PREPROCESSOR;
+     grecs_log_to_stderr = 1;
+-    grecs_default_port = htons(DICO_DICT_PORT);
++    grecs_default_port = DICO_DICT_PORT;
+ }
+ 
+ void
+diff --git a/dicod/server.c b/dicod/server.c
+index eebf6da..be13a08 100644
+--- a/dicod/server.c
++++ b/dicod/server.c
+@@ -45,6 +45,9 @@ address_family_to_domain (int family)
+     case AF_INET:
+ 	return PF_INET;
+ 
++    case AF_INET6:
++	return PF_INET6;
++
+     default:
+ 	abort();
+     }
+@@ -63,26 +66,34 @@ open_sockets()
+     srvcount = dico_list_count(listen_addr);
+     if (srvcount == 0) {
+ 	/* Provide defaults */
+-	struct sockaddr_in *s_in = xmalloc(sizeof(*s_in));
+-
+-	sp = xmalloc(sizeof(*sp));
+-	sp->sa = (struct sockaddr*) s_in;
+-	sp->len = sizeof(*s_in);
++	struct addrinfo hints, *servinfo, *res;
++	char urlport[6];
++
++	memset(&hints, 0, sizeof hints);
++	hints.ai_family = AF_UNSPEC;  // use IPv4 or IPv6, whichever, TODO: user configurable?
++	hints.ai_socktype = SOCK_STREAM;
++	hints.ai_flags = AI_PASSIVE;     // fill in my IP for me
++	sprintf(urlport, "%d", DICO_DICT_PORT);
++	getaddrinfo(NULL, urlport, &hints, &servinfo);
+ 	
+ 	if (!listen_addr)
+ 	    listen_addr = xdico_list_create();
+-	s_in->sin_family = AF_INET;
+-	s_in->sin_addr.s_addr = INADDR_ANY;
+-	s_in->sin_port = htons(DICO_DICT_PORT);
+-	xdico_list_append(listen_addr, sp);
+-	srvcount = 1;
++
++	sp = xmalloc(sizeof(*sp));
++  for(res=servinfo; res; res = res->ai_next) {
++		sp->sa = (struct sockaddr*) res->ai_addr;
++		sp->len = res->ai_addrlen;
++		xdico_list_append(listen_addr, sp);
++		srvcount++;
++  }
++    freeaddrinfo(servinfo);
+     }
+     srvtab = xcalloc(srvcount, sizeof srvtab[0]);
+     fdmax = 0;
+     itr = xdico_list_iterator(listen_addr);
+     for (i = 0, sp = dico_iterator_first(itr); sp;
+ 	 sp = dico_iterator_next(itr)) {
+-	int fd = socket(address_family_to_domain(sp->sa->sa_family),
++	int fd = socket(sp->sa->sa_family,
+ 			SOCK_STREAM, 0);
+ 	if (fd == -1) {
+ 	    dico_log(L_ERR, errno, "socket");
+@@ -117,6 +128,7 @@ open_sockets()
+ 	}
+ 	    
+ 	case AF_INET:
++	case AF_INET6:
+ 	    t = 1;	 
+ 	    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &t, sizeof(t));
+ 	    break;
+diff --git a/doc/dico.texi b/doc/dico.texi
+index 8c55707..d3a910e 100644
+--- a/doc/dico.texi
++++ b/doc/dico.texi
+@@ -1067,15 +1067,16 @@ form.  The @var{port} part is either a numeric port number or a
+ symbolic service name which is found in @file{/etc/services} file.
+ 
+   Either of the two parts may be omitted.  If @var{host} is omitted,
+-it defaults to @samp{0.0.0.0}, which means ``listen on all
+-interfaces''.  If @var{port} is omitted, it defaults to 2628.  In this
+-case the colon may be omitted, too.
++it defaults to @samp{0.0.0.0} (for @acronym{IP}v4), @samp{::} (for 
++@acronym{IP}v6), which means ``listen on all interfaces''.  If @var{port} is 
++omitted, it defaults to 2628.  In this case the colon may be omitted, too.
+ 
+   Examples:
+   
+ @example
+ listen localhost:2628;
+ listen 127.0.0.1;
++listen [::]:2628;
+ listen :2628;
+ @end example
+ 
+diff --git a/grecs/src/tree.c b/grecs/src/tree.c
+index aee196a..ded9941 100644
+--- a/grecs/src/tree.c
++++ b/grecs/src/tree.c
+@@ -349,63 +349,60 @@ string_to_sockaddr(struct grecs_sockaddr *sp, const char *string,
+ 		sp->sa = grecs_malloc(sp->len);
+ 		memcpy(sp->sa, &s_un, sp->len);
+ 	} else {
+-		char *p = strchr(string, ':');
++    char *ip6colon = strchr(string, ':');
++		char *p = strrchr(string, ':');
+ 		size_t len;
+-		struct sockaddr_in sa;
++    struct addrinfo hints, *res;
++		char *host;
++    char freep = 0;
+ 		
+-		sa.sin_family = AF_INET;
++    if(p && ip6colon && (p > ip6colon) && (*(p-1) != ']'))
++      // this is just an IPv6 numeric address (without port)
++       p = NULL;
++
+ 		if (p) 
+ 			len = p - string;
+ 		else
+ 			len = strlen(string);
+ 		
+-		if (len == 0)
+-			sa.sin_addr.s_addr = INADDR_ANY;
+-		else {
+-			char *host = grecs_malloc(len + 1);
++    memset(&hints, 0, sizeof hints);
++    hints.ai_family = AF_UNSPEC;
++
++		host = grecs_malloc(len + 1);
++    if(string[0] == '[') {
++      // IPv6 numeric address, so remove the brackets
++			memcpy(host, string+1, len-2);
++			host[len-2] = 0;
++    }
++    else {
+ 			memcpy(host, string, len);
+ 			host[len] = 0;
+-			
+-			if (string_to_host(&sa.sin_addr, host, locus)) {
+-				grecs_error(locus, 0,
+-					     _("%s: not a valid IP address or hostname"),
+-					     host);
+-				grecs_free(host);
+-				return 1;
+-			}
+-			grecs_free(host);
+-		}
++    }
+ 		
+-		if (p) {
+-			struct servent *serv;
+-			
+-			p++;
+-			serv = getservbyname(p, "tcp");
+-			if (serv != NULL)
+-				sa.sin_port = serv->s_port;
++		if (!p) {
++		  if (grecs_default_port) {
++        p = grecs_malloc(6);
++        sprintf(p, "%d", grecs_default_port);
++        freep = 1;
++      }
+ 			else {
+-				unsigned long l;
+-				char *q;
+-				
+-				/* Not in services, maybe a number? */
+-				l = strtoul(p, &q, 0);
+-				
+-				if (*q || l > USHRT_MAX) {
+-					grecs_error(locus, 0,
+-						     _("%s: not a valid port number"), p);
+-					return 1;
+-				}
+-				sa.sin_port = htons(l);
++        // TODO: or maybe just assume that it is zero ?
++				grecs_error(locus, 0, _("missing port number"));
++			  grecs_free(host);
++				return 1;
+ 			}
+-		} else if (grecs_default_port)
+-			sa.sin_port = grecs_default_port;
+-		else {
+-			grecs_error(locus, 0, _("missing port number"));
+-			return 1;
+-		}
+-		sp->len = sizeof(sa);
++    }
++    else
++      p++;
++    getaddrinfo(host, p, &hints, &res);
++		sp->len = res->ai_addrlen;
+ 		sp->sa = grecs_malloc(sp->len);
+-		memcpy(sp->sa, &sa, sp->len);
++		memcpy(sp->sa, res->ai_addr, sp->len);
++
++    freeaddrinfo(res);
++		grecs_free(host);
++    if(freep)
++		  grecs_free(p);
+ 	}
+ 	return 0;
+ }

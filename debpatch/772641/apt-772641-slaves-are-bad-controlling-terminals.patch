@@ -1,0 +1,133 @@
+commit c6bc9735cf1486d40d85bba90cfc3aaa6537a9c0
+Author: David Kalnischkies <david@kalnischkies.de>
+Date:   Wed Dec 10 22:26:59 2014 +0100
+
+    do not make PTY slave the controlling terminal
+    
+    If we have no controlling terminal opening a terminal will make this
+    terminal our controller, which is a serious problem if this happens to
+    be the pseudo terminal we created to run dpkg in as we will close this
+    terminal at the end hanging ourself up in the process…
+    
+    The offending open is the one we do to have at least one slave fd open
+    all the time, but for good measure, we apply the flag also to the slave
+    fd opening in the child process as we set the controlling terminal
+    explicitely here.
+    
+    This is a regression from 150bdc9ca5d656f9fba94d37c5f4f183b02bd746 with
+    the slight twist that this usecase was silently broken before in that it
+    wasn't logging the output in term.log (as a pseudo terminal wasn't
+    created).
+    
+    Closes: 772641
+
+diff --git a/apt-pkg/deb/dpkgpm.cc b/apt-pkg/deb/dpkgpm.cc
+index 79120f6..8a8214c 100644
+--- a/apt-pkg/deb/dpkgpm.cc
++++ b/apt-pkg/deb/dpkgpm.cc
+@@ -1127,7 +1127,7 @@ void pkgDPkgPM::StartPtyMagic()
+ 	       on kfreebsd we get an incorrect ("step like") output then while it has
+ 	       no problem with closing all references… so to avoid platform specific
+ 	       code here we combine both and be happy once more */
+-	    d->protect_slave_from_dying = open(d->slave, O_RDWR | O_CLOEXEC);
++	    d->protect_slave_from_dying = open(d->slave, O_RDWR | O_CLOEXEC | O_NOCTTY);
+ 	 }
+       }
+    }
+@@ -1159,7 +1159,7 @@ void pkgDPkgPM::SetupSlavePtyMagic()
+    if (setsid() == -1)
+       _error->FatalE("setsid", "Starting a new session for child failed!");
+ 
+-   int const slaveFd = open(d->slave, O_RDWR);
++   int const slaveFd = open(d->slave, O_RDWR | O_NOCTTY);
+    if (slaveFd == -1)
+       _error->FatalE("open", _("Can not write log (%s)"), _("Is /dev/pts mounted?"));
+    else if (ioctl(slaveFd, TIOCSCTTY, 0) < 0)
+diff --git a/test/integration/test-no-fds-leaked-to-maintainer-scripts b/test/integration/test-no-fds-leaked-to-maintainer-scripts
+index cde987b..a7d556b 100755
+--- a/test/integration/test-no-fds-leaked-to-maintainer-scripts
++++ b/test/integration/test-no-fds-leaked-to-maintainer-scripts
+@@ -26,20 +26,25 @@ setupaptarchive
+ 
+ rm -f rootdir/var/log/dpkg.log rootdir/var/log/apt/term.log
+ testsuccess aptget install -y fdleaks -qq < /dev/null
+-msgtest 'Check if fds were not' 'leaked'
+-if [ "$(grep 'root root' rootdir/tmp/testsuccess.output | wc -l)" = '8' ]; then
+-	msgpass
+-else
+-	echo
+-	cat rootdir/tmp/testsuccess.output
+-	msgfail
+-fi
+ 
+-cp rootdir/tmp/testsuccess.output terminal.output
+-tail -n +3 rootdir/var/log/apt/term.log | head -n -1 > terminal.log
+-testfileequal 'terminal.log' "$(cat terminal.output)"
++checkfdleak() {
++	msgtest 'Check if fds were not' 'leaked'
++	if [ "$(grep 'root root' rootdir/tmp/testsuccess.output | wc -l)" = "$1" ]; then
++		msgpass
++	else
++		echo
++		cat rootdir/tmp/testsuccess.output
++		msgfail
++	fi
++}
++checkinstall() {
++	checkfdleak 8
++
++	cp rootdir/tmp/testsuccess.output terminal.output
++	tail -n +3 rootdir/var/log/apt/term.log | head -n -1 > terminal.log
++	testfileequal 'terminal.log' "$(cat terminal.output)"
+ 
+-testequal "startup archives unpack
++	testequal "startup archives unpack
+ install $PKGNAME <none> 1.0
+ status half-installed $PKGNAME 1.0
+ status unpacked $PKGNAME 1.0
+@@ -50,22 +55,19 @@ status unpacked $PKGNAME 1.0
+ status half-configured $PKGNAME 1.0
+ status installed $PKGNAME 1.0
+ startup packages configure" cut -f 3- -d' ' rootdir/var/log/dpkg.log
++}
++checkinstall
+ 
+ rm -f rootdir/var/log/dpkg.log rootdir/var/log/apt/term.log
+ testsuccess aptget purge -y fdleaks -qq
+-msgtest 'Check if fds were not' 'leaked'
+-if [ "$(grep 'root root' rootdir/tmp/testsuccess.output | wc -l)" = '12' ]; then
+-	msgpass
+-else
+-	echo
+-	cat rootdir/tmp/testsuccess.output
+-	msgfail
+-fi
+-cp rootdir/tmp/testsuccess.output terminal.output
+-tail -n +3 rootdir/var/log/apt/term.log | head -n -1 > terminal.log
+-testfileequal 'terminal.log' "$(cat terminal.output)"
++checkpurge() {
++	checkfdleak 12
++
++	cp rootdir/tmp/testsuccess.output terminal.output
++	tail -n +3 rootdir/var/log/apt/term.log | head -n -1 > terminal.log
++	testfileequal 'terminal.log' "$(cat terminal.output)"
+ 
+-testequal "startup packages purge
++	testequal "startup packages purge
+ status installed $PKGNAME 1.0
+ remove $PKGNAME 1.0 <none>
+ status half-configured $PKGNAME 1.0
+@@ -79,3 +81,13 @@ status config-files $PKGNAME 1.0
+ status config-files $PKGNAME 1.0
+ status not-installed $PKGNAME <none>
+ startup packages configure" cut -f 3- -d' ' rootdir/var/log/dpkg.log
++}
++checkpurge
++
++rm -f rootdir/var/log/dpkg.log rootdir/var/log/apt/term.log
++testsuccess runapt command setsid -w "${BUILDDIRECTORY}/apt-get" install -y fdleaks -qq < /dev/null
++checkinstall
++
++rm -f rootdir/var/log/dpkg.log rootdir/var/log/apt/term.log
++testsuccess runapt command setsid -w "${BUILDDIRECTORY}/apt-get" purge -y fdleaks -qq
++checkpurge

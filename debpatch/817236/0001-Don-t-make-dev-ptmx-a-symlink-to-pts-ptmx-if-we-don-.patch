@@ -1,0 +1,52 @@
+From e070e9c9b837815b43eb39140b7005124ed3906f Mon Sep 17 00:00:00 2001
+From: Simon McVittie <smcv@debian.org>
+Date: Mon, 20 Feb 2017 09:22:07 +0000
+Subject: [PATCH 1/4] Don't make /dev/ptmx a symlink to pts/ptmx if we don't
+ have to
+
+In a plain chroot or on real hardware, it is preferable to use mknod
+to create /dev/ptmx. This works as intended with older chroot managers
+such as sbuild and pbuilder, which were designed for the semantics of
+"legacy" /dev/pts (a single non-virtualized pty subsystem per kernel)
+and so mount /dev/pts without the newinstance option. It also works
+in newer kernels where /dev/pts always behaves as though the
+newinstance option was given, because on those kernels, opening a
+(c,5,2) device node automatically looks for an adjacent pts directory
+and uses its ptmx device node instead.
+
+However, if we are running debootstrap inside a restricted container
+such as lxc or systemd-nspawn, mknod ptmx c 5 2 might not be allowed.
+If so, fall back to a symlink with a warning. This mode is fine if
+the debootstrap will be used with systemd-nspawn or lxc, or if a
+devtmpfs will be mounted over its /dev, but will not work for older
+chroot managers like sbuild or pbuilder, because those chroot
+managers leave the ptmxmode mount option at its default 000, causing
+permission to open the pts/ptmx device node to be denied.
+
+Bug: https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=817236
+Signed-off-by: Simon McVittie <smcv@debian.org>
+---
+ functions | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/functions b/functions
+index 6cbbd3b..4a4f2f9 100644
+--- a/functions
++++ b/functions
+@@ -1173,7 +1173,12 @@ setup_devices_simple () {
+ 	mknod -m 666 $TARGET/dev/urandom	c 1 9
+ 	mknod -m 666 $TARGET/dev/tty	c 5 0
+ 	mkdir $TARGET/dev/pts/ $TARGET/dev/shm/
+-	ln -s pts/ptmx $TARGET/dev/ptmx
++	# Inside a container, we might not be allowed to create /dev/ptmx.
++	# If not, do the next best thing.
++	if ! mknod -m 666 $TARGET/dev/ptmx c 5 2; then
++		warning MKNOD "Could not create /dev/ptmx, falling back to symlink. This chroot will require /dev/pts mounted with ptmxmode=666"
++		ln -s pts/ptmx $TARGET/dev/ptmx
++	fi
+ 	ln -s /proc/self/fd   $TARGET/dev/fd
+ 	ln -s /proc/self/fd/0 $TARGET/dev/stdin
+ 	ln -s /proc/self/fd/1 $TARGET/dev/stdout
+-- 
+2.11.0
+

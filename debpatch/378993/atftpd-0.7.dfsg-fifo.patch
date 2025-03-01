@@ -1,0 +1,145 @@
+diff -urN atftpd-0.7.dfsg/atftpd.8 atftpd-0.7.dfsg-fifo/atftpd.8
+--- atftpd-0.7.dfsg/atftpd.8	2004-02-13 05:03:12.000000000 +0100
++++ atftpd-0.7.dfsg-fifo/atftpd.8	2006-07-25 11:31:11.000000000 +0200
+@@ -240,6 +240,35 @@
+ specification. Note that this is not the same as RFC2090. PXE
+ compliant boot implements mtftp, not RFC2090.
+ 
++.SH FIFO
++The atftpd server provides the ability to communicate with other
++processes using named pipes / FIFOs. In addition to files you can
++place FIFOs into the specified root directory which atftpd will open 
++for reading on a client request and serve the content to the client.
++This feature can be used on the tftp server side to tell the clients 
++(separately, if you want) to boot from network or to boot from their 
++fallback boot method.
++
++\fBExample\fR
++
++ #!/usr/bin/perl
++ use POSIX;
++ my $pipe = "/tftpboot/linux/pxelinux.cfg/01-00-01-02-03-04-05";
++ # create fifo
++ POSIX::mkfifo($pipe, 0644) or
++    die("cannot create Pipe $pipe: $!\\n");
++ # open pipe
++ sysopen(FIFO, $pipe, O_WRONLY, 0644);
++ # write boot configuration
++ print FIFO "default linux\\r\\n";
++ print FIFO "label linux\\r\\n";
++ print FIFO " kernel vmlinuz\\r\\n";
++ print FIFO " append ramdisk_size=64000 init=/etc/init initrd=initrd\\r\\n";
++ close(FIFO);
++ # delete pipe
++ unlink($pipe);
++
++
+ .SH SEE ALSO
+ .BR inetd (8), hosts_access (5), libpcre (7),
+ RFC1350, RFC2090, RFC2347, RFC2348, RFC2349 and pxespec.pdf.
+diff -urN atftpd-0.7.dfsg/tftp_def.h atftpd-0.7.dfsg-fifo/tftp_def.h
+--- atftpd-0.7.dfsg/tftp_def.h	2004-02-13 04:16:09.000000000 +0100
++++ atftpd-0.7.dfsg-fifo/tftp_def.h	2006-06-26 11:32:04.000000000 +0200
+@@ -33,6 +33,9 @@
+ #define S_TIMEOUT     5         /* Server timout. */
+ #define NB_OF_RETRY   5
+ 
++#define FIFO_MAX_SIZE 16384     /* Maximum bytes to read from a named pipe */
++
++
+ /* definition to use tftp_options structure */
+ #define OPT_FILENAME  0
+ #define OPT_MODE      1
+diff -urN atftpd-0.7.dfsg/tftpd_file.c atftpd-0.7.dfsg-fifo/tftpd_file.c
+--- atftpd-0.7.dfsg/tftpd_file.c	2004-02-18 03:21:47.000000000 +0100
++++ atftpd-0.7.dfsg-fifo/tftpd_file.c	2006-07-04 11:42:11.000000000 +0200
+@@ -429,6 +429,9 @@
+      int prev_file_pos = 0;
+      int temp = 0;
+ 
++     char *fifo_buf = NULL;
++     int fifo_len = -1;
++
+      /* look for mode option */
+      if (strcasecmp(data->tftp_options[OPT_MODE].value, "netascii") == 0)
+      {
+@@ -498,6 +501,33 @@
+      /* To return the size of the file with tsize argument */
+      fstat(fileno(fp), &file_stat);
+ 
++     if (S_ISFIFO (file_stat.st_mode)) 
++     {
++          fifo_buf = (char *) malloc(sizeof(char)*FIFO_MAX_SIZE);
++
++          if (fifo_buf == NULL)
++          {
++               logger(LOG_ERR, "memory allocation failure");
++               return ERR;
++          }
++
++          /* Reading from named pipe into buffer */
++          fifo_len = fread( fifo_buf, 1, sizeof(char)*FIFO_MAX_SIZE, fp );
++          if (fifo_len < 0)
++          {
++               logger(LOG_ERR, "error reading from named pipe %s", filename);
++               fclose(fp);
++               free(fifo_buf);
++               return ERR;
++          }
++          else if (fifo_len >= FIFO_MAX_SIZE)
++          {
++               logger(LOG_WARNING, "buffer limit reached while reading from pipe");
++          }
++          file_stat.st_size = fifo_len;
++          logger(LOG_DEBUG, "Read %d bytes from pipe", fifo_len);
++     }
++     
+      /* tsize option */
+      if ((opt_get_tsize(data->tftp_options) > -1) && !convert)
+      {
+@@ -714,14 +744,39 @@
+                break;
+           case S_SEND_DATA:
+                timeout_state = state;
++               if (fifo_len > -1 && fifo_buf != NULL)
++               {
++                    /* fifo_buf contains data from pipe */
++                    if (fifo_len >= data->data_buffer_size - 4)
++                    {
++                         data_size = data->data_buffer_size - 4;
++                         fifo_len -= data_size;
++                    }
++                    else
++                    {
++                         data_size = fifo_len;
++                         /* record the last block number */
++                         last_block = block_number;
++                    }
+ 
+-               data_size = tftp_file_read(fp, tftphdr->th_data, data->data_buffer_size - 4, block_number,
+-                                          convert, &prev_block_number, &prev_file_pos, &temp);
+-               data_size += 4;  /* need to consider tftp header */
++                    strncpy(tftphdr->th_data, fifo_buf + block_number * (data->data_buffer_size - 4), data_size);
+ 
+-               /* record the last block number */
+-               if (feof(fp))
+-                    last_block = block_number;
++                    if (data_size == fifo_len && last_block == block_number)
++                    {
++                         free(fifo_buf);
++                         fifo_buf = NULL;
++                    }
++	       }
++               else
++               {
++                    data_size = tftp_file_read(fp, tftphdr->th_data, data->data_buffer_size - 4, block_number,
++                                               convert, &prev_block_number, &prev_file_pos, &temp);
++                    /* record the last block number */
++                    if (feof(fp))
++                         last_block = block_number;
++               }
++
++               data_size += 4;  /* need to consider tftp header */
+ 
+                if (multicast)
+                {

@@ -1,0 +1,218 @@
+From 5acc4c2b5ba1b34c2ffe755d08358f11d34fd8a6 Mon Sep 17 00:00:00 2001
+From: Guilhem Moulin <guilhem@guilhem.org>
+Date: Mon, 12 Oct 2015 21:13:31 +0200
+Subject: [PATCH 1/3] Update remote unlocking via SSH due to the new dropbear
+ release.
+
+---
+ debian/README.Debian   | 62 +++++++++-----------------------
+ debian/README.remote   | 96 --------------------------------------------------
+ debian/cryptsetup.docs |  1 -
+ 3 files changed, 16 insertions(+), 143 deletions(-)
+ delete mode 100644 debian/README.remote
+
+diff --git a/debian/README.Debian b/debian/README.Debian
+index cf4927b..9be59d0 100644
+--- a/debian/README.Debian
++++ b/debian/README.Debian
+@@ -202,68 +202,38 @@ nor in askpass.
+ 8. Remotely unlock encrypted rootfs
+ -----------------------------------
+ 
+- Thanks to Chris <debian@x.ray.net> it's possible to install a dropbear ssh
+-server into the initramfs, connect to this ssh server during execution of
++ Thanks to Chris <debian@x.ray.net> it's possible to install a dropbear SSH
++server into the initramfs, connect to this SSH server during execution of
+ initramfs early in the boot process, and unlock encrypted devices - even the
+ root device - before the boot process continues.
+ 
+  This way it is possible to use an encrypted root filesystem on headless
+ systems where no physical access is available during boot process.
+ 
+- Dropbear 0.52-1 is required for this to work. Thankfully this version
+-configures everything automatically, so all you have to do after installing
+-dropbear on the remote system, is to copy the root ssh keyfile from
+-/etc/initramfs/root/ssh/id_rsa to your local system:
++ Dropbear 0.52-1 or later is required for this to work.  (Since 2015.68-1 the
++functionality has its own binary package 'dropbear-initramfs'.)  Consult
++/usr/share/doc/dropbear-initramfs/README.initramfs from the dropbear-initramfs
++package for information how to install and configure the dropbear SSH server
++into the initramfs.
+ 
+-$ scp remote.system.com:/etc/initramfs/root/ssh/id_rsa remote_rsa
++ You can then unlock the disk remotely via SSH with
+ 
+- The remote system should start dropbear automatically during the boot
+-process's initramfs execution making it possible to ssh to the remote
+-system and supply the rootfs passphrase.  Because the initramfs is
+-kept in an unencrypted partition the default dropbear configuration
+-uses a different host key in the initramfs than the remote system's
+-normal host key.  This means some care must be taken when connecting
+-to the remote system so that host key checking does not interfere with
+-ssh connection establishment.  When using the OpenSSH client either
+-the "-o StrictHostKeyChecking=no" or the "-o
+-UserKnownHostsFile=alternate_known_hosts" options are some available
+-choices.
++$ ssh -tF ~/.luks/ssh.conf root@remote.system.com unlock
+ 
+- You can login into the initramfs via ssh (modified per above)
++ Or, using a local gpg-encrypted key file:
+ 
+-$ ssh -i remote_rsa -l root remote.system.com
+-
+- and echo the passphrase to a fifo file on the remote system:
+-
+-# echo -n "my_secret_passphrase" > /lib/cryptsetup/passfifo
++$ gpg --decrypt ~/.luks/remote.key.gpg | ssh -TF ~/.luks/ssh.conf root@remote.system.com unlock
+ 
+  That's it. Now that the encrypted root device is unlocked, the remote system
+ should continue with the boot process.
+ 
+- If the remote system has a network configuration at boot (via ip= on the
+-kernel command line) which differs from the network configuration normally
+-used, the network interfaces will need to be brought down after the rootfs is
+-mounted.  Without this step the normal boot process will be unable to properly
+-reconfigure the network interfaces. To do this take the following steps.
+-
+-# mkdir -p /etc/initramfs-tools/conf.d
+-# cp -a /usr/share/initramfs-tools/conf.d/dropbear \
+-        /etc/initramfs-tools/conf.d/
+-
+-Then edit /etc/initramfs-tools/conf.d/dropbear to specify the network
+-interfaces to be brought down.
+-
+- Should it be desirable to have the remote system use the same host key
+-during the boot process as during regular system operation the
+-following steps may be taken.
++ You can also use the following authorized_keys(5) options in
++/etc/initramfs-tools/root/.ssh/authorized_keys to restrict access and avoid
++users poking around:
+ 
+-# cp -a /etc/dropbear/dropbear_{dsa,rsa}_host_key \
+-        /etc/initramfs-tools/etc/dropbear/
+-# update-initramfs -u -k all
++no-port-forwarding,no-agent-forwarding,no-X11-forwarding,command="/bin/unlock" ssh-rsa ...
+ 
+- /usr/share/doc/cryptsetup/README.remote.gz is a documentation with more
+-details on the setup of an initramfs with suppurt to remotely unlock the
+-encrypted rootfs.
++(Be sure to rebuild the initrd afterwards: `update-initramfs -u -k all`.)
+ 
+ 
+ 9. Backup the LUKS header
+diff --git a/debian/README.remote b/debian/README.remote
+deleted file mode 100644
+index 856bd97..0000000
+--- a/debian/README.remote
++++ /dev/null
+@@ -1,96 +0,0 @@
+-unlocking rootfs via ssh login in initramfs
+--------------------------------------------
+-
+-You can unlock your rootfs on bootup from remote, using ssh to log in to the
+-booting system while it's running with the initramfs mounted.
+-
+-
+-Setup
+------
+-
+-For remote unlocking to work, the following packages have to be installed
+-before building the initramfs: dropbear busybox
+-
+-The file /etc/initramfs-tools/initramfs.conf holds the configuration options
+-used when building the initramfs. It should contain BUSYBOX=y (this is set as
+-the default when the busybox package is installed) to have busybox installed
+-into the initramfs, and should not contain DROPBEAR=n, which would disable
+-installation of dropbear to initramfs. If set to DROPBEAR=y, dropbear will
+-be installed in any case; if DROPBEAR isn't set at all, then dropbear will only
+-be installed in case of an existing cryptroot setup.
+-
+-The host keys used for the initramfs are dropbear_dss_host_key and
+-dropbear_rsa_host_key, both located in/etc/initramfs-tools/etc/dropbear/.
+-If they do not exist when the initramfs is compiled, they will be created
+-automatically. Following are the commands to create them manually:
+-
+-# dropbearkey -t dss -f /etc/initramfs-tools/etc/dropbear/dropbear_dss_host_key
+-# dropbearkey -t rsa -f /etc/initramfs-tools/etc/dropbear/dropbear_rsa_host_key
+-
+-As the initramfs will not be encrypted, publickey authentication is assumed.
+-The key(s) used for that will be taken from
+-/etc/initramfs-tools/root/.ssh/authorized_keys.
+-If this file doesn't exist when the initramfs is compiled, it will be created
+-and /etc/initramfs-tools/root/.ssh/id_rsa.pub will be added to it.
+-If the latter file doesn't exist either, it will be generated automatically -
+-you will find the matching private key which you will later need to log in to
+-the initramfs under /etc/initramfs-tools/root/.ssh/id_rsa (or id_rsa.dropbear
+-in case you need it in dropbear format). Following are the commands to do the
+-respective steps manually:
+-
+-To create a key (in dropbear format):
+-
+-# dropbearkey -t rsa -f /etc/initramfs-tools/root/.ssh/id_rsa.dropbear
+-
+-To convert the key from dropbear format to openssh format:
+-
+-# /usr/lib/dropbear/dropbearconvert dropbear openssh \
+-	/etc/initramfs-tools/root/.ssh/id_rsa.dropbear \
+-	/etc/initramfs-tools/root/.ssh/id_rsa
+-
+-To extract the public key:
+-
+-# dropbearkey -y -f /etc/initramfs-tools/root/.ssh/id_rsa.dropbear | \
+-	grep "^ssh-rsa " > /etc/initramfs-tools/root/.ssh/id_rsa.pub
+-
+-To add the public key to the authorized_keys file:
+-
+-# cat /etc/initramfs-tools/root/.ssh/id_rsa.pub >> /etc/initramfs-tools/root/.ssh/authorized_keys
+-
+-In case you want some interface to get configured using dhcp, setting DEVICE= in
+-/etc/initramfs-tools/initramfs.conf should be sufficient.  The initramfs should
+-also honour the ip= kernel parameter.
+-In case you use grub, you probably might want to set it in /boot/grub/menu.lst,
+-either in the '# kopt=' line or appended to specific 'kernel' line(s).
+-The ip= kernel parameter is documented in Documentation/nfsroot.txt in the
+-kernel source tree.
+-
+-
+-Issues
+-------
+-
+-Don't forget to run update-initramfs when you changed the config to make it
+-effective!
+-
+-Collecting enough entropy for the ssh daemon sometimes seems to be an issue.
+-Startup of the ssh daemon might be delayed until enough entropy has been
+-retrieved. This is non-blocking for the startup process, so when you are at the
+-console you won't have to wait for the sshd to complete its startup.
+-
+-
+-Unlocking procedure
+--------------------
+-
+-To unlock from remote, you could do something like this:
+-
+-# ssh -o "UserKnownHostsFile=~/.ssh/known_hosts.initramfs" \
+-	-i "~/id_rsa.initramfs" root@initramfshost.example.com \
+-	"echo -ne \"secret\" >/lib/cryptsetup/passfifo"
+-
+-This example assumes that you have an extra known_hosts file
+-"~/.ssh/known_hosts.initramfs" which holds the cryptroot system's host-key,
+-that you have a file "~/id_rsa.initramfs" which holds the authorized-key for
+-the cryptroot system, that the cryptroot system's name is
+-"initramfshost.example.com", and that the cryptroot passphrase is "secret"
+-
+--- <debian@x.ray.net>, Wed, 30 Sep 2009
+diff --git a/debian/cryptsetup.docs b/debian/cryptsetup.docs
+index be68445..7a27612 100644
+--- a/debian/cryptsetup.docs
++++ b/debian/cryptsetup.docs
+@@ -4,6 +4,5 @@ docs/*ReleaseNotes
+ debian/README.keyctl
+ debian/README.gnupg
+ debian/README.initramfs
+-debian/README.remote
+ debian/README.openct
+ debian/README.opensc
+-- 
+2.6.2
+

@@ -1,0 +1,257 @@
+From 70c449652412aab2b96cc3831bef2f7fff11b896 Mon Sep 17 00:00:00 2001
+From: Nicolas Boulenguez <nicolas@debian.org>
+Date: Mon, 29 Jul 2024 17:25:23 +0200
+Subject: [PATCH 1/2] scripts/mk: reduce the number of subprocess again
+
+In architecture.mk, each unset variable was spawning a shell.
+
+In buildapi.mk, each expansion was spawning a shell. Both default.mk
+and vendor.mk expand DPKG_BUILD_API.
+
+In buildflags.mk, each first expansion of an unset variable was
+spawning a shell. DPKG_EXPORT_BUILDFLAGS expands all variables.
+
+In pkg-info.mk, each variable was spawning its own shell.
+
+In vendors.mk the usage was correct but we switch to use the same
+mechanism for consistency.
+
+Compared to previous attempt:
+ * fix and test CFLAGS += -Dfoo
+ * document what is expected of the lazy evaluation
+---
+ scripts/mk/Readme          | 29 +++++++++++++++++++++++++++++
+ scripts/mk/architecture.mk | 14 ++++++++++++--
+ scripts/mk/buildapi.mk     | 10 +++++++++-
+ scripts/mk/buildflags.mk   | 36 ++++++++++++++++++------------------
+ scripts/mk/pkg-info.mk     | 33 +++++++++++++++++++++++++--------
+ scripts/mk/vendor.mk       | 10 +++++++---
+ scripts/t/mk/buildflags.mk |  3 +++
+ 7 files changed, 103 insertions(+), 32 deletions(-)
+ create mode 100644 scripts/mk/Readme
+
+diff --git a/scripts/mk/Readme b/scripts/mk/Readme
+new file mode 100644
+index 000000000..6e582cede
+--- /dev/null
++++ b/scripts/mk/Readme
+@@ -0,0 +1,29 @@
++$(call dpkg_lazy_set,VARIABLE,COMPUTATION)
++
++  Assigns VARIABLE so that the first $(VARIABLE) expansion triggers
++  the expansion of the expensive COMPUTATION, and stores the result
++  into a cache.  This $(VARIABLE) expansion and all following ones
++  will return the value of COMPUTATION without expanding it again.
++
++  The value itself may contain references to other variables or
++  functions.  They will be expanded once, when $(VARIABLE) is first
++  expanded.
++
++  An empty value is allowed, and distinct from "not computed yet".
++
++  After that, it is possible to use 'VARIABLE+=foo' with the usual
++  meaning, although DEB_CFLAGS_MAINT_APPEND:=foo and similar
++  constructs should be preferred when possible.
++
++$(eval $(call dpkg_lazy_eval,VAR1,COMPUTATION))
++$(eval $(call dpkg_lazy_eval,VAR2,COMPUTATION))
++...
++
++  Assigns VAR1, VAR2... so that the first expansion of any variable
++  triggers COMPUTATION.  COMPUTATION must return an empty string and
++  its side effects must assign all of DPKG_CACHE_VAR1,
++  DPKG_CACHE_VAR2... with :=.
++
++When debugging the lazy evaluation, it may be convenient to set
++COMPUTATION to $$(computation) and start the definition of computation
++with $(info RUN).
+diff --git a/scripts/mk/architecture.mk b/scripts/mk/architecture.mk
+index c2f6a054d..755863257 100644
+--- a/scripts/mk/architecture.mk
++++ b/scripts/mk/architecture.mk
+@@ -6,9 +6,19 @@
+ ifndef dpkg_architecture_mk_included
+ dpkg_architecture_mk_included = yes
+ 
+-dpkg_lazy_eval ?= $$(or $$(value DPKG_CACHE_$(1)),$$(eval DPKG_CACHE_$(1) := $$(shell $(2)))$$(value DPKG_CACHE_$(1)))
++# Run a subprocess then assign all unset or empty variables.
++dpkg_architecture_run = \
++  $(foreach line,$(shell dpkg-architecture),\
++    $(eval $(subst =,?=,$(line))))
+ 
+-dpkg_architecture_setvar = export $(1) ?= $(call dpkg_lazy_eval,$(1),dpkg-architecture -q$(1))
++# Run if at least a variable is unset or empty.  Once all variables
++# are assigned, the test never succeeds again.
++define dpkg_architecture_setvar
++  ifndef $1
++    $$(dpkg_architecture_run)
++  endif
++  export $1
++endef
+ 
+ $(foreach machine,BUILD HOST TARGET,\
+   $(foreach var,ARCH ARCH_ABI ARCH_LIBC ARCH_OS ARCH_CPU ARCH_BITS ARCH_ENDIAN GNU_CPU GNU_SYSTEM GNU_TYPE MULTIARCH,\
+diff --git a/scripts/mk/buildapi.mk b/scripts/mk/buildapi.mk
+index 3a1f16405..4ee5b7115 100644
+--- a/scripts/mk/buildapi.mk
++++ b/scripts/mk/buildapi.mk
+@@ -3,8 +3,16 @@
+ ifndef dpkg_buildapi_mk_included
+ dpkg_buildapi_mk_included = yes
+ 
++define dpkg_lazy_eval ?=
++  $1 = $$(DPKG_CACHE_$1)
++  DPKG_CACHE_$1 = $2$$(call DPKG_CACHE_$1)
++endef
++dpkg_lazy_set ?= $(eval $(call dpkg_lazy_eval,$1,$$(eval DPKG_CACHE_$1 := $2)))
++
+ # Default API level when not set.
+-DPKG_BUILD_API ?= $(shell dpkg-buildapi)
++ifndef DPKG_BUILD_API
++  $(call dpkg_lazy_set,DPKG_BUILD_API,$$(shell dpkg-buildapi))
++endif
+ 
+ # We could use only built-in GNU make functions, but that seems too much
+ # complexity given no integer operators, given that we currently have to
+diff --git a/scripts/mk/buildflags.mk b/scripts/mk/buildflags.mk
+index 11597002d..0533d6a72 100644
+--- a/scripts/mk/buildflags.mk
++++ b/scripts/mk/buildflags.mk
+@@ -32,11 +32,13 @@
+ ifndef dpkg_buildflags_mk_included
+ dpkg_buildflags_mk_included = yes
+ 
++define dpkg_lazy_eval ?=
++  $1 = $$(DPKG_CACHE_$1)
++  DPKG_CACHE_$1 = $2$$(call DPKG_CACHE_$1)
++endef
++
+ # This list is kept in sync with the default set of flags returned
+ # by dpkg-buildflags.
+-
+-dpkg_lazy_eval ?= $$(or $$(value DPKG_CACHE_$(1)),$$(eval DPKG_CACHE_$(1) := $$(shell $(2)))$$(value DPKG_CACHE_$(1)))
+-
+ DPKG_BUILDFLAGS_LIST := $(foreach var,\
+   ASFLAGS \
+   CFLAGS \
+@@ -50,23 +52,21 @@ DPKG_BUILDFLAGS_LIST := $(foreach var,\
+   LDFLAGS \
+   ,$(var) $(var)_FOR_BUILD)
+ 
+-define dpkg_buildflags_export_envvar
+-  ifdef $(1)
+-    DPKG_BUILDFLAGS_EXPORT_ENVVAR += $(1)="$$(value $(1))"
+-  endif
+-endef
+-
+-$(eval $(call dpkg_buildflags_export_envvar,DEB_BUILD_OPTIONS))
+-$(eval $(call dpkg_buildflags_export_envvar,DEB_BUILD_MAINT_OPTIONS))
+-$(eval $(call dpkg_buildflags_export_envvar,DEB_BUILD_PATH))
+-$(foreach flag,$(DPKG_BUILDFLAGS_LIST),\
+-  $(foreach operation,SET STRIP APPEND PREPEND,\
+-    $(eval $(call dpkg_buildflags_export_envvar,DEB_$(flag)_MAINT_$(operation)))))
+-
+-dpkg_buildflags_setvar = $(1) = $(call dpkg_lazy_eval,$(1),$(DPKG_BUILDFLAGS_EXPORT_ENVVAR) dpkg-buildflags --get $(1))
++# The innermost eval quotes spaces within lines.
++dpkg_buildflags_run = $(eval $(shell \
++  $(foreach exported,\
++    DEB_BUILD_OPTIONS \
++    DEB_BUILD_MAINT_OPTIONS \
++    DEB_BUILD_PATH \
++    $(foreach flag,$(DPKG_BUILDFLAGS_LIST),\
++      $(foreach operation,SET STRIP APPEND PREPEND,\
++        DEB_$(flag)_MAINT_$(operation))),\
++    $(if $(value $(exported)),\
++      $(exported)="$($(exported))"))\
++  dpkg-buildflags | sed 's/\([^=]*\)\(.*\)/$$(eval DPKG_CACHE_\1:\2)/'))
+ 
+ $(foreach flag,$(DPKG_BUILDFLAGS_LIST),\
+-  $(eval $(call dpkg_buildflags_setvar,$(flag))))
++  $(eval $(call dpkg_lazy_eval,$(flag),$$(dpkg_buildflags_run))))
+ 
+ ifdef DPKG_EXPORT_BUILDFLAGS
+   export $(DPKG_BUILDFLAGS_LIST)
+diff --git a/scripts/mk/pkg-info.mk b/scripts/mk/pkg-info.mk
+index 658e4f675..7f52d93d3 100644
+--- a/scripts/mk/pkg-info.mk
++++ b/scripts/mk/pkg-info.mk
+@@ -21,15 +21,32 @@
+ ifndef dpkg_pkg_info_mk_included
+ dpkg_pkg_info_mk_included = yes
+ 
+-dpkg_late_eval ?= $(or $(value DPKG_CACHE_$(1)),$(eval DPKG_CACHE_$(1) := $(shell $(2)))$(value DPKG_CACHE_$(1)))
++define dpkg_lazy_eval ?=
++  $1 = $$(DPKG_CACHE_$1)
++  DPKG_CACHE_$1 = $2$$(call DPKG_CACHE_$1)
++endef
+ 
+-DEB_SOURCE = $(call dpkg_late_eval,DEB_SOURCE,dpkg-parsechangelog -SSource)
+-DEB_VERSION = $(call dpkg_late_eval,DEB_VERSION,dpkg-parsechangelog -SVersion)
+-DEB_VERSION_EPOCH_UPSTREAM = $(call dpkg_late_eval,DEB_VERSION_EPOCH_UPSTREAM,echo '$(DEB_VERSION)' | sed -e 's/-[^-]*$$//')
+-DEB_VERSION_UPSTREAM_REVISION = $(call dpkg_late_eval,DEB_VERSION_UPSTREAM_REVISION,echo '$(DEB_VERSION)' | sed -e 's/^[0-9]*://')
+-DEB_VERSION_UPSTREAM = $(call dpkg_late_eval,DEB_VERSION_UPSTREAM,echo '$(DEB_VERSION_EPOCH_UPSTREAM)' | sed -e 's/^[0-9]*://')
+-DEB_DISTRIBUTION = $(call dpkg_late_eval,DEB_DISTRIBUTION,dpkg-parsechangelog -SDistribution)
+-DEB_TIMESTAMP = $(call dpkg_late_eval,DEB_TIMESTAMP,dpkg-parsechangelog -STimestamp)
++dpkg_parsechangelog_run = $(info RUN)$(strip \
++  $(foreach line,$(shell dpkg-parsechangelog | sed -n ' \
++    s/^Source: /SOURCE:=/p; \
++    s/^Version: \([0-9]*:\)\{0,1\}\([^-]*\)\(\(.*\)-[^-]*\)\{0,1\}$$/ \
++      VERSION:=\1\2\3 \
++      VERSION_EPOCH_UPSTREAM:=\1\2\4 \
++      VERSION_UPSTREAM_REVISION:=\2\3 \
++      VERSION_UPSTREAM:=\2\4/p; \
++    s/^Distribution: /DISTRIBUTION:=/p; \
++    s/^Timestamp: /TIMESTAMP:=/p; \
++    '),$(eval DPKG_CACHE_DEB_$(line))))
++
++$(foreach var,\
++  SOURCE \
++  VERSION \
++  VERSION_EPOCH_UPSTREAM \
++  VERSION_UPSTREAM_REVISION \
++  VERSION_UPSTREAM \
++  DISTRIBUTION \
++  TIMESTAMP \
++  ,$(eval $(call dpkg_lazy_eval,DEB_$(var),$$(dpkg_parsechangelog_run))))
+ 
+ SOURCE_DATE_EPOCH ?= $(DEB_TIMESTAMP)
+ export SOURCE_DATE_EPOCH
+diff --git a/scripts/mk/vendor.mk b/scripts/mk/vendor.mk
+index a8d29cbcc..61db1133c 100644
+--- a/scripts/mk/vendor.mk
++++ b/scripts/mk/vendor.mk
+@@ -41,10 +41,14 @@ ifndef dpkg_datadir
+ endif
+ include $(dpkg_datadir)/buildapi.mk
+ 
+-dpkg_late_eval ?= $(or $(value DPKG_CACHE_$(1)),$(eval DPKG_CACHE_$(1) := $(shell $(2)))$(value DPKG_CACHE_$(1)))
++define dpkg_lazy_eval ?=
++  $1 = $$(DPKG_CACHE_$1)
++  DPKG_CACHE_$1 = $2$$(call DPKG_CACHE_$1)
++endef
++dpkg_lazy_set ?= $(eval $(call dpkg_lazy_eval,$1,$$(eval DPKG_CACHE_$1 := $2)))
+ 
+-DEB_VENDOR = $(call dpkg_late_eval,DEB_VENDOR,dpkg-vendor --query Vendor)
+-DEB_PARENT_VENDOR = $(call dpkg_late_eval,DEB_PARENT_VENDOR,dpkg-vendor --query Parent)
++$(call dpkg_lazy_set,DEB_VENDOR,$$(shell dpkg-vendor --query Vendor))
++$(call dpkg_lazy_set,DEB_PARENT_VENDOR,$$(shell dpkg-vendor --query Parent))
+ 
+ dpkg_vendor_derives_from_v0 = dpkg-vendor --derives-from $(1) && echo yes || echo no
+ dpkg_vendor_derives_from_v1 = $(shell $(dpkg_vendor_derives_from_v0))
+diff --git a/scripts/t/mk/buildflags.mk b/scripts/t/mk/buildflags.mk
+index bc7e6a849..eb634f25b 100644
+--- a/scripts/t/mk/buildflags.mk
++++ b/scripts/t/mk/buildflags.mk
+@@ -18,6 +18,9 @@ DPKG_EXPORT_BUILDFLAGS := 1
+ 
+ include $(srcdir)/mk/buildflags.mk
+ 
++LDFLAGS      += -DTEST_ADD=1
++TEST_LDFLAGS += -DTEST_ADD=1
++
+ vars := \
+   ASFLAGS \
+   CFLAGS \
+-- 
+2.39.2
+

@@ -1,0 +1,656 @@
+From ee6eae5751261211efc6a0067b151072bfe30972 Mon Sep 17 00:00:00 2001
+From: Simon McVittie <smcv@debian.org>
+Date: Sun, 8 Mar 2015 13:41:42 +0000
+Subject: [PATCH] Decide whether devices are on the same seat by uid, not pid
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+In systemd user sessions, some of a user's processes can exist outside
+the scope of any particular session:
+
+ââuser.slice
+  ââuser-1000.slice
+    ââuser@1000.service
+    â ââ2089 /lib/systemd/systemd --user
+    â ââdbus.service
+    â   ââ 2233 /usr/bin/dbus-daemon â¦
+    â   ââ 2297 /usr/lib/gvfs/gvfsd
+    â   â¦
+    ââsession-2.scope
+      ââ 2102 gnome-session
+      ââ 2376 /usr/bin/gnome-shell
+      â¦
+
+If processes outside sessions don't have access to devices on
+those sessions' seats, then gvfsd won't be able to mount devices.
+Conversely, there is no privilege boundary between the sessions and
+the non-session processes - in particular, the user's processes can
+usually ptrace each other and write to each other's configuration
+files - so isolating them doesn't make a great deal of sense.
+
+I'm specifically looking for one or more *active* sessions on the
+device's seat because in a situation like this:
+
+\- alice
+   \- graphical session on seat0, tty7, active
+   \- system --user
+\- bob
+   \- graphical session on seat0, tty8, inactive
+   \- graphical session on seat1, active
+   \- systemd --user
+\- chris
+   \- ssh session on no seat, active
+   \- systemd --user
+
+the desired behaviour is that alice controls seat0 devices and bob
+controls seat1 devices, corresponding to their respective
+physically-present locations.
+
+Despite udisks_daemon_util_on_user_seat being described in the
+documentation, it is not actually public ABI: it is part of
+libudisks-daemon.la, which is a convenience library statically
+linked into udisksd and the tests.
+
+Bug-Debian: https://bugs.debian.org/780004
+---
+ doc/udisks2-sections.txt        |  2 +-
+ src/udisksdaemonutil.c          | 17 ++++--------
+ src/udisksdaemonutil.h          |  8 ++----
+ src/udiskslinuxblock.c          | 15 +----------
+ src/udiskslinuxdrive.c          | 30 ++-------------------
+ src/udiskslinuxdriveata.c       | 21 +++++++++------
+ src/udiskslinuxencrypted.c      | 15 +----------
+ src/udiskslinuxfilesystem.c     | 32 +++-------------------
+ src/udiskslinuxpartition.c      | 60 +++--------------------------------------
+ src/udiskslinuxpartitiontable.c | 15 +----------
+ 10 files changed, 33 insertions(+), 182 deletions(-)
+
+diff --git a/doc/udisks2-sections.txt b/doc/udisks2-sections.txt
+index 897f48a..6dfc4b4 100644
+--- a/doc/udisks2-sections.txt
++++ b/doc/udisks2-sections.txt
+@@ -389,7 +389,7 @@ udisks_daemon_util_uninhibit_system_sync
+ udisks_daemon_util_hexdump
+ udisks_daemon_util_hexdump_debug
+ udisks_daemon_util_file_set_contents
+-udisks_daemon_util_on_same_seat
++udisks_daemon_util_on_user_seat
+ udisks_daemon_util_get_free_mdraid_device
+ udisks_ata_identify_get_word
+ </SECTION>
+diff --git a/src/udisksdaemonutil.c b/src/udisksdaemonutil.c
+index 278cf20..1ac3b5a 100644
+--- a/src/udisksdaemonutil.c
++++ b/src/udisksdaemonutil.c
+@@ -1038,7 +1038,7 @@ udisks_daemon_util_escape (const gchar *str)
+ }
+ 
+ /**
+- * udisks_daemon_util_on_same_seat:
++ * udisks_daemon_util_on_user_seat:
+  * @daemon: A #UDisksDaemon.
+  * @object: The #GDBusObject that the call is on or %NULL.
+  * @process: The process to check for.
+@@ -1051,9 +1051,9 @@ udisks_daemon_util_escape (const gchar *str)
+  * Returns: %TRUE if @object and @process is on the same seat, %FALSE otherwise.
+  */
+ gboolean
+-udisks_daemon_util_on_same_seat (UDisksDaemon          *daemon,
++udisks_daemon_util_on_user_seat (UDisksDaemon          *daemon,
+                                  UDisksObject          *object,
+-                                 pid_t                  process)
++                                 uid_t                  user)
+ {
+ #if !defined(HAVE_LIBSYSTEMD_LOGIN)
+   /* if we don't have systemd, assume it's always the same seat */
+@@ -1094,16 +1094,9 @@ udisks_daemon_util_on_same_seat (UDisksDaemon          *daemon,
+   if (drive == NULL)
+     goto out;
+ 
+-  /* It's not unexpected to not find a session, nor a seat associated with @process */
+-  if (sd_pid_get_session (process, &session) == 0)
+-    sd_session_get_seat (session, &seat);
+-
+-  /* If we don't know the seat of the caller, we assume the device is always on another seat */
+-  if (seat == NULL)
+-    goto out;
+-
+   drive_seat = udisks_drive_get_seat (drive);
+-  if (g_strcmp0 (seat, drive_seat) == 0)
++
++  if (drive_seat != NULL && sd_uid_is_on_seat (user, TRUE, drive_seat) > 0)
+     {
+       ret = TRUE;
+       goto out;
+diff --git a/src/udisksdaemonutil.h b/src/udisksdaemonutil.h
+index 1f2fac1..031812f 100644
+--- a/src/udisksdaemonutil.h
++++ b/src/udisksdaemonutil.h
+@@ -44,9 +44,9 @@ gboolean udisks_daemon_util_setup_by_user (UDisksDaemon *daemon,
+                                            UDisksObject *object,
+                                            uid_t         user);
+ 
+-gboolean udisks_daemon_util_on_same_seat (UDisksDaemon          *daemon,
++gboolean udisks_daemon_util_on_user_seat (UDisksDaemon          *daemon,
+                                           UDisksObject          *object,
+-                                          pid_t                  process);
++                                          uid_t                  user);
+ 
+ gboolean udisks_daemon_util_check_authorization_sync (UDisksDaemon          *daemon,
+                                                       UDisksObject          *object,
+@@ -87,10 +87,6 @@ gboolean udisks_daemon_util_file_set_contents (const gchar  *filename,
+ UDisksInhibitCookie *udisks_daemon_util_inhibit_system_sync   (const gchar          *reason);
+ void                 udisks_daemon_util_uninhibit_system_sync (UDisksInhibitCookie  *cookie);
+ 
+-gboolean udisks_daemon_util_on_same_seat (UDisksDaemon          *daemon,
+-                                          UDisksObject          *object,
+-                                          pid_t                  process);
+-
+ gchar *udisks_daemon_util_get_free_mdraid_device (void);
+ 
+ guint16 udisks_ata_identify_get_word (const guchar *identify_data, guint word_number);
+diff --git a/src/udiskslinuxblock.c b/src/udiskslinuxblock.c
+index c8a86f1..e113163 100644
+--- a/src/udiskslinuxblock.c
++++ b/src/udiskslinuxblock.c
+@@ -2176,7 +2176,6 @@ handle_format (UDisksBlock           *block,
+   int status;
+   uid_t caller_uid;
+   gid_t caller_gid;
+-  pid_t caller_pid;
+   gboolean take_ownership = FALSE;
+   gchar *encrypt_passphrase = NULL;
+   gchar *erase_type = NULL;
+@@ -2231,18 +2230,6 @@ handle_format (UDisksBlock           *block,
+     }
+ 
+   error = NULL;
+-  if (!udisks_daemon_util_get_caller_pid_sync (daemon,
+-                                               invocation,
+-                                               NULL /* GCancellable */,
+-                                               &caller_pid,
+-                                               &error))
+-    {
+-      g_dbus_method_invocation_return_gerror (invocation, error);
+-      g_error_free (error);
+-      goto out;
+-    }
+-
+-  error = NULL;
+   if (!udisks_daemon_util_get_caller_uid_sync (daemon, invocation, NULL /* GCancellable */, &caller_uid, &caller_gid, NULL, &error))
+     {
+       g_dbus_method_invocation_return_gerror (invocation, error);
+@@ -2280,7 +2267,7 @@ handle_format (UDisksBlock           *block,
+             {
+               action_id = "org.freedesktop.udisks2.modify-device-system";
+             }
+-          else if (!udisks_daemon_util_on_same_seat (daemon, object, caller_pid))
++          else if (!udisks_daemon_util_on_user_seat (daemon, object, caller_uid))
+             {
+               action_id = "org.freedesktop.udisks2.modify-device-other-seat";
+             }
+diff --git a/src/udiskslinuxdrive.c b/src/udiskslinuxdrive.c
+index 5a85fb3..68a9f06 100644
+--- a/src/udiskslinuxdrive.c
++++ b/src/udiskslinuxdrive.c
+@@ -958,7 +958,6 @@ handle_eject (UDisksDrive           *_drive,
+   gchar *escaped_device = NULL;
+   uid_t caller_uid;
+   gid_t caller_gid;
+-  pid_t caller_pid;
+ 
+   object = udisks_daemon_util_dup_object (drive, &error);
+   if (object == NULL)
+@@ -988,18 +987,6 @@ handle_eject (UDisksDrive           *_drive,
+     }
+ 
+   error = NULL;
+-  if (!udisks_daemon_util_get_caller_pid_sync (daemon,
+-                                               invocation,
+-                                               NULL /* GCancellable */,
+-                                               &caller_pid,
+-                                               &error))
+-    {
+-      g_dbus_method_invocation_return_gerror (invocation, error);
+-      g_error_free (error);
+-      goto out;
+-    }
+-
+-  error = NULL;
+   if (!udisks_daemon_util_get_caller_uid_sync (daemon,
+                                                invocation,
+                                                NULL /* GCancellable */,
+@@ -1025,7 +1012,7 @@ handle_eject (UDisksDrive           *_drive,
+     {
+       action_id = "org.freedesktop.udisks2.eject-media-system";
+     }
+-  else if (!udisks_daemon_util_on_same_seat (daemon, UDISKS_OBJECT (object), caller_pid))
++  else if (!udisks_daemon_util_on_user_seat (daemon, UDISKS_OBJECT (object), caller_uid))
+     {
+       action_id = "org.freedesktop.udisks2.eject-media-other-seat";
+     }
+@@ -1350,7 +1337,6 @@ handle_power_off (UDisksDrive           *_drive,
+   gchar *escaped_device = NULL;
+   uid_t caller_uid;
+   gid_t caller_gid;
+-  pid_t caller_pid;
+   GList *sibling_objects = NULL, *l;
+   gint fd = -1;
+ 
+@@ -1405,18 +1391,6 @@ handle_power_off (UDisksDrive           *_drive,
+     }
+ 
+   error = NULL;
+-  if (!udisks_daemon_util_get_caller_pid_sync (daemon,
+-                                               invocation,
+-                                               NULL /* GCancellable */,
+-                                               &caller_pid,
+-                                               &error))
+-    {
+-      g_dbus_method_invocation_return_gerror (invocation, error);
+-      g_error_free (error);
+-      goto out;
+-    }
+-
+-  error = NULL;
+   if (!udisks_daemon_util_get_caller_uid_sync (daemon,
+                                                invocation,
+                                                NULL /* GCancellable */,
+@@ -1442,7 +1416,7 @@ handle_power_off (UDisksDrive           *_drive,
+     {
+       action_id = "org.freedesktop.udisks2.power-off-drive-system";
+     }
+-  else if (!udisks_daemon_util_on_same_seat (daemon, UDISKS_OBJECT (object), caller_pid))
++  else if (!udisks_daemon_util_on_user_seat (daemon, UDISKS_OBJECT (object), caller_uid))
+     {
+       action_id = "org.freedesktop.udisks2.power-off-drive-other-seat";
+     }
+diff --git a/src/udiskslinuxdriveata.c b/src/udiskslinuxdriveata.c
+index 84c0e86..171fe2a 100644
+--- a/src/udiskslinuxdriveata.c
++++ b/src/udiskslinuxdriveata.c
+@@ -1336,7 +1336,7 @@ handle_pm_standby (UDisksDriveAta        *_drive,
+   GError *error = NULL;
+   const gchar *message;
+   const gchar *action_id;
+-  pid_t caller_pid;
++  uid_t caller_uid;
+ 
+   object = udisks_daemon_util_dup_object (drive, &error);
+   if (object == NULL)
+@@ -1369,10 +1369,12 @@ handle_pm_standby (UDisksDriveAta        *_drive,
+     }
+ 
+   error = NULL;
+-  if (!udisks_daemon_util_get_caller_pid_sync (daemon,
++  if (!udisks_daemon_util_get_caller_uid_sync (daemon,
+                                                invocation,
+                                                NULL /* GCancellable */,
+-                                               &caller_pid,
++                                               &caller_uid,
++                                               NULL,
++                                               NULL,
+                                                &error))
+     {
+       g_dbus_method_invocation_return_gerror (invocation, error);
+@@ -1392,7 +1394,7 @@ handle_pm_standby (UDisksDriveAta        *_drive,
+     {
+       action_id = "org.freedesktop.udisks2.ata-standby-system";
+     }
+-  else if (!udisks_daemon_util_on_same_seat (daemon, UDISKS_OBJECT (object), caller_pid))
++  else if (!udisks_daemon_util_on_user_seat (daemon, UDISKS_OBJECT (object), caller_uid))
+     {
+       action_id = "org.freedesktop.udisks2.ata-standby-other-seat";
+     }
+@@ -1467,8 +1469,9 @@ handle_pm_wakeup (UDisksDriveAta        *_drive,
+   GError *error = NULL;
+   const gchar *message;
+   const gchar *action_id;
+-  pid_t caller_pid;
+   guchar buf[4096];
++  uid_t caller_uid;
++  gid_t caller_gid;
+ 
+   object = udisks_daemon_util_dup_object (drive, &error);
+   if (object == NULL)
+@@ -1501,10 +1504,12 @@ handle_pm_wakeup (UDisksDriveAta        *_drive,
+     }
+ 
+   error = NULL;
+-  if (!udisks_daemon_util_get_caller_pid_sync (daemon,
++  if (!udisks_daemon_util_get_caller_uid_sync (daemon,
+                                                invocation,
+                                                NULL /* GCancellable */,
+-                                               &caller_pid,
++                                               &caller_uid,
++                                               &caller_gid,
++                                               NULL,
+                                                &error))
+     {
+       g_dbus_method_invocation_return_gerror (invocation, error);
+@@ -1524,7 +1529,7 @@ handle_pm_wakeup (UDisksDriveAta        *_drive,
+     {
+       action_id = "org.freedesktop.udisks2.ata-standby-system";
+     }
+-  else if (!udisks_daemon_util_on_same_seat (daemon, UDISKS_OBJECT (object), caller_pid))
++  else if (!udisks_daemon_util_on_user_seat (daemon, UDISKS_OBJECT (object), caller_uid))
+     {
+       action_id = "org.freedesktop.udisks2.ata-standby-other-seat";
+     }
+diff --git a/src/udiskslinuxencrypted.c b/src/udiskslinuxencrypted.c
+index dfee074..fefcba5 100644
+--- a/src/udiskslinuxencrypted.c
++++ b/src/udiskslinuxencrypted.c
+@@ -247,7 +247,6 @@ handle_unlock (UDisksEncrypted        *encrypted,
+   UDisksLinuxDevice *cleartext_device = NULL;
+   GError *error = NULL;
+   uid_t caller_uid;
+-  pid_t caller_pid;
+   const gchar *action_id;
+   const gchar *message;
+   gboolean is_in_crypttab = FALSE;
+@@ -314,18 +313,6 @@ handle_unlock (UDisksEncrypted        *encrypted,
+       goto out;
+     }
+ 
+-  error = NULL;
+-  if (!udisks_daemon_util_get_caller_pid_sync (daemon,
+-                                               invocation,
+-                                               NULL /* GCancellable */,
+-                                               &caller_pid,
+-                                               &error))
+-    {
+-      g_dbus_method_invocation_return_gerror (invocation, error);
+-      g_error_free (error);
+-      goto out;
+-    }
+-
+   /* check if in crypttab file */
+   error = NULL;
+   if (!check_crypttab (block,
+@@ -360,7 +347,7 @@ handle_unlock (UDisksEncrypted        *encrypted,
+         {
+           action_id = "org.freedesktop.udisks2.encrypted-unlock-system";
+         }
+-      else if (!udisks_daemon_util_on_same_seat (daemon, object, caller_pid))
++      else if (!udisks_daemon_util_on_user_seat (daemon, object, caller_uid))
+         {
+           action_id = "org.freedesktop.udisks2.encrypted-unlock-other-seat";
+         }
+diff --git a/src/udiskslinuxfilesystem.c b/src/udiskslinuxfilesystem.c
+index bb47337..eb109dd 100644
+--- a/src/udiskslinuxfilesystem.c
++++ b/src/udiskslinuxfilesystem.c
+@@ -1147,7 +1147,6 @@ handle_mount (UDisksFilesystem       *filesystem,
+   UDisksState *state;
+   uid_t caller_uid;
+   gid_t caller_gid;
+-  pid_t caller_pid;
+   const gchar * const *existing_mount_points;
+   const gchar *probed_fs_usage;
+   gchar *fs_type_to_use;
+@@ -1235,18 +1234,6 @@ handle_mount (UDisksFilesystem       *filesystem,
+       goto out;
+     }
+ 
+-  error = NULL;
+-  if (!udisks_daemon_util_get_caller_pid_sync (daemon,
+-                                               invocation,
+-                                               NULL /* GCancellable */,
+-                                               &caller_pid,
+-                                               &error))
+-    {
+-      g_dbus_method_invocation_return_gerror (invocation, error);
+-      g_error_free (error);
+-      goto out;
+-    }
+-
+   if (system_managed)
+     {
+       gint status;
+@@ -1268,7 +1255,7 @@ handle_mount (UDisksFilesystem       *filesystem,
+                 {
+                   action_id = "org.freedesktop.udisks2.filesystem-mount-system";
+                 }
+-              else if (!udisks_daemon_util_on_same_seat (daemon, object, caller_pid))
++              else if (!udisks_daemon_util_on_user_seat (daemon, object, caller_uid))
+                 {
+                   action_id = "org.freedesktop.udisks2.filesystem-mount-other-seat";
+                 }
+@@ -1430,7 +1417,7 @@ handle_mount (UDisksFilesystem       *filesystem,
+         {
+           action_id = "org.freedesktop.udisks2.filesystem-mount-system";
+         }
+-      else if (!udisks_daemon_util_on_same_seat (daemon, object, caller_pid))
++      else if (!udisks_daemon_util_on_user_seat (daemon, object, caller_uid))
+         {
+           action_id = "org.freedesktop.udisks2.filesystem-mount-other-seat";
+         }
+@@ -1845,7 +1832,6 @@ handle_set_label (UDisksFilesystem       *filesystem,
+   gchar *real_label = NULL;
+   uid_t caller_uid;
+   gid_t caller_gid;
+-  pid_t caller_pid;
+   gchar *command;
+   gchar *tmp;
+   GError *error;
+@@ -1866,18 +1852,6 @@ handle_set_label (UDisksFilesystem       *filesystem,
+   block = udisks_object_peek_block (object);
+ 
+   error = NULL;
+-  if (!udisks_daemon_util_get_caller_pid_sync (daemon,
+-                                               invocation,
+-                                               NULL /* GCancellable */,
+-                                               &caller_pid,
+-                                               &error))
+-    {
+-      g_dbus_method_invocation_return_gerror (invocation, error);
+-      g_error_free (error);
+-      goto out;
+-    }
+-
+-  error = NULL;
+   if (!udisks_daemon_util_get_caller_uid_sync (daemon,
+                                                invocation,
+                                                NULL /* GCancellable */,
+@@ -1976,7 +1950,7 @@ handle_set_label (UDisksFilesystem       *filesystem,
+         {
+           action_id = "org.freedesktop.udisks2.modify-device-system";
+         }
+-      else if (!udisks_daemon_util_on_same_seat (daemon, UDISKS_OBJECT (object), caller_pid))
++      else if (!udisks_daemon_util_on_user_seat (daemon, UDISKS_OBJECT (object), caller_uid))
+         {
+           action_id = "org.freedesktop.udisks2.modify-device-other-seat";
+         }
+diff --git a/src/udiskslinuxpartition.c b/src/udiskslinuxpartition.c
+index 8f0b5cf..bfee216 100644
+--- a/src/udiskslinuxpartition.c
++++ b/src/udiskslinuxpartition.c
+@@ -227,7 +227,6 @@ handle_set_flags (UDisksPartition        *partition,
+   gint fd = -1;
+   uid_t caller_uid;
+   gid_t caller_gid;
+-  pid_t caller_pid;
+   GError *error;
+ 
+   error = NULL;
+@@ -242,18 +241,6 @@ handle_set_flags (UDisksPartition        *partition,
+   block = udisks_object_get_block (object);
+ 
+   error = NULL;
+-  if (!udisks_daemon_util_get_caller_pid_sync (daemon,
+-                                               invocation,
+-                                               NULL /* GCancellable */,
+-                                               &caller_pid,
+-                                               &error))
+-    {
+-      g_dbus_method_invocation_return_gerror (invocation, error);
+-      g_error_free (error);
+-      goto out;
+-    }
+-
+-  error = NULL;
+   if (!udisks_daemon_util_get_caller_uid_sync (daemon,
+                                                invocation,
+                                                NULL /* GCancellable */,
+@@ -285,7 +272,7 @@ handle_set_flags (UDisksPartition        *partition,
+         {
+           action_id = "org.freedesktop.udisks2.modify-device-system";
+         }
+-      else if (!udisks_daemon_util_on_same_seat (daemon, object, caller_pid))
++      else if (!udisks_daemon_util_on_user_seat (daemon, object, caller_uid))
+         {
+           action_id = "org.freedesktop.udisks2.modify-device-other-seat";
+         }
+@@ -392,7 +379,6 @@ handle_set_name (UDisksPartition        *partition,
+   gint fd = -1;
+   uid_t caller_uid;
+   gid_t caller_gid;
+-  pid_t caller_pid;
+   GError *error;
+ 
+   error = NULL;
+@@ -407,18 +393,6 @@ handle_set_name (UDisksPartition        *partition,
+   block = udisks_object_get_block (object);
+ 
+   error = NULL;
+-  if (!udisks_daemon_util_get_caller_pid_sync (daemon,
+-                                               invocation,
+-                                               NULL /* GCancellable */,
+-                                               &caller_pid,
+-                                               &error))
+-    {
+-      g_dbus_method_invocation_return_gerror (invocation, error);
+-      g_error_free (error);
+-      goto out;
+-    }
+-
+-  error = NULL;
+   if (!udisks_daemon_util_get_caller_uid_sync (daemon,
+                                                invocation,
+                                                NULL /* GCancellable */,
+@@ -450,7 +424,7 @@ handle_set_name (UDisksPartition        *partition,
+         {
+           action_id = "org.freedesktop.udisks2.modify-device-system";
+         }
+-      else if (!udisks_daemon_util_on_same_seat (daemon, object, caller_pid))
++      else if (!udisks_daemon_util_on_user_seat (daemon, object, caller_uid))
+         {
+           action_id = "org.freedesktop.udisks2.modify-device-other-seat";
+         }
+@@ -734,7 +708,6 @@ handle_set_type (UDisksPartition        *partition,
+   UDisksBlock *partition_table_block = NULL;
+   uid_t caller_uid;
+   gid_t caller_gid;
+-  pid_t caller_pid;
+   GError *error;
+ 
+   error = NULL;
+@@ -749,18 +722,6 @@ handle_set_type (UDisksPartition        *partition,
+   block = udisks_object_get_block (object);
+ 
+   error = NULL;
+-  if (!udisks_daemon_util_get_caller_pid_sync (daemon,
+-                                               invocation,
+-                                               NULL /* GCancellable */,
+-                                               &caller_pid,
+-                                               &error))
+-    {
+-      g_dbus_method_invocation_return_gerror (invocation, error);
+-      g_error_free (error);
+-      goto out;
+-    }
+-
+-  error = NULL;
+   if (!udisks_daemon_util_get_caller_uid_sync (daemon,
+                                                invocation,
+                                                NULL /* GCancellable */,
+@@ -792,7 +753,7 @@ handle_set_type (UDisksPartition        *partition,
+         {
+           action_id = "org.freedesktop.udisks2.modify-device-system";
+         }
+-      else if (!udisks_daemon_util_on_same_seat (daemon, object, caller_pid))
++      else if (!udisks_daemon_util_on_user_seat (daemon, object, caller_uid))
+         {
+           action_id = "org.freedesktop.udisks2.modify-device-other-seat";
+         }
+@@ -845,7 +806,6 @@ handle_delete (UDisksPartition        *partition,
+   gchar *command_line = NULL;
+   uid_t caller_uid;
+   gid_t caller_gid;
+-  pid_t caller_pid;
+   GError *error;
+ 
+   error = NULL;
+@@ -860,18 +820,6 @@ handle_delete (UDisksPartition        *partition,
+   block = udisks_object_get_block (object);
+ 
+   error = NULL;
+-  if (!udisks_daemon_util_get_caller_pid_sync (daemon,
+-                                               invocation,
+-                                               NULL /* GCancellable */,
+-                                               &caller_pid,
+-                                               &error))
+-    {
+-      g_dbus_method_invocation_return_gerror (invocation, error);
+-      g_error_free (error);
+-      goto out;
+-    }
+-
+-  error = NULL;
+   if (!udisks_daemon_util_get_caller_uid_sync (daemon,
+                                                invocation,
+                                                NULL /* GCancellable */,
+@@ -903,7 +851,7 @@ handle_delete (UDisksPartition        *partition,
+         {
+           action_id = "org.freedesktop.udisks2.modify-device-system";
+         }
+-      else if (!udisks_daemon_util_on_same_seat (daemon, object, caller_pid))
++      else if (!udisks_daemon_util_on_user_seat (daemon, object, caller_uid))
+         {
+           action_id = "org.freedesktop.udisks2.modify-device-other-seat";
+         }
+diff --git a/src/udiskslinuxpartitiontable.c b/src/udiskslinuxpartitiontable.c
+index 17fa518..2692b31 100644
+--- a/src/udiskslinuxpartitiontable.c
++++ b/src/udiskslinuxpartitiontable.c
+@@ -340,7 +340,6 @@ handle_create_partition (UDisksPartitionTable   *table,
+   UDisksBlock *partition_block = NULL;
+   gchar *escaped_partition_device = NULL;
+   const gchar *table_type;
+-  pid_t caller_pid;
+   uid_t caller_uid;
+   gid_t caller_gid;
+   gboolean do_wipe = TRUE;
+@@ -364,18 +363,6 @@ handle_create_partition (UDisksPartitionTable   *table,
+     }
+ 
+   error = NULL;
+-  if (!udisks_daemon_util_get_caller_pid_sync (daemon,
+-                                               invocation,
+-                                               NULL /* GCancellable */,
+-                                               &caller_pid,
+-                                               &error))
+-    {
+-      g_dbus_method_invocation_return_gerror (invocation, error);
+-      g_error_free (error);
+-      goto out;
+-    }
+-
+-  error = NULL;
+   if (!udisks_daemon_util_get_caller_uid_sync (daemon,
+                                                invocation,
+                                                NULL /* GCancellable */,
+@@ -403,7 +390,7 @@ handle_create_partition (UDisksPartitionTable   *table,
+         {
+           action_id = "org.freedesktop.udisks2.modify-device-system";
+         }
+-      else if (!udisks_daemon_util_on_same_seat (daemon, object, caller_pid))
++      else if (!udisks_daemon_util_on_user_seat (daemon, object, caller_uid))
+         {
+           action_id = "org.freedesktop.udisks2.modify-device-other-seat";
+         }
+-- 
+2.1.4
+

@@ -1,0 +1,251 @@
+Move private shared libraries from binutils to libbinutils.
+
+This is a preparational step for splitting the triplet-prefixed tools out of
+binutils into binutils-$nativetriplet. Since the tools require the private
+libraries, the libraries need to be accessible to binutils-$nativetriplet.  As
+was the case with the binutils-common split, leaving the libraries in binutils
+would result in a circular dependency. Moving them to binutils-$nativetriplet
+would work in principle, but the private libraries are exposed to non-Debian
+consumers via shlibs files.  Since binutils-$nativetriplet will become
+Multi-Arch: foreign, those dependencies could wrongly become satisfied by cross
+binutils. So neither binutils nor binutils-$nativetriplet are good places for
+those libraries.
+
+Thus the available options are:
+ * Remove the shlibs file making the libraries really private.
+ * Move them to a separate libbinutils package.
+ * Move them to a proper soname-versioned libbinutils-$VER package.
+
+The first option arguably degrades the usability of the package and the third
+option causes binutils to go through NEW frequently. Thus this patch implements
+the second option which is a compromise of the other two.
+
+Index: debian/control.in
+===================================================================
+--- debian.orig/control.in
++++ debian/control.in
+@@ -13,7 +13,8 @@
+ 
+ Package: binutils
+ Architecture: any
+-Depends: ${shlibs:Depends}, binutils-common (= ${source:Version})
++Depends: ${shlibs:Depends}, binutils-common (= ${source:Version}),
++  libbinutils (= ${binary:Version})
+ Conflicts: gas, elf-binutils, modutils (<< 2.4.19-1), ${extraConflicts},
+   binutils-gold	(<< 2.20.51.20100415),
+   binutils-multiarch (<< 2.27-8)
+@@ -30,10 +31,19 @@
+  binary and object files.  They may be used in conjunction with a compiler
+  and various libraries to build programs.
+ 
++Package: libbinutils
++Architecture: any
++Depends: ${shlibs:Depends}
++Breaks: binutils (<< 2.27-8.1)
++Replaces: binutils (<< 2.27-8.1)
++Multi-Arch: same
++Description: GNU binary utilities (private shared library)
++ This package includes the private shared libraries libbfd and libopcodes.
++
+ Package: binutils-dev
+ Architecture: any
+ Priority: extra
+-Depends: binutils (= ${binary:Version})
++Depends: binutils (= ${binary:Version}), libbinutils (= ${binary:Version})
+ Conflicts: libbfd-dev
+ Provides: libbfd-dev
+ Replaces: libbfd-dev, libc5-dev
+Index: debian/rules
+===================================================================
+--- debian.orig/rules
++++ debian/rules
+@@ -14,6 +14,7 @@
+ ###############################################################################
+ 
+ p_bin = binutils
++p_lib = lib$(p_bin)
+ p_dev = $(p_bin)-dev
+ p_mul = $(p_bin)-multiarch
+ p_mdev = $(p_mul)-dev
+@@ -39,6 +40,7 @@
+ pwd   := $(shell pwd)
+ d     = debian/tmp
+ d_bin = $(d)
++d_lib = debian/$(p_lib)
+ d_dev = debian/$(p_dev)
+ d_mul = debian/$(p_mul)
+ d_mdev = debian/$(p_mdev)
+@@ -509,7 +511,7 @@
+ 	rm -rf stamps
+ 	find . -name \*.gmo -o -name \*~ -o -name \*.info ! -name sysroff.info | xargs -r rm -f
+ 	rm -f $(pwd)/test-summary*
+-	rm -rf $(d_bin) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_hppa64) $(d_src) $(d_com)
++	rm -rf $(d_bin) $(d_lib) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_hppa64) $(d_src) $(d_com)
+ 	$(foreach ca,$(CROSS_ARCHS), rm -rf debian/binutils-$(shell echo $(call _gnu_type,$(ca)) | sed 's/_/-/g;s/i586/i686/'); )
+ 	rm -rf debian/patched debian/tmp debian/files* debian/substvars
+ 	rm -f debian/*.orig debian/*.rej
+@@ -924,8 +926,8 @@
+ stamps/install: checkroot stamps/build $(install_stamps) $(if $(CROSS),debian/strip.cross)
+ 	$(checkdir)
+ 
+-	rm -fr $(d_bin) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_src) $(d_com)
+-	$(install_dir) $(d_bin) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_src) $(d_com)
++	rm -fr $(d_bin) $(d_lib) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_src) $(d_com)
++	$(install_dir) $(d_bin) $(d_lib) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_src) $(d_com)
+ 
+ 	: # install binutils and -dev stuff
+ 	env MAKE="$(MAKE) VERSION=$(SINGLE_VERSION)" \
+@@ -1072,11 +1074,11 @@
+ 	$(install_dir) $(d_dev)/$(PF)/include
+ 	mv $(d_bin)/$(PF)/include/* $(d_dev)/$(PF)/include/
+ 
+-	$(install_dir) $(d_bin)/$(PF)/lib/$(DEB_HOST_MULTIARCH) $(d_dev)/$(PF)/lib/$(DEB_HOST_MULTIARCH)
++	$(install_dir) $(d_lib)/$(PF)/lib/$(DEB_HOST_MULTIARCH) $(d_dev)/$(PF)/lib/$(DEB_HOST_MULTIARCH)
+ 	mv $(d_bin)/$(PF)/lib/*.a $(d_bin)/$(PF)/lib/libbfd.so $(d_bin)/$(PF)/lib/libopcodes.so \
+ 	   $(d_dev)/$(PF)/lib/$(DEB_HOST_MULTIARCH)
+ 	mv $(d_bin)/$(PF)/lib/*.so \
+-	   $(d_bin)/$(PF)/lib/$(DEB_HOST_MULTIARCH)
++	   $(d_lib)/$(PF)/lib/$(DEB_HOST_MULTIARCH)
+ 
+ ifeq ($(with_multiarch),yes)
+ 	$(install_dir) $(d_mul)/$(PF)/lib/$(DEB_HOST_MULTIARCH) $(d_mdev)/$(PF)/lib/$(DEB_HOST_MULTIARCH)
+@@ -1093,8 +1095,9 @@
+ 	: # Get rid of .la files since libtool obviously has no idea about transient paths
+ 	rm -f $(d_bin)/$(PF)/lib/*.la
+ 
+-	chmod ugo-x $(d_bin)/$(PF)/lib/$(DEB_HOST_MULTIARCH)/*.so
++	chmod ugo-x $(d_lib)/$(PF)/lib/$(DEB_HOST_MULTIARCH)/*.so
+ 	$(call strip_package, $(p_bin), $(d_bin))
++	$(call strip_package, $(p_lib), $(d_lib))
+ ifeq ($(with_multiarch),yes)
+ 	chmod ugo-x $(d_mul)/$(PF)/lib/$(DEB_HOST_MULTIARCH)/*.so
+ 	$(call strip_package, $(p_mul), $(d_mul))
+@@ -1294,6 +1297,7 @@
+ 
+ 	tar cf - $$(find './debian' -mindepth 1 \( \
+ 		-path './debian/binutils*' -type d -prune -o \
++		-path './debian/libbinutils' -prune -o \
+ 		-path './debian/patches' -prune -o \
+ 		-path './debian/tmp*' -prune -o \
+ 		-path './debian/.bzr*' -prune -o \
+@@ -1479,6 +1483,8 @@
+ 	: # make lintian happy
+ 	$(install_file) -D debian/$(p_bin).overrides \
+ 		$(d_bin)/$(PF)/share/lintian/overrides/$(p_bin)
++	$(install_file) -D debian/$(p_lib).lintian-overrides \
++		$(d_lib)/$(PF)/share/lintian/overrides/$(p_lib)
+ ifeq ($(with_multiarch),yes)
+ 	$(install_file) -D debian/$(p_mul).overrides \
+ 		$(d_mul)/$(PF)/share/lintian/overrides/$(p_mul)
+@@ -1492,8 +1498,10 @@
+ 
+ 	: # install maintainer scripts
+ 	$(install_dir) $(d_bin)/DEBIAN
+-	$(install_file) debian/binutils.triggers $(d_bin)/DEBIAN/triggers
+-	$(install_file) debian/binutils.shlibs $(d_bin)/DEBIAN/shlibs
++
++	$(install_dir) $(d_lib)/DEBIAN
++	$(install_file) debian/binutils.triggers $(d_lib)/DEBIAN/triggers
++	$(install_file) debian/libbinutils.shlibs $(d_lib)/DEBIAN/shlibs
+ 
+ 	$(install_dir) $(d_dev)/DEBIAN
+ 
+@@ -1518,6 +1526,10 @@
+ 	$(install_file)	debian/changelog $(d_bin)/$(PF)/share/doc/$(p_bin)/changelog.Debian
+ 	$(install_file)	debian/copyright $(d_bin)/$(PF)/share/doc/$(p_bin)/
+ 
++	$(install_dir) $(d_lib)/$(PF)/share/doc/$(p_lib)/
++	$(install_file)	debian/changelog $(d_lib)/$(PF)/share/doc/$(p_lib)/changelog.Debian
++	$(install_file)	debian/copyright $(d_lib)/$(PF)/share/doc/$(p_lib)/
++
+ 	$(install_dir) $(d_dev)/$(PF)/share/doc/
+ 	ln -sf $(p_bin) $(d_dev)/$(PF)/share/doc/$(p_dev)
+ ifeq ($(with_multiarch),yes)
+@@ -1541,12 +1553,16 @@
+ 
+ 	: # Compress stuff that needs it
+ 	gzip -9n $(d_bin)/$(PF)/share/man/man1/*.1 $(d_bin)/$(PF)/share/doc/$(p_bin)/changelog.Debian
++	gzip -9n $(d_lib)/$(PF)/share/doc/$(p_lib)/changelog.Debian
+ 
+ 	: # Finish it all up
+-	find $(d_bin) -type f | xargs file | grep ELF | cut -d: -f 1 | xargs dpkg-shlibdeps
++	find $(d_bin) $(d_lib) -type f | xargs file | grep ELF | cut -d: -f 1 | xargs dpkg-shlibdeps
+ 	dpkg-gencontrol -P$(d_bin) -p$(p_bin) $(CONFLICTS_TARGET_$(DEB_HOST_ARCH)) $(gold_provides)
+ 	cd $(d_bin) && find -type f  ! -regex './DEBIAN/.*' -printf '%P\n' | LC_ALL=C sort | xargs md5sum > DEBIAN/md5sums
+ 
++	dpkg-gencontrol -P$(d_lib) -p$(p_lib)
++	cd $(d_lib) && find -type f  ! -regex './DEBIAN/.*' -printf '%P\n' | LC_ALL=C sort | xargs md5sum > DEBIAN/md5sums
++
+ 	rm -f debian/substvars
+ 	dpkg-gencontrol -P$(d_dev) -p$(p_dev)
+ 	cd $(d_dev) && find -type f  ! -regex './DEBIAN/.*' -printf '%P\n' | LC_ALL=C sort | xargs md5sum > DEBIAN/md5sums
+@@ -1570,11 +1586,14 @@
+ 	cd $(d_hppa64) && find -type f  ! -regex './DEBIAN/.*' -printf '%P\n' | LC_ALL=C sort | xargs md5sum > DEBIAN/md5sums
+ endif
+ 
+-	chown -R root:root $(d_bin) $(d_dev)
+-	chmod -R go=rX  $(d_bin) $(d_dev)
++	chown -R root:root $(d_bin) $(d_lib) $(d_dev)
++	chmod -R go=rX  $(d_bin) $(d_lib) $(d_dev)
+ 	find $(d_bin) -depth -newermt '$(BUILD_DATE)' -print0 | \
+ 		xargs -0r touch --no-dereference --date='$(BUILD_DATE)'
+ 	dpkg --build $(d_bin) ..
++	find $(d_lib) -depth -newermt '$(BUILD_DATE)' -print0 | \
++		xargs -0r touch --no-dereference --date='$(BUILD_DATE)'
++	dpkg --build $(d_lib) ..
+ 	find $(d_dev) -depth -newermt '$(BUILD_DATE)' -print0 | \
+ 		xargs -0r touch --no-dereference --date='$(BUILD_DATE)'
+ 	dpkg --build $(d_dev) ..
+@@ -1651,9 +1670,11 @@
+ 	if which pkg_create_dbgsym >/dev/null 2>&1; then \
+ 	  pkg_create_dbgsym $1 $2; \
+ 	fi
+-	$(STRIP) --strip-unneeded $2/$(PF)/lib/$(DEB_HOST_MULTIARCH)/libbfd-*so
+-	$(STRIP) --strip-unneeded $2/$(PF)/lib/$(DEB_HOST_MULTIARCH)/libopcodes-*so
+-	$(STRIP) $$(file $2/$(PF)/bin/* |awk -F: '$$0 !~ /script/ {print $$1}')
++	set -e; if test -d $2/$(PF)/lib/$(DEB_HOST_MULTIARCH); then \
++	  $(STRIP) --strip-unneeded $2/$(PF)/lib/$(DEB_HOST_MULTIARCH)/libbfd-*so; \
++	  $(STRIP) --strip-unneeded $2/$(PF)/lib/$(DEB_HOST_MULTIARCH)/libopcodes-*so; \
++	fi
++	test ! -d $2/$(PF)/bin || $(STRIP) $$(file $2/$(PF)/bin/* |awk -F: '$$0 !~ /script/ {print $$1}')
+ endef
+ else
+ define strip_package
+Index: debian/binutils.shlibs.in
+===================================================================
+--- debian.orig/binutils.shlibs.in
++++ /dev/null
+@@ -1,2 +0,0 @@
+-libbfd @VER@-system@DATE_EXT@ binutils (>= @DEB_UVER@), binutils (<< @DEB_NVER@)
+-libopcodes @VER@-system@DATE_EXT@ binutils (>= @DEB_UVER@), binutils (<< @DEB_NVER@)
+Index: debian/libbinutils.shlibs.in
+===================================================================
+--- /dev/null
++++ debian/libbinutils.shlibs.in
+@@ -0,0 +1,2 @@
++libbfd @VER@-system@DATE_EXT@ libbinutils (>= @DEB_UVER@), libbinutils (<< @DEB_NVER@)
++libopcodes @VER@-system@DATE_EXT@ libbinutils (>= @DEB_UVER@), libbinutils (<< @DEB_NVER@)
+Index: debian/libbinutils.lintian-overrides
+===================================================================
+--- /dev/null
++++ debian/libbinutils.lintian-overrides
+@@ -0,0 +1,5 @@
++# the API of the shared libs is not public, don't care about the name
++libbinutils binary: package-name-doesnt-match-sonames
++
++# the upstream name, we don't care
++libbinutils binary: dev-pkg-without-shlib-symlink
+Index: debian/binutils.overrides
+===================================================================
+--- debian.orig/binutils.overrides
++++ debian/binutils.overrides
+@@ -1,9 +1,3 @@
+-# the API of the shared libs is not public, don't care about the name
+-binutils binary: package-name-doesnt-match-sonames
+-
+-# the upstream name, we don't care
+-binutils binary: dev-pkg-without-shlib-symlink
+-
+ # big tables
+ binutils binary: manpage-has-errors-from-man
+ 

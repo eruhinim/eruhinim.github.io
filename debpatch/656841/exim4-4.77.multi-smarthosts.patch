@@ -1,0 +1,424 @@
+diff -Nru exim4-4.77-orig/debian/changelog exim4-4.77/debian/changelog
+--- exim4-4.77-orig/debian/changelog	2011-10-23 01:00:14.000000000 +0900
++++ exim4-4.77/debian/changelog	2012-01-29 00:03:34.060156402 +0900
+@@ -1,3 +1,10 @@
++exim4 (4.77-2~oa1) not-unstable; urgency=low
++
++  * Non-maintainer upload.
++  * Testing new smarthost configuration template
++
++ -- Osamu Aoki <osamu@debian.org>  Sun, 29 Jan 2012 00:02:23 +0900
++
+ exim4 (4.77-1) unstable; urgency=low
+ 
+   * Fix typo in exim4-config_files.5. (Thanks, Regid Ichira) Closes: #645283
+diff -Nru exim4-4.77-orig/debian/debconf/conf.d/auth/30_exim4-config_examples exim4-4.77/debian/debconf/conf.d/auth/30_exim4-config_examples
+--- exim4-4.77-orig/debian/debconf/conf.d/auth/30_exim4-config_examples	2007-06-24 16:09:00.000000000 +0900
++++ exim4-4.77/debian/debconf/conf.d/auth/30_exim4-config_examples	2012-01-28 23:59:14.202867905 +0900
+@@ -207,8 +207,13 @@
+ cram_md5:
+   driver = cram_md5
+   public_name = CRAM-MD5
++.ifndef ENABLE_MULTIPLE_SMARTHOSTS
+   client_name = ${extract{1}{:}{${lookup{$host}nwildlsearch{CONFDIR/passwd.client}{$value}fail}}}
+   client_secret = ${extract{2}{:}{${lookup{$host}nwildlsearch{CONFDIR/passwd.client}{$value}fail}}}
++.else
++  client_name =   ${extract{name}{$address_data}{$value}fail}
++  client_secret = ${extract{pass}{$address_data}{$value}fail}
++.endif
+ 
+ # this returns the matching line from passwd.client and doubles all ^
+ PASSWDLINE=${sg{\
+@@ -221,6 +226,7 @@
+ plain:
+   driver = plaintext
+   public_name = PLAIN
++.ifndef ENABLE_MULTIPLE_SMARTHOSTS
+ .ifndef AUTH_CLIENT_ALLOW_NOTLS_PASSWORDS
+   client_send = "<; ${if !eq{$tls_cipher}{}\
+                     {^${extract{1}{:}{PASSWDLINE}}\
+@@ -230,10 +236,15 @@
+   client_send = "<; ^${extract{1}{:}{PASSWDLINE}}\
+ 		    ^${sg{PASSWDLINE}{\\N([^:]+:)(.*)\\N}{\\$2}}"
+ .endif
++.else
++  client_send = "<; ^${sg{${extract{name}{$address_data}{$value}fail}}{\\N[\\^]\\N}{^^}}\
++		    ^${sg{${extract{pass}{$address_data}{$value}fail}}{\\N[\\^]\\N}{^^}}"
++.endif
+ 
+ login:
+   driver = plaintext
+   public_name = LOGIN
++.ifndef ENABLE_MULTIPLE_SMARTHOSTS
+ .ifndef AUTH_CLIENT_ALLOW_NOTLS_PASSWORDS
+   # Return empty string if not non-TLS AND looking up $host in passwd-file
+   # yields a non-empty string; fail otherwise.
+@@ -252,3 +263,7 @@
+                  ; ${extract{1}{::}{PASSWDLINE}}\
+ 		 ; ${sg{PASSWDLINE}{\\N([^:]+:)(.*)\\N}{\\$2}}"
+ .endif
++.else
++  client_send = "<; ; ${sg{${extract{name}{$address_data}{$value}fail}}{\\N[\\^]\\N}{^^}} ; ${sg{${extract{pass}{$address_data}{$value}fail}}{\\N[\\^]\\N}{^^}}"
++.endif
++
+diff -Nru exim4-4.77-orig/debian/debconf/conf.d/main/03_exim4-config_tlsoptions exim4-4.77/debian/debconf/conf.d/main/03_exim4-config_tlsoptions
+--- exim4-4.77-orig/debian/debconf/conf.d/main/03_exim4-config_tlsoptions	2009-12-12 20:53:43.000000000 +0900
++++ exim4-4.77/debian/debconf/conf.d/main/03_exim4-config_tlsoptions	2012-01-28 22:40:56.155571443 +0900
+@@ -76,3 +76,19 @@
+ .endif
+ 
+ .endif
++
++#############################################################################
++# TLS/SSL configuration for exim as an SMTP client.
++# See /usr/share/doc/exim4-base/README.Debian.gz for explanations.
++#############################################################################
++
++# Defining following MACRO will enable SMTPS (SSL upon connection) on port 465
++# for Exim as SMTP-AUTH client (basic) configuration.
++# USE_SMTPS_PROTOCOL_FOR_SMARTHOST = yes
++
++# Defining following MACRO will enable Exim as flexible SMTP-AUTH client 
++# (alternative) configuration.
++#ENABLE_MULTIPLE_SMARTHOSTS = yes
++
++# This MACRO is used across alternative clint configuration
++SMARTHOSTS_CONF = ${lookup{${sg{${addresses:$header_from:}}{:.*}{}}}lsearch*{CONFDIR/smarthosts.conf}}
+diff -Nru exim4-4.77-orig/debian/debconf/conf.d/rewrite/31_exim4-config_rewriting exim4-4.77/debian/debconf/conf.d/rewrite/31_exim4-config_rewriting
+--- exim4-4.77-orig/debian/debconf/conf.d/rewrite/31_exim4-config_rewriting	2007-06-24 15:33:15.000000000 +0900
++++ exim4-4.77/debian/debconf/conf.d/rewrite/31_exim4-config_rewriting	2012-01-28 02:28:17.000000000 +0900
+@@ -1,10 +1,10 @@
+-
+ ### rewrite/31_exim4-config_rewriting
+ #################################
+ 
+ # This rewriting rule is particularily useful for dialup users who
+ # don't have their own domain, but could be useful for anyone.
+ # It looks up the real address of all local users in a file
++.ifndef ENABLE_MULTIPLE_SMARTHOSTS
+ .ifndef NO_EAA_REWRITE_REWRITE
+ *@+local_domains "${lookup{${local_part}}lsearch{/etc/email-addresses}\
+                    {$value}fail}" Ffrs
+@@ -12,5 +12,13 @@
+ *@ETC_MAILNAME "${lookup{${local_part}}lsearch{/etc/email-addresses}\
+                    {$value}fail}" Ffrs
+ .endif
++.else
++
++*@+local_domains "${lookup{${local_part}}lsearch{${extract{rewrite}{SMARTHOSTS_CONF}{CONFDIR/$value}{/etc/email-addresses}}}\
++                   {$value}fail}" Ffrs
++# identical rewriting rule for /etc/mailname
++*@ETC_MAILNAME "${lookup{${local_part}}lsearch{${extract{rewrite}{SMARTHOSTS_CONF}{CONFDIR/$value}{/etc/email-addresses}}}\
++                   {$value}fail}" Ffrs
++.endif
+ 
+ 
+diff -Nru exim4-4.77-orig/debian/debconf/conf.d/router/200_exim4-config_primary exim4-4.77/debian/debconf/conf.d/router/200_exim4-config_primary
+--- exim4-4.77-orig/debian/debconf/conf.d/router/200_exim4-config_primary	2005-11-06 21:37:24.000000000 +0900
++++ exim4-4.77/debian/debconf/conf.d/router/200_exim4-config_primary	2012-01-28 19:14:35.702180197 +0900
+@@ -74,6 +74,7 @@
+ # here so that mail to relay_domains is handled separately.
+ 
+ smarthost:
++.ifndef ENABLE_MULTIPLE_SMARTHOSTS
+   debug_print = "R: smarthost for $local_part@$domain"
+   driver = manualroute
+   domains = ! +local_domains
+@@ -82,6 +83,18 @@
+   host_find_failed = defer
+   same_domain_copy_routing = yes
+   no_more
++.else
++  debug_print = "R: smarthost for $local_part@$domain"
++  driver = manualroute
++  domains = ! +local_domains
++  address_data = SMARTHOSTS_CONF 
++  # unless smtps is specified, use remote_smtp_smarthost, otherwise use remote_smtps_smarthost
++  transport = ${extract{smtps}{$address_data}{remote_smtps_smarthost}{remote_smtp_smarthost}}
++  route_list = * ${extract{smtp}{$address_data}} byname
++  host_find_failed = defer
++  same_domain_copy_routing = yes
++  no_more
++.endif
+ 
+ .endif
+ 
+diff -Nru exim4-4.77-orig/debian/debconf/conf.d/transport/30_exim4-config_remote_smtp_smarthost exim4-4.77/debian/debconf/conf.d/transport/30_exim4-config_remote_smtp_smarthost
+--- exim4-4.77-orig/debian/debconf/conf.d/transport/30_exim4-config_remote_smtp_smarthost	2009-03-15 23:57:04.000000000 +0900
++++ exim4-4.77/debian/debconf/conf.d/transport/30_exim4-config_remote_smtp_smarthost	2012-01-28 23:39:17.348932974 +0900
+@@ -6,6 +6,7 @@
+ # to a smarthost. The local host tries to authenticate.
+ # This transport is used for smarthost and satellite configurations.
+ 
++.ifndef ENABLE_MULTIPLE_SMARTHOSTS
+ remote_smtp_smarthost:
+   debug_print = "T: remote_smtp_smarthost for $local_part@$domain"
+   driver = smtp
+@@ -15,6 +16,14 @@
+         }\
+         {} \
+       }
++
++.ifdef USE_SMTPS_PROTOCOL_FOR_SMARTHOST
++# Some ISPs offer SMTP service using deprecated SMTPS (SSL on port 465)
++# protocol instead of using STARTTLS (usually on submission port 587).
++# Exim 4.77 supports SMTPS protocol as SMTP client.
++  protocol = smtps
++# This automatically sets port=465
++.endif
+ .ifdef REMOTE_SMTP_SMARTHOST_HOSTS_AVOID_TLS
+   hosts_avoid_tls = REMOTE_SMTP_SMARTHOST_HOSTS_AVOID_TLS
+ .endif
+@@ -27,3 +36,19 @@
+ .ifdef REMOTE_SMTP_HELO_DATA
+   helo_data=REMOTE_SMTP_HELO_DATA
+ .endif
++
++.else
++remote_smtp_smarthost:
++  debug_print = "T: remote_smtp_smarthost via ${extract{smtp}{$address_data}} for $local_part@$domain"
++  driver = smtp
++  port = ${extract{port}{$address_data}{$value}{25}}
++  hosts_try_auth = <; ${extract{name}{$address_data}{$host_address}}
++
++remote_smtps_smarthost:
++  debug_print = "T: remote_smtps_smarthost via ${extract{smtp}{$address_data}} for $local_part@$domain"
++  driver = smtp
++  port = ${extract{port}{$address_data}{$value}{465}}
++  protocol = smtps
++  hosts_try_auth = <; ${extract{name}{$address_data}{$host_address}}
++.endif
++
+diff -Nru exim4-4.77-orig/debian/debconf/rewrite.yahoo exim4-4.77/debian/debconf/rewrite.yahoo
+--- exim4-4.77-orig/debian/debconf/rewrite.yahoo	1970-01-01 09:00:00.000000000 +0900
++++ exim4-4.77/debian/debconf/rewrite.yahoo	2012-01-28 19:08:14.220288469 +0900
+@@ -0,0 +1,14 @@
++# This is alternative to /etc/email-addresses. 
++# It is part of the exim package
++#
++# This file contains email addresses to use for outgoing mail. Any local
++# part not in here will be qualified by the system domain as normal.
++#
++# It should contain lines of the form:
++#
++#user: someone@isp.com
++#otheruser: someoneelse@anotherisp.com
++#
++# When using yahoo for smart host
++#foo: foo@yahoo.co.jp
++
+diff -Nru exim4-4.77-orig/debian/debconf/smarthosts.conf exim4-4.77/debian/debconf/smarthosts.conf
+--- exim4-4.77-orig/debian/debconf/smarthosts.conf	1970-01-01 09:00:00.000000000 +0900
++++ exim4-4.77/debian/debconf/smarthosts.conf	2012-01-28 23:10:11.632276422 +0900
+@@ -0,0 +1,38 @@
++#####################################################################
++##
++## multiple smarthosts configuration depending on the "From: address"
++##
++#####################################################################
++## 1st item is the "From: address", * is for default
++## 2nd item is the ":"
++## following items are configurations in "config_name = config_value" format
++##   * smtp    = smarthost SMTP server URL
++##   * name    = SMTP auth name
++##   * pass    = SMTP password
++##   * port    = SMTP server port (optional)
++##               587 for most modern ISP smarthost services, 
++##               465 for SMTPS (SSL upon connection), 
++##               25 as default
++##   * smtps   = Set "yes" to use deprecated SMTPS (optional)
++##               (Change default port to 465)
++##   * rewrite = alternative configuration of /etc/email-addresses file located 
++##               in /etc/exim4 which is specific to the sender.(optional)
++#####################################################################
++## EXAMPLE CONFIGURATION ASSUMPTIONS
++##   * Use of submission port (587) is required for modern STARTTLS service
++##   * Use deprecated SMTPS service for yahoo to avoid sending plain text 
++##     password. (Eat an evil food with less toxicity)
++##   * example.com : your connection ISP. It allows use of From: header with 
++##     different address than theirs.
++##   * foo-guest@alioth.debian.org: address fowarded to any of real address
++##   * gmail service accepts address as a sender but overwrites it
++##   * yahoo service uses smtps and needs to have envelope sender matching 
++##     the yahoo address
++#####################################################################
++## EXAMPLE CONFIGURATION
++#*                           : smtp=smtp.example.com      name=isp_account       pass=isp_secret   port=587
++#foobar@example.com          : smtp=smtp.example.com      name=isp_account       pass=isp_secret   port=587
++#foo-guest@alioth.debian.org : smtp=smtp.example.com      name=isp_account       pass=isp_secret   port=587
++#foo.bar@gmail.com           : smtp=smtp.gmail.com        name=foo.bar@gmail.com pass=gmail_secret port=587
++#foo_bar_home@yahoo.co.jp    : smtp=smtp.mail.yahoo.co.jp name=foo_bar           pass=yahoo_secret smtps=yes rewrite=rewrite.yahoo
++#####################################################################
+diff -Nru exim4-4.77-orig/debian/exim4-config.install exim4-4.77/debian/exim4-config.install
+--- exim4-4.77-orig/debian/exim4-config.install	2010-01-03 02:33:29.000000000 +0900
++++ exim4-4.77/debian/exim4-config.install	2012-01-29 00:13:46.415192852 +0900
+@@ -1,3 +1,4 @@
+ debian/debconf/update-exim4.conf.template usr/sbin
+ debian/debconf/exim4.conf.template etc/exim4
++debian/debconf/rewrite.yahoo etc/exim4
+ debian/script usr/share/bug/exim4-config
+diff -Nru exim4-4.77-orig/debian/exim4-config.lintian-overrides exim4-4.77/debian/exim4-config.lintian-overrides
+--- exim4-4.77-orig/debian/exim4-config.lintian-overrides	2011-02-14 01:34:50.000000000 +0900
++++ exim4-4.77/debian/exim4-config.lintian-overrides	2012-01-28 23:51:16.592499498 +0900
+@@ -1 +1,2 @@
+ exim4-config: non-standard-file-perm etc/exim4/passwd.client 0640 != 0644
++exim4-config: non-standard-file-perm etc/exim4/smarthosts.conf 0640 != 0644
+diff -Nru exim4-4.77-orig/debian/exim4-config.postinst exim4-4.77/debian/exim4-config.postinst
+--- exim4-4.77-orig/debian/exim4-config.postinst	2011-05-28 01:34:32.000000000 +0900
++++ exim4-4.77/debian/exim4-config.postinst	2012-01-28 23:48:12.863588554 +0900
+@@ -197,13 +197,18 @@
+ 	        --no-create-home --disabled-login --force-badname Debian-exim
+ fi
+ 
+-# fix permissions of /etc/exim4/passwd.client
++# fix permissions of /etc/exim4/passwd.client and /etc/exim4/smarthosts.conf
+ if [ "$1" = "configure" ] ; then
+ 	if ! dpkg-statoverride --list /etc/exim4/passwd.client > /dev/null 2>&1 
+ 	then
+ 		dpkg-statoverride --update --add root Debian-exim 0640 \
+ 			/etc/exim4/passwd.client
+ 	fi
++	if ! dpkg-statoverride --list /etc/exim4/smarthosts.conf > /dev/null 2>&1 
++	then
++		dpkg-statoverride --update --add root Debian-exim 0640 \
++			/etc/exim4/smarthosts.conf
++	fi
+ 
+ 	if dpkg --compare-versions "$2" le "4.30-1" ; then	
+ 		find /etc/exim4 -user mail \( -type f -or -type d \) -print |\
+diff -Nru exim4-4.77-orig/debian/exim4-config.postrm exim4-4.77/debian/exim4-config.postrm
+--- exim4-4.77-orig/debian/exim4-config.postrm	2005-09-03 19:05:25.000000000 +0900
++++ exim4-4.77/debian/exim4-config.postrm	2012-01-28 23:50:15.788197918 +0900
+@@ -9,6 +9,7 @@
+ case "$1" in
+     purge)
+     	dpkg-statoverride --remove /etc/exim4/passwd.client || true
++    	dpkg-statoverride --remove /etc/exim4/smarthosts.conf || true
+ 	rm -f /etc/exim4/update-exim4.conf.conf
+ 	rm -f /var/lib/exim4/config.autogenerated
+ 	rm -f /etc/exim4/conf.d/main/03_exim4-config_neverusers \
+diff -Nru exim4-4.77-orig/debian/README.Debian.xml exim4-4.77/debian/README.Debian.xml
+--- exim4-4.77-orig/debian/README.Debian.xml	2010-11-08 03:36:46.000000000 +0900
++++ exim4-4.77/debian/README.Debian.xml	2012-01-28 23:06:19.143123604 +0900
+@@ -1223,19 +1223,31 @@
+         documentation about this. Note that most Microsoft clients
+         need special handling for TLS.
+       </para>
+-      <section>	<title>Using Exim as SMTP-AUTH client</title>
++      <section>	<title>Using Exim as SMTP-AUTH client (basic)</title>
+ 	<para>
+ 	  If you want to set up Exim as SMTP AUTH client for delivery
+-	  to your internet access provider's smarthost put the name of
++	  to your Internet access provider's smarthost, put the name of
+ 	  the server, your login and password in
+ 	  <filename>/etc/exim4/passwd.client</filename>. See the man
+           page for exim4-config_files(5) for more information about the
+ 	  required format.
+ 	</para>
+ 	<para>
++	  Many ISPs offer such a smarthost SMTP service with TLS 
++	  encryption using the modern STARTTLS method on the port 587
++	  (submission).  But some ISPs offer such a smarthost SMTP 
++	  service by using now deprecated SMTPS protocol which starts 
++	  SSL immediately after connection to the port 465.  Exim 4.77 
++	  supports SMTPS as client. If you need to enable SMTPS, you can
++	  do so by setting the USE_SMTPS_PROTOCOL_FOR_SMARTHOST macro.
++	  Please refer to <xref linkend="macros"/> for an explanation of
++	  how best to do this.
++	</para>
++	<para>
+ 	  If you need to enable AUTH PLAIN or AUTH LOGIN for unencrypted
+ 	  connections because your service provider does support neither
+-	  TLS encryption nor the CRAM MD5 authentication method, you can
++	  TLS encryption with STARTTLS nor the SMTPS protocol with SSL
++	  nor the CRAM MD5 authentication method, you can
+ 	  do so by setting the AUTH_CLIENT_ALLOW_NOTLS_PASSWORDS macro.
+ 	  Please refer to <xref linkend="macros"/> for an explanation of
+ 	  how best to do this.
+@@ -1246,6 +1258,65 @@
+ 	  Debian-exim). It is suggested that you keep the default
+ 	  permissions root:Debian-exim 0640.
+ 	</para>
++	<para>
++	  You need to pay attentions to avoid interference with the SPAM 
++	  prevention system. The header From: address and envelope From_ 
++	  address of your outgoing mails can be configured using
++	  <filename>/etc/email-addresses</filename>.  For some ISPs,
++	  mails with the unresolvable SMTP envelope address are rejected.
++	  Your header From: address may need to match your mail accout at
++	  the smarthost ISP to get DKIM signature on your mail.  Your
++	  envelope From_ address may need to match your mail account at
++	  the smarthost ISP to get better SPF score on your mail. 
++	  Some smarthost ISPs may automatically replace some of these
++	  addresses to match your mail account there.
++	</para>
++      </section>
++      <section>	<title>Using Exim as SMTP-AUTH client (advanced)</title>
++	<para>
++	  If you want to set up Exim as SMTP AUTH client for delivery
++	  to multiple smarthosts of your Internet access providers depending
++	  on the header From: address of your email, you can enable this
++	  with the alternative configuration method by setting the 
++	  ENABLE_MULTIPLE_SMARTHOSTS macro.
++	  Please refer to <xref linkend="macros"/> for an explanation of
++	  how best to do this.  Please note this configuration does not use
++	  <filename>/etc/exim4/passwd.client</filename> but uses
++	  <filename>/etc/exim4/smarthosts.conf</filename>.
++	</para>
++	<para>
++	  The debconf selection of the smarthost URL is not used by this 
++	  configuration.  All configuration data of smarthosts including 
++	  SMTP server URL, SMTP AUTH account and password, SMTP port,
++	  use of SMTPS are in <filename>/etc/exim4/smarthosts.conf</filename>.
++	  See the comment in the distributed file for usage examples.
++	</para>
++	<para>
++	  <filename>/etc/exim4/smarthosts.conf</filename> needs to be
++	  readable for the exim user (user Debian-exim, group
++	  Debian-exim). It is suggested that you keep the default
++	  permissions root:Debian-exim 0640.
++	</para>
++	<para>
++	  You need to pay attentions to avoid interference with the SPAM 
++	  prevention system. The header From: address and envelope From_ 
++	  address of your outgoing mails can be configured using
++	  <filename>/etc/email-addresses</filename> or its alternative file
++	  in <filename>/etc/exim4/</filename> specified by the "rewrite=..."
++	  in <filename>/etc/exim4/smarthosts.conf</filename>.  For some ISPs,
++	  mails with the unresolvable SMTP envelope address are rejected.
++	  Your header From: address may need to match your mail account at
++	  the smarthost ISP to get DKIM signature on your mail.  Your
++	  envelope From_ address may need to match your mail account at
++	  the smarthost ISP to get better SPF score on your mail. 
++	  Some smarthost ISPs may automatically replace some of these
++	  addresses to match your mail account there.
++	</para>
++	<para>
++	  You may also wish to configure your mail user agent to use 
++	  appropriate From: address automatically.  For example, mutt can be 
++	  configured with "alternates ..." in <filename>~/.muttrc</filename>.
++	</para>
+       </section>
+       <section>	<title>Using Exim as SMTP-AUTH server</title>
+ 	<para>
+diff -Nru exim4-4.77-orig/debian/rules exim4-4.77/debian/rules
+--- exim4-4.77-orig/debian/rules	2011-10-08 20:00:57.000000000 +0900
++++ exim4-4.77/debian/rules	2012-01-29 00:24:38.766427806 +0900
+@@ -365,6 +365,8 @@
+ 	install -m644 $(DEBIAN)/email-addresses $(DEBIAN)/exim4-config/etc/
+ 	install -m640 -oroot -groot $(DEBIAN)/passwd.client \
+ 		$(DEBIAN)/exim4-config/etc/exim4/
++	install -m640 -oroot -groot $(DEBIAN)/debconf/smarthosts.conf \
++		$(DEBIAN)/exim4-config/etc/exim4/
+ 	chmod 755 $(DEBIAN)/debconf/update-exim4.conf.template
+ 	env CONFDIR=$(DEBIAN)/debconf \
+ 		$(DEBIAN)/debconf/update-exim4.conf.template --nobackup --run
+@@ -411,7 +413,7 @@
+ 	#  dh_strip -p$$pkg --dbg-package=$${pkg}-dbg; \
+ 	#done
+ 	dh_compress -i
+-	dh_fixperms -i -X/etc/exim4/passwd.client
++	dh_fixperms -i -X/etc/exim4/passwd.client -X/etc/exim4/smarthosts.conf
+ #	dh_makeshlibs -i
+ 	dh_installdeb -i
+ #	dh_perl -i

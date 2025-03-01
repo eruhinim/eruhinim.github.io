@@ -1,0 +1,117 @@
+commit d0c0f9c7119248b4bdb59baa20b2d6ac84ad7b5d
+Author: Richard Kettlewell <rjk@terraraq.org.uk>
+Date:   Sat Dec 17 13:08:44 2016 +0000
+
+    Add --wget option
+    
+    Unsurprisingly this makes debmirror use wget for downloads.
+    The reason is that it's more persistent in the face of errors
+    than Perl's native HTTP.
+
+diff --git a/debmirror b/debmirror
+index 917f560..34697bb 100755
+--- a/debmirror
++++ b/debmirror
+@@ -447,6 +447,10 @@ debmirror cleanup is disabled when this flag is specified.
+ Separate pool and snapshot cleanup utilities are available at
+ http://code.google.com/p/debmarshal/source/browse/#svn/trunk/repository2
+ 
++=item B<--wget>
++
++Use B<wget> to download files, instead of Perl's native web support.
++
+ =item B<--config-file>=I<file>
+ 
+ Specify a configuration file. This option may be repeated to read
+@@ -637,6 +641,7 @@ our $retry_rsync_packages=1;
+ our $slow_cpu=0;
+ our $check_gpg=1;
+ our $new_mirror=0;
++our $wget=0;
+ our $retry_rsync_packages_delay=30; # seconds
+ my @errlog;
+ my $HOME;
+@@ -756,6 +761,7 @@ GetOptions('debug'                  => \$debug,
+            'disable-ssl-verification' => \$disable_ssl_verification,
+            'retry-rsync-packages=s' => \$retry_rsync_packages,
+            'keyring=s'              => \@keyrings,
++	   'wget'                   => \$wget,
+            'help'                   => \$help,
+ ) or usage;
+ usage if $help;
+@@ -903,6 +909,7 @@ sub init_connection {
+   $_ = $download_method;
+ 
+   downloads_via_http() && do {
++    return if $wget;
+     $ua = LWP::UserAgent->new(keep_alive => 1);
+     $ua->timeout($timeout);
+     $ua->proxy('http', $ENV{http_proxy}) if $ENV{http_proxy};
+@@ -912,6 +919,7 @@ sub init_connection {
+   };
+ 
+   downloads_via_https() && do {
++    return if $wget;
+     $ua = LWP::UserAgent->new(keep_alive => 1, ssl_opts => {
+                     verify_hostname => ! $disable_ssl_verification });
+     $ua->timeout($timeout);
+@@ -923,6 +931,7 @@ sub init_connection {
+ 
+ 
+   downloads_via_ftp() && do {
++    return if $wget;
+     if ($proxy || $ENV{ftp_proxy}) {
+       $ua = LWP::UserAgent->new;
+       $ua->timeout($timeout);
+@@ -948,6 +957,7 @@ sub init_connection {
+   };
+ 
+   downloads_via_rsync() && do {
++    die "rsync method cannot be used with wget\n" if $wget;
+     return;
+   };
+ 
+@@ -1770,17 +1780,33 @@ sub http_get {
+   print "\t #" if $progress;
+   if (! $do_dry_run) {
+     unlink($file) if (-f $file);
+-    $ret = $ua->mirror($url, $file);
+-    print $ret->status_line . "\n" if ($debug);
+-    if ($ret->is_error) {
+-      $files{$file} = -1;
+-      warn "failed " . $ret->status_line . "\n" if ($progress or $verbose);
+-      push (@errlog,"Download of $file failed: ".$ret->status_line."\n");
+-      $num_errors++;
+-    } elsif ($progress || $verbose) {
+-      print "ok\n";
++    if ($wget) {
++      my @wget = ("wget", "--timeout", $timeout, "-O", $file);
++      die "--wget --proxy are not compatible, sorry\n" if $proxy;
++      push(@wget, "-q") if not $progress;
++      my $rc = system (@wget, $url);
++      if($rc) {
++       $files{$file} = -1;
++       warn "failed $rc\n" if ($progress or $verbose);
++       push (@errlog,"Download of $file failed: $rc/$!\n");
++       $num_errors++;
++      } elsif ($progress || $verbose) {
++       print "ok\n";
++      }
++      $ret = not $rc;
++    } else {
++      $ret = $ua->mirror($url, $file);
++      print $ret->status_line . "\n" if ($debug);
++      if ($ret->is_error) {
++	$files{$file} = -1;
++	warn "failed " . $ret->status_line . "\n" if ($progress or $verbose);
++	push (@errlog,"Download of $file failed: ".$ret->status_line."\n");
++	$num_errors++;
++      } elsif ($progress || $verbose) {
++	print "ok\n";
++      }
++      $ret = not ( $ret->is_error );
+     }
+-    $ret = not ( $ret->is_error );
+   } elsif ($progress || $verbose) {
+     print "ok\n";
+   }

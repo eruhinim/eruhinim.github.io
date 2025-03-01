@@ -1,0 +1,188 @@
+diff -Naur cryptsetup-1.0.5.orig/debian/initramfs/cryptopenct-hook cryptsetup-1.0.5.temp/debian/initramfs/cryptopenct-hook
+--- cryptsetup-1.0.5.orig/debian/initramfs/cryptopenct-hook	1970-01-01 00:00:00.000000000 +0000
++++ cryptsetup-1.0.5.temp/debian/initramfs/cryptopenct-hook	2007-08-17 09:37:32.000000000 +0000
+@@ -0,0 +1,61 @@
++#!/bin/sh
++
++set -e
++
++PREREQ="cryptroot"
++
++prereqs()
++{
++    echo "$PREREQ"
++}
++
++case $1 in
++    prereqs)
++        prereqs
++        exit 0
++        ;;
++esac
++
++. /usr/share/initramfs-tools/hook-functions
++
++# Hooks for loading smartcard reading software into the initramfs
++
++# Check whether cryptroot hook has installed decrypt_openct script
++if [ ! -x ${DESTDIR}/keyscripts/decrypt_openct ] ; then
++    exit 0
++fi
++
++# Install cryptroot key files into initramfs
++keys=$(sed 's/^\(.*,\|\)key=//; s/,.*//' ${DESTDIR}/conf/conf.d/cryptroot)
++
++if [ "${keys}" != "none" ]
++then
++	if [ -z "${keys}" ] ; then
++	    echo $0: Missing key files in ${DESTDIR}/conf/conf.d/cryptroot >&2
++	    cat ${DESTDIR}/conf/conf.d/cryptroot >&2
++	    exit 1
++	fi
++	for key in ${keys} ; do
++	    if [ ! -d ${DESTDIR}/$(dirname ${key}) ] ; then
++	        mkdir -p ${DESTDIR}/$(dirname ${key})
++	    fi
++	    cp ${key} ${DESTDIR}/${key}
++	done
++fi
++
++# Install directories needed by smartcard reading daemon, command, and
++# key-script
++for dir in etc etc/init.d etc/udev/rules.d lib/udev usr/bin usr/sbin var/run/openct tmp ; do
++    if [ ! -d ${DESTDIR}/${dir} ] ; then mkdir -p ${DESTDIR}/${dir} ; fi
++done
++
++# Install openct tools, drivers, conf file
++cp /etc/openct.conf ${DESTDIR}/etc
++cp /etc/udev/rules.d/z60_openct.rules ${DESTDIR}/etc/udev/rules.d
++cp /lib/udev/openct_pcmcia ${DESTDIR}/lib/udev
++cp /lib/udev/openct_serial ${DESTDIR}/lib/udev
++cp /lib/udev/openct_usb ${DESTDIR}/lib/udev
++copy_exec /usr/bin/openct-tool /usr/bin
++copy_exec /usr/bin/pkcs15-tool /usr/bin
++copy_exec /usr/sbin/ifdhandler /usr/sbin
++copy_exec /usr/sbin/openct-control /usr/sbin
+diff -Naur cryptsetup-1.0.5.orig/debian/initramfs/cryptroot-script cryptsetup-1.0.5.temp/debian/initramfs/cryptroot-script
+--- cryptsetup-1.0.5.orig/debian/initramfs/cryptroot-script	2007-08-17 09:39:24.000000000 +0000
++++ cryptsetup-1.0.5.temp/debian/initramfs/cryptroot-script	2007-08-17 08:44:58.000000000 +0000
+@@ -182,7 +182,12 @@
+ 				echo "cryptsetup: error - $cryptkeyscript missing"
+ 				return 1
+ 			fi
+-			$cryptkeyscript $cryptkey < /dev/console 2> /dev/console | $cryptcreate --key-file=- > /dev/console 2>&1
++			if [ -p /dev/.initramfs/usplash_outfifo ] && [ -x /sbin/usplash_write ]; then
++				usplash_write "INPUTQUIET Enter pin for $crypttarget ($cryptsource): "
++				PASS="$(cat /dev/.initramfs/usplash_outfifo)" $cryptkeyscript $cryptkey < /dev/console 2> /dev/console | $cryptcreate --key-file=- > /dev/console 2>&1
++			else
++				$cryptkeyscript $cryptkey < /dev/console 2> /dev/console | $cryptcreate --key-file=- > /dev/console 2>&1
++			fi
+ 		elif [ -p /dev/.initramfs/usplash_outfifo ] && [ -x /sbin/usplash_write ]; then
+ 			usplash_write "INPUTQUIET Enter password for $crypttarget ($cryptsource): "
+ 			PASS="$(cat /dev/.initramfs/usplash_outfifo)"
+diff -Naur cryptsetup-1.0.5.orig/debian/rules cryptsetup-1.0.5.temp/debian/rules
+--- cryptsetup-1.0.5.orig/debian/rules	2007-08-17 09:39:24.000000000 +0000
++++ cryptsetup-1.0.5.temp/debian/rules	2007-08-17 08:44:58.000000000 +0000
+@@ -115,10 +115,13 @@
+ 		$(CURDIR)/debian/cryptsetup/usr/share/initramfs-tools/conf.d/cryptsetup
+ 	install -m 0755 debian/initramfs/cryptopensc-hook \
+ 		$(CURDIR)/debian/cryptsetup/usr/share/initramfs-tools/hooks/cryptopensc
++	install -m 0755 debian/initramfs/cryptopenct-hook \
++		$(CURDIR)/debian/cryptsetup/usr/share/initramfs-tools/hooks/cryptopenct
+ 	install -m 0755 debian/initramfs/cryptopensc-script-local-top \
+ 		$(CURDIR)/debian/cryptsetup/usr/share/initramfs-tools/scripts/local-top/cryptopensc
+ 	install -m 0755 debian/initramfs/cryptopensc-script-local-bottom \
+ 		$(CURDIR)/debian/cryptsetup/usr/share/initramfs-tools/scripts/local-bottom/cryptopensc
++
+ 	rmdir $(CURDIR)/debian/cryptsetup/usr/lib/cryptsetup
+ 
+ binary-indep: build install
+diff -Naur cryptsetup-1.0.5.orig/debian/scripts/decrypt_openct cryptsetup-1.0.5.temp/debian/scripts/decrypt_openct
+--- cryptsetup-1.0.5.orig/debian/scripts/decrypt_openct	1970-01-01 00:00:00.000000000 +0000
++++ cryptsetup-1.0.5.temp/debian/scripts/decrypt_openct	2007-08-17 09:41:11.000000000 +0000
+@@ -0,0 +1,66 @@
++#!/bin/sh
++
++# The default configuration of openct expects its program to be located in
++# /usr/sbin and /usr/bin, rather than /bin and /sbin.
++# Instead of 'manually' adjust the configuration, we just adjust the path.
++
++PATH="$PATH:/usr/bin:/usr/sbin"
++
++check_reader() {
++    readerfound=0
++
++    if [ ! -e "$readertmp" ] ; then
++        readertmp=$(mktemp /tmp/decrypt_openct.XXXXXXXX)
++    fi
++
++    openct-tool list > $readertmp 2>&1
++    if [ $? == 0 ] ; then
++        readerfound=1
++    fi
++}
++
++wait_reader() {
++    check_reader
++    if [ $readerfound == 0 ] ; then
++        echo Waiting for Smart Card reader... >&2
++        tries=0
++        while [ $readerfound == 0 -a $tries -lt 60 ] ; do
++            sleep 1
++            check_reader
++            tries=$(($tries + 1))
++        done
++        cat $readertmp >&2
++        if [ $readerfound == 0 ] ; then
++            echo Failed to find Smart Card reader!
++            exit 1
++        fi
++    fi
++    rm $readertmp
++}
++
++echo >&2
++
++/usr/sbin/openct-control init
++wait_reader
++
++# Due to a bug in openct, the --label does not work on data objects, means,
++# all data objects have by default the label 'pkcs15-init', that's why we are
++# setting the label manually if none is configured by the user.
++
++if [ -z "$1" ]
++then
++	LABEL="pkcs15-init"
++else
++	LABEL="$1"
++fi
++
++if [ -n "$PASS" ]
++then
++	# Non-interactive call, getting pin number from usplash
++	pkcs15-tool --read-data-object $LABEL --pin $PASS
++else
++	# Interactive call, user enters pin
++	pkcs15-tool --read-data-object $LABEL
++fi
++
++exit $?
+diff -Naur cryptsetup-1.0.5.orig/debian/scripts/decrypt_opensc cryptsetup-1.0.5.temp/debian/scripts/decrypt_opensc
+--- cryptsetup-1.0.5.orig/debian/scripts/decrypt_opensc	2007-08-17 09:39:24.000000000 +0000
++++ cryptsetup-1.0.5.temp/debian/scripts/decrypt_opensc	2007-08-17 08:44:58.000000000 +0000
+@@ -89,5 +89,14 @@
+ check_middleware
+ wait_reader
+ wait_card
+-pkcs15-crypt --decipher --input $1 --pkcs1 --raw
++
++if [ -n "$PASS" ]
++then
++	# Non-interactive call, getting pin number from usplash
++	pkcs15-crypt --decipher --input $1 --pkcs1 --raw --pin $PASS
++else
++	# Interactive call, user enters pin
++	pkcs15-crypt --decipher --input $1 --pkcs1 --raw
++fi
++
+ exit $?

@@ -1,0 +1,414 @@
+diff -Nru dictionaries-common-1.20.5/debian/changelog dictionaries-common-1.20.5+nmu1/debian/changelog
+--- dictionaries-common-1.20.5/debian/changelog	2014-01-14 11:27:40.000000000 +0100
++++ dictionaries-common-1.20.5+nmu1/debian/changelog	2014-02-02 23:55:52.000000000 +0100
+@@ -1,3 +1,9 @@
++dictionaries-common (1.20.5+nmu1) UNRELEASED; urgency=medium
++
++  * Non-maintainer upload.
++
++ -- Andreas Beckmann <anbe@debian.org>  Sat, 01 Feb 2014 23:09:13 +0100
++
+ dictionaries-common (1.20.5) unstable; urgency=low
+ 
+   * Move default symlink creation to the common perl module.
+diff -Nru dictionaries-common-1.20.5/debian/dictionaries-common-dev.install dictionaries-common-1.20.5+nmu1/debian/dictionaries-common-dev.install
+--- dictionaries-common-1.20.5/debian/dictionaries-common-dev.install	1970-01-01 01:00:00.000000000 +0100
++++ dictionaries-common-1.20.5+nmu1/debian/dictionaries-common-dev.install	2014-02-02 23:55:52.000000000 +0100
+@@ -0,0 +1,2 @@
++scripts/debhelper/dh_aspell		usr/bin/
++scripts/debhelper/sequence/aspell.pm	usr/share/perl5/Debian/Debhelper/Sequence/
+diff -Nru dictionaries-common-1.20.5/debian/dictionaries-common.lintian-overrides dictionaries-common-1.20.5+nmu1/debian/dictionaries-common.lintian-overrides
+--- dictionaries-common-1.20.5/debian/dictionaries-common.lintian-overrides	1970-01-01 01:00:00.000000000 +0100
++++ dictionaries-common-1.20.5+nmu1/debian/dictionaries-common.lintian-overrides	2014-02-02 23:55:52.000000000 +0100
+@@ -0,0 +1 @@
++dictionaries-common: debconf-is-not-a-registry
+diff -Nru dictionaries-common-1.20.5/debian/dictionaries-common.overrides dictionaries-common-1.20.5+nmu1/debian/dictionaries-common.overrides
+--- dictionaries-common-1.20.5/debian/dictionaries-common.overrides	2008-07-01 13:42:00.000000000 +0200
++++ dictionaries-common-1.20.5+nmu1/debian/dictionaries-common.overrides	1970-01-01 01:00:00.000000000 +0100
+@@ -1 +0,0 @@
+-dictionaries-common: debconf-is-not-a-registry
+diff -Nru dictionaries-common-1.20.5/debian/rules dictionaries-common-1.20.5+nmu1/debian/rules
+--- dictionaries-common-1.20.5/debian/rules	2014-01-14 11:27:05.000000000 +0100
++++ dictionaries-common-1.20.5+nmu1/debian/rules	2014-02-02 23:55:52.000000000 +0100
+@@ -46,8 +46,6 @@
+ 	dh_installdirs
+ 
+ 	$(MAKE) install DESTDIR=$(debtmp)
+-	install -m 0644 debian/dictionaries-common.overrides \
+-		debian/dictionaries-common/usr/share/lintian/overrides/dictionaries-common
+ 	touch $(debtmp)/usr/share/dictionaries-common/elanguages
+ 	dh_movefiles -pdictionaries-common-dev
+ 	dh_movefiles -pdictionaries-common
+@@ -57,11 +55,13 @@
+ binary-indep: build install
+ 	dh_testdir
+ 	dh_testroot
++	dh_install
+ 	dh_installdocs --all $(alldocs)
+ 	dh_installemacsen
+ 	dh_installman
+ 	dh_installchangelogs
+ 	dh_link
++	dh_lintian
+ 	dh_compress
+ 	dh_installdebconf
+ 	dh_fixperms
+diff -Nru dictionaries-common-1.20.5/scripts/debhelper/dh_aspell dictionaries-common-1.20.5+nmu1/scripts/debhelper/dh_aspell
+--- dictionaries-common-1.20.5/scripts/debhelper/dh_aspell	1970-01-01 01:00:00.000000000 +0100
++++ dictionaries-common-1.20.5+nmu1/scripts/debhelper/dh_aspell	2014-02-02 23:55:52.000000000 +0100
+@@ -0,0 +1,331 @@
++#!/usr/bin/perl -w
++#
++# Registration with aspell dictionary
++#
++# PROMISE: DH NOOP WITHOUT info-aspell
++
++use strict;
++
++my $class = "aspell";
++my $no_pre_post;
++my $no_config;
++my $debug;
++#
++
++
++#
++
++# -------------------------------------------------------
++sub mydie {
++# -------------------------------------------------------
++  my $msg = shift;
++  my $see = shift;
++  die "$msg\nPlease see $see.\n";
++}
++
++# -------------------------------------------------------
++sub mywarn {
++# -------------------------------------------------------
++  my $msg = shift;
++  my $see = shift;
++  warn "$msg\nPlease see $see.\n";
++  exit 0;
++}
++
++# =======================================================
++# Main part
++# =======================================================
++
++use Text::Wrap;
++$Text::Wrap::columns = 72;
++
++# --- No extra options for aspell 
++
++use Debian::Debhelper::Dh_Lib;
++init();
++
++use Debian::DictionariesCommon q(:all);
++
++if ( defined $dh{NOSCRIPTS} ){
++  $no_pre_post = 1;
++  $no_config   = 1;
++};
++
++$debug++ if ( defined $ENV{DICT_COMMON_DEBUG} );
++
++foreach my $package (@{$dh{DOPACKAGES}}) {
++
++  my $lib_dir = tmpdir($package) . getlibdir($class);
++  my $usr_lib_dir = tmpdir($package) . "/usr/lib/$class";
++  my $var_lib_dir = tmpdir($package) . "/var/lib/$class";
++  my $usr_share_dir = tmpdir($package) . "/usr/share/$class";
++  my $infofile;
++
++  # Process the debian/info-aspell file
++  unless ( $infofile = pkgfile ($package, "info-$class") ) {
++    mywarn ("There is no debian/[package.]info-$class file for package $package.",
++            "the dictionaries-common Policy");
++  }
++
++  # Parse the debian/info-aspell file
++  my $dicts = parseinfo ($infofile);
++
++  # If we get here, the parseinfo call was successful. Install the
++  # file in the dictionaries-common lib dir.
++  doit ("install", "-d", $lib_dir);
++  doit ("install", "-m644", $infofile, "$lib_dir/$package");
++
++  # Move *.cwl to /usr/share/aspell
++  my @cwls = glob("$usr_lib_dir/*.cwl");
++  if (scalar @cwls) {
++    doit ("install", "-d", $usr_share_dir);
++    doit ("mv", @cwls, $usr_share_dir);
++  }
++
++  # Compress *.cwl
++  @cwls = glob("$usr_share_dir/*.cwl");
++  doit ("gzip", "-9nf", @cwls) if scalar @cwls;
++
++  # Remove *.rws files
++  foreach my $rws (glob("$usr_lib_dir/*.rws")) {
++    doit ("rm", "-f", $rws) if (-f $rws && ! -l $rws);
++  }
++
++  # Install debhelper and debhelper-like auto-scripts
++  unless ( $dh{NOSCRIPTS} or $no_pre_post) {
++    if ( $class ne "wordlist" ){
++      my %hash_extension      = ("ispell" => "hash", "aspell" => "rws");
++      my %auto_hash_basenames = ();
++      my %auto_extra_hash_basenames = ();
++
++      # Get list of basenames for compat and contents files
++      my %auto_compat_basenames   = ();
++      my %auto_contents_basenames = ();
++      foreach my $language ( keys %$dicts ){
++	my $entry  = $dicts->{$language};
++	if ( defined $entry->{'auto-compat'} ) {
++	  my $compat = $entry->{'auto-compat'};
++	  foreach ( split(" ", $compat) ){
++	    s/\.compat$//;
++	    $auto_compat_basenames{$_}++;
++	  }
++	}
++	if ( defined $entry->{'auto-contents'} ) {
++	  my $contents = $entry->{'auto-contents'};
++	  foreach ( split(" ", $contents) ){
++	    s/\.contents$//;
++	    $auto_contents_basenames{$_}++;
++	  }
++	}
++	# Hashes list should be created automatically. This is here to
++	# add an extra hash name to the clean list on package
++	# removal. If you think about this, you may prefer to
++	# unconditionally remove old file from maintainer scripts.
++	if ( defined $entry->{'auto-extra-hash'} ) {
++	  my $extra_hashes = $entry->{'auto-extra-hash'};
++	  foreach ( split(" ", $extra_hashes) ){
++	    s/\.$hash_extension{$class}$//;
++	    $auto_hash_basenames{$_}++;
++	    $auto_extra_hash_basenames{$_}++;
++	  }
++	}
++      }
++
++      # Get automatic list of basenames for different hashes
++      foreach my $base_name ( sort keys %auto_compat_basenames ){
++	my $contents_file;
++	if ( $class eq "aspell" ) {
++	  # Check if there is an associated contents file.
++	  my $tmp_contents_file = "debian/$base_name.contents";
++	  if ( -e $tmp_contents_file ) {
++	    print STDERR "installeb-$class: Found contents file \"$tmp_contents_file\".\n"
++	      if $debug;
++	    # and if it has been declared.
++	    if ( defined $auto_contents_basenames{$base_name} ){
++	      print STDERR "installeb-$class: contents file \"$tmp_contents_file\" is properly declared.\n"
++		if $debug;
++	      $contents_file = $tmp_contents_file;
++	    } else {
++	      print STDERR "dh_$class: Warning:\n"
++		. "\"$tmp_contents_file\" found, but no associated 'auto-compat' entry in info file.\n"
++		. "Ignoring \"$tmp_contents_file\"...\n";
++	    }
++	  } elsif ( defined $auto_contents_basenames{$base_name} ){
++	    die "dh_$class error: No matching \"$tmp_contents_file\" for 'auto-compat' entry \"$base_name\". Aborting ...\n";
++	  }
++	}
++	# Parse aspell contents file if enabled and present.
++	if ( $contents_file ){
++	  open (my $CONTENTS, "< $contents_file")
++	    or die "Could not open contents file \"$contents_file\". Aborting ...";
++	  while (<$CONTENTS>){
++	    next if m /^\s*\#/;
++	    next if m/^\s*$/;
++	    chomp;
++	    s/\.rws$//;
++	    # Add contents info to list of hashes to be removed.
++	    $auto_hash_basenames{$_}++;
++	  }
++	  close $CONTENTS;
++	} else {
++	  # Add base name to list of hashes to be removed.
++	  $auto_hash_basenames{$base_name}++;
++	}
++      }
++
++      if ( scalar %auto_compat_basenames && $debug ){
++	print STDERR "installeb-$class info:\n";
++	if ( %auto_contents_basenames ){
++	  print STDERR " auto-contents: \"",join(', ',sort keys %auto_contents_basenames),"\"\n";
++	}
++	print STDERR " auto-compat: \"",join(', ',sort keys %auto_compat_basenames),"\"\n";
++	print STDERR " auto-hash: \"",  join(', ',sort keys %auto_hash_basenames), "\"\n";
++      }
++
++      if ( scalar %auto_compat_basenames ){
++	my $auto_compats = join(" ", map { $_ . ".compat" } sort keys %auto_compat_basenames);
++	my $auto_hashes  = join(" ", map { $_ . ".$hash_extension{$class}" } sort keys %auto_hash_basenames);
++	my $varlibrm     = "$auto_compats $auto_hashes";
++
++	# Install extra auto-scripts for auto-compat handling
++	autoscript ($package, "preinst", "preinst-compatfile-$class",
++		    "s/#COMPAT#/$auto_compats/");
++	autoscript ($package, "postinst", "postinst-compatfile-$class",
++		    "s/#COMPAT#/$auto_compats/");
++	autoscript ($package, "postrm", "postrm-varlibrm-$class",
++		    "s/#VARLIBRM#/$varlibrm/");
++
++	# Make sure /var/lib/{a,i}spell directory is available.
++	doit ("install", "-d", $var_lib_dir);
++
++	# Automatically provide symlinks for the different hashes
++	doit ("install", "-d", $usr_lib_dir);
++	foreach my $hash ( sort keys %auto_hash_basenames ){
++	  # Not for extra hashes only for the clean list
++	  next if ( defined $auto_extra_hash_basenames{$hash} );
++	  $hash = $hash . '.' .$hash_extension{$class};
++	  unless ( -e "$usr_lib_dir/$hash" ){
++	    print STDERR "dh_$class: Setting \"$usr_lib_dir/$hash\" symlink.\n" if $debug;
++	    doit ("ln", "-sf", "/var/lib/$class/$hash", "$usr_lib_dir/$hash");
++	  }
++	}
++      }
++    }
++    autoscript ($package, "postinst", "postinst-$class",
++		"s/#PACKAGE#/$package/");
++    autoscript ($package, "postrm", "postrm-$class",
++		"s/#PACKAGE#/$package/");
++    addsubstvar ($package, "$class:Depends", "aspell");  # >= 0.60.3-3, satisfied in squeeze
++    addsubstvar ($package, "$class:Depends", "dictionaries-common", ">= 1.10");
++  }
++  # -- No debconf handling needed for aspell or hunspell --
++}
++
++
++__END__
++
++=head1 NAME
++
++B<dh_aspell> - debhelper-like utility for
++maintainers of aspell dictionary Debian packages
++
++=head1 SYNOPSIS
++
++ dh_aspell [debhelper options] 
++
++=head1 DESCRIPTION
++
++B<dh_aspell> is a debhelper like program that is
++responsible for installing appropriate debhelper snippets in
++an aspell dictionary package,
++according to the Debian Spell Dictionaries and Tools Policy.
++
++For more details, see
++ /usr/share/doc/dictionaries-common-dev/dsdt-policy.txt.gz
++
++The actions executed by B<dh_aspell> are the
++following:
++
++=over
++
++=item * Maintainer Scripts
++
++B<dh_aspell> installs the necessary
++scraps of code in the F<postinst> and F<postrm> scripts.
++
++=item * Language info file
++
++B<dh_aspell> also checks a file containing
++aspell dictionary information, called
++F<debian/info-aspell> or
++F<debian/package.info-aspell>.  If this file is
++successfully parsed, it is installed in the
++F</var/lib/dictionaries-common/aspell> directory.
++
++=item * Debconf files
++
++As opposed to B<installdeb-ispell> and B<installdeb-wordlist>, neither B<dh_aspell>
++nor B<installdeb-hunspell> do anything related to debconf files, since both aspell and
++hunspell rely on the environment variable C<LANG> for default dictionary selection
++instead of using symlinks set after a debconf question on dictionary
++installation. For that reason if you need to add debconf stuff with debhelper
++to your aspell or hunspell dictionary package do it in the usual way and call
++dh_installdebconf(1) as for any other package.
++
++
++=item * Extra dh_aspell options in Language info file
++
++For benefit of aspell dictionaries using B<aspell-autobuildhash>,
++B<dh_aspell> script will look for C<'auto-compat'> and
++C<'auto-contents'> fields in F<$lang.info-aspell>, containing base
++name(s) of your compat and, if needed, contents file(s).  If
++C<'auto-compat'> entry is found two debhelper snippets are added, one
++to create/reset compatfile(s) in postinst and the other to remove
++files in a removal list (initially containing compat files) from
++postrm.  If C<'auto-contents'> entry is found, contents file at
++F<debian/> will be parsed and its contents added to the removal list,
++otherwise a hash with the same basename of the compatfile is expected
++and added to the removal list.  Unless previous stuff exists,
++F</usr/lib/aspell}/$dict.rws -E<gt> /var/lib/aspell/$dict.rws>
++symlinks will also be automatically created.  If you use a contents
++file and enable it in C<'auto-contents'> you usually will need only
++the same base name enabled in C<'auto-compat'>.
++ 
++
++=back
++
++=head1 OPTIONS
++
++The usual dephelper(1) options are accepted. 
++
++=head1 NOTES
++
++This program is not part of debhelper, although it is intended to be used
++in aspell dictionary packages using debhelper in its
++building.
++
++=head1 SEE ALSO
++
++debhelper(1)
++
++This program is part of the dictionaries-common-dev package. It is
++intended to be used by maintainers of
++aspell dictionary
++packages for Debian. See the documentation
++under /usr/share/doc/dictionaries-common-dev.
++
++=head1 AUTHORS
++
++Rafael Laboissiere, Agustin Martin
++
++=cut
++
++# Local Variables:
++#  mode: perl
++#  mode: flyspell-prog
++#  ispell-local-dictionary: "american"
++# End:
++
++#  LocalWords:  aspell ispell wordlist debconf debhelper Debian config postrm
++#  LocalWords:  debian elanguages installdeb dephelper installdebconf Elanguage
++#  LocalWords:  Laboissiere
+diff -Nru dictionaries-common-1.20.5/scripts/debhelper/installdeb.in dictionaries-common-1.20.5+nmu1/scripts/debhelper/installdeb.in
+--- dictionaries-common-1.20.5/scripts/debhelper/installdeb.in	2012-06-19 18:28:59.000000000 +0200
++++ dictionaries-common-1.20.5+nmu1/scripts/debhelper/installdeb.in	2014-02-02 23:55:52.000000000 +0100
+@@ -378,7 +378,7 @@
+ 	  $hash = $hash . '.' .$hash_extension{$class};
+ 	  unless ( -e "$usr_lib_dir/$hash" ){
+ 	    print STDERR "installdeb-$class: Setting \"$usr_lib_dir/$hash\" symlink.\n" if $debug;
+-	    symlink "/var/lib/$class/$hash", "$usr_lib_dir/$hash"
++	    doit ("ln", "-sf", "/var/lib/$class/$hash", "$usr_lib_dir/$hash");
+ 	  }
+ 	}
+       }
+diff -Nru dictionaries-common-1.20.5/scripts/debhelper/sequence/aspell.pm dictionaries-common-1.20.5+nmu1/scripts/debhelper/sequence/aspell.pm
+--- dictionaries-common-1.20.5/scripts/debhelper/sequence/aspell.pm	1970-01-01 01:00:00.000000000 +0100
++++ dictionaries-common-1.20.5+nmu1/scripts/debhelper/sequence/aspell.pm	2014-02-02 23:55:52.000000000 +0100
+@@ -0,0 +1,8 @@
++#!/usr/bin/perl
++use warnings;
++use strict;
++use Debian::Debhelper::Dh_Lib;
++
++insert_after("dh_install", "dh_aspell");
++
++1

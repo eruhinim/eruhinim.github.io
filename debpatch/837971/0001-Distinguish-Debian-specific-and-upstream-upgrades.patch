@@ -1,0 +1,99 @@
+From a75130149a4e838d090d5af3158868d24b0b2c7d Mon Sep 17 00:00:00 2001
+From: Keshav Kini <keshav.kini@gmail.com>
+Date: Thu, 15 Sep 2016 20:34:35 -0700
+Subject: [PATCH] Distinguish Debian-specific and upstream upgrades
+
+When upgrading packages, aptitude users might like to know whether each
+upgrade represents a newer upstream version of the package, or is merely
+a Debian-specific change.  This can be determined by comparing the
+current and candidate versions in the rightmost two columns of the
+package listing, but I thought it might be easier to see at a glance if
+these two kinds of upgrades were colored differently in the UI.
+
+This commit makes upgrades that represent a newer upstream version
+appear in bold, while upgrades that represent a Debian revision bump
+appear as before.
+---
+ src/defaults.cc | 36 +++++++++++++++++++-----------------
+ src/pkg_item.cc | 11 +++++++++--
+ 2 files changed, 28 insertions(+), 19 deletions(-)
+
+diff --git a/src/defaults.cc b/src/defaults.cc
+index 1747f90..f0ad047 100644
+--- a/src/defaults.cc
++++ b/src/defaults.cc
+@@ -107,23 +107,25 @@ static void init_keybindings()
+ 
+ static void init_styles()
+ {
+-  cw::set_style("PkgNotInstalled", cw::style());
+-  cw::set_style("PkgIsInstalled",  cw::style_attrs_on(A_BOLD));
+-  cw::set_style("PkgToHold",       cw::style_fg(COLOR_WHITE)   + cw::style_attrs_on(A_REVERSE));
+-  cw::set_style("PkgToRemove",     cw::style_fg(COLOR_MAGENTA) + cw::style_attrs_on(A_REVERSE));
+-  cw::set_style("PkgBroken",       cw::style_fg(COLOR_RED)     + cw::style_attrs_on(A_REVERSE));
+-  cw::set_style("PkgToInstall",    cw::style_fg(COLOR_GREEN)   + cw::style_attrs_on(A_REVERSE));
+-  cw::set_style("PkgToUpgrade",    cw::style_fg(COLOR_CYAN)    + cw::style_attrs_on(A_REVERSE));
+-  cw::set_style("PkgToDowngrade",  cw::style_fg(COLOR_YELLOW)  + cw::style_attrs_on(A_REVERSE));
+-
+-  cw::set_style("PkgNotInstalledHighlighted", cw::style_attrs_flip(A_REVERSE));
+-  cw::set_style("PkgIsInstalledHighlighted",  cw::style_attrs_on(A_BOLD) + cw::style_attrs_flip(A_REVERSE));
+-  cw::set_style("PkgToHoldHighlighted",       cw::style_fg(COLOR_WHITE));
+-  cw::set_style("PkgToRemoveHighlighted",     cw::style_fg(COLOR_MAGENTA));
+-  cw::set_style("PkgBrokenHighlighted",       cw::style_fg(COLOR_RED));
+-  cw::set_style("PkgToInstallHighlighted",    cw::style_fg(COLOR_GREEN));
+-  cw::set_style("PkgToUpgradeHighlighted",    cw::style_fg(COLOR_CYAN));
+-  cw::set_style("PkgToDowngradeHighlighted",  cw::style_fg(COLOR_YELLOW));
++  cw::set_style("PkgNotInstalled",      cw::style());
++  cw::set_style("PkgIsInstalled",       cw::style_attrs_on(A_BOLD));
++  cw::set_style("PkgToHold",            cw::style_fg(COLOR_WHITE)   + cw::style_attrs_on(A_REVERSE));
++  cw::set_style("PkgToRemove",          cw::style_fg(COLOR_MAGENTA) + cw::style_attrs_on(A_REVERSE));
++  cw::set_style("PkgBroken",            cw::style_fg(COLOR_RED)     + cw::style_attrs_on(A_REVERSE));
++  cw::set_style("PkgToInstall",         cw::style_fg(COLOR_GREEN)   + cw::style_attrs_on(A_REVERSE));
++  cw::set_style("PkgToUpgradeUpstream", cw::style_fg(COLOR_CYAN)    + cw::style_attrs_on(A_REVERSE | A_BOLD));
++  cw::set_style("PkgToUpgradeDebian",   cw::style_fg(COLOR_CYAN)    + cw::style_attrs_on(A_REVERSE));
++  cw::set_style("PkgToDowngrade",       cw::style_fg(COLOR_YELLOW)  + cw::style_attrs_on(A_REVERSE));
++
++  cw::set_style("PkgNotInstalledHighlighted",      cw::style_attrs_flip(A_REVERSE));
++  cw::set_style("PkgIsInstalledHighlighted",       cw::style_attrs_on(A_BOLD) + cw::style_attrs_flip(A_REVERSE));
++  cw::set_style("PkgToHoldHighlighted",            cw::style_fg(COLOR_WHITE));
++  cw::set_style("PkgToRemoveHighlighted",          cw::style_fg(COLOR_MAGENTA));
++  cw::set_style("PkgBrokenHighlighted",            cw::style_fg(COLOR_RED));
++  cw::set_style("PkgToInstallHighlighted",         cw::style_fg(COLOR_GREEN));
++  cw::set_style("PkgToUpgradeUpstreamHighlighted", cw::style_fg(COLOR_CYAN) + cw::style_attrs_on(A_BOLD));
++  cw::set_style("PkgToUpgradeDebianHighlighted",   cw::style_fg(COLOR_CYAN));
++  cw::set_style("PkgToDowngradeHighlighted",       cw::style_fg(COLOR_YELLOW));
+ 
+   cw::set_style("DepBroken", cw::style_fg(COLOR_BLACK)+cw::style_bg(COLOR_RED));
+ 
+diff --git a/src/pkg_item.cc b/src/pkg_item.cc
+index 459191e..cbefa60 100644
+--- a/src/pkg_item.cc
++++ b/src/pkg_item.cc
+@@ -44,6 +44,8 @@
+ 
+ #include <apt-pkg/configuration.h>
+ #include <apt-pkg/error.h>
++#include <apt-pkg/version.h>
++#include <apt-pkg/pkgsystem.h>
+ 
+ #include <sigc++/adaptors/bind.h>
+ #include <sigc++/functors/mem_fun.h>
+@@ -330,8 +332,13 @@ cw::style pkg_item::pkg_style(pkgCache::PkgIterator package, bool highlighted)
+ 	return cw::get_style(MAYBE_HIGHLIGHTED("PkgToRemove"));
+       else if(state.InstBroken())
+ 	return cw::get_style(MAYBE_HIGHLIGHTED("PkgBroken"));
+-      else if(state.Upgrade())
+-	return cw::get_style(MAYBE_HIGHLIGHTED("PkgToUpgrade"));
++      else if(state.Upgrade()) {
++        if (_system->VS->UpstreamVersion(state.CurVersion) ==
++            _system->VS->UpstreamVersion(state.CandVersion))
++          return cw::get_style(MAYBE_HIGHLIGHTED("PkgToUpgradeDebian"));
++        else
++          return cw::get_style(MAYBE_HIGHLIGHTED("PkgToUpgradeUpstream"));
++      }
+       else if(state.Downgrade())
+ 	return cw::get_style(MAYBE_HIGHLIGHTED("PkgToDowngrade"));
+       else if(package.CurrentVer().end())
+-- 
+2.9.3
+

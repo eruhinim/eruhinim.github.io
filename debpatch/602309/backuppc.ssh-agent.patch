@@ -1,0 +1,58 @@
+--- /tmp/etc/init.d/backuppc	2009-11-25 16:11:46.000000000 +0100
++++ /etc/init.d/backuppc	2010-11-05 08:17:09.499311114 +0100
+@@ -51,9 +51,44 @@
+     fi
+ }
+ 
++check_or_start_ssh_agent()
++{
++    [ -x $(command -v ssh-agent) ] || return 0
++
++    [ -r /var/run/backuppc/ssh-agent.env ] && . /var/run/backuppc/ssh-agent.env >/dev/null
++
++    for i in $(pgrep -u $USER ssh-agent); do
++        # if the agent is still running, return
++        [ $i = $SSH_AGENT_PID ] && return 0
++    done
++
++    log_begin_msg "Starting ssh-agent for $NAME..."
++    su $USER -c 'ssh-agent -s' 2>/dev/null >/var/run/backuppc/ssh-agent.env
++    log_end_msg $?
++    . /var/run/backuppc/ssh-agent.env >/dev/null
++    if [ -t 0 ]; then
++        su $USER -c ssh-add || :
++    fi
++}
++
++stop_ssh_agent()
++{
++    [ -r /var/run/backuppc/ssh-agent.env ] && . /var/run/backuppc/ssh-agent.env >/dev/null
++
++    for i in $(pgrep -u $USER ssh-agent); do
++        if [ $i = $SSH_AGENT_PID ]; then
++            log_begin_msg "Stopping ssh-agent for $NAME..."
++            kill -TERM $i
++            log_end_msg $?
++            rm -f /var/run/backuppc/ssh-agent.env
++            return 0
++        fi
++    done
++}
+ 
+ case "$1" in
+   start)
++    check_or_start_ssh_agent
+     log_begin_msg "Starting $NAME..."
+     check_old_config
+     start-stop-daemon --start --pidfile /var/run/backuppc/BackupPC.pid \
+@@ -65,8 +100,10 @@
+     start-stop-daemon --stop --pidfile /var/run/backuppc/BackupPC.pid -u $USER \
+ 			    --oknodo --retry 30
+     log_end_msg $?
++    stop_ssh_agent
+       ;;
+   restart)
++    check_or_start_ssh_agent
+     log_begin_msg "Restarting $NAME..."
+     start-stop-daemon --stop --pidfile /var/run/backuppc/BackupPC.pid -u $USER \
+ 			    --oknodo --retry 30

@@ -1,0 +1,105 @@
+Index: installer/build/boot/arm/lspro-config-debian
+===================================================================
+--- installer/build/boot/arm/lspro-config-debian	(revision 0)
++++ installer/build/boot/arm/lspro-config-debian	(revision 0)
+@@ -0,0 +1,66 @@
++#!/bin/sh
++
++# This code is covered by the GNU General Public License (GPLv2 or higher)
++
++NVRAM=$(which nvram)
++FW_PRINTENV=$(which fw_printenv)
++
++path=$(mount | grep ext2 | sed -n '/sda1/ {s/\/dev\/sda1 on \(.*\) type.*/\1/; p}')
++if [ -z "$path" ]; then
++	echo "You have to create an ext2 filesystem on /dev/sda1"
++	exit 1
++fi
++
++if [ ! -e $path/uImage.buffalo ]; then
++	echo "You have to download the uImage.buffalo file from the debian-installer for Linkstation Pro/Live, and put it in $path"
++	exit 1
++fi
++
++if [ ! -e $path/initrd.buffalo ]; then
++	echo "You have to download the initrd.buffalo file from the debian-installer for Linkstation Pro/Live, and put it in $path"
++	exit 1
++fi
++
++if [ -n "$NVRAM" ]; then
++	PRINTENV="$NVRAM -c printenv"
++	SETENV="$NVRAM -c set"
++	GETENV="$NVRAM -c get"
++elif [ -n "$FW_PRINTENV" ]; then
++	if [ -z "$(which fw_setenv)" ]; then
++		echo "Program fw_setenv not found, cannot modify U-Boot environment..."
++		exit 1
++	elif [ ! -f /etc/fw_env.config ]; then
++		echo "Configuration file for fw_printenv not found."
++		exit 1
++	else
++		PRINTENV=$FW_PRINTENV
++		SETENV=$(which fw_setenv)
++		GETENV="$FW_PRINTENV -n"
++	fi
++else
++	echo "No tool found for modifying U-Boot environment..."
++	exit 1
++fi
++
++BOOTVER=$($GETENV buffalo_ver | sed 's/^.*=//')
++if [ -z "$BOOTVER" ]; then
++	echo "Unable to detect Buffalo bootloader version.  Please ensure that your bootloader supports automatic initrd position/size detection."
++else
++	BOOTVER_MAJOR=${BOOTVER%.*}
++	BOOTVER_MINOR=${BOOTVER#*.}
++	if [ $BOOTVER_MAJOR -eq 1 -a $BOOTVER_MINOR -lt 10 ]; then
++		echo "Incompatible bootloader version detected.  Please update to the latest firmware version."
++		exit 1
++	fi
++fi
++
++printf "Saving U-Boot environment to ubootenv.bak... "
++$PRINTENV > ubootenv.bak
++echo "done."
++
++echo "Changing U-Boot environment... "
++$SETENV bootargs_root "root=/dev/sda2 rw panic=5"
++echo "done."
++
++echo "Please reboot your Linkstation."
+Index: installer/build/config/armel/orion5x/netboot.cfg
+===================================================================
+--- installer/build/config/armel/orion5x/netboot.cfg	(revision 63243)
++++ installer/build/config/armel/orion5x/netboot.cfg	(working copy)
+@@ -1,6 +1,6 @@
+ MEDIA_TYPE = netboot image
+ 
+-TARGET = $(TEMP_INITRD) $(TEMP_KERNEL) dns-323 kuroboxpro mv2120 ts209 ts409
++TARGET = $(TEMP_INITRD) $(TEMP_KERNEL) dns-323 kuroboxpro lspro mv2120 ts209 ts409
+ EXTRANAME = $(MEDIUM)
+ TYPE = netboot/network-console
+ 
+@@ -35,6 +35,22 @@
+ 	update-manifest $(SOME_DEST)/$(EXTRANAME)/buffalo/kuroboxpro/uImage.buffalo "Linux kernel for Kurobox Pro"
+ 	update-manifest $(SOME_DEST)/$(EXTRANAME)/buffalo/kuroboxpro/initrd.buffalo "initrd for Kurobox Pro"
+ 
++# Buffalo Linkstation Pro/Live
++lspro:
++	mkdir -p $(SOME_DEST)/$(EXTRANAME)/buffalo/lspro
++	mkdir -p $(TEMP)/lspro
++	# Set machine id 1585 (0x0631)
++	devio > $(TEMP)/lspro/kernel 'wl 0xe3a01c06,4' 'wl 0xe3811031,4'
++	cat $(TEMP_KERNEL) >> $(TEMP)/lspro/kernel
++	mkimage -A arm -O linux -T kernel -C none -a 0x00008000 -e 0x00008000 -n "Debian kernel" -d $(TEMP)/lspro/kernel $(TEMP)/lspro/kernel.uboot
++	cp $(TEMP)/lspro/kernel.uboot $(SOME_DEST)/$(EXTRANAME)/buffalo/lspro/uImage.buffalo
++	mkimage -A arm -O linux -T ramdisk -C gzip -a 0x02000000 -e 0x02000000 -n "debian-installer ramdisk" -d $(TEMP_INITRD) $(TEMP)/lspro/initrd.uboot
++	cp $(TEMP)/lspro/initrd.uboot $(SOME_DEST)/$(EXTRANAME)/buffalo/lspro/initrd.buffalo
++	install -m 744 boot/arm/lspro-config-debian $(SOME_DEST)/$(EXTRANAME)/buffalo/lspro/config-debian
++	update-manifest $(SOME_DEST)/$(EXTRANAME)/buffalo/lspro/config-debian "Script to run debian-installer"
++	update-manifest $(SOME_DEST)/$(EXTRANAME)/buffalo/lspro/uImage.buffalo "Linux kernel for Linkstation Pro/Live"
++	update-manifest $(SOME_DEST)/$(EXTRANAME)/buffalo/lspro/initrd.buffalo "initrd for Linkstation Pro/Live"
++
+ # HP Media Vault mv2120
+ mv2120:
+ 	mkdir -p $(SOME_DEST)/$(EXTRANAME)/hp/mv2120

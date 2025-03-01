@@ -1,0 +1,102 @@
+From f42b6dea2a384101e56cc706d2dee041acca5cd7 Mon Sep 17 00:00:00 2001
+From: Simon McVittie <smcv@collabora.com>
+Date: Wed, 9 May 2018 19:04:28 +0100
+Subject: [PATCH] qemu: Add a shortcut for running tests on an EFI-booted image
+
+Some Debian derivatives, notably SteamOS, and some image-preparation
+tools, notably mkosi, prefer EFI.
+
+Signed-off-by: Simon McVittie <smcv@collabora.com>
+---
+ debian/control               | 10 +++++++++-
+ virt/autopkgtest-virt-qemu   | 26 ++++++++++++++++++++++++++
+ virt/autopkgtest-virt-qemu.1 |  8 ++++++++
+ 3 files changed, 43 insertions(+), 1 deletion(-)
+
+diff --git a/debian/control b/debian/control
+index eed730e..74fda0e 100644
+--- a/debian/control
++++ b/debian/control
+@@ -25,7 +25,15 @@ Depends: python3,
+  procps,
+  ${misc:Depends}
+ Recommends: autodep8
+-Suggests: schroot, lxc, lxd-client, qemu-system, qemu-utils
++Suggests:
++ lxc,
++ lxd-client,
++ ovmf,
++ qemu-efi-aarch64,
++ qemu-efi-arm,
++ qemu-system,
++ qemu-utils,
++ schroot,
+ Breaks: debci (<< 1.7~)
+ Description: automatic as-installed testing for Debian packages
+  autopkgtest runs tests on binary packages.  The tests are run on the
+diff --git a/virt/autopkgtest-virt-qemu b/virt/autopkgtest-virt-qemu
+index ae5bfc2..416c4c8 100755
+--- a/virt/autopkgtest-virt-qemu
++++ b/virt/autopkgtest-virt-qemu
+@@ -90,6 +90,8 @@ def parse_args():
+                         help='Pass through arguments to QEMU command.')
+     parser.add_argument('--baseimage', action='store_true', default=False,
+                         help='Provide a read-only copy of the base image at /dev/baseimage')
++    parser.add_argument('--efi', action='store_true', default=False,
++                        help='Use OVMF or AAVMF to boot virtual machine using EFI (default: BIOS)')
+     parser.add_argument('image', nargs='+',
+                         help='disk image to add to the VM (in order)')
+ 
+@@ -545,6 +547,30 @@ def hook_open():
+             '-virtfs',
+             'local,id=autopkgtest,path=%s,security_model=none,mount_tag=autopkgtest' % shareddir,
+             '-drive', 'file=%s,cache=unsafe,if=virtio,index=0' % overlay]
++
++    if args.efi:
++        code = None
++        data = None
++
++        if 'qemu-system-x86_64' in args.qemu_command or \
++                'qemu-system-i386' in args.qemu_command:
++            code = '/usr/share/OVMF/OVMF_CODE.fd'
++            data = '/usr/share/OVMF/OVMF_VARS.fd'
++        elif 'qemu-system-aarch64' in args.qemu_command:
++            code = '/usr/share/AAVMF/AAVMF_CODE.fd'
++            data = '/usr/share/AAVMF/AAVMF_VARS.fd'
++        elif 'qemu-system-arm' in args.qemu_command:
++            code = '/usr/share/AAVMF/AAVMF32_CODE.fd'
++            data = '/usr/share/AAVMF/AAVMF32_VARS.fd'
++        else:
++            VirtSubproc.bomb('Unknown architecture for EFI boot')
++
++        shutil.copy(data, '%s/efivars.fd' % workdir)
++        argv.append('-drive')
++        argv.append('if=pflash,format=raw,read-only,file=' + code)
++        argv.append('-drive')
++        argv.append('if=pflash,format=raw,file=%s/efivars.fd' % workdir)
++
+     for i, image in enumerate(args.image[1:]):
+         argv.append('-drive')
+         argv.append('file=%s,if=virtio,index=%i,readonly' % (image, i + 1))
+diff --git a/virt/autopkgtest-virt-qemu.1 b/virt/autopkgtest-virt-qemu.1
+index cdfe190..2137725 100644
+--- a/virt/autopkgtest-virt-qemu.1
++++ b/virt/autopkgtest-virt-qemu.1
+@@ -109,6 +109,14 @@ will not be accessible between calling
+ .B autopkgtest-reboot-prepare
+ and the next boot, thus make sure to stop accessing it before.
+ 
++.TP
++.B  \-\-efi
++Configure QEMU with OVMF or AAVMF firmware images suitable for booting
++an x86, ARM or ARM64 virtual machine using EFI. This requires the
++ovmf, qemu-efi-arm or qemu-efi-aarch64 package. The correct firmware
++image is guessed from the
++.BR --qemu-command .
++
+ .TP
+ .BI "--qemu-options=" arguments
+ Pass through arguments to QEMU command; e. g. --qemu-options='-readconfig qemu.cfg'
+-- 
+2.17.0
+

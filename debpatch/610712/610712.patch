@@ -1,0 +1,152 @@
+commit 13667a098a23d6c4a522322672f79d88eea6452a
+Author: Daniel Kahn Gillmor <dkg@fifthhorseman.net>
+Date:   Sat May 4 04:46:34 2013 -0400
+
+    Enable OpenPGP signature verification (Closes: #610712)
+    
+    add a new opts= option for debian/watch files: pgpsigurlmangle.
+    
+    if this option is present and the file debian/upstream-signing-key.pgp
+    exists (as an OpenPGP keyring) uscan will try to fetch the detached
+    signature based on the mangled URL, and verify it against the key(s)
+    stored in the keyring.
+
+diff --git a/debian/control b/debian/control
+index 742dc3a..59fc856 100644
+--- a/debian/control
++++ b/debian/control
+@@ -68,6 +68,7 @@ Suggests: bsd-mailx | mailx,
+           cvs-buildpackage,
+           devscripts-el,
+           gnuplot,
++          gpgv,
+           libauthen-sasl-perl,
+           libfile-desktopentry-perl,
+           libnet-smtp-ssl-perl,
+@@ -184,7 +185,7 @@ Description: scripts to make the life of a Debian Package maintainer easier
+     transitions for which uploads to unstable are currently blocked
+     [libwww-perl, libyaml-syck-perl]
+   - uscan: scan upstream sites for new releases of packages
+-    [libcrypt-ssleay-perl, libwww-perl, unzip, lzma, xz-utils]
++    [libcrypt-ssleay-perl, gpgv, libwww-perl, unzip, lzma, xz-utils]
+   - uupdate: integrate upstream changes into a source package [patch]
+   - what-patch: determine what patch system, if any, a source package is using
+     [patchutils]
+diff --git a/scripts/uscan.1 b/scripts/uscan.1
+index 99ee64c..f3b3be3 100644
+--- a/scripts/uscan.1
++++ b/scripts/uscan.1
+@@ -282,6 +282,16 @@ matched, then the version number is determined from this URL.
+ Finally, any rules given by this option are applied before the actual
+ download attempt is made. An example of its use is given in the
+ examples section above.
++.TP
++\fBpgpsigurlmangle=\fIrules\fR
++If present, the supplied rules will be applied to the downloaded URL
++(after any downloadurlmangle rules, if present) to craft a new URL
++that will be used to fetch the detached OpenPGP signature file for the
++upstream tarball.  Some common rules might be `\fBs/$/.asc/\fR' or
++`\fBs/$/.pgp/\fR' or `\fBs/$/.gpg/\fR'.  This signature must be made
++by a key found in the keyring \fBdebian/upstream-signing-key.pgp\fR.
++If it is not valid, or not made by one of the listed keys, uscan will
++report an error.
+ .SH "Directory name checking"
+ Similarly to several other scripts in the \fBdevscripts\fR package,
+ \fBuscan\fR explores the requested directory trees looking for
+diff --git a/scripts/uscan.pl b/scripts/uscan.pl
+index 177f3f0..cafa5e8 100755
+--- a/scripts/uscan.pl
++++ b/scripts/uscan.pl
+@@ -56,6 +56,7 @@ eval { require Crypt::SSLeay; };
+ if ($@) {
+     $haveSSL = 0;
+ }
++my $havegpgv = (-x '/usr/bin/gpgv');
+ 
+ # Did we find any new upstream versions on our wanderings?
+ our $found = 0;
+@@ -761,6 +762,9 @@ sub process_watchline ($$$$$$)
+ 		elsif ($opt =~ /^downloadurlmangle\s*=\s*(.+)/) {
+ 		    @{$options{'downloadurlmangle'}} = split /;/, $1;
+ 		}
++		elsif ($opt =~ /^pgpsigurlmangle\s*=\s*(.+)/) {
++		    @{$options{'pgpsigurlmangle'}} = split /;/, $1;
++		}
+ 		else {
+ 		    uscan_warn "$progname warning: unrecognised option $opt\n";
+ 		}
+@@ -793,6 +797,17 @@ sub process_watchline ($$$$$$)
+ 	    uscan_warn "$progname warning: downloadurlmangle option invalid for ftp sites,\n  ignoring in $watchfile:\n  $line\n";
+ 	}
+ 
++	# Check validity of options
++	if (exists $options{'pgpsigurlmangle'}) {
++          if (not (-r 'debian/upstream-signing-key.pgp')) {
++            uscan_warn "$progname warning: pgpsigurlmangle option exists, but debian/upstream-signing-key.pgp does not exist,\n  ignoring in $watchfile:\n  $line\n";
++            delete $options{'pgpsigurlmangle'};
++          } elsif (! $havegpgv) {
++	    uscan_warn "$progname warning: pgpsignurlmangle option exists, but you must have gpgv installed to verify\n  in $watchfile, skipping:\n  $line\n";
++	    return 1;
++          }
++	}
++
+ 	# Handle sf.net addresses specially
+ 	if ($base =~ m%^http://sf\.net/%) {
+ 	    $base =~ s%^http://sf\.net/%http://qa.debian.org/watch/sf.php/%;
+@@ -1123,6 +1138,7 @@ EOF
+ 
+     # So what have we got to report now?
+     my $upstream_url;
++    my $pgpsig_url;
+     # Upstream URL?  Copying code from below - ugh.
+     if ($site =~ m%^https?://%) {
+ 	# absolute URL?
+@@ -1202,6 +1218,20 @@ EOF
+ 	$upstream_url = "$base$newfile";
+     }
+ 
++    if (exists $options{'pgpsigurlmangle'}) {
++      $pgpsig_url = $upstream_url;
++      foreach my $pat (@{$options{'pgpsigurlmangle'}}) {
++        if (! safe_replace(\$pgpsig_url, $pat)) {
++          uscan_warn "$progname: In $watchfile, potentially"
++            . " unsafe or malformed pgpsigurlmangle"
++            . " pattern:\n  '$pat'"
++            . " found. Skipping watchline\n"
++            . "  $line\n";
++          return 1;
++        }
++      }
++    }
++
+     $dehs_tags{'debian-uversion'} = $lastversion;
+     $dehs_tags{'debian-mangled-uversion'} = $mangled_lastversion;
+     $dehs_tags{'upstream-version'} = $newversion;
+@@ -1347,6 +1377,27 @@ EOF
+ 	}
+     }
+ 
++    if (defined $pgpsig_url) {
++      print "-- Downloading OpenPGP signature for package as $newfile_base.pgp\n" if $verbose;
++      my $sigrequest = HTTP::Request->new('GET', "$pgpsig_url");
++      my $sigresponse = $user_agent->request($sigrequest, "$destdir/$newfile_base.pgp");
++
++      if (! $sigresponse->is_success) {
++        if (defined $pkg_dir) {
++          uscan_warn "$progname warning: In directory $pkg_dir, downloading OpenPGP signature\n  $upstream_url failed: " . $sigresponse->status_line . "\n";
++        } else {
++          uscan_warn "$progname warning: Downloading OpenPGP signature\n $pgpsig_url failed:\n" . $sigresponse->status_line . "\n";
++        }
++        return 1;
++      }
++
++      print "-- Verifying OpenPGP signature $newfile_base.pgp for $newfile_base\n" if $verbose;
++      system('/usr/bin/gpgv', '--homedir', '/dev/null',
++             '--keyring', 'debian/upstream-signing-key.pgp',
++             "$destdir/$newfile_base.pgp", "$destdir/$newfile_base") >> 8 == 0
++               or uscan_die("$progname warning: OpenPGP signature did not verify.\n");
++    }
++
+     if ($repack and $newfile_base =~ /^(.*)\.(tar\.bz2|tbz2?)$/) {
+ 	print "-- Repacking from bzip2 to gzip\n" if $verbose;
+ 	my $newfile_base_gz = "$1.tar.gz";

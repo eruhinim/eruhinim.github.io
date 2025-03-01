@@ -1,0 +1,383 @@
+diff -urNp byacc-20100216.orig/defs.h byacc-20100216/defs.h
+--- byacc-20100216.orig/defs.h	2010-02-16 19:48:59.000000000 -0500
++++ byacc-20100216/defs.h	2010-06-07 13:38:30.000000000 -0400
+@@ -93,6 +93,9 @@
+ #define EXPECT 10
+ #define EXPECT_RR 11
+ #define PURE_PARSER 12
++#define PARSE_PARAM 13
++#define LEX_PARAM 14
++#define POSIX_YACC 15
+ 
+ /*  symbol classes  */
+ 
+@@ -204,6 +207,15 @@ struct action
+     char suppressed;
+ };
+ 
++/*  the structure used to store parse/lex parameters  */
++typedef struct param param;
++struct param
++{
++    struct param *next;
++    char *name;
++    char *type;
++};
++
+ /* global variables */
+ 
+ extern char dflag;
+@@ -220,6 +232,7 @@ extern char *line;
+ extern int lineno;
+ extern int outline;
+ extern int exit_code;
++extern int pure_parser;
+ 
+ extern const char *banner[];
+ extern const char *xdecls[];
+@@ -309,6 +322,9 @@ extern Value_t *itemset;
+ extern Value_t *itemsetend;
+ extern unsigned *ruleset;
+ 
++extern param *lex_param;
++extern param *parse_param;
++
+ /* global functions */
+ 
+ extern bucket *lookup(const char *);
+diff -urNp byacc-20100216.orig/main.c byacc-20100216/main.c
+--- byacc-20100216.orig/main.c	2010-02-16 19:43:08.000000000 -0500
++++ byacc-20100216/main.c	2010-06-07 13:38:30.000000000 -0400
+@@ -213,6 +213,11 @@ setflag(int ch)
+ 	printf("%s - %s\n", myname, VERSION);
+ 	exit(EXIT_SUCCESS);
+ 
++		case 'y':
++	/* noop for bison compatibility. byacc is already designed to be posix
++	 * yacc compatible. */
++	break;
++
+     default:
+ 	usage();
+     }
+diff -urNp byacc-20100216.orig/output.c byacc-20100216/output.c
+--- byacc-20100216.orig/output.c	2010-02-16 20:48:22.000000000 -0500
++++ byacc-20100216/output.c	2010-06-07 13:38:29.000000000 -0400
+@@ -1178,6 +1178,121 @@ output_semantic_actions(void)
+ }
+ 
+ static void
++output_parse_decl(void)
++{
++    ++outline;
++    fprintf(code_file, "/* compatibility with bison */\n");
++    ++outline;
++    fprintf(code_file, "#ifdef YYPARSE_PARAM\n");
++    ++outline;
++    fprintf(code_file, "/* compatibility with FreeBSD */\n");
++    ++outline;
++    fprintf(code_file, "# ifdef YYPARSE_PARAM_TYPE\n");
++    ++outline;
++    fprintf(code_file, "#  define YYPARSE_DECL() "
++        "yyparse(YYPARSE_PARAM_TYPE YYPARSE_PARAM)\n");
++    ++outline;
++    fprintf(code_file, "# else\n");
++    ++outline;
++    fprintf(code_file, "#  define YYPARSE_DECL() "
++        "yyparse(void *YYPARSE_PARAM)\n");
++    ++outline;
++    fprintf(code_file, "# endif\n");
++    ++outline;
++    fprintf(code_file, "#else\n");
++    ++outline;
++    fprintf(code_file, "# define YYPARSE_DECL() yyparse(");
++    if (!parse_param)
++        fprintf(code_file, "void");
++    else
++    {
++        param *p;
++        for (p = parse_param; p; p = p->next)
++            fprintf(code_file, "%s %s%s", p->type, p->name,
++                p->next ? ", " : "");
++    }
++    fprintf(code_file, ")\n");
++    outline += 2;
++    fprintf(code_file, "#endif\n\n");
++}
++
++static void
++output_lex_decl(void)
++{
++    ++outline;
++    fprintf(code_file, "/* Parameters sent to lex. */\n");
++    ++outline;
++    fprintf(code_file, "#ifdef YYLEX_PARAM\n");
++    if (pure_parser)
++    {
++        ++outline;
++        fprintf(code_file, "# define YYLEX_DECL() yylex(YYSTYPE *yylval, "
++            "void *YYLEX_PARAM)\n");
++        ++outline;
++        fprintf(code_file, "# define YYLEX yylex(&yylval, YYLEX_PARAM)\n");
++    }
++    else
++    {
++        ++outline;
++        fprintf(code_file, "# define YYLEX_DECL() yylex(void *YYLEX_PARAM)\n");
++        ++outline;
++        fprintf(code_file, "# define YYLEX yylex(YYLEX_PARAM)\n");
++    }
++    ++outline;
++    fprintf(code_file, "#else\n");
++    if (pure_parser && lex_param)
++    {
++        fprintf(code_file, "# define YYLEX_DECL() yylex(YYSTYPE *yylval, ");
++        param *p;
++        for (p = lex_param; p; p = p->next)
++            fprintf(code_file, "%s %s%s", p->type, p->name,
++                p->next ? ", " : "");
++        ++outline;
++        fprintf(code_file, ")\n");
++
++        fprintf(code_file, "# define YYLEX yylex(&yylval, ");
++        for (p = lex_param; p; p = p->next)
++            fprintf(code_file, "%s%s", p->name, p->next ? ", " : "");
++        ++outline;
++        fprintf(code_file, ")\n");
++    }
++    else if (pure_parser)
++    {
++        ++outline;
++        fprintf(code_file, "# define YYLEX_DECL() yylex(YYSTYPE *yylval)\n");
++
++        ++outline;
++        fprintf(code_file, "# define YYLEX yylex(&yylval)\n");
++    }
++    else if (lex_param)
++    {
++        fprintf(code_file, "# define YYLEX_DECL() yylex(");
++        param *p;
++        for (p = lex_param; p; p = p->next)
++            fprintf(code_file, "%s %s%s", p->type, p->name,
++                p->next ? ", " : "");
++        ++outline;
++        fprintf(code_file, ")\n");
++
++        fprintf(code_file, "# define YYLEX yylex(");
++        for (p = lex_param; p; p = p->next)
++            fprintf(code_file, "%s%s", p->name, p->next ? ", " : "");
++        ++outline;
++        fprintf(code_file, ")\n");
++    }
++    else
++    {
++        ++outline;
++        fprintf(code_file, "# define YYLEX_DECL() yylex(void)\n");
++
++        ++outline;
++        fprintf(code_file, "# define YYLEX yylex()\n");
++    }
++    outline += 2;
++    fprintf(code_file, "#endif\n\n");
++}
++
++static void
+ free_itemsets(void)
+ {
+     core *cp, *next;
+@@ -1223,8 +1338,11 @@ output(void)
+     free_shifts();
+     free_reductions();
+     output_prefix(output_file);
+-    write_section(xdecls);
++    output_pure_parser();
+     output_stored_text();
++    output_parse_decl();
++    output_lex_decl();
++    write_section(xdecls);
+     output_defines();
+     output_rule_data();
+     output_yydefred();
+@@ -1239,7 +1357,6 @@ output(void)
+ 	write_section(tables);
+     }
+     write_section(hdr_defs);
+-    output_pure_parser();
+     if (!pure_parser)
+     {
+ 	write_section(hdr_vars);
+diff -urNp byacc-20100216.orig/reader.c byacc-20100216/reader.c
+--- byacc-20100216.orig/reader.c	2010-02-16 20:41:35.000000000 -0500
++++ byacc-20100216/reader.c	2010-06-07 13:38:30.000000000 -0400
+@@ -42,6 +42,9 @@ static char *name_pool;
+ 
+ char line_format[] = "#line %d \"%s\"\n";
+ 
++param *lex_param;
++param *parse_param;
++
+ static void
+ cachec(int c)
+ {
+@@ -276,6 +279,12 @@ keyword(void)
+ 	    return (EXPECT_RR);
+ 	if (strcmp(cache, "pure-parser") == 0)
+ 	    return (PURE_PARSER);
++	if (strcmp(cache, "parse-param") == 0)
++	    return (PARSE_PARAM);
++	if (strcmp(cache, "lex-param") == 0)
++	    return (LEX_PARAM);
++  if (strcmp(cache, "yacc") == 0)
++      return (POSIX_YACC);
+     }
+     else
+     {
+@@ -615,6 +624,88 @@ copy_union(void)
+     }
+ }
+ 
++/*
++ * Keep a linked list of parameters
++ */
++static void
++copy_param(int k)
++{
++    char *buf;
++    int c;
++    param *head, *p;
++    int i;
++
++    c = nextc();
++    if (c == EOF)
++	unexpected_EOF();
++    if (c != '{')
++	goto out;
++    cptr++;
++
++    c = nextc();
++    if (c == EOF)
++	unexpected_EOF();
++    if (c == '}')
++	goto out;
++
++    buf = MALLOC(linesize);
++    if (buf == NULL)
++	goto nospace;
++
++    for (i = 0; (c = *cptr++) != '}'; i++) {
++	if (c == EOF)
++	    unexpected_EOF();
++	buf[i] = c;
++    }
++
++    if (i == 0)
++	goto out;
++
++    buf[i--] = '\0';
++    while (i >= 0 && isspace((unsigned char)buf[i]))
++	buf[i--] = '\0';
++    while (i >= 0 && (isalnum((unsigned char)buf[i]) ||
++	(unsigned char)buf[i] == '_'))
++	i--;
++
++    if (!isspace((unsigned char)buf[i]) && buf[i] != '*')
++	goto out;
++
++    p = MALLOC(sizeof(*p));
++    if (p == NULL)
++	goto nospace;
++
++    p->name = strdup(buf + i + 1);
++    if (p->name == NULL)
++	goto nospace;
++
++    buf[i + 1] = '\0';
++    p->type = buf;
++
++    if (k == LEX_PARAM)
++	head = lex_param;
++    else
++	head = parse_param;
++
++    if (head != NULL) {
++	while (head->next)
++	    head = head->next;
++	head->next = p;
++    } else {
++	if (k == LEX_PARAM)
++	    lex_param = p;
++	else
++	    parse_param = p;
++    }
++    p->next = NULL;
++    return;
++
++out:
++    syntax_error(lineno, line, cptr);
++nospace:
++    no_space();
++}
++
+ static int
+ hexval(int c)
+ {
+@@ -1142,6 +1233,16 @@ read_declarations(void)
+ 	case PURE_PARSER:
+ 	    pure_parser = 1;
+ 	    break;
++
++	case PARSE_PARAM:
++	case LEX_PARAM:
++	    copy_param(k);
++	    break;
++
++	case POSIX_YACC:
++	    /* noop for bison compatibility. byacc is already designed to be posix
++	     * yacc compatible. */
++	    break;
+ 	}
+     }
+ }
+diff -urNp byacc-20100216.orig/skeleton.c byacc-20100216/skeleton.c
+--- byacc-20100216.orig/skeleton.c	2010-02-16 20:44:23.000000000 -0500
++++ byacc-20100216/skeleton.c	2010-06-07 13:38:29.000000000 -0400
+@@ -40,20 +40,8 @@ const char *banner[] =
+ 
+ const char *xdecls[] =
+ {
+-    "",
+-    "/* compatibility with bison */",
+-    "#ifdef YYPARSE_PARAM",
+-    "/* compatibility with FreeBSD */",
+-    "#ifdef YYPARSE_PARAM_TYPE",
+-    "#define YYPARSE_DECL() yyparse(YYPARSE_PARAM_TYPE YYPARSE_PARAM)",
+-    "#else",
+-    "#define YYPARSE_DECL() yyparse(void *YYPARSE_PARAM)",
+-    "#endif",
+-    "#else",
+-    "#define YYPARSE_DECL() yyparse(void)",
+-    "#endif /* YYPARSE_PARAM */",
+-    "",
+     "extern int YYPARSE_DECL();",
++    "extern int YYLEX_DECL();",
+     "",
+     0
+ };
+@@ -232,7 +220,7 @@ const char *body_2[] =
+     "    if ((yyn = yydefred[yystate]) != 0) goto yyreduce;",
+     "    if (yychar < 0)",
+     "    {",
+-    "        if ((yychar = yylex()) < 0) yychar = 0;",
++    "        if ((yychar = YYLEX) < 0) yychar = 0;",
+     "#if YYDEBUG",
+     "        if (yydebug)",
+     "        {",
+@@ -368,7 +356,7 @@ const char *trailer[] =
+     "        *++yystack.l_mark = yyval;",
+     "        if (yychar < 0)",
+     "        {",
+-    "            if ((yychar = yylex()) < 0) yychar = 0;",
++    "            if ((yychar = YYLEX) < 0) yychar = 0;",
+     "#if YYDEBUG",
+     "            if (yydebug)",
+     "            {",

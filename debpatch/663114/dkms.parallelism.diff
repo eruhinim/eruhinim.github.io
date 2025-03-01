@@ -1,0 +1,81 @@
+--- dkms.orig	2012-10-06 00:00:00.000000000 +0200
++++ dkms	2013-12-26 14:56:58.042271991 +0100
+@@ -127,6 +127,7 @@
+     echo $"              [--kernelsourcedir=source-location] [--no-prepare-kernel] [--no-initrd]"
+     echo $"              [--binaries-only] [--source-only] [-r release (SuSE)] [--verbose]"
+     echo $"              [--size] [--spec=specfile] [--media=floppy|iso|tar] [--legacy-postinst=0|1]"
++    echo $"              [-j number]"
+ }
+ 
+ VER()
+@@ -145,6 +146,19 @@
+ 		  -e 's: ::g'
+ }
+ 
++# Find out how many CPUs there are so that we may pass an appropriate -j
++# option to make. Ignore hyperthreading for now.
++get_num_cpus()
++{
++   local num_cpus
++   num_cpus=$(egrep -i \
++       '^processor[[:space:]]*:[[:space:]]*[[:digit:]]+[[:space:]]*$' \
++       /proc/cpuinfo \
++       | wc -l)
++   [[ "$num_cpus" -lt 1 ]] && num_cpus=1 # Make sure we return at least 1
++   echo "$num_cpus"
++}
++
+ # Figure out the correct module suffix for the kernel we are currently
+ # dealing with, which may or may not be the currently installed kernel.
+ set_module_suffix()
+@@ -1085,7 +1099,7 @@
+ 	invoke_command "cp /boot/vmlinuz.version.h include/linux/version.h" "using /boot/vmlinux.version.h"
+ 	invoke_command "cp -f $kernel_config .config" "using $kernel_config"
+ 	invoke_command "make KERNELRELEASE=$1 cloneconfig" "make cloneconfig" background
+-	invoke_command "make CONFIG_MODVERSIONS=1 KERNELRELEASE=$1 dep" "make CONFIG_MODVERSIONS=1 dep" background
++	invoke_command "make -j$parallel_jobs CONFIG_MODVERSIONS=1 KERNELRELEASE=$1 dep" "make CONFIG_MODVERSIONS=1 dep" background
+     elif grep -q rhconfig.h $kernel_source_dir/include/linux/{modversions,version}.h 2>/dev/null; then
+ 	echo $"Running Red Hat style preparation routine"
+ 	invoke_command "make clean" "make clean" background
+@@ -1131,9 +1145,9 @@
+ 
+ 	invoke_command "make KERNELRELEASE=$1 oldconfig" "make oldconfig" background
+ 	if [[ $(VER $1) < $(VER 2.5) ]]; then
+-	    invoke_command "make KERNELRELEASE=$1 dep" "make dep" background
++	    invoke_command "make -j$parallel_jobs KERNELRELEASE=$1 dep" "make dep" background
+ 	else
+-	    invoke_command "make KERNELRELEASE=$1 prepare-all scripts" "make prepare-all" background
++	    invoke_command "make -j$parallel_jobs KERNELRELEASE=$1 prepare-all scripts" "make prepare-all" background
+ 	fi
+     fi
+     cd - >/dev/null
+@@ -1205,7 +1219,7 @@
+     invoke_command "$clean" "cleaning build area" background
+     echo $"DKMS make.log for $module-$module_version for kernel $kernelver ($arch)" >> "$dkms_tree/$module/$module_version/build/make.log"
+     date >> "$dkms_tree/$module/$module_version/build/make.log"
+-    local the_make_command="${make_command/#make/make KERNELRELEASE=$kernelver}"
++    local the_make_command="${make_command/#make/make -j$parallel_jobs KERNELRELEASE=$kernelver}"
+ 
+     invoke_command "{ $the_make_command; } >> $dkms_tree/$module/$module_version/build/make.log 2>&1" "$the_make_command" background || \
+ 	report_build_problem 10 $"Bad return status for module build on kernel: $kernelver ($arch)" \
+@@ -3444,6 +3458,7 @@
+ 	--debug)
+ 	    export PS4='${BASH_SOURCE}@${LINENO}(${FUNCNAME[0]}): '
+ 	    set -x;;
++	-j)                  read_arg parallel_jobs "$1" "$2" || shift;;
+ 	-*|--*)              error $" Unknown option: $1"
+ 			     show_usage
+ 			     exit 2;;
+@@ -3491,6 +3506,12 @@
+ 	$"--all on the command line."
+ fi
+ 
++# Default to -j<number of CPUs>
++parallel_jobs=${parallel_jobs:-$(get_num_cpus)}
++
++# Make sure we're not passing -j0 to make; treat -j0 as just "-j"
++[[ "$parallel_jobs" = 0 ]] && parallel_jobs=""
++
+ # Run the specified action
+ for action_to_run in $action; do
+     setup_kernels_arches "$action_to_run"

@@ -1,0 +1,107 @@
+>From e0ae543b47eebfd0ac8337bb3f7794ef34f2dbe3 Mon Sep 17 00:00:00 2001
+From: Daniel Schaal <daniel@schaal.email>
+Date: Thu, 14 Jul 2016 06:33:12 +0200
+Subject: [PATCH] Add systemd service and timer units overriding the cron.d
+ file
+
+Add a condition to cron.d/certbot to only run the cron entry
+when not running under systemd
+---
+ debian/certbot.cron.d  |  2 +-
+ debian/certbot.service |  8 ++++++++
+ debian/certbot.timer   | 10 ++++++++++
+ debian/control.in      |  1 +
+ debian/rules           | 12 +++++++++++-
+ 5 files changed, 31 insertions(+), 2 deletions(-)
+ create mode 100644 debian/certbot.service
+ create mode 100644 debian/certbot.timer
+
+diff --git a/debian/certbot.cron.d b/debian/certbot.cron.d
+index aef16b2..dc2f28b 100644
+--- a/debian/certbot.cron.d
++++ b/debian/certbot.cron.d
+@@ -8,4 +8,4 @@
+ SHELL=/bin/sh
+ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+ 
+-0 */12 * * * root test -x /usr/bin/certbot && perl -e 'sleep int(rand(3600))' && certbot -q renew
++0 */12 * * * root test -x /usr/bin/certbot -a \! -d /run/systemd/system && perl -e 'sleep int(rand(3600))' && certbot -q renew
+diff --git a/debian/certbot.service b/debian/certbot.service
+new file mode 100644
+index 0000000..256ff83
+--- /dev/null
++++ b/debian/certbot.service
+@@ -0,0 +1,8 @@
++[Unit]
++Description=Certbot
++
++[Service]
++Type=oneshot
++ExecStart=/usr/bin/certbot -q renew
++PrivateTmp=true
++
+diff --git a/debian/certbot.timer b/debian/certbot.timer
+new file mode 100644
+index 0000000..dfcf484
+--- /dev/null
++++ b/debian/certbot.timer
+@@ -0,0 +1,10 @@
++[Unit]
++Description=Run certbot twice daily
++
++[Timer]
++OnCalendar=*-*-* 00,12:00:00
++RandomizedDelaySec=3600
++Persistent=true
++
++[Install]
++WantedBy=timers.target
+diff --git a/debian/control.in b/debian/control.in
+index fec8664..820c44b 100644
+--- a/debian/control.in
++++ b/debian/control.in
+@@ -5,6 +5,7 @@ Maintainer: Debian Let's Encrypt <letsencrypt-devel@lists.alioth.debian.org>
+ Uploaders: Harlan Lieberman-Berg <hlieberman@debian.org>,
+            Francois Marier <francois@debian.org>
+ Build-Depends: debhelper (>= 9~),
++               dh-systemd,
+                dh-python,
+                dialog,
+                python-acme (>= ###UPSTREAM_VERSION###~),
+diff --git a/debian/rules b/debian/rules
+index 4217c66..16db638 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -5,7 +5,7 @@ export PYBUILD_NAME = certbot
+ include /usr/share/dpkg/pkg-info.mk
+ 
+ %:
+-	dh $@ --with python2,sphinxdoc --buildsystem=pybuild
++	dh $@ --with python2,sphinxdoc,systemd --buildsystem=pybuild
+ 
+ override_dh_clean: debian/control
+ 	dh_clean
+@@ -13,6 +13,14 @@ override_dh_clean: debian/control
+ debian/control: debian/control.in debian/changelog
+ 	sed -e 's/###UPSTREAM_VERSION###/$(DEB_VERSION_UPSTREAM)/g' < debian/control.in > debian/control
+ 
++override_dh_systemd_enable:
++	dh_systemd_enable --package=certbot certbot.timer
++
++override_dh_systemd_start:
++	dh_systemd_start --package=certbot certbot.timer
++
++override_dh_installinit:
++
+ override_dh_install:
+ 	mkdir -p debian/certbot/usr/bin
+ 	mv debian/python-certbot/usr/bin/* debian/certbot/usr/bin
+@@ -24,3 +32,5 @@ override_dh_install:
+ 		http_proxy='127.0.0.1:9' \
+ 		sphinx-build -N -bman docs/ build/man
+ 	chmod -x debian/python-certbot/usr/lib/python2.7/dist-packages/certbot/tests/testdata/sample-renewal*.conf
++
++	install -D --mode=644 --target-directory=debian/certbot/lib/systemd/system debian/certbot.timer
+-- 
+2.8.1
+

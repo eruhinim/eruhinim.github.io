@@ -1,0 +1,164 @@
+diff -Naur ddclient-3.7.3/debian/config ddclient-3.7.3-dyndns/debian/config
+--- ddclient-3.7.3/debian/config	2009-01-29 09:38:35.000000000 -0500
++++ ddclient-3.7.3-dyndns/debian/config	2009-01-29 09:38:26.000000000 -0500
+@@ -95,19 +95,45 @@
+   fi
+ 
+   # ask the user about the dynamic DNS names, account and interface
+-  db_input critical ddclient/names || true
+   db_input critical ddclient/username || true
+   db_input critical ddclient/password || true
+-  db_input critical ddclient/interface || true
++  db_get ddclient/service
++  # if the chosen service is dyndns, ask some extra questions.  otherwise, set them to false
++  if [ $RET = "www.dyndns.com" ]; then
++  	db_input critical ddclient/checkip || true
++	if [ -f /usr/bin/wget ]; then
++		db_input critical ddclient/fetchhosts || true
++	else
++		db_fset ddclient/fetchhosts seen true
++		db_set ddclient/fetchhosts false
++	fi
++  else
++  	db_fset ddclient/checkip seen true
++	db_fset ddclient/fetchhosts seen true
++	db_set ddclient/checkip false
++	db_set ddclient/fetchhosts false
++  fi
++  db_go
++  db_get ddclient/checkip
++  # ask the traditional questions if the dyndns questions weren't answered true
++  if [ $RET = "false" ]; then
++	db_input critical ddclient/interface || true
++  fi
++  db_get ddclient/fetchhosts
++  if [ $RET = "false" ]; then
++  	db_input critical ddclient/names || true
++  fi
+   db_go
+ 
+   # set the default mode ddclient should run in (ip-up | daemon),
+   # depending on the entered interface (XpppX or other)
+   db_get ddclient/interface
+   interface=$RET
++  db_get ddclient/checkip
++  checkip=$RET
+ 
+-  # if it is actually a ppp or related interface
+-  if [ -z "${interface##*ppp*}" ]; then
++  # if it is actually a ppp or related interface, and we're not using checkip
++  if [ $checkip != "true"  ] && [ -z "${interface##*ppp*}" ]; then
+     db_fget ddclient/run_ipup seen
+     if [ $RET = "false" ]; then
+       db_set ddclient/run_ipup true
+diff -Naur ddclient-3.7.3/debian/ddclient.templates ddclient-3.7.3-dyndns/debian/ddclient.templates
+--- ddclient-3.7.3/debian/ddclient.templates	2009-01-29 09:38:35.000000000 -0500
++++ ddclient-3.7.3-dyndns/debian/ddclient.templates	2009-01-29 09:38:26.000000000 -0500
+@@ -38,6 +38,13 @@
+ _Description: Password for dynamic DNS service:
+  Enter the password you use to log into the dynamic DNS service.
+ 
++Template: ddclient/checkip
++Type: boolean
++Default: true
++_Description: Find public IP using checkip.dyndns.com? (Recommended)
++ Enable this to have ddclient find your IP via the web, recommended
++ if this machine is behind a NAT.
++
+ Template: ddclient/interface
+ Type: string
+ _Description: Interface used for dynamic DNS service:
+@@ -73,3 +80,26 @@
+  this. Maybe you modified the configuration file manually, thus it won't
+  be modified. If you want a new config file to be created, please run
+  "dpkg-reconfigure ddclient".
++
++Template: ddclient/fetchhosts
++Type: boolean
++Default: true
++_Description: Automatically fetch list of hosts to choose from?
++ Select this to see a list of your account's hostnames to select which to update.
++
++Template: ddclient/hostslist
++Type: multiselect
++Choices: ${choices}
++_Description: Please select the hostnames you would like to keep updated
++ Select one or more hosts to update using ddclient
++
++Template: ddclient/blankhostslist
++Type: note
++_Description: Hosts list blank, possible incorrect login information.
++ The fetched hosted list is blank.  This can be caused by the following:
++ .
++  * An incorrect username or password was entered
++  * You do not have any hostnames configured in your account
++ .
++ Please check your account to be sure you have hostnames configured, then run
++ "dpkg-reconfigure ddclient" to input your username and password again.
+diff -Naur ddclient-3.7.3/debian/postinst ddclient-3.7.3-dyndns/debian/postinst
+--- ddclient-3.7.3/debian/postinst	2009-01-29 09:38:35.000000000 -0500
++++ ddclient-3.7.3-dyndns/debian/postinst	2009-01-29 09:38:26.000000000 -0500
+@@ -35,9 +35,33 @@
+   db_version 2.0 || { echo "ddclient.config: \
+     need DebConf 2.0 or later"; exit 1; }
+ 
+-	
+   # if /etc/ddclient.conf does not exist:
+   if [ ! -f /etc/ddclient.conf ]; then
++  	# check if we should fetch the hostlist for a dyndns account
++	db_get ddclient/fetchhosts
++	if [ $RET = "true" ]; then
++		# get the dyndns host list
++		db_get ddclient/username	&& username="$RET"
++		db_get ddclient/password	&& password="$RET"
++		hostslist=`/usr/bin/wget http://$username:$password@update.dyndns.com/text/gethostlist -q -O - | awk -F \: '{print $2, $4}' | sed -e "N;s/ \n/,/g" | sed -e "s/,/, /g"`
++		
++		# add the list to our multichoice template, then prompt the user
++		db_subst ddclient/hostslist choices $hostslist
++		db_input critical ddclient/hostslist || true
++		db_go
++	
++		# set names using the host list to write it to the config file later
++		db_get ddclient/hostslist
++		hostslist=`echo "$RET" | sed -e "s/, /,/g"`
++		db_set ddclient/names "$hostslist"
++
++		# if the hostslist was blank, let the user know some possible reasons
++		if [ -z $hostslist ]; then
++			db_input high ddclient/blankhostslist
++			db_go
++		fi
++	fi
++
+     # get the values from the debconf database
+     db_get ddclient/protocol 		&& protocol="$RET"
+     db_get ddclient/server   		&& server="$RET"
+@@ -45,8 +69,15 @@
+     db_get ddclient/username 		&& username="$RET"
+     db_get ddclient/password \
+       && password=$(echo "$RET"|sed -e "s/'/\\\\'/g")
+-    db_get ddclient/interface 		&& interface="$RET"
+-
++    db_get ddclient/interface
++	if [ $RET ]; then
++		interface="use=if, if=$RET"
++	else
++		db_get ddclient/checkip
++		if [ $RET = "true" ]; then
++			interface="use=web, web=checkip.dyndns.com, web-skip='IP Address'"
++		fi
++	fi
+ 
+     # create configuration file /etc/ddclient.conf
+     config=`mktemp /etc/ddclient.conf.XXXXXX`
+@@ -58,7 +89,7 @@
+ 
+ pid=/var/run/ddclient.pid
+ protocol=$protocol
+-use=if, if=$interface
++$interface
+ server=$server
+ login=$username
+ password='$password'
+
+

@@ -1,0 +1,191 @@
+From 156b0be9f13b3427973f1d83a004947225b2d8b6 Mon Sep 17 00:00:00 2001
+From: Preston Maness <aggroskater@gmail.com>
+Date: Wed, 16 Dec 2015 10:45:57 -0600
+Subject: [PATCH] client (Linux): Reinstate XScreenSaver API-based idle
+ detection on GNU/Linux.
+
+---
+ client/hostinfo_unix.cpp | 68 +++++++++++++++++++++++++++++++++++++++++++++++-
+ configure.ac             | 20 ++++++++++++++
+ lib/prefs.cpp            |  2 +-
+ lib/prefs.h              |  6 ++++-
+ 4 files changed, 93 insertions(+), 3 deletions(-)
+
+diff --git a/client/hostinfo_unix.cpp b/client/hostinfo_unix.cpp
+index 617f824..c059895 100644
+--- a/client/hostinfo_unix.cpp
++++ b/client/hostinfo_unix.cpp
+@@ -41,6 +41,10 @@
+ #include <cstring>
+ #endif
+ 
++#if HAVE_XSS
++#include <X11/extensions/scrnsaver.h> //X-based idle detection
++#endif
++
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+@@ -1947,6 +1951,62 @@ bool interrupts_idle(time_t t) {
+     }
+     return last_irq < t;
+ }
++
++#if HAVE_XSS
++// Ask the X server for user idle time (using XScreenSaver API)
++// Return true if the idle time exceeds idle_threshold.
++//
++bool xss_idle(long idle_threshold) {
++    static XScreenSaverInfo* xssInfo = NULL;
++    static Display* disp = NULL;
++    static bool error = false;
++        // some X call failed - always return not idle
++    
++    if (error) return false;
++
++    long idle_time = 0;
++    
++    if (disp == NULL) {
++        disp = XOpenDisplay(NULL);
++        // XOpenDisplay may return NULL if there is no running X
++        // or DISPLAY points to wrong/invalid display
++        //
++        if (disp == NULL) {
++            error = true;
++            //msg_printf(NULL, MSG_INFO, "XDisplay not found.");
++            return false;
++        }
++        int event_base_return, error_base_return;
++        xssInfo = XScreenSaverAllocInfo();
++        if (!XScreenSaverQueryExtension(
++            disp, &event_base_return, &error_base_return
++        )){
++            error = true;
++            //msg_printf(NULL, MSG_INFO, "XScreenSaverQueryExtension() failed.");
++            return false;
++        }
++    }
++
++    XScreenSaverQueryInfo(disp, DefaultRootWindow(disp), xssInfo);
++    idle_time = xssInfo->idle;
++
++    // convert from milliseconds to seconds
++    //
++    idle_time = idle_time / 1000;
++
++    //msg_printf(NULL, MSG_INFO, "XSS idle detection succeeded.");
++    //msg_printf(NULL, MSG_INFO, "idle threshold: %ld", idle_threshold);
++    //msg_printf(NULL, MSG_INFO, "idle_time: %ld", idle_time);
++
++    if ( idle_threshold < idle_time ) {
++        //msg_printf(NULL, MSG_INFO, "System is idle according to X.");
++    } else {
++        //msg_printf(NULL, MSG_INFO, "System is active according to X.");
++    }
++    return idle_threshold < idle_time;
++}
++#endif // HAVE_XSS
++
+ #endif // LINUX_LIKE_SYSTEM
+ 
+ bool HOST_INFO::users_idle(bool check_all_logins, double idle_time_to_run) {
+@@ -1972,6 +2032,12 @@ bool HOST_INFO::users_idle(bool check_all_logins, double idle_time_to_run) {
+         return false;
+     }
+ 
++#if HAVE_XSS
++    if (!xss_idle((long)(idle_time_to_run * 60))) {
++        return false;
++    }
++#endif // HAVE_XSS
++
+     // Lets at least check the dev entries which should be correct for
+     // USB keyboards and mice.  If the linux kernel doc is correct it should
+     // also work for bluetooth input devices as well.
+@@ -1990,7 +2056,7 @@ bool HOST_INFO::users_idle(bool check_all_logins, double idle_time_to_run) {
+     if (!device_idle(idle_time, "/dev/input/mice")) return false;
+     if (!device_idle(idle_time, "/dev/kbd")) return false;
+         // solaris
+-#endif
++#endif // LINUX_LIKE_SYSTEM
+     return true;
+ }
+ 
+diff --git a/configure.ac b/configure.ac
+index 792c6fb..919fd46 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -200,6 +200,7 @@ configured_to_build=
+ 
+ if test x$enable_client = xyes ; then
+   configured_to_build="client"
++  enable_xss="yes"
+ fi
+ if test x$enable_manager = xyes ; then
+   configured_to_build="${configured_to_build} manager"
+@@ -628,6 +629,15 @@ fi
+ 
+ AM_CONDITIONAL(BUILD_GRAPHICS_API, [ test "$have_glut" = yes -a "$have_jpeg" = 1])
+ 
++dnl check for X screen saver lib (X-based idle detection on Linux)
++if test "$enable_xss" == yes; then
++    AC_CHECK_LIB([Xss], [XScreenSaverAllocInfo], [have_Xss="yes"], [have_Xss="no"])
++    AC_CHECK_HEADER([X11/extensions/scrnsaver.h], [have_Xss="yes"], [have_Xss="no"])
++    if test "$have_Xss" == no; then
++        AC_MSG_WARN([libxss missing, disabling X ScreenSaver user idle detection])
++    fi
++fi
++
+ dnl --------------------------------------------------------------------------------
+ dnl put double-inclusion protection into config.h
+ AH_TOP([
+@@ -1194,6 +1204,16 @@ if test "${ac_cv_func_res_init}" != "yes" ; then
+ fi
+ LIBS=$svlibs
+ 
++if (test "$enable_xss" == yes) && (test "$have_Xss" == yes); then
++    SAH_CHECK_LIB([Xss],[XScreenSaverAllocInfo],[
++        AC_DEFINE([HAVE_XSS],[1],[Define to 1 if you have xss library])
++        CLIENTLIBS="${sah_lib_last} ${CLIENTLIBS}"])
++    SAH_CHECK_LIB([X11],[XOpenDisplay],[
++        AC_DEFINE([HAVE_X11],[1],[Define to 1 if you have X11 library])
++        CLIENTLIBS="${sah_lib_last} ${CLIENTLIBS}"])
++    echo DEBUG: CLIENTLIBS=${CLIENTLIBS} >&5
++fi
++
+ SAH_CHECK_LIB([resolv],[res_query],[
+     AC_DEFINE([HAVE_RESOLV],[1],[Define to 1 if you have the resolv library])
+     CLIENTLIBS="${sah_lib_last} ${CLIENTLIBS}"])
+diff --git a/lib/prefs.cpp b/lib/prefs.cpp
+index 3a8267e..9bd4160 100644
+--- a/lib/prefs.cpp
++++ b/lib/prefs.cpp
+@@ -149,7 +149,7 @@ bool TIME_SPAN::suspended(double hour) const {
+ 
+ TIME_SPAN::TimeMode TIME_SPAN::mode() const {
+     if (end_hour == start_hour || (start_hour == 0 && end_hour == 24)) {
+-        return Always;
++        return Always2;
+     } else if (start_hour == 24 && end_hour == 0) {
+         return Never;
+     }
+diff --git a/lib/prefs.h b/lib/prefs.h
+index ebbe3cc..da81ea7 100644
+--- a/lib/prefs.h
++++ b/lib/prefs.h
+@@ -89,7 +89,11 @@ struct TIME_SPAN {
+     double end_hour;
+ 
+     enum TimeMode {
+-        Always = 7000,
++        // "Always" is defined by X.h, which itself is (indirectly) included
++        // from client/hostinfo_unix.cpp when including the XSS API
++        // (<X11/extensions/scrnsaver.h>). Hence, renaming here (and in
++        // prefs.cpp).
++        Always2 = 7000,
+         Never,
+         Between
+     };
+-- 
+2.6.2
+

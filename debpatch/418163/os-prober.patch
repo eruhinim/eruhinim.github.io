@@ -1,0 +1,85 @@
+Index: os-prober/os-prober
+===================================================================
+--- os-prober/os-prober	(revision 46179)
++++ os-prober/os-prober	(working copy)
+@@ -34,6 +34,13 @@
+ 	done
+ }
+ 
++parse_proc_swaps () {
++	while read line; do
++		set -- $line
++		echo "$(mapdevfs $1) swap swap"
++	done
++}
++
+ parse_proc_mdstat () {
+ 	while read line; do
+ 		for word in $line; do
+@@ -67,6 +74,7 @@
+ # Therefore we use mapdevfs to match partitions with mount points
+ # and partitions used in RAID
+ grep "^/dev/" /proc/mounts | parse_proc_mounts >/tmp/mounted-map || true
++grep "^/dev/" /proc/swaps | parse_proc_swaps >/tmp/swaps-map || true
+ : >/tmp/raided-map
+ if [ -f /proc/mdstat ] ; then
+ 	grep "^md" /proc/mdstat | parse_proc_mdstat >/tmp/raided-map || true
+@@ -84,6 +92,12 @@
+ 		continue
+ 	fi
+ 
++	# Skip partitions used as active swap
++	if grep -q "^$mapped" /tmp/swaps-map ; then
++		debug "$partition: is active swap"
++		continue
++	fi
++
+ 	if ! grep -q "^$mapped " /tmp/mounted-map ; then
+ 		for test in /usr/lib/os-probes/*; do
+ 			if [ -f $test ] && [ -x $test ]; then
+Index: os-prober/os-probes/common/50mounted-tests
+===================================================================
+--- os-prober/os-probes/common/50mounted-tests	(revision 46179)
++++ os-prober/os-probes/common/50mounted-tests	(working copy)
+@@ -20,6 +20,25 @@
+ 	fi
+ done
+ 
++
++protect_dev(){ #$1=partition : stdout=dev_rw_flag
++dev_rw_flag=0
++if type blockdev >/dev/null 2>&1; then
++	if  [ `blockdev --getro $1` = "0" ] ; then 
++		blockdev --setro $1
++		dev_rw_flag=1
++	fi
++fi
++echo $dev_rw_flag
++}
++
++unprotect_dev(){ #$1=partition $2=dev_rw_flag
++if  [ "$2" = "1" ] ; then 
++	blockdev --setrw $1
++fi
++}
++
++dev_rw_flag=`protect_dev $partition`
+ for type in $types $delaytypes; do
+ 	if mount -o ro -t $type $partition $tmpmnt 2>/dev/null; then
+ 		debug "mounted as $type filesystem"
+@@ -29,6 +48,7 @@
+ 				if $test $partition $tmpmnt $type; then
+ 					debug "os found by subtest $test"
+ 					umount $tmpmnt
++					unprotect_dev $partition $dev_rw_flag
+ 					rmdir $tmpmnt || true
+ 					exit 0
+ 				fi
+@@ -38,6 +58,7 @@
+ 		break
+ 	fi
+ done
++unprotect_dev $partition $dev_rw_flag
+ 
+ rmdir $tmpmnt || true
+ 

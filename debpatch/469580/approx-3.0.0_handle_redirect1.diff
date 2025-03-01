@@ -1,0 +1,157 @@
+diff -Naur a/approx.ml b/approx.ml
+--- a/approx.ml	2007-12-07 23:17:06.000000000 +0000
++++ b/approx.ml	2008-03-05 20:58:55.000000000 +0000
+@@ -254,35 +254,20 @@
+   close_cache resp.length resp.last_modified;
+   if resp.length >= 0L then Delivered else Cached
+ 
+-let with_pair rex str proc =
+-  match Pcre.extract ~rex ~full_match: false str with
+-  | [| a; b |] -> proc (a, b)
+-  | _ -> assert false
+-
+-let status_re = Pcre.regexp "^HTTP/\\d+\\.\\d+\\s+(\\d{3})\\s+(.*?)\\s*$"
+-let header_re = Pcre.regexp "^(.*?):\\s*(.*?)\\s*$"
+-
+-let process_header resp str =
+-  let do_status (code, _) =
+-    resp.status <- int_of_string code
+-  in
+-  let do_header (header, value) =
+-    match String.lowercase header with
+-    | "content-length" ->
+-	(try resp.length <- Int64.of_string value
+-	 with Failure _ ->
+-	   error_message "Cannot parse Content-Length %s" value)
+-    | "last-modified" ->
+-	(try resp.last_modified <- Url.time_of_string value
+-	 with Invalid_argument _ ->
+-	   error_message "Cannot parse Last-Modified date %s" value)
+-    | _ -> ()
+-  in
+-  if debug then debug_message "  %s" str;
+-  try with_pair header_re str do_header
+-  with Not_found ->  (* e.g., status line or CRLF *)
+-    try with_pair status_re str do_status
+-    with Not_found -> error_message "Unrecognized response: %s" str
++let process_header resp field =
++  match field with
++    | Url.Status code -> (resp.status <- code)
++    | Url.Header (header, value) ->
++        (match String.lowercase header with
++         | "content-length" ->
++     	(try resp.length <- Int64.of_string value
++     	 with Failure _ ->
++     	   error_message "Cannot parse Content-Length %s" value)
++         | "last-modified" ->
++     	(try resp.last_modified <- Url.time_of_string value
++     	 with Invalid_argument _ ->
++     	   error_message "Cannot parse Last-Modified date %s" value)
++         | _ -> ())
+ 
+ let process_body resp cgi str pos len =
+   if resp.status = 200 then
+diff -Naur a/url.ml b/url.ml
+--- a/url.ml	2007-12-07 23:17:06.000000000 +0000
++++ b/url.ml	2008-03-05 20:58:55.000000000 +0000
+@@ -57,26 +57,58 @@
+ 
+ let head_command = curl_command ["--head"]
+ 
++let with_pair rex str proc =
++  match Pcre.extract ~rex ~full_match: false str with
++  | [| a; b |] -> proc (a, b)
++  | _ -> assert false
++
++let status_re = Pcre.regexp "^HTTP/\\d+\\.\\d+\\s+(\\d{3})\\s+(.*?)\\s*$"
++let header_re = Pcre.regexp "^(.*?):\\s*(.*?)\\s*$"
++
++let next chan =
++  try
++    let header = (input_line chan) in
++    let n = String.length header in
++    if n > 0 && header.[n - 1] = '\r' then
++      Some (String.sub header 0 (n - 1))
++    else
++      begin
++	error_message "Unexpected header: %s" header;
++	None
++    end
++  with End_of_file -> None
++
++type header_field = Status of int | Header of string * string
++
+ let iter_headers proc chan =
+-  let next () =
+-    try Some (input_line chan)
+-    with End_of_file -> None
++  let rec skip () = (* skip headers until we see just CRLF *)
++    match next chan with
++    | Some header -> if String.length header > 0 then skip () else ()
++    | None -> ()
+   in
+   let rec loop () =
+-    match next () with
++    match next chan with
+     | Some header ->
+-	let n = String.length header in
+-	if n > 0 && header.[n - 1] = '\r' then
+-	  if n > 1 then
+-	    begin
+-	      proc (String.sub header 0 (n - 1));
+-	      loop ()
+-	    end
+-	  else
+-	    (* CRLF terminates headers *)
+-	    ()
+-	else
+-	  error_message "Unexpected header: %s" header
++      if String.length header > 0 then
++	let do_header (header, value) =
++	  proc (Header (header, value))
++	in
++	let do_status (status, _) =
++	let code = int_of_string status in
++	  match code with
++	  | 301 | 302 | 303 | 307 -> skip ()
++	  | _ -> proc (Status code)
++	in
++	if debug then debug_message "  %s" header;
++	(try with_pair header_re header do_header
++	   with Not_found ->  (* e.g., status line or CRLF *)
++	     try with_pair status_re header do_status
++	     with Not_found ->
++	       error_message "Unrecognized response: %s" header);
++	loop ()
++      else
++	(* CRLF terminates headers *)
++	()
+     | None -> ()
+   in
+   loop ()
+diff -Naur a/url.mli b/url.mli
+--- a/url.mli	2007-12-07 23:17:06.000000000 +0000
++++ b/url.mli	2008-03-05 20:58:55.000000000 +0000
+@@ -22,10 +22,12 @@
+ 
+ val protocol : string -> protocol
+ 
++type header_field = Status of int | Header of string * string
++
+ (* Perform HTTP HEAD (or equivalent for FTP and FILE) on the given URL
+    and apply a callback to each header that is returned *)
+ 
+-val head : string -> (string -> unit) -> unit
++val head : string -> (header_field -> unit) -> unit
+ 
+ (* Download the specified URL with optional request headers,
+    then apply callbacks to the headers and body chunks *)
+@@ -33,7 +35,7 @@
+ val download :
+   string ->
+   ?headers:string list ->
+-  ?header_callback:(string -> unit) ->
++  ?header_callback:(header_field -> unit) ->
+   (string -> int -> int -> unit) -> unit
+ 
+ (* Download a file from a remote repository *)

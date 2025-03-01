@@ -1,0 +1,242 @@
+From 6f85a5134282862fc87126cb57ed6ae1becdf6fc Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Wed, 2 Jul 2014 03:10:21 +0200
+Subject: [PATCH 2/2] Fix ar and tar code to be LFS-safe
+
+This is an ABI break.
+
+Closes: #742882
+---
+ apt-inst/contrib/arfile.h       |  2 +-
+ apt-inst/contrib/extracttar.cc  | 13 ++++++-------
+ apt-inst/contrib/extracttar.h   |  4 ++--
+ apt-inst/deb/debfile.cc         |  4 ++--
+ apt-inst/deb/debfile.h          |  4 ++--
+ apt-inst/dirstream.h            |  4 ++--
+ cmdline/apt-extracttemplates.cc |  2 +-
+ cmdline/apt-extracttemplates.h  |  4 ++--
+ debian/libapt-inst1.5.symbols   |  8 ++++----
+ 9 files changed, 22 insertions(+), 23 deletions(-)
+
+diff --git a/apt-inst/contrib/arfile.h b/apt-inst/contrib/arfile.h
+index 0f62a34..5aa38ae 100644
+--- a/apt-inst/contrib/arfile.h
++++ b/apt-inst/contrib/arfile.h
+@@ -61,7 +61,7 @@ struct ARArchive::Member
+    unsigned long long Size;
+    
+    // Location of the data.
+-   unsigned long Start;
++   unsigned long long Start;
+    Member *Next;
+    
+    Member() : Start(0), Next(0) {};
+diff --git a/apt-inst/contrib/extracttar.cc b/apt-inst/contrib/extracttar.cc
+index 0ba3f05..2c86d0d 100644
+--- a/apt-inst/contrib/extracttar.cc
++++ b/apt-inst/contrib/extracttar.cc
+@@ -60,9 +60,8 @@ struct ExtractTar::TarHeader
+ // ExtractTar::ExtractTar - Constructor					/*{{{*/
+ // ---------------------------------------------------------------------
+ /* */
+-ExtractTar::ExtractTar(FileFd &Fd,unsigned long Max,string DecompressionProgram) : File(Fd), 
+-                         MaxInSize(Max), DecompressProg(DecompressionProgram)
+-
++ExtractTar::ExtractTar(FileFd &Fd,unsigned long long Max,string DecompressionProgram)
++	: File(Fd), MaxInSize(Max), DecompressProg(DecompressionProgram)
+ {
+    GZPid = -1;
+    Eof = false;
+@@ -267,7 +266,7 @@ bool ExtractTar::Go(pkgDirStream &Stream)
+ 
+ 	 case GNU_LongLink:
+ 	 {
+-	    unsigned long Length = Itm.Size;
++	    unsigned long long Length = Itm.Size;
+ 	    unsigned char Block[512];
+ 	    while (Length > 0)
+ 	    {
+@@ -286,7 +285,7 @@ bool ExtractTar::Go(pkgDirStream &Stream)
+ 	 
+ 	 case GNU_LongName:
+ 	 {
+-	    unsigned long Length = Itm.Size;
++	    unsigned long long Length = Itm.Size;
+ 	    unsigned char Block[512];
+ 	    while (Length > 0)
+ 	    {
+@@ -315,11 +314,11 @@ bool ExtractTar::Go(pkgDirStream &Stream)
+ 	    return false;
+       
+       // Copy the file over the FD
+-      unsigned long Size = Itm.Size;
++      unsigned long long Size = Itm.Size;
+       while (Size != 0)
+       {
+ 	 unsigned char Junk[32*1024];
+-	 unsigned long Read = min(Size,(unsigned long)sizeof(Junk));
++	 unsigned long Read = min(Size, (unsigned long long)sizeof(Junk));
+ 	 if (InFd.Read(Junk,((Read+511)/512)*512) == false)
+ 	    return false;
+ 	 
+diff --git a/apt-inst/contrib/extracttar.h b/apt-inst/contrib/extracttar.h
+index 4b29df3..472e018 100644
+--- a/apt-inst/contrib/extracttar.h
++++ b/apt-inst/contrib/extracttar.h
+@@ -39,7 +39,7 @@ class ExtractTar
+                   GNU_LongLink = 'K',GNU_LongName = 'L'};
+ 
+    FileFd &File;
+-   unsigned long MaxInSize;
++   unsigned long long MaxInSize;
+    int GZPid;
+    FileFd InFd;
+    bool Eof;
+@@ -53,7 +53,7 @@ class ExtractTar
+ 
+    bool Go(pkgDirStream &Stream);
+    
+-   ExtractTar(FileFd &Fd,unsigned long Max,std::string DecompressionProgram);
++   ExtractTar(FileFd &Fd,unsigned long long Max,std::string DecompressionProgram);
+    virtual ~ExtractTar();
+ };
+ 
+diff --git a/apt-inst/deb/debfile.cc b/apt-inst/deb/debfile.cc
+index a63cb67..4853a13 100644
+--- a/apt-inst/deb/debfile.cc
++++ b/apt-inst/deb/debfile.cc
+@@ -203,7 +203,7 @@ bool debDebFile::MemControlExtract::DoItem(Item &Itm,int &Fd)
+ /* Just memcopy the block from the tar extractor and put it in the right
+    place in the pre-allocated memory block. */
+ bool debDebFile::MemControlExtract::Process(Item &/*Itm*/,const unsigned char *Data,
+-			     unsigned long Size,unsigned long Pos)
++			     unsigned long long Size,unsigned long long Pos)
+ {
+    memcpy(Control + Pos, Data,Size);
+    return true;
+@@ -232,7 +232,7 @@ bool debDebFile::MemControlExtract::Read(debDebFile &Deb)
+ // ---------------------------------------------------------------------
+ /* The given memory block is loaded into the parser and parsed as a control
+    record. */
+-bool debDebFile::MemControlExtract::TakeControl(const void *Data,unsigned long Size)
++bool debDebFile::MemControlExtract::TakeControl(const void *Data,unsigned long long Size)
+ {
+    delete [] Control;
+    Control = new char[Size+2];
+diff --git a/apt-inst/deb/debfile.h b/apt-inst/deb/debfile.h
+index 880bcf6..b068efc 100644
+--- a/apt-inst/deb/debfile.h
++++ b/apt-inst/deb/debfile.h
+@@ -81,12 +81,12 @@ class debDebFile::MemControlExtract : public pkgDirStream
+    // Members from DirStream
+    virtual bool DoItem(Item &Itm,int &Fd);
+    virtual bool Process(Item &Itm,const unsigned char *Data,
+-			unsigned long Size,unsigned long Pos);
++			unsigned long long Size,unsigned long long Pos);
+    
+ 
+    // Helpers
+    bool Read(debDebFile &Deb);
+-   bool TakeControl(const void *Data,unsigned long Size);
++   bool TakeControl(const void *Data,unsigned long long Size);
+       
+    MemControlExtract() : IsControl(false), Control(0), Length(0), Member("control") {};
+    MemControlExtract(std::string Member) : IsControl(false), Control(0), Length(0), Member(Member) {};
+diff --git a/apt-inst/dirstream.h b/apt-inst/dirstream.h
+index 1be2688..571fe86 100644
+--- a/apt-inst/dirstream.h
++++ b/apt-inst/dirstream.h
+@@ -37,10 +37,10 @@ class pkgDirStream
+ 	           Directory, FIFO} Type;
+       char *Name;
+       char *LinkTarget;
++      unsigned long long Size;
+       unsigned long Mode;
+       unsigned long UID;
+       unsigned long GID;
+-      unsigned long Size;
+       unsigned long MTime;
+       unsigned long Major;
+       unsigned long Minor;
+@@ -50,7 +50,7 @@ class pkgDirStream
+    virtual bool Fail(Item &Itm,int Fd);
+    virtual bool FinishedFile(Item &Itm,int Fd);
+    virtual bool Process(Item &/*Itm*/,const unsigned char * /*Data*/,
+-			unsigned long /*Size*/,unsigned long /*Pos*/) {return true;};
++			unsigned long long /*Size*/,unsigned long long /*Pos*/) {return true;};
+       
+    virtual ~pkgDirStream() {};   
+ };
+diff --git a/cmdline/apt-extracttemplates.cc b/cmdline/apt-extracttemplates.cc
+index e4428e0..e2d0c0d 100644
+--- a/cmdline/apt-extracttemplates.cc
++++ b/cmdline/apt-extracttemplates.cc
+@@ -138,7 +138,7 @@ bool DebFile::DoItem(Item &I, int &Fd)
+ // ---------------------------------------------------------------------
+ /* */
+ bool DebFile::Process(Item &/*I*/, const unsigned char *data,
+-		unsigned long size, unsigned long pos)
++		unsigned long long size, unsigned long long pos)
+ {
+ 	switch (Which)
+ 	{
+diff --git a/cmdline/apt-extracttemplates.h b/cmdline/apt-extracttemplates.h
+index 9cc3f5f..27137df 100644
+--- a/cmdline/apt-extracttemplates.h
++++ b/cmdline/apt-extracttemplates.h
+@@ -20,7 +20,7 @@ class pkgCache;
+ class DebFile : public pkgDirStream
+ {
+ 	FileFd File;
+-	unsigned long Size;
++	unsigned long long Size;
+ 	char *Control;
+ 	unsigned long ControlLen;
+ 	
+@@ -29,7 +29,7 @@ public:
+ 	~DebFile();
+ 	bool DoItem(Item &I, int &fd);
+ 	bool Process(pkgDirStream::Item &I, const unsigned char *data, 
+-		unsigned long size, unsigned long pos);
++		unsigned long long size, unsigned long long pos);
+ 
+ 	bool Go();
+ 	bool ParseInfo();
+diff --git a/debian/libapt-inst1.5.symbols b/debian/libapt-inst1.5.symbols
+index 8ce7072..c5ab7f4 100644
+--- a/debian/libapt-inst1.5.symbols
++++ b/debian/libapt-inst1.5.symbols
+@@ -3,7 +3,7 @@ libapt-inst.so.1.5 libapt-inst1.5 #MINVER#
+  (c++)"ExtractTar::Done(bool)@Base" 0.8.0
+  (c++)"ExtractTar::Go(pkgDirStream&)@Base" 0.8.0
+  (c++)"ExtractTar::StartGzip()@Base" 0.8.0
+- (c++)"ExtractTar::ExtractTar(FileFd&, unsigned long, std::basic_string<char, std::char_traits<char>, std::allocator<char> >)@Base" 0.8.0
++ (c++)"ExtractTar::ExtractTar(FileFd&, unsigned long long, std::basic_string<char, std::char_traits<char>, std::allocator<char> >)@Base" 1.0.5
+  (c++)"ExtractTar::~ExtractTar()@Base" 0.8.0
+  (c++)"debDebFile::GotoMember(char const*)@Base" 0.8.0
+  (c++)"debDebFile::CheckMember(char const*)@Base" 0.8.0
+@@ -11,10 +11,10 @@ libapt-inst.so.1.5 libapt-inst1.5 #MINVER#
+  (c++)"debDebFile::ControlExtract::~ControlExtract()@Base" 0.8.0
+  (c++)"debDebFile::ExtractTarMember(pkgDirStream&, char const*)@Base" 0.9.15.4
+  (c++)"debDebFile::ExtractArchive(pkgDirStream&)@Base" 0.8.0
+- (c++)"debDebFile::MemControlExtract::TakeControl(void const*, unsigned long)@Base" 0.8.0
++ (c++)"debDebFile::MemControlExtract::TakeControl(void const*, unsigned long long)@Base" 1.0.5
+  (c++)"debDebFile::MemControlExtract::Read(debDebFile&)@Base" 0.8.0
+  (c++)"debDebFile::MemControlExtract::DoItem(pkgDirStream::Item&, int&)@Base" 0.8.0
+- (c++)"debDebFile::MemControlExtract::Process(pkgDirStream::Item&, unsigned char const*, unsigned long, unsigned long)@Base" 0.8.0
++ (c++)"debDebFile::MemControlExtract::Process(pkgDirStream::Item&, unsigned char const*, unsigned long long, unsigned long long)@Base" 1.0.5
+  (c++)"debDebFile::MemControlExtract::~MemControlExtract()@Base" 0.8.0
+  (c++)"debDebFile::debDebFile(FileFd&)@Base" 0.8.0
+  (c++)"pkgExtract::FinishedFile(pkgDirStream::Item&, int)@Base" 0.8.0
+@@ -41,7 +41,7 @@ libapt-inst.so.1.5 libapt-inst1.5 #MINVER#
+  (c++)"pkgDirStream::FinishedFile(pkgDirStream::Item&, int)@Base" 0.8.0
+  (c++)"pkgDirStream::Fail(pkgDirStream::Item&, int)@Base" 0.8.0
+  (c++)"pkgDirStream::DoItem(pkgDirStream::Item&, int&)@Base" 0.8.0
+- (c++)"pkgDirStream::Process(pkgDirStream::Item&, unsigned char const*, unsigned long, unsigned long)@Base" 0.8.0
++ (c++)"pkgDirStream::Process(pkgDirStream::Item&, unsigned char const*, unsigned long long, unsigned long long)@Base" 1.0.5
+  (c++)"pkgDirStream::~pkgDirStream()@Base" 0.8.0
+  (c++|optional)"pkgCache::DepIterator::operator++(int)@Base" 0.8.0
+  (c++|optional)"pkgCache::DepIterator::operator++()@Base" 0.8.0
+-- 
+2.0.1
+

@@ -1,0 +1,87 @@
+--- cryptsetup-1.0.6+20090405.svn49~/debian/askpass.c	2009-05-10 16:51:44.000000000 -0700
++++ cryptsetup-1.0.6+20090405.svn49/debian/askpass.c	2009-04-09 19:59:00.000000000 -0700
+@@ -344,12 +344,37 @@
+ usplash_prepare(const char *prompt)
+ {
+ 	int rdfd = -1;
+-	char cmd_input[strlen(prompt) + strlen("INPUTQUIET") + 2];
++	int usplash_cmd_len = strlen("TEXT-URGENT");
++	int cmd_input_max = strlen(prompt) + usplash_cmd_len + 2;
++	char cmd_input[cmd_input_max];
++	char *prompt_ptr = prompt;
++	char *newline = NULL;
+ 
+ 	if (!usplash_command("TIMEOUT 0"))
+ 		return -1;
+ 
+-	sprintf(cmd_input, "INPUTQUIET %s", prompt);
++	/* handle any non-literal embedded newlines in prompt */
++	while ( (newline = strstr(prompt_ptr,"\\n")) != NULL ) {
++		/* Calculate length of string leading up to newline. */
++		int line_len = newline - prompt_ptr;
++		/* Add text-urgent length, space, and NULL. */
++		line_len += usplash_cmd_len + 2;
++
++		/* Even though line_len can never be larger than
++                   cmd_input_max, check it anyway. */
++		if (line_len > cmd_input_max)
++			return -1;
++
++		/* Force trimming of prompt to location of newline. */
++		snprintf(cmd_input, line_len, "TEXT-URGENT %s", prompt_ptr);
++		if (!usplash_command(cmd_input))
++			return -1;
++
++		/* Skip over newline. */
++		prompt_ptr = newline + 2;
++	}
++
++	snprintf(cmd_input, cmd_input_max, "INPUTQUIET %s", prompt_ptr);
+ 	if (!usplash_command(cmd_input))
+ 		return -1;
+ 
+@@ -519,6 +544,8 @@
+ console_prepare(const char *prompt)
+ {
+ 	struct termios term_new;
++	char *prompt_ptr = prompt;
++	char *newline = NULL;
+ 
+ 	if (!isatty(STDIN_FILENO)) {
+ 		if (access(CONSOLE_PATH, R_OK | W_OK)) {
+@@ -549,7 +576,23 @@
+ 		return -1;
+ 	}
+ 
+-	if (fprintf(stderr, prompt) < 0) {
++	/* handle any non-literal embedded newlines in prompt */
++	while ( (newline = strstr(prompt_ptr,"\\n")) != NULL ) {
++		/* Calculate length of string leading up to newline. */
++		int line_len = newline - prompt_ptr;
++
++		/* Force trimming of prompt to location of newline. */
++		if (fwrite(prompt_ptr, line_len, 1, stderr) < 1 ||
++		    fwrite("\n", 1, 1, stderr) < 1) {
++			debug("Failed to print prompt\n");
++			tcsetattr(STDIN_FILENO, TCSAFLUSH, &term_old);
++			return -1;
++		}
++
++		/* Skip over newline. */
++		prompt_ptr = newline + 2;
++	}
++	if (fputs(prompt_ptr, stderr) < 0) {
+ 		debug("Failed to print prompt\n");
+ 		tcsetattr(STDIN_FILENO, TCSAFLUSH, &term_old);
+ 		return -1;
+--- cryptsetup-1.0.6+20090405.svn49~/debian/initramfs/cryptroot-script	2009-05-10 16:51:44.000000000 -0700
++++ cryptsetup-1.0.6+20090405.svn49/debian/initramfs/cryptroot-script	2009-04-09 19:59:00.000000000 -0700
+@@ -225,7 +267,7 @@
+ 
+ 		if [ -z "$cryptkeyscript" ]; then
+ 			cryptkeyscript="/lib/cryptsetup/askpass"
+-			cryptkey="Enter passphrase to unlock the disk $cryptsource ($crypttarget): "
++			cryptkey="Unlocking the disk $cryptsource ($crypttarget)\nEnter passphrase: "
+ 		fi
+ 
+ 

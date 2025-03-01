@@ -1,0 +1,91 @@
+diff --git i/lib/dpkg/compress.c w/lib/dpkg/compress.c
+index 8cfba80cc..9b02b48b7 100644
+--- i/lib/dpkg/compress.c
++++ w/lib/dpkg/compress.c
+@@ -605,8 +605,14 @@ filter_lzma_error(struct io_lzma *io, lzma_ret ret)
+  * page cache may be purged, not everything will be reclaimed that might be
+  * reclaimed, watermarks are considered.
+  */
+-static const char str_MemAvailable[] = "MemAvailable";
+-static const size_t len_MemAvailable = sizeof(str_MemAvailable) - 1;
++
++struct mem_field {
++	const char *name;
++	ssize_t len;
++	int tag;
++	uint64_t *var;
++};
++#define MEM_FIELD(name, tag, var) name, sizeof(name) - 1, tag, &var
+ 
+ static int
+ get_avail_mem(uint64_t *val)
+@@ -615,6 +621,14 @@ get_avail_mem(uint64_t *val)
+ 	char *str;
+ 	ssize_t bytes;
+ 	int fd;
++	uint64_t mem_free, mem_buffers, mem_cached;
++	struct mem_field fields[] = {
++		{ MEM_FIELD("MemFree", 0x1, mem_free) },
++		{ MEM_FIELD("Buffers", 0x2, mem_buffers) },
++		{ MEM_FIELD("Cached", 0x4, mem_cached) },
++	};
++	const int want_tags = 0x7;
++	int seen_tags = 0;
+ 
+ 	*val = 0;
+ 
+@@ -632,14 +646,23 @@ get_avail_mem(uint64_t *val)
+ 
+ 	str = buf;
+ 	while (1) {
++		struct mem_field *field = NULL;
+ 		char *end;
++		size_t f;
+ 
+ 		end = strchr(str, ':');
+ 		if (end == 0)
+ 			break;
+ 
+-		if ((end - str) == len_MemAvailable &&
+-		    strncmp(str, str_MemAvailable, len_MemAvailable) == 0) {
++		for (f = 0; f < array_count(fields); f++) {
++			if ((end - str) == fields[f].len &&
++			    strncmp(str, fields[f].name, fields[f].len) == 0) {
++				field = &fields[f];
++				break;
++			}
++		}
++
++		if (field) {
+ 			intmax_t num;
+ 
+ 			str = end + 1;
+@@ -657,16 +680,25 @@ get_avail_mem(uint64_t *val)
+ 			/* This should not overflow, but just in case. */
+ 			if (num < (INTMAX_MAX / 1024))
+ 				num *= 1024;
+-			*val = num;
+-			return 0;
++
++			*field->var = num;
++			seen_tags |= field->tag;
+ 		}
+ 
++		if (seen_tags == want_tags)
++			break;
++
+ 		end = strchr(end + 1, '\n');
+ 		if (end == 0)
+ 			break;
+ 		str = end + 1;
+ 	}
+-	return -1;
++
++	if (seen_tags != want_tags)
++		return -1;
++
++	*val = mem_free + mem_buffers + mem_cached;
++	return 0;
+ }
+ # else
+ static int

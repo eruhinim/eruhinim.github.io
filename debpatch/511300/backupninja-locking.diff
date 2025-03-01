@@ -1,0 +1,100 @@
+diff -ur backupninja-0.9.5.orig/etc/backupninja.conf.in backupninja-0.9.5/etc/backupninja.conf.in
+--- backupninja-0.9.5.orig/etc/backupninja.conf.in	2007-03-04 12:29:26.000000000 +0200
++++ backupninja-0.9.5/etc/backupninja.conf.in	2009-01-09 12:50:24.494527275 +0200
+@@ -62,6 +62,9 @@
+ # where backupninja libs are found
+ libdirectory = @pkglibdir@
+ 
++# where backupninja stores action lock files
++lockdirectory = @localstatedir@/lock
++
+ # whether to use colors in the log file
+ usecolors = yes
+ 
+diff -ur backupninja-0.9.5.orig/man/backupninja.conf.5 backupninja-0.9.5/man/backupninja.conf.5
+--- backupninja-0.9.5.orig/man/backupninja.conf.5	2005-11-19 19:11:28.000000000 +0200
++++ backupninja-0.9.5/man/backupninja.conf.5	2009-01-09 12:51:00.844527176 +0200
+@@ -66,6 +66,10 @@
+ .B scriptdirectory 
+ Where backupninja handler scripts are found
+ 
++.TP 
++.B lockdirectory 
++Where backupninja stores action lock files
++
+ .TP
+ .B usecolors
+ If set to 'yes', use colors in the log file and debug output.
+diff -ur backupninja-0.9.5.orig/src/backupninja.in backupninja-0.9.5/src/backupninja.in
+--- backupninja-0.9.5.orig/src/backupninja.in	2007-10-12 20:42:46.000000000 +0300
++++ backupninja-0.9.5/src/backupninja.in	2009-01-09 13:29:38.552333945 +0200
+@@ -227,6 +227,27 @@
+ 	return 1
+ }
+ 
++# Returns the hostname in a portable way
++function findhostname() {
++	local hostname=$HOSTNAME
++	[ -z "$hostname" ] && hostname=`hostname 2>/dev/null`
++	if [ -n "$hostname" ]; then
++		echo $hostname
++		return
++	fi
++	echo localhost
++}
++
++# Return 1 if given PID is running, 0 if not and 2 in case of error.
++# TODO: Only Linux and supported, should support other operating systems
++# by running ps with suitable arguments for the system and parsing the result
++function checkpidalive() {
++	local pid="$1"
++	[ -z "$pid" ] && return 2
++	[ -d /proc/$pid ] && return 0
++	return 1
++}
++
+ function usage() {
+ 	cat << EOF
+ $0 usage:
+@@ -273,6 +294,41 @@
+ 	local run="no"
+ 	setfile $file
+ 
++	# skip over this config if another instance is already running
++	getconf lockdir @localstatedir@/lock/backupninja
++	if ! [ -d "$lockdir" ]; then
++		if ! mkdir -p "$lockdir" >/dev/null 2>&1; then
++			msg "*failed* -- $file"
++			errormsg="$errormsg\n== could not create lock directory $lockdir ==\n"
++			error "<<<< finished action $file: ERROR"
++			return
++		fi
++	fi
++	if ! [ -w "$lockdir" ]; then
++		msg "*failed* -- $file"
++		errormsg="$errormsg\n== lock directory $lockdir not writable ==\n"
++		error "<<<< finished action $file: ERROR"
++		return
++	fi
++	local hostname=`findhostname`
++	local basename=`basename $file`
++	local lockfile="${lockdir}/${hostname}_${basename}.lock"
++	local currentargs="${BASH_ARGV[@]}"
++	if [ -e $lockfile ]; then
++		local previouspid=`cat $lockfile | cut -d' ' -f1`
++		local previousargs=`cat $lockfile | cut -d' ' -f2-`
++		checkpidalive $previouspid
++		local previouspidalive=$?
++		if [ $previouspidalive == 0 ] && [ "$previousargs" == "$currentargs" ]; then
++			info ">>>> skipping action $file because the action is currently running already"
++			return
++		else
++			echo $$ $currentargs > $lockfile
++		fi
++	else
++		echo $$ $currentargs > $lockfile
++	fi
++
+ 	# skip over this config if "when" option
+ 	# is not set to the current time.
+ 	getconf when "$defaultwhen"

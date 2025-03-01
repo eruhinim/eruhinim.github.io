@@ -1,0 +1,277 @@
+From 30d3bf2c1433f26ee1a7288bf0247cde063a0d68 Mon Sep 17 00:00:00 2001
+From: Bill Allombert <Bill.Allombert@math.u-bordeaux.fr>
+Date: Sun, 6 Sep 2009 13:18:50 +0200
+Subject: [PATCH] Add support for Build-Features: build-arch.
+
+New module BuildFeatures
+Closes #229357
+---
+ debian/changelog               |    4 ++
+ man/deb-src-control.5          |    6 +++
+ man/dpkg-buildpackage.1        |   13 ++++--
+ scripts/Dpkg/BuildFeatures.pm  |   86 ++++++++++++++++++++++++++++++++++++++++
+ scripts/Dpkg/Control/Fields.pm |    3 +
+ scripts/Makefile.am            |    1 +
+ scripts/dpkg-buildpackage.pl   |   10 ++++-
+ scripts/po/POTFILES.in         |    1 +
+ 8 files changed, 118 insertions(+), 6 deletions(-)
+ create mode 100644 scripts/Dpkg/BuildFeatures.pm
+
+diff --git a/debian/changelog b/debian/changelog
+index afc2283..5f55e8a 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -85,6 +85,10 @@ dpkg (1.16.1) UNRELEASED; urgency=low
+   * Do not warn on missing architecture on packages in config-files state,
+     but then make sure the architecture field is usable. Closes: #604241
+ 
++  [ Bill Allombert]
++  * Add support for Build-Features: build-arch. Closes: #229357
++    - New module Dpkg::BuildFeatures.
++
+   [ Updated dpkg translations ]
+   * German (Sven Joachim). Closes: #620312
+ 
+diff --git a/man/deb-src-control.5 b/man/deb-src-control.5
+index 0c5ee67..5b5e816 100644
+--- a/man/deb-src-control.5
++++ b/man/deb-src-control.5
+@@ -106,6 +106,12 @@ A list of these values can be obtained from the latest version of the
+ package.
+ 
+ .TP
++.BR Build\-Features: " <features list>"
++A list of names of build-time features that are supported by \fBdebian/rules\fP.
++They affects \fBdpkg-buildpackage\fP behavior.  Currently the only supported
++feature is \fBbuild-arch\fP.
++
++.TP
+ .BR Build\-Depends: " <package list>"
+ A list of packages that need to be installed and configured to be able to build
+ the source package.
+diff --git a/man/dpkg-buildpackage.1 b/man/dpkg-buildpackage.1
+index 6460e51..f303806 100644
+--- a/man/dpkg-buildpackage.1
++++ b/man/dpkg-buildpackage.1
+@@ -27,12 +27,15 @@ It calls \fBdpkg-source \-b\fP to generate the source package (unless
+ a binary\-only build has been requested with \fB\-b\fP, \fB\-B\fP or
+ \fB\-A\fP).
+ .IP \fB5.\fP 3
+-It calls \fBdebian/rules\fP \fBbuild\fP followed by
++It calls \fBdebian/rules\fP \fIbuild-target\fP followed by
+ \fBfakeroot debian/rules\fP \fIbinary-target\fP (unless a source-only
+-build has been requested with \fB\-S\fP). Note that \fIbinary-target\fR is
+-either \fBbinary\fP (default case, or if \fB\-b\fP is specified)
+-or \fBbinary-arch\fP (if \fB\-B\fP is specified) or \fBbinary-indep\fP
+-(if \fB\-A\fP is specified).
++build has been requested with \fB\-S\fP). Note that \fIbuild-target\fP
++is \fBbuild\fP unless the the control file defines the build-feature \fBbuild-arch\fP,
++in which case it is either \fBbuild\fP (default case) or \fBbuild-arch\fP (if
++\fB\-B\fP is specified) or \fBbuild-indep\fP (if \fB\-A\fP is specified) and
++that \fIbinary-target\fR is either \fBbinary\fP (default case, or if \fB\-b\fP
++is specified) or \fBbinary-arch\fP (if \fB\-B\fP is specified) or
++\fBbinary-indep\fP (if \fB\-A\fP is specified).
+ .IP \fB6.\fP 3
+ It calls \fBgpg\fP to sign the \fB.dsc\fP file (if any, unless
+ \fB\-us\fP is specified).
+diff --git a/scripts/Dpkg/BuildFeatures.pm b/scripts/Dpkg/BuildFeatures.pm
+new file mode 100644
+index 0000000..2ce1f8c
+--- /dev/null
++++ b/scripts/Dpkg/BuildFeatures.pm
+@@ -0,0 +1,86 @@
++# Copyright © 2007 Frank Lichtenheld <djpig@debian.org>
++# Copyright © 2010 Raphaël Hertzog <hertzog@debian.org>
++# Copyright © 2010 Bill Allombert    <ballombe@debian.org>
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 2 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++package Dpkg::BuildFeatures;
++
++use strict;
++use warnings;
++
++our $VERSION = "0.01";
++
++use Dpkg::Control::Info;
++
++=encoding utf8
++
++=head1 NAME
++
++Dpkg::BuildFeatures - parse the Build-Features control field
++
++=head1 DESCRIPTION
++
++The Dpkg::BuildFeatures object can be used to query the options
++stored in the Build-Features control field.
++
++=head1 FUNCTIONS
++
++=over 4
++
++=item my $bf = Dpkg::BuildFeatures->new($controlfile)
++
++Create a new Dpkg::BuildFeatures object. It will be initialized based
++on the value of the Build-Features control field.
++
++=cut
++
++sub new {
++    my ($this, $control_opt) = @_;
++    my $controlfile = defined($control_opt)?$control_opt:"debian/control";
++    my $class = ref($this) || $this;
++    my $control = Dpkg::Control::Info->new($controlfile);
++    my $src_fields = $control->get_source();
++    my %buildfeats;
++    if (defined($src_fields->{'Build-Features'})) {
++        my @buildfeats = split(/\s*,\s*/m, $src_fields->{'Build-Features'});
++        %buildfeats = map { $_ => 1 } @buildfeats;
++    } else { 
++        %buildfeats=();
++    }
++    my $self = { options => \%buildfeats }; 
++    bless $self, $class;
++    return $self;
++}
++
++=item $bf->has($option)
++
++Returns a boolean indicating whether the option is stored in the object.
++
++=cut
++
++sub has {
++    my ($self, $key) = @_;
++    return exists $self->{'options'}{$key};
++}
++
++=back
++
++=head1 AUTHOR
++
++Bill Allombert <ballombe@debian.org>
++
++=cut
++
++1;
+diff --git a/scripts/Dpkg/Control/Fields.pm b/scripts/Dpkg/Control/Fields.pm
+index d7d7dcf..0183281 100644
+--- a/scripts/Dpkg/Control/Fields.pm
++++ b/scripts/Dpkg/Control/Fields.pm
+@@ -83,6 +83,9 @@ our %FIELDS = (
+         dependency => 'union',
+         dep_order => 10,
+     },
++    'Build-Features' => {
++        allowed => ALL_SRC,
++    },
+     'Changed-By' => {
+         allowed => CTRL_FILE_CHANGES,
+     },
+diff --git a/scripts/Makefile.am b/scripts/Makefile.am
+index 9b4d394..be376c9 100644
+--- a/scripts/Makefile.am
++++ b/scripts/Makefile.am
+@@ -56,6 +56,7 @@ nobase_dist_perllib_DATA = \
+ 	Dpkg/Arch.pm \
+ 	Dpkg/BuildFlags.pm \
+ 	Dpkg/BuildOptions.pm \
++	Dpkg/BuildFeatures.pm \
+ 	Dpkg/Changelog.pm \
+ 	Dpkg/Changelog/Debian.pm \
+ 	Dpkg/Changelog/Entry.pm \
+diff --git a/scripts/dpkg-buildpackage.pl b/scripts/dpkg-buildpackage.pl
+index aaea544..b7af23f 100755
+--- a/scripts/dpkg-buildpackage.pl
++++ b/scripts/dpkg-buildpackage.pl
+@@ -27,6 +27,7 @@ use Dpkg::Gettext;
+ use Dpkg::ErrorHandling;
+ use Dpkg::BuildFlags;
+ use Dpkg::BuildOptions;
++use Dpkg::BuildFeatures;
+ use Dpkg::Compression;
+ use Dpkg::Version;
+ use Dpkg::Changelog::Parse;
+@@ -100,6 +101,7 @@ Options:
+       --version  show the version.
+ "), $progname;
+ }
++my $buildfeats   = Dpkg::BuildFeatures->new();
+ 
+ my @debian_rules = ("debian/rules");
+ my @rootcommand = ();
+@@ -119,6 +121,7 @@ my $checkbuilddep = 1;
+ my $signsource = 1;
+ my $signchanges = 1;
+ my $binarytarget = 'binary';
++my $buildtarget = 'build';
+ my $targetarch = my $targetgnusystem = '';
+ my $call_target = '';
+ my $call_target_as_root = 0;
+@@ -202,18 +205,21 @@ while (@ARGV) {
+ 	$include = BUILD_BINARY;
+ 	push @changes_opts, '-b';
+ 	@checkbuilddep_opts = ();
++	$buildtarget = 'build';
+ 	$binarytarget = 'binary';
+     } elsif (/^-B$/) {
+ 	build_sourceonly && usageerr(_g("cannot combine %s and %s"), $_, "-S");
+ 	$include = BUILD_ARCH_DEP;
+ 	push @changes_opts, '-B';
+ 	@checkbuilddep_opts = ('-B');
++	$buildtarget = 'build-arch';
+ 	$binarytarget = 'binary-arch';
+     } elsif (/^-A$/) {
+ 	build_sourceonly && usageerr(_g("cannot combine %s and %s"), $_, "-S");
+ 	$include = BUILD_ARCH_INDEP;
+ 	push @changes_opts, '-A';
+ 	@checkbuilddep_opts = ();
++	$buildtarget = 'build-indep';
+ 	$binarytarget = 'binary-indep';
+     } elsif (/^-S$/) {
+ 	build_binaryonly && usageerr(_g("cannot combine %s and %s"), build_opt, "-S");
+@@ -247,6 +253,8 @@ if ($noclean) {
+     $include = BUILD_BINARY if ($include & BUILD_DEFAULT);
+ }
+ 
++$buildtarget='build' unless $buildfeats->has('build-arch');
++
+ if ($< == 0) {
+     warning(_g("using a gain-root-command while being root")) if (@rootcommand);
+ } else {
+@@ -403,7 +411,7 @@ unless (build_binaryonly) {
+     chdir($dir) or syserr("chdir $dir");
+ }
+ unless (build_sourceonly) {
+-    withecho(@debian_rules, 'build');
++    withecho(@debian_rules, $buildtarget);
+     withecho(@rootcommand, @debian_rules, $binarytarget);
+ }
+ if ($usepause &&
+diff --git a/scripts/po/POTFILES.in b/scripts/po/POTFILES.in
+index 88da318..a79375e 100644
+--- a/scripts/po/POTFILES.in
++++ b/scripts/po/POTFILES.in
+@@ -17,6 +17,7 @@ scripts/dpkg-shlibdeps.pl
+ scripts/dpkg-source.pl
+ scripts/changelog/debian.pl
+ scripts/Dpkg/Arch.pm
++scripts/Dpkg/BuildFeatures.pm
+ scripts/Dpkg/BuildFlags.pm
+ scripts/Dpkg/BuildOptions.pm
+ scripts/Dpkg/Compression.pm
+-- 
+1.7.2.5
+

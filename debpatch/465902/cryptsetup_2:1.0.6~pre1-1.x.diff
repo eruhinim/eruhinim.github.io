@@ -1,0 +1,87 @@
+diff -pruN cryptsetup-1.0.6~pre1.orig/debian/control cryptsetup-1.0.6~pre1/debian/control
+--- cryptsetup-1.0.6~pre1.orig/debian/control	2008-02-25 14:30:46.000000000 +0100
++++ cryptsetup-1.0.6~pre1/debian/control	2008-02-25 14:35:15.000000000 +0100
+@@ -12,7 +12,7 @@ Vcs-Svn: svn://svn.debian.org/svn/pkg-cr
+ Package: cryptsetup
+ Architecture: any
+ Depends: ${shlibs:Depends}, dmsetup
+-Suggests: udev, initramfs-tools (>= 0.91) | linux-initramfs-tool, dosfstools
++Suggests: udev, initramfs-tools (>= 0.91) | linux-initramfs-tool, dropbear, dosfstools
+ Conflicts: cryptsetup-luks (<= 1.0.1-8), hashalot (<= 0.3-1)
+ Replaces: cryptsetup-luks (<= 1.0.1-8)
+ Description: configures encrypted block devices
+diff -pruN cryptsetup-1.0.6~pre1.orig/debian/initramfs/cryptroot-script cryptsetup-1.0.6~pre1/debian/initramfs/cryptroot-script
+--- cryptsetup-1.0.6~pre1.orig/debian/initramfs/cryptroot-script	2008-02-25 14:30:46.000000000 +0100
++++ cryptsetup-1.0.6~pre1/debian/initramfs/cryptroot-script	2008-02-28 14:52:39.000000000 +0100
+@@ -188,14 +188,13 @@ setup_mapping()
+ 				return 1
+ 			fi
+ 			crypttarget="$crypttarget" cryptsource="$cryptsource" \
+-			$cryptkeyscript $cryptkey < /dev/console 2> /dev/console | \
+-			$cryptcreate --key-file=- > /dev/console 2>&1
+-		elif [ -p /dev/.initramfs/usplash_outfifo ] && [ -x /sbin/usplash_write ]; then
++			$cryptkeyscript $cryptkey | $cryptcreate --key-file=-
++		elif [ "`tty`" == "/dev/console" ] && [ -p /dev/.initramfs/usplash_outfifo ] && [ -x /sbin/usplash_write ]; then
+ 			usplash_write "INPUTQUIET Enter password for $crypttarget: "
+ 			PASS="$(cat /dev/.initramfs/usplash_outfifo)"
+ 			echo -n "$PASS" | $cryptcreate > /dev/null 2>&1
+ 		else
+-			$cryptcreate < /dev/console > /dev/console 2>&1
++			$cryptcreate
+ 		fi
+ 
+ 		if [ $? -ne 0 ]; then
+@@ -205,7 +204,7 @@ setup_mapping()
+ 		elif [ ! -e "$NEWROOT" ]; then
+ 			echo "cryptsetup: unknown error setting up device mapping"
+ 			return 1
+-		elif [ -p /dev/.initramfs/usplash_outfifo ] && [ -x /sbin/usplash_write ]; then
++		elif [ "`tty`" == "/dev/console" ] && [ -p /dev/.initramfs/usplash_outfifo ] && [ -x /sbin/usplash_write ]; then
+ 			# clean the text, to give feedback that it worked
+ 			usplash_write "TEXT-URGENT "
+ 		fi
+@@ -249,6 +248,24 @@ setup_mapping()
+ 	fi
+ }
+ 
++killtree() {
++	local ppid="$1"
++	if [ $ppid -ne $$ ]; then
++		local pid
++		local cpids="`
++			grep -lE "^PPid:[ 	]+$ppid$" /proc/*/status | while read pid; do
++				basename "\`dirname \"$pid\"\`"
++			done
++			`"
++		kill $ppid
++		for pid in $cpids; do
++			if [ "$pid" -ne "$$" ]; then
++				killtree $pid
++			fi
++		done
++	fi
++}
++
+ #
+ # Begin real processing
+ #
+@@ -270,9 +287,17 @@ fi
+ 
+ # Do we have any settings from the /conf/conf.d/cryptroot file?
+ if [ -r /conf/conf.d/cryptroot ]; then
+-	while read mapping; do
++	while read mapping <&3; do
+ 		setup_mapping "$mapping"
+-	done < /conf/conf.d/cryptroot
++	done 3< /conf/conf.d/cryptroot
+ fi
+ 
++# We might be called manually from the shell, i.e. there might be other
++# instances around. To clean up, kill them and all their subprocesses.
++for pid in `pidof cryptroot`; do
++	if [ "$pid" -ne "$$" ]; then
++		killtree $pid
++	fi
++done
++
+ exit 0

@@ -1,0 +1,131 @@
+diff --git a/debian/README.Debian b/debian/README.Debian
+new file mode 100644
+index 0000000..6bae7b3
+--- /dev/null
++++ b/debian/README.Debian
+@@ -0,0 +1,48 @@
++# Setup overview
++
++The compiled version of adminer is located at /usr/share/adminer/adminer.php
++
++The recommended ways to deploy adminer are:
++- symlinking adminer.php into your directory of choice viewable by a
++  php-enabled webserver.
++- if you want to enable plugins, pointing your webserver configuration to
++  /etc/adminer with conf.php a directory index. Editing conf.php lets you
++  enable plugins.
++
++# Setup with apache
++
++The following configuration snippet should do the trick.
++
++    Alias /adminer.php /etc/adminer/conf.php
++
++# Setup with apache+uwsgi
++
++uwsgi configuration file:
++
++    [uwsgi]
++    master = True
++    cheap = True
++
++    plugins = 0:php
++
++    project_dir = /etc/adminer
++    chdir = %(project_dir)
++    php-docroot = %(project_dir)
++    php-index = conf.php
++
++    plugins = router_rewrite
++    route = ^/adminer/(.*) rewrite:/conf.php
++
++    buffer-size = 8192
++
++    # PHP sessions storage
++    cache2 = name=dbadmsessions,items=200,store=/var/lib/www/adminer/uwsgi.cache,expires=3600
++    php-set = session.save_handler=uwsgi
++    php-set = session.save_path=dbadmsessions
++
++apache:
++
++    ProxyPassMatch  "^/adminer/(.*)?$"       "unix:/var/run/uwsgi/adminer.socket|uwsgi://uwsgi-uds-adminer/"
++    <Location /adminer>
++        Require all granted
++    </Location>
+diff --git a/debian/conf.php b/debian/conf.php
+new file mode 100644
+index 0000000..b60352c
+--- /dev/null
++++ b/debian/conf.php
+@@ -0,0 +1,32 @@
++<?php
++
++define('ADMINER_DIR', '/usr/share/adminer');
++
++function adminer_object() {
++    // required to run any plugin
++    include_once ADMINER_DIR . "/plugins/plugin.php";
++
++    // autoloader
++    foreach (glob(ADMINER_DIR . "/plugins/*.php") as $filename) {
++        include_once $filename;
++    }
++
++    $plugins = array(
++        // specify enabled plugins here
++        //new AdminerLoginServers([
++        //    'my' => ['server' => 'localhost', 'driver' => 'mysql'],
++        //    'pg' => ['server' => 'localhost', 'driver' => 'pgsql'],
++        //]),
++    );
++
++    /* It is possible to combine customization and plugins:
++    class AdminerCustomization extends AdminerPlugin {
++    }
++    return new AdminerCustomization($plugins);
++    */
++
++    return new AdminerPlugin($plugins);
++}
++
++include ADMINER_DIR . "/adminer.php";
++?>
+diff --git a/debian/control b/debian/control
+index 5d3a612..44eb589 100644
+--- a/debian/control
++++ b/debian/control
+@@ -3,7 +3,7 @@ Section: web
+ Priority: optional
+ Maintainer: Chris Lamb <lamby@debian.org>
+ Build-Depends:
+- debhelper-compat (= 11),
++ debhelper-compat (= 11), php-cli
+ Standards-Version: 4.3.0
+ Homepage: https://www.adminer.org/
+ Vcs-Git: https://salsa.debian.org/lamby/pkg-adminer.git
+diff --git a/debian/install b/debian/install
+index c0ac2b6..791d1ce 100644
+--- a/debian/install
++++ b/debian/install
+@@ -4,3 +4,4 @@ designs		usr/share/adminer
+ editor		usr/share/adminer
+ externals	usr/share/adminer
+ plugins		usr/share/adminer
++debian/conf.php	etc/adminer/
+diff --git a/debian/rules b/debian/rules
+index dd54c24..0cfc638 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -15,3 +15,12 @@ override_dh_installdocs:
+ 	set -e; for X in designs plugins; do \
+ 		mv -v $(SHARE)/adminer/$$X/readme.txt $(SHARE)/doc/adminer/readme-$$X.txt; \
+ 	done
++
++override_dh_auto_build:
++	dh_auto_build
++	php compile.php
++	mv adminer-*.php adminer.php
++
++override_dh_auto_clean:
++	rm -f adminer.php
++	dh_auto_clean

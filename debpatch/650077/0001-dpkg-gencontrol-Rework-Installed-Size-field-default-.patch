@@ -1,0 +1,131 @@
+From 775fd2a0876e0c778d78451d2ef9268247e61d24 Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Tue, 20 Jan 2015 02:37:20 +0100
+Subject: [PATCH] dpkg-gencontrol: Rework Installed-Size field default value
+ computation
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Switch from «du» to File::Find, and accumulate size usage per filesystem
+object, on 1 KiB units. Use the actual size only for regular files and
+symlinks, and just 1 KiB for any other filesystem object type.
+
+This guarantees a constant and reproducible size regardless of the
+build system filesystem being used.
+
+Closes: #650077
+---
+ man/deb-substvars.5        | 19 ++++++++++++-------
+ scripts/dpkg-gencontrol.pl | 43 ++++++++++++++++++++++---------------------
+ 2 files changed, 34 insertions(+), 28 deletions(-)
+
+diff --git a/man/deb-substvars.5 b/man/deb-substvars.5
+index f507042..376929f 100644
+--- a/man/deb-substvars.5
++++ b/man/deb-substvars.5
+@@ -18,7 +18,7 @@
+ .\" You should have received a copy of the GNU General Public License
+ .\" along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ .
+-.TH deb\-substvars 5 "2009-07-15" "Debian Project" "dpkg utilities"
++.TH deb\-substvars 5 "2015-01-20" "Debian Project" "dpkg utilities"
+ .SH NAME
+ deb\-substvars \- Debian source substitution variables
+ .
+@@ -111,13 +111,18 @@ The source package version (from the changelog file). This variable is now
+ the \fBsource:Version\fP or \fBbinary:Version\fP as appropriate.
+ .TP
+ .B Installed\-Size
+-The total size of the package's installed files. This value is copied
+-into the corresponding control file field; setting it will modify the
+-value of that field. If this variable isn't set
++The approximate total size of the package's installed files. This value is
++copied into the corresponding control file field; setting it will modify
++the value of that field. If this variable is not set
+ .B dpkg\-gencontrol
+-will use
+-.B du \-k debian/tmp
+-to find the default value.
++will compute the default value by accumulating the size of each regular
++file and symlink rounded to 1 KiB used units, and a baseline of 1 KiB for
++any other filesystem object type.
++
++\fBNote:\fP Take into account that this can only ever be an approximation,
++as the actual size used on the installed system will depend greatly on the
++filesystem used and its parameters, which might end up using either more
++or less space than the specified in this field.
+ .TP
+ .B Extra\-Size
+ Additional disk space used when the package is installed. If this
+diff --git a/scripts/dpkg-gencontrol.pl b/scripts/dpkg-gencontrol.pl
+index 09a6956..6b076f4 100755
+--- a/scripts/dpkg-gencontrol.pl
++++ b/scripts/dpkg-gencontrol.pl
+@@ -4,7 +4,7 @@
+ #
+ # Copyright © 1996 Ian Jackson
+ # Copyright © 2000,2002 Wichert Akkerman
+-# Copyright © 2006-2014 Guillem Jover <guillem@debian.org>
++# Copyright © 2006-2015 Guillem Jover <guillem@debian.org>
+ #
+ # This program is free software; you can redistribute it and/or modify
+ # it under the terms of the GNU General Public License as published by
+@@ -23,6 +23,8 @@ use strict;
+ use warnings;
+ 
+ use POSIX qw(:errno_h :fcntl_h);
++use File::Find;
++
+ use Dpkg ();
+ use Dpkg::Gettext;
+ use Dpkg::ErrorHandling;
+@@ -334,26 +336,25 @@ if ($oppackage ne $sourcepackage || $verdiff) {
+ }
+ 
+ if (!defined($substvars->get('Installed-Size'))) {
+-    my $c = open(my $du_fh, '-|');
+-    if (not defined $c) {
+-        syserr(g_('cannot fork for %s'), 'du');
+-    }
+-    if (!$c) {
+-        chdir("$packagebuilddir")
+-            or syserr(g_("chdir for du to \`%s'"), $packagebuilddir);
+-        exec('du', '-k', '-s', '--apparent-size', '.')
+-            or syserr(g_('unable to execute %s'), 'du');
+-    }
+-    my $duo = '';
+-    while (<$du_fh>) {
+-	$duo .= $_;
+-    }
+-    close($du_fh);
+-    subprocerr(g_("du in \`%s'"), $packagebuilddir) if $?;
+-    if ($duo !~ m/^(\d+)\s+\.$/) {
+-        error(g_("du gave unexpected output \`%s'"), $duo);
+-    }
+-    $substvars->set_as_auto('Installed-Size', $1);
++    my $installed_size = 0;
++    my $scan_installed_size = sub {
++        lstat or syserr(g_('cannot stat %s'), $File::Find::name);
++
++        if (-f _ or -l _) {
++            # For filesystem objects with actual content accumulate the size
++            # in 1 KiB units.
++            $installed_size += POSIX::ceil((-s _) / 1024);
++        } else {
++            # For other filesystem objects assume a minimum 1 KiB baseline,
++            # as directories are shared resources between packages, and other
++            # object types are mainly metadata-only, supposedly consuming
++            # at most an inode.
++            $installed_size += 1;
++        }
++    };
++    find($scan_installed_size, $packagebuilddir);
++
++    $substvars->set_as_auto('Installed-Size', $installed_size);
+ }
+ if (defined($substvars->get('Extra-Size'))) {
+     my $size = $substvars->get('Extra-Size') + $substvars->get('Installed-Size');
+-- 
+2.2.1.209.g41e5f3a
+

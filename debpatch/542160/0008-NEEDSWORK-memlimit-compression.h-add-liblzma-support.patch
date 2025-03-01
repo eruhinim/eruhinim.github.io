@@ -1,0 +1,472 @@
+From: Jonathan Nieder <jrnieder@gmail.com>
+Date: Tue, 29 Sep 2009 22:43:16 -0500
+Subject: [PATCH 8/9] [NEEDSWORK: memlimit] compression.h: add liblzma support
+
+Use liblzma if available instead of external commands to handle
+.xz and .lzma compressed files from dpkg-deb.
+
+Among other things, this means the lzma package no longer has to
+be part of the base system.
+
+Warning: on severely memory starved systems, dpkg-deb will refuse
+to unpack an xz or lzma compressed deb if it requires more than
+10 MiB of memory.  Packages with data.tar.lzma or data.tar.xz
+built by the command-line xz or lzma encoder with the default
+preset are fine.  Packages built with dpkg-deb -z6 are fine, too.
+
+NEEDSWORK:
+
+Unfortunately, packages compressed by dpkg-deb without the -z
+option in xz or lzma format currently use the preset -9 by
+default, which requires about 80 MiB of memory to decompress if
+compressed by liblzma, 40 MiB if compressed by lzmp.
+
+There need to be command-line and configuration options to
+override the default memory limit.
+
+dpkg should print how high such an option’s value needs to be in
+its error message for an exceeded memory limit.
+---
+ configure.ac           |    3 +
+ debian/control         |    6 +-
+ debian/rules           |    3 +-
+ dpkg-deb/Makefile.am   |    1 +
+ lib/dpkg/Makefile.am   |    5 +
+ lib/dpkg/compression.h |  248 +++++++++++++++++++++++++++++++++++++++++++++++-
+ m4/libs.m4             |   32 ++++++
+ src/Makefile.am        |    1 +
+ 8 files changed, 293 insertions(+), 6 deletions(-)
+
+diff --git a/configure.ac b/configure.ac
+index cc810f7..a11621a 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -65,6 +65,7 @@ AC_SYS_LARGEFILE
+ # Checks for libraries.
+ DPKG_LIB_ZLIB
+ DPKG_LIB_BZ2
++DPKG_LIB_LZMA
+ DPKG_LIB_SELINUX
+ if test "x$build_dselect" = "xyes"; then
+    DPKG_LIB_CURSES
+@@ -75,6 +76,7 @@ fi
+ 
+ # Checks for header files.
+ AC_HEADER_STDC
++AC_HEADER_STDBOOL
+ AC_CHECK_HEADERS([stddef.h error.h locale.h libintl.h kvm.h \
+                   sys/cdefs.h sys/syscall.h])
+ DPKG_CHECK_DEFINE(TIOCNOTTY, [sys/ioctl.h])
+@@ -100,6 +102,7 @@ DPKG_CHECK_DECL([WCOREDUMP], [sys/wait.h])
+ DPKG_CHECK_COMPAT_FUNCS([getopt getopt_long obstack_free \
+                          vsnprintf snprintf strnlen strerror strsignal \
+                          scandir alphasort unsetenv])
++TUKLIB_PHYSMEM
+ AC_CHECK_FUNCS([strtoul isascii bcopy memcpy lchown setsid getdtablesize])
+ 
+ DPKG_COMPILER_WARNINGS
+diff --git a/debian/control b/debian/control
+index be85e8a..3b5a15a 100644
+--- a/debian/control
++++ b/debian/control
+@@ -11,14 +11,14 @@ Vcs-Browser: http://git.debian.org/?p=dpkg/dpkg.git
+ Vcs-Git: git://git.debian.org/git/dpkg/dpkg.git
+ Standards-Version: 3.8.3
+ Build-Depends: debhelper (>= 6.0.7), pkg-config, po4a (>= 0.33.1),
+- libncursesw5-dev, zlib1g-dev (>= 1:1.1.3-19.1), libbz2-dev, flex,
+- libselinux1-dev (>= 1.28-4) [!hurd-i386 !kfreebsd-i386 !kfreebsd-amd64],
++ libncursesw5-dev, zlib1g-dev (>= 1:1.1.3-19.1), libbz2-dev, liblzma-dev,
++ flex, libselinux1-dev (>= 1.28-4) [!hurd-i386 !kfreebsd-i386 !kfreebsd-amd64],
+  libtimedate-perl, libio-string-perl
+ 
+ Package: dpkg
+ Architecture: any
+ Essential: yes
+-Pre-Depends: ${shlibs:Depends}, coreutils (>= 5.93-1), lzma, xz-utils
++Pre-Depends: ${shlibs:Depends}, coreutils (>= 5.93-1)
+ Conflicts: sysvinit (<< 2.82-1), dpkg-iasearch (<< 0.11),
+  dpkg-dev (<< 1.14.16), apt (<< 0.7.7), aptitude (<< 0.4.7-1)
+ Replaces: manpages-de (<= 0.4-3), manpages-pl (<= 20051117-1)
+diff --git a/debian/rules b/debian/rules
+index 9f84953..1d8f81a 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -55,7 +55,8 @@ build-tree/config.status: configure
+ 		--sysconfdir=/etc \
+ 		--localstatedir=/var/lib \
+ 		--with-zlib=static \
+-		--with-bz2=static
++		--with-bz2=static \
++		--with-liblzma
+ 
+ # Build the package in build-tree
+ build: build-tree/config.status
+diff --git a/dpkg-deb/Makefile.am b/dpkg-deb/Makefile.am
+index ee4fd1d..b5d4626 100644
+--- a/dpkg-deb/Makefile.am
++++ b/dpkg-deb/Makefile.am
+@@ -23,5 +23,6 @@ dpkg_deb_LDADD = \
+ 	$(LIBINTL) \
+ 	$(ZLIB_LIBS) \
+ 	$(BZ2_LIBS) \
++	$(LZMA_LIBS) \
+ 	$(SELINUX_LIBS)
+ 
+diff --git a/lib/dpkg/Makefile.am b/lib/dpkg/Makefile.am
+index 45fdaa9..ed6c3f1 100644
+--- a/lib/dpkg/Makefile.am
++++ b/lib/dpkg/Makefile.am
+@@ -22,6 +22,11 @@ libdpkg_a_SOURCES = \
+ 	buffer.c buffer.h \
+ 	cleanup.c \
+ 	compression.c compression.h \
++	$(top_srcdir)/lib/tuklib/tuklib_physmem.c \
++	$(top_srcdir)/lib/tuklib/tuklib_physmem.h \
++	$(top_srcdir)/lib/tuklib/tuklib_common.h \
++	$(top_srcdir)/lib/tuklib/tuklib_config.h \
++	$(top_srcdir)/lib/tuklib/sysdefs.h \
+ 	database.c \
+ 	dbmodify.c \
+ 	dump.c \
+diff --git a/lib/dpkg/compression.h b/lib/dpkg/compression.h
+index 6d1d639..d9613ce 100644
+--- a/lib/dpkg/compression.h
++++ b/lib/dpkg/compression.h
+@@ -18,14 +18,20 @@
+ #ifdef WITH_BZ2
+ #include <bzlib.h>
+ #endif
++#ifdef WITH_LIBLZMA
++#include <lzma.h>
++#include <tuklib/tuklib_physmem.h>
++#endif
+ 
+ #include <dpkg/i18n.h>
+ #include <dpkg/buffer.h>
+ #include <dpkg/dpkg.h>
+ 
++#define DPKG_BUFFER_SIZE 4096
++
+ #define DECOMPRESS(format, zFile, zdopen, zread, zerror, ERR_ERRNO) do \
+ { \
+-	char buffer[4096]; \
++	char buffer[DPKG_BUFFER_SIZE]; \
+ 	int actualread; \
+ 	zFile zfile = zdopen(fd_in, "r"); \
+ 	while ((actualread = zread(zfile, buffer, \
+@@ -49,7 +55,7 @@
+ { \
+ 	char combuf[6]; \
+ 	int actualread, actualwrite; \
+-	char buffer[4096]; \
++	char buffer[DPKG_BUFFER_SIZE]; \
+ 	zFile zfile; \
+ 	strncpy(combuf, "w9", sizeof(combuf)); \
+ 	combuf[1] = compression; \
+@@ -175,6 +181,243 @@ static void compress_bzip2(int fd_in, int fd_out, char compression,
+ }
+ #endif
+ 
++#ifdef WITH_LIBLZMA
++static uint64_t memlimit()
++{
++	/*
++	 * The command-line decoder from XZ Utils limits itself to 40% of
++	 * available RAM, so take that as a reasonable default memory
++	 * limit.  If tuklib_physmem() fails, this is zero.
++	 */
++	uint64_t limit = tuklib_physmem() * 2 / 5;
++
++	/*
++	 * Assume one can manage to find 10 MiB even on memory-starved
++	 * systems, so dpkg won’t refuse to unpack packages shipped by
++	 * Debian.  Do not use more than 100 MiB, as a safety measure
++	 * for servers processing untrusted packages.
++	 *
++	 * XXX NEEDSWORK: This should be configurable.
++	 */
++	limit = max(limit, 10 << 20);
++	limit = min(limit, 100 << 20);
++
++	return limit;
++}
++
++/* liblzma does not do I/O yet, so we get to. */
++static size_t fill_buf(int fd_in, void *buf, size_t bufsz)
++{
++	void *p = buf;
++	while (bufsz > 0) {
++		ssize_t n = read(fd_in, p, bufsz);
++
++		if (n < 0) {
++			if (errno == EINTR)
++				continue;
++			return SIZE_MAX;
++		}
++
++		if (n == 0)
++			/* End of file. */
++			break;
++
++		p += n;
++		bufsz -= n;
++	}
++	return p - buf;
++}
++
++/* Returns nonzero on error. */
++static int write_buf(int fd_out, const void *buf, size_t bufsz)
++{
++	while (bufsz > 0) {
++		ssize_t n = write(fd_out, buf, bufsz);
++
++		if (n < 0) {
++			if (errno == EINTR)
++				continue;
++			return -1;
++		}
++
++		if (n == 0) {
++			/* This can’t happen. */
++			errno = EDOM;
++			return -1;
++		}
++
++		buf += n;
++		bufsz -= n;
++	}
++	return 0;
++}
++
++/* liblzma does not expose error messages yet. */
++static const char *message_lzma_ret(lzma_ret code,
++	bool initializing, bool compressing)
++{
++	const char *const impossible = _("Internal error (bug)");
++
++	switch (code) {
++	case LZMA_MEM_ERROR:
++		return strerror(ENOMEM);
++	case LZMA_MEMLIMIT_ERROR:
++		if (!initializing)
++			/*
++			 * XXX NEEDSWORK: A proper diagnostic would
++			 * indicate an appropriate memory limit for
++			 * next time.
++			 */
++			return _("Memory usage limit reached");
++		return impossible;
++	case LZMA_OPTIONS_ERROR:
++		if (initializing && compressing)
++			return _("Unsupported compression preset");
++		if (!initializing && !compressing)
++			return _("Unsupported options in file header");
++		return impossible;
++	case LZMA_DATA_ERROR:
++		if (!initializing)
++			return _("Compressed data is corrupt");
++		return impossible;
++	case LZMA_BUF_ERROR:
++		if (!initializing)
++			return _("Unexpected end of input");
++		return impossible;
++	case LZMA_FORMAT_ERROR:
++		if (!initializing && !compressing)
++			return _("File format not recognized");
++		return impossible;
++	case LZMA_UNSUPPORTED_CHECK:
++		if (initializing && compressing)
++			return _("liblzma build does not support CRC32");
++		return impossible;
++	case LZMA_OK:
++	case LZMA_STREAM_END:
++	case LZMA_NO_CHECK:
++	case LZMA_GET_CHECK:
++	case LZMA_PROG_ERROR:
++		return impossible;
++	}
++}
++
++static void filter_lzma(int fd_in, int fd_out, lzma_stream *s,
++		bool compressing, const char *desc)
++{
++	lzma_action action;
++	uint8_t in_buf[DPKG_BUFFER_SIZE];
++	uint8_t out_buf[DPKG_BUFFER_SIZE];
++
++	s->next_out = out_buf;
++	s->avail_out = sizeof(out_buf);
++	action = LZMA_RUN;
++
++	for (;;) {
++		lzma_ret ret;
++
++		if (action != LZMA_FINISH && s->avail_in == 0) {
++			size_t len = fill_buf(fd_in, in_buf, sizeof(in_buf));
++			if (len == SIZE_MAX)
++				ohshite(_("%s: internal lzma error: %s: `%s'"),
++					desc, "read", strerror(errno));
++			s->next_in = in_buf;
++			s->avail_in = len;
++			if (len == 0)
++				action = LZMA_FINISH;
++		}
++
++		ret = lzma_code(s, action);
++
++		if (s->avail_out == 0 || ret == LZMA_STREAM_END) {
++			if (write_buf(fd_out, out_buf, s->next_out - out_buf)) {
++				if (errno == EDOM)
++					ohshite(_("%s: internal lzma error: "
++						"write returned 0"), desc);
++				ohshite(_("%s: internal lzma error: %s: `%s'"),
++					desc, "write", strerror(errno));
++			}
++			s->next_out = out_buf;
++			s->avail_out = sizeof(out_buf);
++		}
++
++		if (ret == LZMA_OK)
++			continue;
++		if (ret == LZMA_STREAM_END)
++			/* End of output. */
++			break;
++		ohshite(_("%s: internal lzma error: `%s'"),
++			desc, message_lzma_ret(ret, false, compressing));
++	}
++}
++
++static void decompress_lzma(int fd_in, int fd_out, const char *desc)
++{
++	lzma_stream s = LZMA_STREAM_INIT;
++	const lzma_ret ret = lzma_alone_decoder(&s, memlimit());
++
++	if (ret != LZMA_OK)
++		ohshite(_("%s: internal lzma error: `%s'"),
++			desc, message_lzma_ret(ret, true, false));
++
++	filter_lzma(fd_in, fd_out, &s, false, desc);
++	lzma_end(&s);
++}
++
++static void compress_lzma(int fd_in, int fd_out, char compression,
++			const char *desc)
++{
++	lzma_stream s = LZMA_STREAM_INIT;
++	lzma_options_lzma preset;
++	lzma_ret ret;
++
++	if (compression < '0' || compression > '9' ||
++			lzma_lzma_preset(&preset, compression - '0'))
++		ohshite(_("%s: internal lzma error: `%s %c'"), desc,
++			message_lzma_ret(LZMA_OPTIONS_ERROR, true, true),
++			compression);
++
++	ret = lzma_alone_encoder(&s, &preset);
++	if (ret != LZMA_OK)
++		ohshite(_("%s: internal lzma error: `%s'"),
++			desc, message_lzma_ret(ret, true, true));
++
++	filter_lzma(fd_in, fd_out, &s, true, desc);
++	lzma_end(&s);
++}
++
++static void decompress_xz(int fd_in, int fd_out, const char *desc)
++{
++	lzma_stream s = LZMA_STREAM_INIT;
++	const lzma_ret ret = lzma_stream_decoder(&s, memlimit(), 0);
++
++	if (ret != LZMA_OK)
++		ohshite(_("%s: internal lzma error: `%s'"),
++			desc, message_lzma_ret(ret, true, false));
++
++	filter_lzma(fd_in, fd_out, &s, false, desc);
++	lzma_end(&s);
++}
++
++static void compress_xz(int fd_in, int fd_out, char compression,
++			const char *desc)
++{
++	lzma_stream s = LZMA_STREAM_INIT;
++	lzma_ret ret;
++
++	if (compression < '0' || compression > '9')
++		ohshite(_("%s: internal lzma error: `%s %c'"), desc,
++			message_lzma_ret(LZMA_OPTIONS_ERROR, true, true));
++
++	ret = lzma_easy_encoder(&s, compression - '0', LZMA_CHECK_CRC32);
++
++	if (ret != LZMA_OK)
++		ohshite(_("%s: internal lzma error: `%s'"),
++			desc, message_lzma_ret(ret, true, true));
++
++	filter_lzma(fd_in, fd_out, &s, true, desc);
++	lzma_end(&s);
++}
++#else /* !WITH_LIBLZMA */
+ static void decompress_lzma(int fd_in, int fd_out, const char *desc)
+ {
+ 	decompress_cmd(fd_in, fd_out, LZMA, "lzma", desc);
+@@ -196,3 +439,4 @@ static void compress_xz(int fd_in, int fd_out, char compression,
+ {
+ 	compress_cmd(fd_in, fd_out, XZ, "xz", compression, desc);
+ }
++#endif
+diff --git a/m4/libs.m4 b/m4/libs.m4
+index 255a7ef..1cfe2b0 100644
+--- a/m4/libs.m4
++++ b/m4/libs.m4
+@@ -58,6 +58,38 @@ if test "x$with_bz2" != "xno"; then
+ fi
+ ])# DPKG_LIB_BZ2
+ 
++# DPKG_LIB_LZMA
++# -------------
++# Check for liblzma.
++AC_DEFUN([DPKG_LIB_LZMA],
++[AC_ARG_VAR([LZMA_LIBS], [linker flags for lzma library])dnl
++AC_ARG_WITH(liblzma,
++	AS_HELP_STRING([--with-liblzma],
++		       [use liblzma for compression and decompression]))
++if test "x$with_liblzma" != "xno"; then
++	AC_CHECK_LIB([lzma], [lzma_alone_decoder],
++		[AC_DEFINE(WITH_LIBLZMA, 1,
++			[Define to 1 to use liblzma rather than console tool])
++		 if test "x$with_liblzma" = "xstatic"; then
++			dpkg_lzma_libs="-Wl,-Bstatic $(
++				pkg-config --static --libs liblzma
++				) -Wl,-Bdynamic"
++		 else
++			dpkg_lzma_libs=$(pkg-config --libs liblzma)
++		 fi
++		 LZMA_LIBS="${LZMA_LIBS:+$LZMA_LIBS }$dpkg_lzma_libs"
++		 with_liblzma="yes"],
++		[if test -n "$with_liblzma"; then
++			AC_MSG_FAILURE([lzma library not found])
++		 fi])
++
++	AC_CHECK_HEADER([lzma.h],,
++		[if test -n "$with_liblzma"; then
++			AC_MSG_FAILURE([lzma header not found])
++		 fi])
++fi
++])# DPKG_LIB_LZMA
++
+ # DPKG_LIB_SELINUX
+ # ----------------
+ # Check for selinux library.
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 820cf1c..1295323 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -39,6 +39,7 @@ dpkg_LDADD = \
+ 	$(LIBINTL) \
+ 	$(ZLIB_LIBS) \
+ 	$(BZ2_LIBS) \
++	$(LZMA_LIBS) \
+ 	$(SELINUX_LIBS)
+ 
+ dpkg_query_SOURCES = \
+-- 
+1.6.5.rc1.199.g596ec
+

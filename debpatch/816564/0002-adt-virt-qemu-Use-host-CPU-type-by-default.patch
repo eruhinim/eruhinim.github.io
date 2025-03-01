@@ -1,0 +1,119 @@
+From 718663dae3056f4b602ffd711c3742060343aa85 Mon Sep 17 00:00:00 2001
+From: Christian Seiler <christian@iwakd.de>
+Date: Fri, 26 Feb 2016 16:14:47 +0100
+Subject: [PATCH 2/3] adt-virt-qemu: Use host CPU type by default
+
+Tell QEMU to use the host's CPU type by default so that nested KVM
+support is possible. Add an option to allow the user to override
+this setting.
+---
+ debian/changelog             |  1 +
+ virt-subproc/adt-virt-qemu   | 19 ++++++++++++++++++-
+ virt-subproc/adt-virt-qemu.1 | 32 ++++++++++++++++++++++++++++++++
+ 3 files changed, 51 insertions(+), 1 deletion(-)
+
+diff --git a/debian/changelog b/debian/changelog
+index b9c6a1a..82a9a07 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -10,6 +10,7 @@ autopkgtest (3.19.4) UNRELEASED; urgency=medium
+   [ Christian Seiler ]
+   * adt-virt-qemu: Implement support for nested base images.
+     (Closes: #800845)
++  * adt-virt-qemu: Use host CPU type by default
+ 
+  -- Martin Pitt <mpitt@debian.org>  Tue, 23 Feb 2016 18:21:51 +0100
+ 
+diff --git a/virt-subproc/adt-virt-qemu b/virt-subproc/adt-virt-qemu
+index 819f96e..1f4f192 100755
+--- a/virt-subproc/adt-virt-qemu
++++ b/virt-subproc/adt-virt-qemu
+@@ -52,10 +52,11 @@ p_qemu = None
+ ssh_port = None
+ ssh_port_lock = None
+ normal_user = None
++qemu_cmd_default = None
+ 
+ 
+ def parse_args():
+-    global args
++    global args, qemu_cmd_default
+ 
+     parser = ArgumentParser()
+ 
+@@ -78,6 +79,8 @@ def parse_args():
+                         help='Show boot messages from serial console')
+     parser.add_argument('-d', '--debug', action='store_true',
+                         help='Enable debugging output')
++    parser.add_argument('--qemu-cpu',
++                        help='The QEMU CPU type to use (default: host).')
+     parser.add_argument('--qemu-options',
+                         help='Pass through arguments to QEMU command.')
+     parser.add_argument('--nested-baseimage',
+@@ -495,6 +498,20 @@ def hook_open():
+     if os.path.exists('/dev/kvm'):
+         argv.append('-enable-kvm')
+ 
++    if args.qemu_cpu is None:
++        if args.qemu_command == qemu_cmd_default:
++            cpu_type = 'host'
++        else:
++            # We are using a different qemu command, which means that
++            # -cpu host might not work (because it's fully emulated,
++            # for example), so don't set the option at all.
++            cpu_type = None
++    else:
++        cpu_type = args.qemu_cpu
++    if cpu_type is not None and cpu_type != 'qemu-default':
++        argv.append('-cpu')
++        argv.append(cpu_type)
++
+     # pass through option to qemu
+     if args.qemu_options:
+         argv.extend(args.qemu_options.split())
+diff --git a/virt-subproc/adt-virt-qemu.1 b/virt-subproc/adt-virt-qemu.1
+index 9c29602..c3a3473 100644
+--- a/virt-subproc/adt-virt-qemu.1
++++ b/virt-subproc/adt-virt-qemu.1
+@@ -94,6 +94,38 @@ Show boot messages from serial console.
+ Enable debugging output.
+ 
+ .TP
++.BI "--qemu-cpu=" type
++The QEMU CPU type to use. This defaults to
++.I host
++if the
++.B --qemu-command
++option has not been specified, which passes through all of the host CPU's
++features into the VM and allows the use of nested KVM if enabled on the host.
++For emulating a more generic CPU on x86 systems that still has KVM support, one
++may use the
++.BI --qemu-cpu= kvm64
++or
++.BI --qemu-cpu= kvm32
++CPU variaants.
++
++Using
++.BI --qemu-cpu= qemu-default
++disables this option and lets QEMU select the default CPU type for the given
++architecture.
++
++Nested KVM currently only works on x86 systems. To enable it, one needs to
++additionally set some module parameters on the host, by creating a file
++.I /etc/modprobe.d/nested_kvm.conf
++with the contents
++
++.EX
++options kvm_intel nested=1
++options kvm_amd   nested=1
++.EE
++
++and rebooting and/or reloading the KVM modules.
++
++.TP
+ .BI "--qemu-options=" arguments
+ Pass through arguments to QEMU command; e. g. --qemu-options='-readconfig qemu.cfg'
+ 
+-- 
+2.1.4
+

@@ -1,0 +1,152 @@
+diff -Nru clang-2.9/debian/changelog clang-2.9/debian/changelog
+--- clang-2.9/debian/changelog	2011-04-15 21:35:01.000000000 +0200
++++ clang-2.9/debian/changelog	2011-05-13 08:58:21.000000000 +0200
+@@ -1,3 +1,12 @@
++clang (2.9-1~exp1mwild0) natty; urgency=low
++
++  * Backport Ubuntu Natty and multiarch support from SVN
++  * Configure to search /usr/include/<arch> and only one standard C++ header
++    install location (http://llvm.org/bugs/show_bug.cgi?id=6907)
++  * Depend on libstdc++6-4.5-dev
++
++ -- Michael Wild <themiwi@users.sourceforge.net>  Thu, 12 May 2011 07:58:13 +0200
++
+ clang (2.9-1~exp1) experimental; urgency=low
+ 
+   * New upstream release
+diff -Nru clang-2.9/debian/control clang-2.9/debian/control
+--- clang-2.9/debian/control	2011-04-15 21:52:21.000000000 +0200
++++ clang-2.9/debian/control	2011-05-13 15:05:17.000000000 +0200
+@@ -16,7 +16,7 @@
+ 
+ Package: clang
+ Architecture: any
+-Depends: ${shlibs:Depends}, ${misc:Depends}
++Depends: ${shlibs:Depends}, ${misc:Depends}, libstdc++6-4.5-dev
+ Recommends: llvm-2.9-dev, python
+ Description: Low-Level Virtual Machine (LLVM), C language family frontend
+  The Low-Level Virtual Machine (LLVM) is a collection of libraries and
+diff -Nru clang-2.9/debian/control.in/clang clang-2.9/debian/control.in/clang
+--- clang-2.9/debian/control.in/clang	2011-02-14 23:38:11.000000000 +0100
++++ clang-2.9/debian/control.in/clang	2011-05-13 08:58:21.000000000 +0200
+@@ -1,6 +1,6 @@
+ Package: clang
+ Architecture: any
+-Depends: ${shlibs:Depends}, ${misc:Depends}
++Depends: ${shlibs:Depends}, ${misc:Depends}, libstdc++6-4.5-dev
+ Recommends: llvm-@UVERSION@-dev, python
+ Description: Low-Level Virtual Machine (LLVM), C language family frontend
+  The Low-Level Virtual Machine (LLVM) is a collection of libraries and
+diff -Nru clang-2.9/debian/patches/0001-multiarch-support-backport.patch clang-2.9/debian/patches/0001-multiarch-support-backport.patch
+--- clang-2.9/debian/patches/0001-multiarch-support-backport.patch	1970-01-01 01:00:00.000000000 +0100
++++ clang-2.9/debian/patches/0001-multiarch-support-backport.patch	2011-05-13 15:05:17.000000000 +0200
+@@ -0,0 +1,94 @@
++---
++ Driver/ToolChains.cpp         |   18 +++++++++++++++---
++ Frontend/InitHeaderSearch.cpp |    9 +++++++++
++ 2 files changed, 24 insertions(+), 3 deletions(-)
++
++Description: Backport multi-arch detection from SVN and introduce Natty
++
++--- clang-2.9.orig/tools/clang/lib/Driver/ToolChains.cpp
+++++ clang-2.9/tools/clang/lib/Driver/ToolChains.cpp
++@@ -1286,6 +1286,7 @@ enum LinuxDistro {
++   UbuntuKarmic,
++   UbuntuLucid,
++   UbuntuMaverick,
+++  UbuntuNatty,
++   UnknownDistro
++ };
++ 
++@@ -1304,7 +1305,8 @@ static bool IsDebian(enum LinuxDistro Di
++ static bool IsUbuntu(enum LinuxDistro Distro) {
++   return Distro == UbuntuHardy  || Distro == UbuntuIntrepid ||
++          Distro == UbuntuLucid  || Distro == UbuntuMaverick || 
++-         Distro == UbuntuJaunty || Distro == UbuntuKarmic;
+++         Distro == UbuntuJaunty || Distro == UbuntuKarmic ||
+++         Distro == UbuntuNatty;
++ }
++ 
++ static bool IsDebianBased(enum LinuxDistro Distro) {
++@@ -1344,6 +1346,8 @@ static LinuxDistro DetectLinuxDistro(llv
++         return UbuntuJaunty;
++       else if (Lines[i] == "DISTRIB_CODENAME=karmic")
++         return UbuntuKarmic;
+++      else if (Lines[i] == "DISTRIB_CODENAME=natty")
+++        return UbuntuNatty;
++     }
++     return UnknownDistro;
++   }
++@@ -1432,6 +1436,9 @@ Linux::Linux(const HostInfo &Host, const
++     else if (!llvm::sys::fs::exists("/usr/lib/gcc/x86_64-manbo-linux-gnu",
++              Exists) && Exists)
++       GccTriple = "x86_64-manbo-linux-gnu";
+++    else if (!llvm::sys::fs::exists("/usr/lib/x86_64-linux-gnu/gcc",
+++             Exists) && Exists)
+++      GccTriple = "x86_64-linux-gnu";
++   } else if (Arch == llvm::Triple::x86) {
++     if (!llvm::sys::fs::exists("/usr/lib/gcc/i686-linux-gnu", Exists) && Exists)
++       GccTriple = "i686-linux-gnu";
++@@ -1463,6 +1470,11 @@ Linux::Linux(const HostInfo &Host, const
++       Base = t2;
++       break;
++     }
+++    std::string t3 = "/usr/lib/" + GccTriple + "/gcc/" + Suffix;
+++    if (!llvm::sys::fs::exists(t3 + "/crtbegin.o", Exists) && Exists) {
+++      Base = t3;
+++      break;
+++    }
++   }
++ 
++   path_list &Paths = getFilePaths();
++@@ -1495,7 +1507,7 @@ Linux::Linux(const HostInfo &Host, const
++   if (Arch == llvm::Triple::arm || Arch == llvm::Triple::thumb)
++     ExtraOpts.push_back("-X");
++ 
++-  if (IsFedora(Distro) || Distro == UbuntuMaverick)
+++  if (IsFedora(Distro) || Distro == UbuntuMaverick || Distro == UbuntuNatty)
++     ExtraOpts.push_back("--hash-style=gnu");
++ 
++   if (IsDebian(Distro) || Distro == UbuntuLucid || Distro == UbuntuJaunty ||
++@@ -1510,7 +1522,7 @@ Linux::Linux(const HostInfo &Host, const
++ 
++   if (Distro == DebianSqueeze || IsOpenSuse(Distro) ||
++       IsFedora(Distro) || Distro == UbuntuLucid || Distro == UbuntuMaverick ||
++-      Distro == UbuntuKarmic)
+++      Distro == UbuntuKarmic || Distro == UbuntuNatty)
++     ExtraOpts.push_back("--build-id");
++ 
++   if (Distro == ArchLinux)
++--- clang-2.9.orig/tools/clang/lib/Frontend/InitHeaderSearch.cpp
+++++ clang-2.9/tools/clang/lib/Frontend/InitHeaderSearch.cpp
++@@ -643,6 +643,15 @@ AddDefaultCPlusPlusIncludePaths(const ll
++     // Debian based distros.
++     // Note: these distros symlink /usr/include/c++/X.Y.Z -> X.Y
++     //===------------------------------------------------------------------===//
+++    // Ubuntu 11.04 "Natty Narwhal" -- gcc-4.5.2
+++    AddGnuCPlusPlusIncludePaths("/usr/include/c++/4.5",
+++                                "x86_64-linux-gnu", "32", "", triple);
+++    AddGnuCPlusPlusIncludePaths("/usr/include/c++/4.5",
+++                                "i686-linux-gnu", "", "64", triple);
+++    AddGnuCPlusPlusIncludePaths("/usr/include/c++/4.5",
+++                                "i486-linux-gnu", "", "64", triple);
+++    AddGnuCPlusPlusIncludePaths("/usr/include/c++/4.5",
+++                                "arm-linux-gnueabi", "", "", triple);
++     // Ubuntu 10.10 "Maverick Meerkat" -- gcc-4.4.5
++     AddGnuCPlusPlusIncludePaths("/usr/include/c++/4.4",
++                                 "i686-linux-gnu", "", "64", triple);
+diff -Nru clang-2.9/debian/rules.d/vars.mk clang-2.9/debian/rules.d/vars.mk
+--- clang-2.9/debian/rules.d/vars.mk	2011-04-15 19:19:10.000000000 +0200
++++ clang-2.9/debian/rules.d/vars.mk	2011-05-13 15:04:51.000000000 +0200
+@@ -68,6 +68,11 @@
+ confargs := \
+ 	CC=$(DEB_HOST_GNU_TYPE)-gcc CXX=$(DEB_HOST_GNU_TYPE)-g++ \
+ 	CPP=$(DEB_HOST_GNU_TYPE)-cpp \
++	--with-c-include-dirs=/usr/include/$(DEB_BUILD_GNU_TYPE):/usr/include \
++	--with-cxx-include-root=/usr/include/c++/4.5 \
++	--with-cxx-include-arch=$(DEB_BUILD_GNU_TYPE) \
++	--with-cxx-include-32bit-dir=32 \
++	--with-binutils-include=/usr/include
+ 	--host=$(DEB_HOST_GNU_TYPE) --build=$(DEB_BUILD_GNU_TYPE)
+ 
+ # build not yet prepared to take variables from the environment

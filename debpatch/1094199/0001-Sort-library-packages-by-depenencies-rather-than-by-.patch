@@ -1,0 +1,76 @@
+From 6333c51012f134340a8544508dd9fd5266bf013a Mon Sep 17 00:00:00 2001
+From: Hilko Bengen <bengen@debian.org>
+Date: Wed, 5 Feb 2025 22:48:26 +0100
+Subject: [PATCH] Sort library packages by depenencies rather than by
+ dependency count
+
+This will fail if dependency cycles are detected, but it is probably
+better than the current state.
+
+Closes: #1094199
+---
+ lib/Debian/Debhelper/Buildsystem/rust.pm | 39 +++++++++++++++++++-----
+ 1 file changed, 32 insertions(+), 7 deletions(-)
+
+diff --git a/lib/Debian/Debhelper/Buildsystem/rust.pm b/lib/Debian/Debhelper/Buildsystem/rust.pm
+index 76610d3..0041a2a 100644
+--- a/lib/Debian/Debhelper/Buildsystem/rust.pm
++++ b/lib/Debian/Debhelper/Buildsystem/rust.pm
+@@ -79,9 +79,10 @@ sub cargo_crates ( $root, $src, $default )
+     # resolve amount of local dependencies
+     # TODO: use Graph to compute an always reliable order instead
+     for my $key ( @{ $manifest->{packages} } ) {
+-        $crates{ $key->{name} =~ tr/_/-/r }{depcount}
+-            = grep { exists $crates{ $_->{name} =~ tr/_/-/r } }
+-            @{ $key->{dependencies} };
++        @{$crates{ $key->{name} =~ tr/_/-/r }{dependencies}}
++          = map { $_->{name} }
++          grep { exists $crates{ $_->{name} =~ tr/_/-/r } }
++          @{ $key->{dependencies} };
+     }
+     return \%crates;
+ }
+@@ -357,12 +358,36 @@ sub test ( $this, @params )
+     );
+ }
+ 
++sub sort_crates ( @pkgs )
++{
++    my %pkgs = map { ($_->{pkgid} =~ s/@.*//r) => $_ } @pkgs;
++    my @sorted;
++    my $changes;
++    do {
++        $changes = 0;
++      name: foreach my $name (sort keys %pkgs) {
++            print "considering $name...\n";
++            foreach my $dep (@{$pkgs{$name}->{dependencies}}) {
++                next name if $pkgs{$dep} and not $name eq $dep;
++            }
++            print "$name goes into build list.\n";
++            push @sorted, $pkgs{$name};
++            delete $pkgs{$name};
++            $changes++;
++            next name;
++        }
++    } while ($changes > 0);
++    if (scalar %pkgs) {
++        error('Found dependency cycle among crates ' . join(', ', sort keys %pkgs) . '. Cannot determine sensible installation ordering.');
++    }
++    return @sorted;
++}
++
+ sub install ( $this, $destdir, @params )
+ {
+-    foreach my $crate (
+-        sort { $a->{depcount} cmp $b->{depcount} }
+-        map  { @{ $_->{crates} } } sort values %{ $this->{libpkg} }
+-        )
++    my @crates = map { @{ $_->{crates} } }
++      sort values %{ $this->{libpkg} };
++    foreach my $crate ( sort_crates @crates )
+     {
+         my $target = tmpdir( $crate->{libpkg}{name} ) . $crate->{systempath};
+         install_dir($target);
+-- 
+2.47.2
+

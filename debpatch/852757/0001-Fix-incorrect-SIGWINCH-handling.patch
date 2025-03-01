@@ -1,0 +1,119 @@
+From 6cdd7fe9476a8149bc5bf18f70f9a8a30ba92d3a Mon Sep 17 00:00:00 2001
+From: Zhang Boyang <zhangboyang.id@gmail.com>
+Date: Wed, 24 Nov 2021 23:34:04 +0800
+Subject: [PATCH] Fix incorrect SIGWINCH handling
+
+Previously, status line is redrawn in signal handler. However, the
+drawing code make heavy use of std::string and other syscalls, which may
+not be async-signal-safe. This will cause deadlock, overwritten errno,
+even silent memory corruption.
+
+With this patch, the signal handler will only set a flag, which is
+async-signal-safe, and actual redrawing will be deferred to Pulse().
+
+Closes: #852757
+---
+ apt-pkg/install-progress.cc | 31 +++++++++++++++++++++----------
+ apt-pkg/install-progress.h  |  8 +++++---
+ 2 files changed, 26 insertions(+), 13 deletions(-)
+
+diff --git a/apt-pkg/install-progress.cc b/apt-pkg/install-progress.cc
+index aadd28e51..99f16bffa 100644
+--- a/apt-pkg/install-progress.cc
++++ b/apt-pkg/install-progress.cc
+@@ -222,22 +222,22 @@ PackageManagerFancy::PackageManagerFancy()
+    : d(NULL), child_pty(-1)
+ {
+    // setup terminal size
+-   old_SIGWINCH = signal(SIGWINCH, PackageManagerFancy::staticSIGWINCH);
+-   instances.push_back(this);
++   if (instances++ == 0)
++      old_SIGWINCH = signal(SIGWINCH, PackageManagerFancy::staticSIGWINCH);
+ }
+-std::vector<PackageManagerFancy*> PackageManagerFancy::instances;
++int PackageManagerFancy::instances = 0;
++sighandler_t PackageManagerFancy::old_SIGWINCH;
++volatile sig_atomic_t PackageManagerFancy::SIGWINCH_flag = 0;
+ 
+ PackageManagerFancy::~PackageManagerFancy()
+ {
+-   instances.erase(find(instances.begin(), instances.end(), this));
+-   signal(SIGWINCH, old_SIGWINCH);
++   if (--instances == 0)
++      signal(SIGWINCH, old_SIGWINCH);
+ }
+ 
+-void PackageManagerFancy::staticSIGWINCH(int signum)
++void PackageManagerFancy::staticSIGWINCH(int)
+ {
+-   std::vector<PackageManagerFancy *>::const_iterator I;
+-   for(I = instances.begin(); I != instances.end(); ++I)
+-      (*I)->HandleSIGWINCH(signum);
++   SIGWINCH_flag = 1;
+ }
+ 
+ PackageManagerFancy::TermSize
+@@ -294,13 +294,24 @@ void PackageManagerFancy::SetupTerminalScrollArea(int nr_rows)
+      }
+ }
+ 
+-void PackageManagerFancy::HandleSIGWINCH(int)
++void PackageManagerFancy::HandleSIGWINCH()
+ {
+    int const nr_terminal_rows = GetTerminalSize().rows;
+    SetupTerminalScrollArea(nr_terminal_rows);
+    DrawStatusLine();
+ }
+ 
++void PackageManagerFancy::Pulse()
++{
++   if (SIGWINCH_flag)
++   {
++      SIGWINCH_flag = 0;
++      int errsv = errno;
++      HandleSIGWINCH();
++      errno = errsv;
++   }
++}
++
+ void PackageManagerFancy::Start(int a_child_pty)
+ {
+    child_pty = a_child_pty;
+diff --git a/apt-pkg/install-progress.h b/apt-pkg/install-progress.h
+index 94b66ed9b..d1dd3eb8a 100644
+--- a/apt-pkg/install-progress.h
++++ b/apt-pkg/install-progress.h
+@@ -125,12 +125,14 @@ namespace Progress {
+     void * const d;
+  private:
+     APT_HIDDEN static void staticSIGWINCH(int);
+-    static std::vector<PackageManagerFancy*> instances;
++    static int instances;
++    static sighandler_t old_SIGWINCH;
++    static volatile sig_atomic_t SIGWINCH_flag;
+     APT_HIDDEN bool DrawStatusLine();
+ 
+  protected:
+     void SetupTerminalScrollArea(int nr_rows);
+-    void HandleSIGWINCH(int);
++    void HandleSIGWINCH();
+ 
+     typedef struct {
+        int rows;
+@@ -138,12 +140,12 @@ namespace Progress {
+     } TermSize;
+     TermSize GetTerminalSize();
+ 
+-    sighandler_t old_SIGWINCH;
+     int child_pty;
+ 
+  public:
+     PackageManagerFancy();
+     virtual ~PackageManagerFancy();
++    virtual void Pulse() APT_OVERRIDE;
+     virtual void Start(int child_pty=-1) APT_OVERRIDE;
+     virtual void Stop() APT_OVERRIDE;
+     virtual bool StatusChanged(std::string PackageName,
+-- 
+2.30.2
+

@@ -1,0 +1,2033 @@
+diff --git a/bin/named/client.c b/bin/named/client.c
+index e68f96d..8486830 100644
+--- a/bin/named/client.c
++++ b/bin/named/client.c
+@@ -883,6 +883,11 @@ ns_client_sendraw(ns_client_t *client, dns_message_t *message) {
+ 		goto done;
+ 	}
+ 
++	if (client->view != NULL && client->view->dampening != NULL)
++		dns_dampening_score_size(client->view->dampening,
++					 &client->peeraddr,
++					 client->now, mr->length);
++
+ 	result = client_allocsendbuf(client, &buffer, NULL, mr->length,
+ 				     sendbuf, &data);
+ 	if (result != ISC_R_SUCCESS)
+diff --git a/bin/named/include/named/server.h b/bin/named/include/named/server.h
+index 52ba94d..28d056f 100644
+--- a/bin/named/include/named/server.h
++++ b/bin/named/include/named/server.h
+@@ -170,10 +170,12 @@ enum {
+ #ifdef USE_RRL
+ 	dns_nsstatscounter_ratedropped = 37,
+ 	dns_nsstatscounter_rateslipped = 38,
++	dns_nsstatscounter_dampened = 39,
+ 
+-	dns_nsstatscounter_max = 39
++	dns_nsstatscounter_max = 40
+ #else /* USE_RRL */
+-	dns_nsstatscounter_max = 37
++	dns_nsstatscounter_dampened = 37,
++	dns_nsstatscounter_max = 38
+ #endif /* USE_RRL */
+ };
+ 
+diff --git a/bin/named/query.c b/bin/named/query.c
+index c357f83..5a40198 100644
+--- a/bin/named/query.c
++++ b/bin/named/query.c
+@@ -7520,11 +7520,12 @@ query_find(ns_client_t *client, dns_fetchevent_t *event, dns_rdatatype_t qtype)
+ }
+ 
+ static inline void
+-log_query(ns_client_t *client, unsigned int flags, unsigned int extflags) {
++log_query(ns_client_t *client, unsigned int flags, unsigned int extflags, int penalty) {
+ 	char namebuf[DNS_NAME_FORMATSIZE];
+ 	char typename[DNS_RDATATYPE_FORMATSIZE];
+ 	char classname[DNS_RDATACLASS_FORMATSIZE];
+ 	char onbuf[ISC_NETADDR_FORMATSIZE];
++	char penbuf[sizeof("65536")+1];
+ 	dns_rdataset_t *rdataset;
+ 	int level = ISC_LOG_INFO;
+ 
+@@ -7537,9 +7538,10 @@ log_query(ns_client_t *client, unsigned int flags, unsigned int extflags) {
+ 	dns_rdataclass_format(rdataset->rdclass, classname, sizeof(classname));
+ 	dns_rdatatype_format(rdataset->type, typename, sizeof(typename));
+ 	isc_netaddr_format(&client->destaddr, onbuf, sizeof(onbuf));
++	snprintf(penbuf, sizeof(penbuf), "%d", penalty);
+ 
+ 	ns_client_log(client, NS_LOGCATEGORY_QUERIES, NS_LOGMODULE_QUERY,
+-		      level, "query: %s %s %s %s%s%s%s%s%s (%s)", namebuf,
++		      level, "query: %s %s %s %s%s%s%s%s%s (%s) %s", namebuf,
+ 		      classname, typename, WANTRECURSION(client) ? "+" : "-",
+ 		      (client->signer != NULL) ? "S": "",
+ 		      (client->opt != NULL) ? "E" : "",
+@@ -7547,7 +7549,8 @@ log_query(ns_client_t *client, unsigned int flags, unsigned int extflags) {
+ 				 "T" : "",
+ 		      ((extflags & DNS_MESSAGEEXTFLAG_DO) != 0) ? "D" : "",
+ 		      ((flags & DNS_MESSAGEFLAG_CD) != 0) ? "C" : "",
+-		      onbuf);
++		      onbuf,
++		      penalty < -1 ? "" : penalty < 0 ? "-" : penbuf);
+ }
+ 
+ static inline void
+@@ -7601,6 +7604,7 @@ ns_query_start(ns_client_t *client) {
+ 	dns_rdatatype_t qtype;
+ 	unsigned int saved_extflags = client->extflags;
+ 	unsigned int saved_flags = client->message->flags;
++	int client_penalty = -2;
+ 
+ 	CTRACE("ns_query_start");
+ 
+@@ -7655,6 +7659,22 @@ ns_query_start(ns_client_t *client) {
+ 	}
+ 
+ 	/*
++	 * Dampening for UDP packets only. Early processing to prevent error
++	 * message reflector attacks.
++	 */
++	if ((client->attributes & NS_CLIENTATTR_TCP) == 0 &&
++	    client->view != NULL && client->view->dampening != NULL) {
++		if( DNS_DAMPENING_STATE_SUPPRESS ==
++		    dns_dampening_query(client->view->dampening,
++					&client->peeraddr, client->now,
++					&client_penalty) ) {
++			inc_stats(client, dns_nsstatscounter_dampened);
++			query_next(client, DNS_R_DROP);
++			return;
++		}
++	}
++
++	/*
+ 	 * Get the question name.
+ 	 */
+ 	result = dns_message_firstname(message, DNS_SECTION_QUESTION);
+@@ -7679,7 +7699,7 @@ ns_query_start(ns_client_t *client) {
+ 	}
+ 
+ 	if (ns_g_server->log_queries)
+-		log_query(client, saved_flags, saved_extflags);
++		log_query(client, saved_flags, saved_extflags, client_penalty);
+ 
+ 	/*
+ 	 * Check for multiple question queries, since edns1 is dead.
+@@ -7697,6 +7717,11 @@ ns_query_start(ns_client_t *client) {
+ 	qtype = rdataset->type;
+ 	dns_rdatatypestats_increment(ns_g_server->rcvquerystats, qtype);
+ 
++	if (client->view != NULL && client->view->dampening != NULL)
++		dns_dampening_score_qtype(client->view->dampening,
++					  &client->peeraddr, client->now,
++					  client->message->id, qtype);
++
+ 	if (dns_rdatatype_ismeta(qtype)) {
+ 		switch (qtype) {
+ 		case dns_rdatatype_any:
+diff --git a/bin/named/server.c b/bin/named/server.c
+index 1777cb8..1b5ca47 100644
+--- a/bin/named/server.c
++++ b/bin/named/server.c
+@@ -163,6 +163,16 @@
+ 			fatal(msg, result);			  \
+ 	} while (0)						  \
+ 
++#define CHECKRANGE(obj, cond, pat, val) \
++	do {								\
++		if (!(cond)) {						\
++			cfg_obj_log(obj, ns_g_lctx, ISC_LOG_ERROR,	\
++				    pat, val);				\
++			result = ISC_R_RANGE;				\
++			goto cleanup;					\
++		}							\
++	} while (0)							\
++
+ /*%
+  * Maximum ADB size for views that share a cache.  Use this limit to suppress
+  * the total of memory footprint, which should be the main reason for sharing
+@@ -2115,6 +2125,230 @@ create_empty_zone(dns_zone_t *zone, dns_name_t *name, dns_view_t *view,
+ 	return (result);
+ }
+ 
++static isc_result_t
++configure_dampening(dns_view_t *view, const cfg_obj_t *config,
++		    const cfg_obj_t *map) {
++	const cfg_obj_t *obj;
++	isc_result_t result;
++	int min_entries, i;
++
++	min_entries = 500;
++	obj = NULL;
++	result = cfg_map_get(map, "min-table-size", &obj);
++	if (result == ISC_R_SUCCESS) {
++		min_entries = cfg_obj_asuint32(obj);
++		CHECKRANGE(obj, 1 < min_entries && min_entries < ISC_UINT16_MAX,
++			   "invalid '{min-table-size %d;}'", min_entries);
++	}
++	result = dns_dampening_init(view, min_entries);
++	if (result != ISC_R_SUCCESS)
++		goto cleanup;
++
++	i = ISC_MAX(min_entries, 1000);
++	obj = NULL;
++	result = cfg_map_get(map, "max-table-size", &obj);
++	if (result == ISC_R_SUCCESS) {
++		i = cfg_obj_asuint32(obj);
++		CHECKRANGE(obj, min_entries <= i && i < ISC_UINT16_MAX,
++			   "invalid '{max-table-size %d;}'", i);
++	}
++	view->dampening->max_entries = i;
++
++	i = 600;
++	obj = NULL;
++	result = cfg_map_get(map, "halflife", &obj);
++	if (result == ISC_R_SUCCESS) {
++		i = cfg_obj_asuint32(obj);
++		CHECKRANGE(obj, 10 < i,
++			   "invalid '{halflife %d;}'", i);
++	}
++	view->dampening->decay.halflife = i;
++
++	i = ISC_MAX(1 , view->dampening->decay.halflife / 100);
++	obj = NULL;
++	result = cfg_map_get(map, "update-delay", &obj);
++	if (result == ISC_R_SUCCESS) {
++		i = cfg_obj_asuint32(obj);
++		CHECKRANGE(obj, i <= view->dampening->decay.halflife,
++			   "invalid '{update-delay %d;}'", i);
++	}
++	view->dampening->decay.updatedelay = i;
++
++	i = 32000;
++	obj = NULL;
++	result = cfg_map_get(map, "limit-maximum", &obj);
++	if (result == ISC_R_SUCCESS) {
++		i = cfg_obj_asuint32(obj);
++		CHECKRANGE(obj, 1000 <= i && i <= ISC_UINT16_MAX,
++			   "invalid '{limit-maximum %d;}'", i);
++	}
++	view->dampening->limit.maximum = i;
++
++	i = 0.8 * view->dampening->limit.maximum;
++	obj = NULL;
++	result = cfg_map_get(map, "limit-enable-dampening", &obj);
++	if (result == ISC_R_SUCCESS) {
++		i = cfg_obj_asuint32(obj);
++		CHECKRANGE(obj, 0.3 * view->dampening->limit.maximum < i && i < view->dampening->limit.maximum,
++			   "invalid '{limit-enable-dampening %d;}'", i);
++	}
++	view->dampening->limit.enable_dampening = i;
++
++	i = 0.3 * view->dampening->limit.maximum;
++	obj = NULL;
++	result = cfg_map_get(map, "limit-disable-dampening", &obj);
++	if (result == ISC_R_SUCCESS) {
++		i = cfg_obj_asuint32(obj);
++		CHECKRANGE(obj, 0.1 * view->dampening->limit.maximum < i && i < view->dampening->limit.enable_dampening,
++			   "invalid '{limit-disable-dampening %d;}'", i);
++	}
++	view->dampening->limit.disable_dampening = i;
++
++	i = 100;
++	obj = NULL;
++	result = cfg_map_get(map, "limit-irrelevant", &obj);
++	if (result == ISC_R_SUCCESS) {
++		i = cfg_obj_asuint32(obj);
++		CHECKRANGE(obj, 100 < i && i < view->dampening->limit.disable_dampening,
++			   "invalid '{limit-irrelevant %d;}'", i);
++	}
++	view->dampening->limit.irrelevant = i;
++
++	i = 10;
++	obj = NULL;
++	result = cfg_map_get(map, "score-first-query", &obj);
++	if (result == ISC_R_SUCCESS) {
++		i = cfg_obj_asuint32(obj);
++		CHECKRANGE(obj, i < view->dampening->limit.enable_dampening,
++			   "invalid '{score-first-query %d;}'", i);
++	}
++	view->dampening->score.first_query = i;
++
++	i = 1;
++	obj = NULL;
++	result = cfg_map_get(map, "score-per-query", &obj);
++	if (result == ISC_R_SUCCESS) {
++		i = cfg_obj_asuint32(obj);
++		CHECKRANGE(obj, i < view->dampening->limit.maximum,
++			   "invalid '{score-per-query %d;}'", i);
++	}
++	view->dampening->score.per_query = i;
++
++	i = 100;
++	obj = NULL;
++	result = cfg_map_get(map, "score-qtype-any", &obj);
++	if (result == ISC_R_SUCCESS) {
++		i = cfg_obj_asuint32(obj);
++		CHECKRANGE(obj, i < view->dampening->limit.maximum,
++			   "invalid '{score-qtype-any %d;}'", i);
++	}
++	view->dampening->score.qtype_any = i;
++
++	i = 500;
++	obj = NULL;
++	result = cfg_map_get(map, "minimum-score-size", &obj);
++	if (result == ISC_R_SUCCESS) {
++		i = cfg_obj_asuint32(obj);
++		CHECKRANGE(obj, i < ISC_UINT16_MAX / 4,
++			   "invalid '{minimum-score-size %d;}'", i);
++	}
++	view->dampening->score.minimum_size = i;
++
++	i = ISC_MAX(4000,4*view->dampening->score.minimum_size);
++	obj = NULL;
++	result = cfg_map_get(map, "maximum-score-size", &obj);
++	if (result == ISC_R_SUCCESS) {
++		i = cfg_obj_asuint32(obj);
++		CHECKRANGE(obj, i > view->dampening->score.minimum_size && i <= ISC_UINT16_MAX,
++			   "invalid '{maximum-score-size %d;}'", i);
++	}
++	view->dampening->score.maximum_size = i;
++
++	i = 100;
++	obj = NULL;
++	result = cfg_map_get(map, "score-size", &obj);
++	if (result == ISC_R_SUCCESS) {
++		i = cfg_obj_asuint32(obj);
++		CHECKRANGE(obj, i < view->dampening->limit.maximum,
++			   "invalid '{score-size %d;}'", i);
++	}
++	view->dampening->score.size_penalty = i;
++
++	i = 100;
++	obj = NULL;
++	result = cfg_map_get(map, "score-duplicates", &obj);
++	if (result == ISC_R_SUCCESS) {
++		i = cfg_obj_asuint32(obj);
++		CHECKRANGE(obj, i < view->dampening->limit.maximum,
++			   "invalid '{score-duplicates %d;}'", i);
++	}
++	view->dampening->score.duplicates = i;
++
++	i = 24;
++	obj = NULL;
++	result = cfg_map_get(map, "IPv4-prefix-length", &obj);
++	if (result == ISC_R_SUCCESS) {
++		i = cfg_obj_asuint32(obj);
++		CHECKRANGE(obj, i >= 8 && i <= 32,
++			   "invalid '{IPv4-prefix-length %d;}'", i);
++	}
++	view->dampening->prefixlen.ipv4 = i;
++
++	i = 48;
++	obj = NULL;
++	result = cfg_map_get(map, "IPv6-prefix-length", &obj);
++	if (result == ISC_R_SUCCESS) {
++		i = cfg_obj_asuint32(obj);
++		CHECKRANGE(obj, i >= 16 && i <= 128,
++			   "invalid '{IPv6-prefix-length %d;}'", i);
++	}
++	view->dampening->prefixlen.ipv6 = i;
++
++	obj = NULL;
++	result = cfg_map_get(map, "exempt-clients", &obj);
++	if (result == ISC_R_SUCCESS) {
++		result = cfg_acl_fromconfig(obj, config, ns_g_lctx,
++					    ns_g_aclconfctx, ns_g_mctx,
++					    0, &view->dampening->exempt);
++		CHECKRANGE(obj, result == ISC_R_SUCCESS,
++			   "invalid %s", "address_match_list");
++	}
++
++	i = 0;
++	obj = NULL;
++	result = cfg_map_get(map, "report-interval", &obj);
++	if (result == ISC_R_SUCCESS) {
++		i = cfg_obj_asuint32(obj);
++	}
++	view->dampening->statistics.report_interval = i;
++
++	isc_log_write(ns_g_lctx, NS_LOGCATEGORY_GENERAL,
++		      NS_LOGMODULE_SERVER, ISC_LOG_INFO,
++		      "Dampening configured to max_entries=%d prefixlen{ipv4=%d ipv6=%d} decay{halflife=%d updatedelay=%d} limit{max=%d enable=%d disable=%d irrelevant=%d} score{first=%d each=%d any=%d dup=%d size=%d mins=%d maxs=%d} report=%d",
++		      view->dampening->max_entries,
++		      view->dampening->prefixlen.ipv4,
++		      view->dampening->prefixlen.ipv6,
++		      view->dampening->decay.halflife,
++		      view->dampening->decay.updatedelay,
++		      view->dampening->limit.maximum,
++		      view->dampening->limit.enable_dampening,
++		      view->dampening->limit.disable_dampening,
++		      view->dampening->limit.irrelevant,
++		      view->dampening->score.first_query,
++		      view->dampening->score.per_query,
++		      view->dampening->score.qtype_any,
++		      view->dampening->score.duplicates,
++		      view->dampening->score.size_penalty,
++		      view->dampening->score.minimum_size,
++		      view->dampening->score.maximum_size,
++		      view->dampening->statistics.report_interval
++		      );
++	return (ISC_R_SUCCESS);
++cleanup:
++	dns_dampening_destroy(view);
++	return (result);
++}
++
+ /*
+  * Configure 'view' according to 'vconfig', taking defaults from 'config'
+  * where values are missing in 'vconfig'.
+@@ -3531,6 +3765,17 @@ configure_view(dns_view_t *view, cfg_obj_t *config, cfg_obj_t *vconfig,
+ 	}
+ #endif /* USE_RRL */
+ 
++	/*
++	 * Activate dampening
++	 */
++	obj = NULL;
++	result = ns_config_get(maps, "dampening", &obj);
++	if (result == ISC_R_SUCCESS) {
++		result = configure_dampening(view, config, obj);
++		if (result != ISC_R_SUCCESS)
++			goto cleanup;
++	}
++
+ 	result = ISC_R_SUCCESS;
+ 
+  cleanup:
+diff --git a/bin/named/statschannel.c b/bin/named/statschannel.c
+index 8ec08d7..48070fd 100644
+--- a/bin/named/statschannel.c
++++ b/bin/named/statschannel.c
+@@ -215,6 +215,9 @@ init_desc(void) {
+ 	SET_NSSTATDESC(rateslipped, "responses truncated for rate limits",
+ 		       "RateSlipped");
+ #endif /* USE_RRL */
++	SET_NSSTATDESC(dampened,
++		       "query dropped due to dampening",
++		       "Dampened");
+ 	INSIST(i == dns_nsstatscounter_max);
+ 
+ 	/* Initialize resolver statistics */
+diff --git a/configure b/configure
+index dc75c14..e272913 100755
+--- a/configure
++++ b/configure
+@@ -824,6 +824,7 @@ OPENSSLGOSTLINKSRCS
+ OPENSSLGOSTLINKOBJS
+ DST_OPENSSL_INC
+ USE_OPENSSL
++GEOIP_LIBS
+ LWRES_PLATFORM_NEEDSYSSELECTH
+ ISC_PLATFORM_NEEDSYSSELECTH
+ ISC_PLATFORM_HAVEDEVPOLL
+@@ -961,6 +962,7 @@ with_openssl
+ enable_openssl_version_check
+ with_ecdsa
+ with_gost
++with_geoip
+ enable_openssl_hash
+ with_pkcs11
+ with_gssapi
+@@ -1675,6 +1677,7 @@ Optional Packages:
+ 			  (Required for DNSSEC)
+   --with-ecdsa            OpenSSL ECDSA
+   --with-gost             OpenSSL GOST
++  --with-geoip=PATH   Specify path for system-supplied GeoIP
+   --with-pkcs11=PATH      Build with PKCS11 support yes|no|path
+                           (PATH is for the PKCS11 provider)
+   --with-gssapi=PATH      Specify path for system-supplied GSSAPI [default=yes]
+@@ -12420,7 +12423,7 @@ case "$host" in
+ 	# as it breaks how the two halves (Basic and Advanced) of the IPv6
+ 	# Socket API were designed to be used but we have to live with it.
+ 	# Define _GNU_SOURCE to pull in the IPv6 Advanced Socket API.
+-	*-linux* | *-kfreebsd*-gnu)
++	*-linux*|*-gnu*)
+ 		STD_CDEFINES="$STD_CDEFINES -D_GNU_SOURCE"
+ 		CPPFLAGS="$CPPFLAGS -D_GNU_SOURCE"
+ 		;;
+@@ -13927,6 +13930,147 @@ $as_echo "#define HAVE_OPENSSL_GOST 1" >>confdefs.h
+ esac
+ 
+ #
++# Check for GeoIP - if yes enable it
++#
++
++{ $as_echo "$as_me:${as_lineno-$LINENO}: checking for GeoIP library" >&5
++$as_echo_n "checking for GeoIP library... " >&6; }
++
++# Check whether --with-geoip was given.
++if test "${with_geoip+set}" = set; then :
++  withval=$with_geoip; use_geoip="$withval"
++else
++  use_geoip="no"
++fi
++
++
++#geoipdirs="/usr/local /usr/pkg /usr/kerberos /usr"
++#
++#if test "$use_geoip" = "yes"
++#then
++#	for d in $geoipdirs
++#	do
++#		if test -f $d/include/include/GeoIP.h -o -f $d/include/GeoIP.h
++#		then
++#			use_geoip=$d
++#			break
++#		fi
++#	done
++#fi
++
++
++$as_echo "#define GEOIP_V6 1" >>confdefs.h
++
++case "$use_geoip" in
++	no)
++		{ $as_echo "$as_me:${as_lineno-$LINENO}: result: disabled" >&5
++$as_echo "disabled" >&6; }
++		USE_GEOIP=''
++		;;
++#	yes)
++#		AC_MSG_ERROR([--with-geoip must specify a path])
++#		;;
++	*)
++		ac_fn_c_check_header_mongrel "$LINENO" "GeoIP.h" "ac_cv_header_GeoIP_h" "$ac_includes_default"
++if test "x$ac_cv_header_GeoIP_h" = xyes; then :
++
++else
++  as_fn_error $? "GeoIP library header files not found" "$LINENO" 5
++
++fi
++
++
++		{ $as_echo "$as_me:${as_lineno-$LINENO}: checking for GeoIP_open in -lGeoIP" >&5
++$as_echo_n "checking for GeoIP_open in -lGeoIP... " >&6; }
++if ${ac_cv_lib_GeoIP_GeoIP_open+:} false; then :
++  $as_echo_n "(cached) " >&6
++else
++  ac_check_lib_save_LIBS=$LIBS
++LIBS="-lGeoIP  $LIBS"
++cat confdefs.h - <<_ACEOF >conftest.$ac_ext
++/* end confdefs.h.  */
++
++/* Override any GCC internal prototype to avoid an error.
++   Use char because int might match the return type of a GCC
++   builtin and then its argument prototype would still apply.  */
++#ifdef __cplusplus
++extern "C"
++#endif
++char GeoIP_open ();
++int
++main ()
++{
++return GeoIP_open ();
++  ;
++  return 0;
++}
++_ACEOF
++if ac_fn_c_try_link "$LINENO"; then :
++  ac_cv_lib_GeoIP_GeoIP_open=yes
++else
++  ac_cv_lib_GeoIP_GeoIP_open=no
++fi
++rm -f core conftest.err conftest.$ac_objext \
++    conftest$ac_exeext conftest.$ac_ext
++LIBS=$ac_check_lib_save_LIBS
++fi
++{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_GeoIP_GeoIP_open" >&5
++$as_echo "$ac_cv_lib_GeoIP_GeoIP_open" >&6; }
++if test "x$ac_cv_lib_GeoIP_GeoIP_open" = xyes; then :
++
++
++$as_echo "#define SUPPORT_GEOIP 1" >>confdefs.h
++
++
++else
++
++				as_fn_error $? "GeoIP library header files were found but the library was not found" "$LINENO" 5
++
++fi
++
++		GEOIP_LIBS="-lGeoIP"
++                { $as_echo "$as_me:${as_lineno-$LINENO}: checking for for GeoIP IPv6 support" >&5
++$as_echo_n "checking for for GeoIP IPv6 support... " >&6; }
++                cat confdefs.h - <<_ACEOF >conftest.$ac_ext
++/* end confdefs.h.  */
++
++#include <GeoIP.h>
++#include <netinet/in.h>
++
++int
++main ()
++{
++
++
++extern const struct in6_addr in6addr_loopback;
++static GeoIP *geoip = NULL;
++
++const char* value = value = GeoIP_country_name_by_ipnum_v6(geoip, (geoipv6_t)in6addr_loopback);
++
++
++
++  ;
++  return 0;
++}
++_ACEOF
++if ac_fn_c_try_compile "$LINENO"; then :
++  { $as_echo "$as_me:${as_lineno-$LINENO}: result: yes" >&5
++$as_echo "yes" >&6; }
++		GEOIP_V6="#define GEOIP_V6 1"
++else
++  { $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
++$as_echo "no" >&6; }
++		GEOIP_V6="#undef GEOIP_V6"
++fi
++rm -f core conftest.err conftest.$ac_objext conftest.$ac_ext
++$as_echo "#define GEOIP_V6 1" >>confdefs.h
++
++		;;
++esac
++
++
++
++#
+ # This would include the system openssl path (and linker options to use
+ # it as needed) if it is found.
+ #
+@@ -15275,7 +15419,7 @@ fi
+ 		# LinuxThreads requires some changes to the way we
+ 		# deal with signals.
+ 		#
+-		*-linux*)
++		*-linux*|*-kfreebsd*-gnu)
+ 			$as_echo "#define HAVE_LINUXTHREADS 1" >>confdefs.h
+ 
+ 			;;
+diff --git a/debian/changelog b/debian/changelog
+index da8e108..75a8cc3 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,3 +1,31 @@
++bind9 (1:9.9.5.dfsg-1+damp1-2) experimental; urgency=low
++
++  [Benny Baumann]
++
++  * Build source package with complete debugging symbols
++    to ease tracking bugs.
++
++ -- Benny Baumann <BenBE@geshi.org>  Mon, 10 Mar 2014 20:36:21 +0100
++
++bind9 (1:9.9.5.dfsg-1+damp1-1) experimental; urgency=low
++
++  [Wilfried Klaebe]
++
++  * Remove heap implementation from dampening patch;
++    Lutz said it was found to be unstable.
++
++ -- Wilfried Klaebe <w+debian@chaos.in-kiel.de>  Sun, 09 Mar 2014 15:04:00 +0100
++
++bind9 (1:9.9.5.dfsg-1+damp1) experimental; urgency=low
++
++  [Wilfried Klaebe]
++
++  * applied DNS Dampening patch from Lutz Donnerhacke. See:
++    http://lutz.donnerhacke.de/Blog/DNS-Dampening
++    http://lutz.donnerhacke.de/Blog/DNS-Dampening-unter-der-Lupe
++
++ -- Wilfried Klaebe <w+debian@chaos.in-kiel.de>  Thu, 06 Mar 2014 14:02:05 +0100
++
+ bind9 (1:9.9.5.dfsg-1) experimental; urgency=low
+ 
+   [Internet Software Consortium, Inc]
+diff --git a/debian/control b/debian/control
+index a4792f8..d65888f 100644
+--- a/debian/control
++++ b/debian/control
+@@ -20,6 +20,17 @@ Description: Internet Domain Name Server
+  .
+  This package provides the server and related configuration files.
+ 
++Package: bind9-dbg
++Architecture: any
++Depends: ${shlibs:Depends}, ${misc:Depends}, debconf | debconf-2.0, netbase, adduser, libdns100 (=${binary:Version}), libisccfg90 (=${binary:Version}), libisc95 (=${binary:Version}), libisccc90 (=${binary:Version}), lsb-base (>= 3.2-14), bind9utils (=${binary:Version}), liblwres90 (=${binary:Version}), libbind9-90 (=${binary:Version}), net-tools
++Conflicts: bind, apparmor-profiles (<< 2.1+1075-0ubuntu4)
++Replaces: bind, dnsutils (<< 1:9.1.0-3), apparmor-profiles (<< 2.1+1075-0ubuntu4), bind9utils (<< 1:9.9.3.dfsg.P2-3)
++Suggests: dnsutils, bind9-doc, resolvconf, ufw
++Description: Internet Domain Name Server (Debug Symbols)
++ ${Description}
++ .
++ This package provides the server and related configuration files.
++
+ Package: bind9utils
+ Architecture: any
+ Replaces: bind9 (<= 1:9.5.0~b2-1)
+@@ -28,6 +39,14 @@ Description: Utilities for BIND
+  This package provides various utilities that are useful for maintaining a
+  working BIND installation.
+ 
++Package: bind9utils-dbg
++Architecture: any
++Replaces: bind9 (<= 1:9.5.0~b2-1)
++Depends: ${shlibs:Depends}, ${misc:Depends}, python, python-argparse
++Description: Utilities for BIND (Debug Symbols)
++ This package provides various utilities that are useful for maintaining a
++ working BIND installation.
++
+ Package: bind9-doc
+ Architecture: all
+ Section: doc
+@@ -44,6 +63,14 @@ Description: Transitional package
+  This dummy package is provided for a smooth transition from the previous
+  host package.  It may safely be removed after installation.
+ 
++Package: host-dbg
++Priority: standard
++Architecture: all
++Depends: ${misc:Depends}, bind9-host
++Description: Transitional package (Debug Symbols)
++ This dummy package is provided for a smooth transition from the previous
++ host package.  It may safely be removed after installation.
++
+ Package: bind9-host
+ Priority: standard
+ Architecture: any
+@@ -55,6 +82,17 @@ Description: Version of 'host' bundled with BIND 9.X
+  This package provides the 'host' program in the form that is bundled with
+  the BIND 9.X sources.
+ 
++Package: bind9-host-dbg
++Priority: standard
++Architecture: any
++Depends: ${shlibs:Depends}, ${misc:Depends}, libdns100 (=${binary:Version}), libisccfg90 (=${binary:Version}), libisc95 (=${binary:Version}), liblwres90 (=${binary:Version}), libbind9-90 (=${binary:Version})
++Conflicts: host (<<1:9.7.0), dnsutils (<< 1:9.0.0)
++Replaces: dnsutils (<< 1:9.0.0), host (<< 1:9.7.0)
++Provides: host
++Description: Version of 'host' bundled with BIND 9.X (Debug Symbols)
++ This package provides the 'host' program in the form that is bundled with
++ the BIND 9.X sources.
++
+ Package: libbind-dev
+ Section: libdevel
+ Architecture: any
+@@ -80,6 +118,19 @@ Description: BIND9 Shared Library used by BIND
+  This package delivers the libbind9 shared library used by BIND's daemons and
+  clients.
+ 
++Package: libbind9-90-dbg
++Section: libs
++Priority: standard
++Architecture: any
++Conflicts: libbind0, libbind9-41
++Replaces: libbind0
++Depends: ${shlibs:Depends}, ${misc:Depends}, libdns100, libisccfg90, libisc95
++Description: BIND9 Shared Library used by BIND (Debug Symbols)
++ ${Description}
++ .
++ This package delivers the libbind9 shared library used by BIND's daemons and
++ clients.
++
+ Package: libdns100
+ Section: libs
+ Priority: standard
+@@ -93,6 +144,19 @@ Description: DNS Shared Library used by BIND
+  This package delivers the libdns shared library used by BIND's daemons and
+  clients.
+ 
++Package: libdns100-dbg
++Section: libs
++Priority: standard
++Architecture: any
++Conflicts: libbind0, libbind9-41
++Replaces: libbind0
++Depends: ${shlibs:Depends}, ${misc:Depends}, libisc95
++Description: DNS Shared Library used by BIND (Debug Symbols)
++ ${Description}
++ .
++ This package delivers the libdns shared library used by BIND's daemons and
++ clients.
++
+ Package: libisc95
+ Section: libs
+ Priority: standard
+@@ -106,6 +170,19 @@ Description: ISC Shared Library used by BIND
+  This package delivers the libisc shared library used by BIND's daemons and
+  clients.
+ 
++Package: libisc95-dbg
++Section: libs
++Priority: standard
++Architecture: any
++Conflicts: libbind0, libbind9-41
++Replaces: libbind0
++Depends: ${shlibs:Depends}, ${misc:Depends}
++Description: ISC Shared Library used by BIND (Debug Symbols)
++ ${Description}
++ .
++ This package delivers the libisc shared library used by BIND's daemons and
++ clients.
++
+ Package: liblwres90
+ Section: libs
+ Priority: standard
+@@ -119,6 +196,19 @@ Description: Lightweight Resolver Library used by BIND
+  This package delivers the liblwres shared library used by BIND's daemons
+  and clients.
+ 
++Package: liblwres90-dbg
++Section: libs
++Priority: standard
++Architecture: any
++Replaces: libbind0
++Conflicts: libbind0
++Depends: ${shlibs:Depends}, ${misc:Depends}
++Description: Lightweight Resolver Library used by BIND (Debug Symbols)
++ ${Description}
++ .
++ This package delivers the liblwres shared library used by BIND's daemons
++ and clients.
++
+ Package: libisccc90
+ Section: libs
+ Architecture: any
+@@ -131,6 +221,18 @@ Description: Command Channel Library used by BIND
+  This package delivers the libisccc shared library used by BIND's daemons
+  and clients, particularly rndc.
+ 
++Package: libisccc90-dbg
++Section: libs
++Architecture: any
++Conflicts: libbind0, libbind9-41
++Replaces: libbind0
++Depends: ${shlibs:Depends}, ${misc:Depends}, libisc95
++Description: Command Channel Library used by BIND (Debug Symbols)
++ ${Description}
++ .
++ This package delivers the libisccc shared library used by BIND's daemons
++ and clients, particularly rndc.
++
+ Package: libisccfg90
+ Section: libs
+ Architecture: any
+@@ -144,6 +246,19 @@ Description: Config File Handling Library used by BIND
+  and clients to read and write ISC-style configuration files like named.conf
+  and rndc.conf.
+ 
++Package: libisccfg90-dbg
++Section: libs
++Architecture: any
++Conflicts: libbind0, libbind9-41
++Replaces: libbind0
++Depends: ${shlibs:Depends}, ${misc:Depends}, libdns100, libisccc90, libisc95
++Description: Config File Handling Library used by BIND (Debug Symbols)
++ ${Description}
++ .
++ This package delivers the libisccfg shared library used by BIND's daemons
++ and clients to read and write ISC-style configuration files like named.conf
++ and rndc.conf.
++
+ Package: dnsutils
+ Priority: standard
+ Architecture: any
+@@ -161,6 +276,23 @@ Description: Clients provided with BIND
+   - nslookup - the older way to do it
+   - nsupdate - perform dynamic updates (See RFC2136)
+ 
++Package: dnsutils-dbg
++Priority: standard
++Architecture: any
++Depends: ${shlibs:Depends}, ${misc:Depends}, bind9-host | host, libdns100 (=${binary:Version}), libisccfg90 (=${binary:Version}), libisc95 (=${binary:Version}), liblwres90 (=${binary:Version}), libbind9-90 (=${binary:Version})
++Suggests: rblcheck
++Conflicts: netstd (<< 2.00)
++Replaces: bind, bind9 (<< 1:9.1.0-3)
++Description: Clients provided with BIND (Debug Symbols)
++ ${Description}
++ .
++ This package delivers various client programs related to DNS that are
++ derived from the BIND source tree.
++ .
++  - dig - query the DNS in various ways
++  - nslookup - the older way to do it
++  - nsupdate - perform dynamic updates (See RFC2136)
++
+ Package: lwresd
+ Architecture: any
+ Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, libdns100 (=${binary:Version}), libisccfg90 (=${binary:Version}), libisccc90 (=${binary:Version}), libisc95 (=${binary:Version}), liblwres90 (=${binary:Version}), libbind9-90 (=${binary:Version})
+@@ -171,3 +303,14 @@ Description: Lightweight Resolver Daemon
+  the BIND 9 lightweight resolver library.  It is essentially a stripped-
+  down, caching-only name server that answers queries using the BIND 9
+  lightweight resolver protocol rather than the DNS protocol.
++
++Package: lwresd-dbg
++Architecture: any
++Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, libdns100 (=${binary:Version}), libisccfg90 (=${binary:Version}), libisccc90 (=${binary:Version}), libisc95 (=${binary:Version}), liblwres90 (=${binary:Version}), libbind9-90 (=${binary:Version})
++Recommends: libnss-lwres
++Suggests: bind9utils
++Description: Lightweight Resolver Daemon (Debug Symbols)
++ lwresd is the daemon providing name lookup services to clients that use
++ the BIND 9 lightweight resolver library.  It is essentially a stripped-
++ down, caching-only name server that answers queries using the BIND 9
++ lightweight resolver protocol rather than the DNS protocol.
+diff --git a/debian/rules b/debian/rules
+old mode 100644
+new mode 100755
+index 3dfef35..d53bea4
+--- a/debian/rules
++++ b/debian/rules
+@@ -55,6 +55,8 @@ configure-stamp:
+ 		--with-atf=no \
+ 		--enable-ipv6 \
+ 		--enable-filter-aaaa \
++		--enable-rrl \
++		--enable-full-report \
+ 		$(EXTRA_FEATURES)
+ 
+ 	touch $@
+@@ -173,7 +175,18 @@ binary-arch: build install
+ 	    install -m 644 -D debian/bind9.apport debian/bind9/usr/share/apport/package-hooks/bind9.py; \
+ 	fi
+ 	dh_link -a
+-	dh_strip -a
++	dh_strip -pbind9 --dbg-package=bind9-dbg --exclude=/etc --exclude=/lib --exclude=/usr/share
++	dh_strip -pbind9utils --dbg-package=bind9utils-dbg
++	dh_strip -phost --dbg-package=host-dbg
++	dh_strip -pbind9-host --dbg-package=bind9-host-dbg
++	dh_strip -plibbind9-90 --dbg-package=libbind9-90-dbg
++	dh_strip -plibdns100 --dbg-package=libdns100-dbg
++	dh_strip -plibisc95 --dbg-package=libisc95-dbg
++	dh_strip -pliblwres90 --dbg-package=liblwres90-dbg
++	dh_strip -plibisccc90 --dbg-package=libisccc90-dbg
++	dh_strip -plibisccfg90 --dbg-package=libisccfg90-dbg
++	dh_strip -pdnsutils --dbg-package=dnsutils-dbg
++	dh_strip -plwresd --dbg-package=lwresd-dbg
+ 	dh_compress -a
+ 	dh_fixperms -a
+ 	dh_makeshlibs -a
+diff --git a/doc/arm/Bv9ARM-book.xml b/doc/arm/Bv9ARM-book.xml
+index 0238065..48d8ebb 100644
+--- a/doc/arm/Bv9ARM-book.xml
++++ b/doc/arm/Bv9ARM-book.xml
+@@ -4532,6 +4532,22 @@ badresp:1,adberr:0,findfail:0,valfail:0]
+ 		    </para>
+ 		  </entry>
+ 		</row>
++		<row rowsep="0">
++		  <entry colname="1">
++		    <para><command>dampening</command></para>
++		  </entry>
++		  <entry colname="2">
++		    <para>
++		     The start and periodic notices of a penalty based
++		     suppression of incoming queries are logged at
++		     <command>info</command> severity in this category.
++		     Dampening events for prefixes as well as  
++		     periodic performance data comes into the same severity.
++		     Individual penalty values per query are logged in the
++		     <command>queries</command> category.
++		    </para>
++		  </entry>
++		</row>
+ 	      </tbody>
+ 	    </tgroup>
+ 	  </informaltable>
+@@ -4877,6 +4893,27 @@ badresp:1,adberr:0,findfail:0,valfail:0]
+ 	<optional> recursive-only <replaceable>yes_or_no</replaceable> </optional> <optional> max-policy-ttl <replaceable>number</replaceable> </optional> ;
+     } <optional> recursive-only <replaceable>yes_or_no</replaceable> </optional> <optional> max-policy-ttl <replaceable>number</replaceable> </optional>
+ 	<optional> break-dnssec <replaceable>yes_or_no</replaceable> </optional> <optional> min-ns-dots <replaceable>number</replaceable> </optional> ; </optional>
++    <optional> dampening {
++	<optional> halflife <replaceable>number</replaceable> ; </optional>
++	<optional> update-delay <replaceable>number</replaceable> ; </optional>
++	<optional> limit-maximum <replaceable>number</replaceable> ; </optional>
++	<optional> limit-enable-dampening <replaceable>number</replaceable> ; </optional>
++	<optional> limit-disable-dampening <replaceable>number</replaceable> ; </optional>
++	<optional> limit-irrelevant <replaceable>number</replaceable> ; </optional>
++	<optional> score-first-query <replaceable>number</replaceable> ; </optional>
++	<optional> score-per-query <replaceable>number</replaceable> ; </optional>
++	<optional> score-qtype-any <replaceable>number</replaceable> ; </optional>
++	<optional> minimum-score-size <replaceable>number</replaceable> ; </optional>
++	<optional> maximum-score-size <replaceable>number</replaceable> ; </optional>
++	<optional> score-size <replaceable>number</replaceable> ; </optional>
++	<optional> score-duplicates <replaceable>number</replaceable> ; </optional>
++	<optional> report-interval <replaceable>number</replaceable> ; </optional>
++	<optional> IPv4-prefix-length <replaceable>number</replaceable> ; </optional>
++	<optional> IPv6-prefix-length <replaceable>number</replaceable> ; </optional>
++	<optional> exempt-clients  { <replaceable>address_match_list</replaceable> } ; </optional>
++	<optional> max-table-size <replaceable>number</replaceable> ; </optional>
++	<optional> min-table-size <replaceable>number</replaceable> ; </optional>
++      } ; </optional>
+ };
+ </programlisting>
+ 
+@@ -9658,6 +9695,90 @@ ns.domain.com.rpz-nsdname   CNAME   .
+ 	    Responses that truncated by rate limits are included in
+ 	    <command>RateSlipped</command> and <command>RespTruncated</command>.
+ 	  </para>
++	
++	<sect3>
++	  <title>Dampening</title>
++	  <para>
++	    Spoofed UDP queries are a major security threat especially when
++	    reflected and possibly amplified by DNS servers. Dampening is a
++	    dynamically adapting method for dealing with such kinds of misuse.
++	    So dampening a about spoofing, hence TCP connections are not
++	    affected at all.
++	  </para>
++
++	  <para>
++	    Every piece of a query and its response is associated with
++	    specific penalty points. Those points aggregate over all queries
++	    from netblocks defined by <command>IPv6-prefix-length</command> and
++	    <command>IPv4-prefix-length</command>. Over the time, the penalty
++	    decrease exponentially (determined by <command>halflife</command>).
++	    So each netblock gains a penalty over time characteristics.
++	  </para>
++
++	  <para>
++	    In order to allow local clients, which should be protected by
++	    anti-spoof techniques at the edge of the operated network, to
++	    send any amount of queries without fear the risks of being blocked,
++	    push them into a seperate view with other or no dampening rules or
++	    add them to <command>exempt-clients</command>.
++	  </para>
++
++	  <para>
++	    If the penalty exeeds the <command>limit-enable-dampening</command>,
++	    the netblock gets dampened. No further query processing will occur.
++	    Every further query is dropped silently before inspecting the
++	    content of the query itself. So the penalty value can decrease
++	    slowly, if the sender collect not quickly enough further
++	    <command>score-per-query</command> points. Please note, that
++	    penalty values can't exceed <command>limit-maximum</command>.
++	  </para>
++
++	  <para>
++	    If the penalty drops below <command>limit-disable-dampening</command>,
++	    query processing for the netblock switchs back to normal. If
++	    the penalty drops as low as <command>limit-irrelevant</command>,
++	    the netblock is removed from the statistics. The next query
++	    gains <command>score-first-query</command> for this netblock
++	    and reenteres the collection.
++	  </para>
++
++	  <para>
++	    Comment current attacks gain a huge amplification from ANY query
++	    to DNSSEC signed zones. So each ANY query is charged with
++	    additional <command>score-qtype-any</command> points. Furthermore
++	    current attackers repeat the same packet over and over again, so
++	    keeping the same id in each query. Such repetitions are recognised
++	    and give <command>score-duplicates</command> points times the
++	    repetition of this id.
++	  </para>
++
++	  <para>
++	    Amplification attacks aims to huge answers, so the next penalty
++	    comes from the response size. The penalty increased lineary from
++	    zero for responses up to <command>minimum-score-size</command>
++	    bytes. The maximum penalty of <command>score-size</command> is
++	    reached when the response reaches or exceeds
++	    <command>maximum-score-size</command> bytes.
++	  </para>
++
++	  <para>
++	    In order to minimize expensive calulations for each query, the
++	    penalty decay is delayed by at least
++	    <command>update-delay</command> seconds. The statistics table
++	    has space for <command>min-table-size</command> elements but
++	    might increase to <command>max-table-size</command> elements if
++	    necessary.
++	  </para>
++
++	  </para>
++	    In order to compare various storage models, which are activated
++	    at compile time, regular statistics can by extracted by setting
++	    <command>report-interval</command> to the seconds between reports.
++	    Those statistic lines contain the numerical index of the
++	    implementation <command>Stats for #...</command>, the number of
++	    queries processed, dampened, and exempted <command>queries ././.</command>,
++	    and aggregated time spend in the various functions.
++	  <para>
+ 	</sect3>
+       </sect2>
+ 
+@@ -14437,6 +14558,19 @@ HOST-127.EXAMPLE. MX 0 .
+ 		      </para>
+ 		    </entry>
+ 		  </row>
++		  <row rowsep="0">
++		    <entry colname="1">
++		      <para><command>Dampened</command></para>
++		    </entry>
++		    <entry colname="2">
++		      <para><command></command></para>
++		    </entry>
++		    <entry colname="3">
++		      <para>
++			Queries dropped due to dampening
++		      </para>
++		    </entry>
++		  </row>
+ 		</tbody>
+               </tgroup>
+             </informaltable>
+diff --git a/lib/dns/Makefile.in b/lib/dns/Makefile.in
+index 5bf850a..f2bb0fa 100644
+--- a/lib/dns/Makefile.in
++++ b/lib/dns/Makefile.in
+@@ -60,6 +60,7 @@ RRLOBJS =	rrl.@O@
+ # Alphabetically
+ DNSOBJS =	acache.@O@ acl.@O@ adb.@O@ byaddr.@O@ \
+ 		cache.@O@ callbacks.@O@ clientinfo.@O@ compress.@O@ \
++		dampening.@O@ \
+ 		db.@O@ dbiterator.@O@ dbtable.@O@ diff.@O@ dispatch.@O@ \
+ 		dlz.@O@ dns64.@O@ dnssec.@O@ ds.@O@ forward.@O@ iptable.@O@ \
+ 		dynamic_db.@O@ journal.@O@ keydata.@O@ keytable.@O@ \
+@@ -90,6 +91,7 @@ DSTSRCS =	@DST_EXTRA_SRCS@ @OPENSSLLINKSRCS@ \
+ 
+ DNSSRCS =	acache.c acl.c adb.c byaddr.c \
+ 		cache.c callbacks.c clientinfo.c compress.c \
++		dampening.c \
+ 		db.c dbiterator.c dbtable.c diff.c dispatch.c \
+ 		dlz.c dns64.c dnssec.c ds.c forward.c iptable.c journal.c \
+ 		dynamic_db.c keydata.c keytable.c lib.c log.c lookup.c \
+diff --git a/lib/dns/dampening.c b/lib/dns/dampening.c
+new file mode 100644
+index 0000000..434f149
+--- /dev/null
++++ b/lib/dns/dampening.c
+@@ -0,0 +1,700 @@
++/*
++ * (C) 2012 Lutz Donnerhacke
++ */
++
++#include <config.h>
++#include <math.h>
++#include <sys/time.h>
++
++/*
++#include <isc/buffer.h>
++#include <isc/net.h>
++#include <isc/netaddr.h>
++#include <isc/print.h>
++#include <isc/stdlib.h>
++#include <isc/string.h>
++#include <isc/util.h>
++#include <dns/db.h>
++#include <dns/fixedname.h>
++#include <dns/rdata.h>
++#include <dns/rdataset.h>
++#include <dns/rdatastruct.h>
++#include <dns/result.h>
++#include <dns/rpz.h>
++#include <dns/view.h>
++ */
++
++#include <isc/mem.h>
++#include <dns/dampening.h>
++#include <dns/log.h>
++#include <dns/view.h>
++
++#define DAMPENING_STATISTICS_DO(impl, field, command)	do { \
++   struct timeval before, after, diff; \
++   gettimeofday(&before, NULL); \
++   command; \
++   gettimeofday(&after, NULL); \
++   timersub(&after, &before, &diff); \
++   timeradd(&diff, &((impl)->statistics.field), &after); \
++   (impl)->statistics.field = after; \
++}  while(0)
++#define DAMPENING_STATISTICS_INC(impl, field)	do { (impl)->statistics.field++; } while(0)
++
++
++static isc_result_t queue_init(isc_mem_t *, dns_dampening_implementation_t *, dns_dampening_t *, uint16_t);
++
++static isc_result_t
++(*(implementations[])) (isc_mem_t *, dns_dampening_implementation_t *,
++			dns_dampening_t *, uint16_t) = {
++	queue_init
++};
++
++
++
++static void
++extract_prefix(isc_netaddr_t * prefix, const isc_netaddr_t * addr, const struct dns_dampening_prefix * prefixlen) {
++   int bytes, bits, len, max = -1;
++   unsigned char *p = NULL;
++
++   INSIST(prefix != NULL);
++   INSIST(addr != NULL);
++   INSIST(prefixlen != NULL);
++
++   memcpy(prefix, addr, sizeof(*prefix));
++
++   switch(addr->family) {
++    case AF_INET:
++      p = (unsigned char *)&(prefix->type.in);
++      max = 32;
++      len = prefixlen->ipv4;
++      break;
++    case AF_INET6:
++      p = (unsigned char *)&(prefix->type.in6);
++      max = 128;
++      len = prefixlen->ipv6;
++      break;
++    default:
++      return;
++   }
++
++   INSIST(0 <= len && len <= max);
++   INSIST(p != NULL);
++
++   bytes = len / 8;
++   bits  = len % 8;
++
++   if(bits > 0)
++     p[bytes++] &= (0xFF << (8-bits)) & 0xFF;
++
++   for(max /= 8; bytes < max; bytes++)
++     p[bytes] = 0;
++
++}
++
++static void
++log_dampening(const dns_dampening_t * conf, const isc_netaddr_t * prefix, int enabled) {
++   char pb[ISC_NETADDR_FORMATSIZE];
++   int len;
++
++   INSIST(conf != NULL);
++   INSIST(prefix != NULL);
++
++   switch(prefix->family) {
++    case AF_INET : len = conf->prefixlen.ipv4; break;
++    case AF_INET6: len = conf->prefixlen.ipv6; break;
++    default      : return;
++   }
++
++   if(isc_log_wouldlog(dns_lctx, ISC_LOG_INFO)) {
++      isc_netaddr_format(prefix, pb, sizeof(pb));
++      isc_log_write(dns_lctx, DNS_LOGCATEGORY_DAMPENING,
++		    DNS_LOGMODULE_REQUEST, ISC_LOG_INFO,
++		    "%s/%d dampening %s.",pb, len,
++		    enabled ? "activated" : "removed");
++   }
++}
++
++/*
++ * Decay the penalty value, if necessary and add the new points.
++ * Return zero if the entry is below the drop limit. Caller should remove it
++ * from the table. Otherwise the caller has to update the structure to reflect
++ * the modified values.
++ */
++static int
++update_penalty(const dns_dampening_t * conf, dns_dampening_entry_t * entry,
++	       uint16_t points, isc_stdtime_t now) {
++   int timediff;
++
++   INSIST(conf != NULL);
++   INSIST(entry != NULL);
++
++   timediff = now - entry->last_updated;
++   if(timediff > conf->decay.updatedelay) {
++      float penalty = entry->penalty;
++      penalty *= exp(-(0.693*timediff)/conf->decay.halflife);
++      entry->penalty = penalty;
++      entry->last_updated = now;
++   }
++   if(entry->penalty >= conf->limit.maximum - points)
++     entry->penalty = conf->limit.maximum;
++   else
++     entry->penalty += points;
++
++   if(entry->dampening == 1 && entry->penalty < conf->limit.disable_dampening) {
++      entry->dampening = 0;
++      log_dampening(conf, &entry->netaddr, entry->dampening);
++   }
++
++   if(entry->dampening == 0 && entry->penalty > conf->limit.enable_dampening) {
++      entry->dampening = 1;
++      log_dampening(conf, &entry->netaddr, entry->dampening);
++   }
++
++   if(entry->penalty < conf->limit.irrelevant &&
++      timediff > conf->decay.updatedelay) {
++      return 0;
++   } else {
++      return 1;
++   }
++}
++
++dns_dampening_state_t
++dns_dampening_query(dns_dampening_t * damp, const isc_sockaddr_t * addr,
++		    isc_stdtime_t now, int * penalty) {
++   isc_netaddr_t netaddr, prefix;
++   dns_dampening_state_t final_state = DNS_DAMPENING_STATE_NORMAL, state = DNS_DAMPENING_STATE_NORMAL;
++   dns_dampening_entry_t * entry;
++   dns_dampening_implementation_t *impl;
++   int max_penalty = -2;
++
++   RUNTIME_CHECK( damp != NULL );
++   RUNTIME_CHECK( addr != NULL );
++
++   isc_netaddr_fromsockaddr(&netaddr, addr);
++   extract_prefix(&prefix, &netaddr, &(damp->prefixlen));
++
++   for(impl = damp->workers;
++       impl - damp->workers < damp->workers_count;
++       impl++) {
++
++      if(damp->exempt != NULL) {
++	 int match;
++
++	 if (ISC_R_SUCCESS == dns_acl_match(&netaddr, NULL, damp->exempt,
++					    NULL, &match, NULL) &&
++	     match > 0) {
++	    max_penalty = ISC_MAX(max_penalty, -1);
++	    DAMPENING_STATISTICS_INC(impl,skipped);
++	    continue;
++	 }
++      }
++
++      DAMPENING_STATISTICS_DO(impl, lock, LOCK(&impl->lock));
++
++      if(damp->statistics.report_interval > 0 &&
++	 damp->statistics.report_interval + impl->statistics.last_report <= now) {
++	 if(isc_log_wouldlog(dns_lctx, ISC_LOG_INFO))
++	   isc_log_write(dns_lctx, DNS_LOGCATEGORY_DAMPENING,
++			 DNS_LOGMODULE_REQUEST, ISC_LOG_INFO,
++			 "Stats for #%d: queries %u/%u/%u: lock=%ld.%06ld, search=%ld.%06ld, update=%ld.%06ld, add=%ld.%06ld",
++			 impl - damp->workers,
++			 impl->statistics.allowed, impl->statistics.denied, impl->statistics.skipped,
++			 impl->statistics.lock.tv_sec, impl->statistics.lock.tv_usec,
++			 impl->statistics.search.tv_sec, impl->statistics.search.tv_usec,
++			 impl->statistics.update.tv_sec, impl->statistics.update.tv_usec,
++			 impl->statistics.add.tv_sec, impl->statistics.add.tv_usec);
++	 memset(&impl->statistics, 0, sizeof(impl->statistics));
++	 impl->statistics.last_report = now;
++      }
++
++      DAMPENING_STATISTICS_DO(impl, search, entry = impl->search(impl->data, &prefix));
++      if(entry == NULL) {
++	 state = DNS_DAMPENING_STATE_NORMAL;
++	 DAMPENING_STATISTICS_DO(impl, add, impl->add(impl->data, &prefix, damp->score.first_query, now));
++	 max_penalty = ISC_MAX(max_penalty, 0);
++      } else {
++	 state = entry->dampening == 1
++	   ? DNS_DAMPENING_STATE_SUPPRESS
++	   : DNS_DAMPENING_STATE_NORMAL;
++	 max_penalty = ISC_MAX(max_penalty, entry->penalty);
++	 DAMPENING_STATISTICS_DO(impl, update, impl->update(impl->data, &entry, damp->score.per_query, now));
++      }
++
++      if(state == DNS_DAMPENING_STATE_NORMAL) {
++	 DAMPENING_STATISTICS_INC(impl, allowed);
++      } else {
++	 DAMPENING_STATISTICS_INC(impl, denied);
++	 final_state = state;	       /* any dampening suffice */
++      }
++
++      UNLOCK(&impl->lock);
++   }
++
++   if(penalty != NULL) *penalty = max_penalty;
++   return final_state;
++}
++
++void dns_dampening_score_qtype(dns_dampening_t * damp,
++			       const isc_sockaddr_t * addr,
++			       isc_stdtime_t now,
++			       dns_messageid_t message_id,
++			       int qtype) {
++   isc_netaddr_t netaddr, prefix;
++   dns_dampening_entry_t * entry;
++   uint16_t points;
++   dns_dampening_implementation_t *impl;
++
++   RUNTIME_CHECK( damp != NULL );
++   RUNTIME_CHECK( addr != NULL );
++
++   isc_netaddr_fromsockaddr(&netaddr, addr);
++   extract_prefix(&prefix, &netaddr, &(damp->prefixlen));
++
++   for(impl = damp->workers;
++       impl - damp->workers < damp->workers_count;
++       impl++) {
++
++      if(damp->exempt != NULL) {
++	 int match;
++
++	 if (ISC_R_SUCCESS == dns_acl_match(&netaddr, NULL, damp->exempt,
++					    NULL, &match, NULL) &&
++	     match > 0) {
++	    DAMPENING_STATISTICS_INC(impl,skipped);
++	    continue;
++	 }
++      }
++
++      DAMPENING_STATISTICS_DO(impl, lock, LOCK(&impl->lock));
++      DAMPENING_STATISTICS_DO(impl, search, entry = impl->search(impl->data, &prefix));
++
++      if(entry != NULL) {
++	 switch(qtype) {
++	  case dns_rdatatype_any: points = damp->score.qtype_any; break;
++	  default               : points = 0;                     break;
++	 }
++
++	 if(entry->last_id == message_id) {
++	    points += (entry->last_id_count++)*damp->score.duplicates;
++	 } else {
++	    entry->last_id = message_id;
++	    entry->last_id_count = 1;
++	 }
++
++	 DAMPENING_STATISTICS_DO(impl, update, impl->update(impl->data, &entry, points, now));
++      }
++
++      UNLOCK(&impl->lock);
++   }
++}
++
++void dns_dampening_score_size(dns_dampening_t * damp, const isc_sockaddr_t * addr, isc_stdtime_t now, int length) {
++   isc_netaddr_t netaddr, prefix;
++   dns_dampening_entry_t * entry;
++   uint16_t points;
++   dns_dampening_implementation_t *impl;
++
++   RUNTIME_CHECK( damp != NULL );
++   RUNTIME_CHECK( addr != NULL );
++
++   isc_netaddr_fromsockaddr(&netaddr, addr);
++   extract_prefix(&prefix, &netaddr, &(damp->prefixlen));
++
++   for(impl = damp->workers;
++       impl - damp->workers < damp->workers_count;
++       impl++) {
++
++      if(damp->exempt != NULL) {
++	 int match;
++
++	 if (ISC_R_SUCCESS == dns_acl_match(&netaddr, NULL, damp->exempt,
++					    NULL, &match, NULL) &&
++	     match > 0) {
++	    DAMPENING_STATISTICS_INC(impl,skipped);
++	    continue;
++	 }
++      }
++
++      DAMPENING_STATISTICS_DO(impl, lock, LOCK(&impl->lock));
++      DAMPENING_STATISTICS_DO(impl, search, entry = impl->search(impl->data, &prefix));
++      if(entry != NULL) {
++	 length = ISC_MAX(length, damp->score.minimum_size);
++	 length = ISC_MIN(length, damp->score.maximum_size);
++	 points = damp->score.size_penalty
++	   * (length - damp->score.minimum_size)
++	   / (damp->score.maximum_size - damp->score.minimum_size);
++	 DAMPENING_STATISTICS_DO(impl, update, impl->update(impl->data, &entry, points, now));
++      }
++
++      UNLOCK(&impl->lock);
++   }
++}
++
++isc_result_t dns_dampening_init(dns_view_t * view, int initial_size) {
++   isc_result_t result;
++   int i, num_workers = sizeof(implementations)/sizeof(*implementations);
++
++   INSIST( view != NULL );
++   INSIST( view->dampening == NULL );
++   RUNTIME_CHECK( 0 < initial_size && initial_size <= ISC_UINT16_MAX );
++
++   view->dampening = isc_mem_get(view->mctx, sizeof(*(view->dampening)));
++   if( view->dampening == NULL ) {
++      result = ISC_R_NOMEMORY;
++      goto cleanup;
++   }
++   memset( view->dampening, 0, sizeof(*(view->dampening)) );
++
++   view->dampening->workers = isc_mem_get(view->mctx, num_workers * sizeof(*(view->dampening->workers)));
++   if( view->dampening->workers == NULL ) {
++      result = ISC_R_NOMEMORY;
++      goto cleanup;
++   }
++   memset( view->dampening->workers, 0, num_workers * sizeof(*(view->dampening->workers)) );
++
++   for(i = 0; i < num_workers; i++) {
++      result = implementations[i](view->mctx,
++				  view->dampening->workers + i,
++				  view->dampening, initial_size);
++      if( ISC_R_SUCCESS != result) {
++	 dns_dampening_destroy( view );
++	 goto cleanup;
++      }
++
++      result = isc_mutex_init(&view->dampening->workers[i].lock);
++      if( result != ISC_R_SUCCESS ) {
++	 dns_dampening_destroy( view );
++	 goto cleanup;
++      }
++   }
++   view->dampening->workers_count = num_workers;
++   INSIST( view->dampening != NULL );
++
++   result = ISC_R_SUCCESS;
++
++cleanup:
++   return result;
++}
++
++void dns_dampening_destroy(dns_view_t * view) {
++   int i, num_workers = sizeof(implementations)/sizeof(*implementations);
++
++   INSIST( view != NULL );
++   INSIST( view->dampening != NULL );
++
++   if(view->dampening->exempt != NULL)
++     dns_acl_detach(&view->dampening->exempt);
++
++   for( i = view->dampening->workers_count; i-- > 0; ) {
++      DESTROYLOCK(&view->dampening->workers[i].lock);
++      view->dampening->workers[i].destroy(&(view->dampening->workers[i].data));
++   }
++   view->dampening->workers_count = 0;
++
++   isc_mem_put(view->mctx, view->dampening->workers, num_workers * sizeof(*(view->dampening->workers)));
++   view->dampening->workers = NULL;
++
++   isc_mem_put(view->mctx, view->dampening, sizeof(*(view->dampening)));
++   view->dampening = NULL;
++
++   INSIST( view->dampening == NULL );
++}
++
++/********************************************************
++ * Quere
++ ********************************************************/
++
++/*
++ * Queue-Implementation
++ * ~~~~~+~~~~~~~~~~~~~~
++ *
++ * Any client operation should be performed in constant time, unless really
++ * strange condtions occur. So the natural data structure is a hash.
++ *
++ * The following operations are implemented:
++ *
++ *  a) Searching an IP by hashing and travering a linked list in the case of
++ *     duplicates. In order to catch attacker IPs quickly, the least recent
++ *     entry is always moved to the front of the list.
++ *
++ *     Measurements show, that a ordered list is strictly slower than the LRU
++ *     approach. Even if unknown entries require a full search of the hash
++ *     duplicates.
++ *
++ *  b) If the searched IP was not found, a new entry is allocated and linked
++ *     into the front of the associeated hash list. If the storage is full,
++ *     the least used entry is recalculated using the last update timestamp
++ *     and the highest penalty (old or new) is moved to the front of a
++ *     decay queue. So the least used entry is always at the rear of the queue.
++ *
++ *  c) If a searched IP was found, the penalty is recalculated and moved to
++ *     the front of the decay queue. If the penality value falls below a
++ *     certain limit, the entry is removed from the queue and the hash list.
++ *     This operation requires a double linked list for the queue.
++ *
++ * Using this approach, the operations on the data structure will be O(1) on
++ * each access. There is no need for a regular maintainence activity.
++ *
++ * The free space is maintained by reusing the single link fields of the hash
++ * linked list. The very first entry is used as a sentiel node for all lists.
++ *
++ * This algorithms was developed by my collegue Jens.
++ *
++ */
++
++typedef struct {
++   dns_dampening_entry_t entry;
++   uint16_t list_next, queue_next, queue_prev;
++} queue_entry_t;
++
++typedef struct {
++   queue_entry_t * field;
++   uint16_t * hash;
++   uint16_t length;
++   isc_mem_t * mctx;
++   dns_dampening_t * conf;
++} queue_t;
++
++#define QUEUE_AVAIL(d)	((d)->field[0].list_next)
++#define QUEUE_FRONT(d)	((d)->field[0].queue_next)
++#define QUEUE_REAR(d)	((d)->field[0].queue_prev)
++
++/*
++ * Hashing using a variant of the Adler32 algorithm. I had touble
++ * with generic hash functions, the full content of netaddr varies
++ * between queries for the same IP.
++ */
++static uint16_t
++queue_makehash(const queue_t * d, const isc_netaddr_t * netaddr) {
++   uint16_t a = 0, b = 0;
++   const unsigned char * buff = (const unsigned char*)&netaddr->type;
++   unsigned int i;
++
++   INSIST(d != NULL);
++   RUNTIME_CHECK(netaddr != NULL);
++
++   for(i= netaddr->family == AF_INET  ? sizeof(netaddr->type.in ) :
++          netaddr->family == AF_INET6 ? sizeof(netaddr->type.in6) :
++                                        sizeof(netaddr->type    ) ;
++       i-->0; ) {
++      a = a + buff[i];
++      b = b + a;
++   }
++
++   return ((b << 8) + a) % d->length;
++}
++
++/*
++ * Searching the entry by hashing the address and searching the link list
++ * of duplicates. If found, move the entry to the front.
++ */
++static dns_dampening_entry_t *
++queue_search(void * data, const isc_netaddr_t * netaddr) {
++   queue_t * d = data;
++   uint16_t h = queue_makehash(data, netaddr), i, j=0;
++
++   INSIST(data != NULL);
++   INSIST(h < d->length);
++
++   for(i = d->hash[h]; i > 0; i = d->field[j=i].list_next) {
++      INSIST(0 < i && i < d->length);
++
++      if(ISC_TRUE == isc_netaddr_equal(netaddr, &d->field[i].entry.netaddr)) {
++	 if(j>0) {
++	    /* Move to front */
++	    d->field[j].list_next = d->field[i].list_next;
++	    d->field[i].list_next = d->hash[h];
++	    d->hash[h] = i;
++	 }
++	 return &(d->field[i].entry);
++      }
++   }
++   return NULL;
++}
++
++/*
++ * Delete an entry from the quere and the hash.
++ */
++static void
++queue_delete(queue_t * d, uint16_t entry) {
++   uint16_t h, i, j=0;
++
++   INSIST(d != NULL);
++   RUNTIME_CHECK(0 < entry && entry < d->length);
++   h = queue_makehash(d, &d->field[entry].entry.netaddr);
++   INSIST(h < d->length);
++
++   for(i = d->hash[h]; i != entry; i = d->field[j=i].list_next) {
++      INSIST(0 < i && i < d->length);
++   }
++
++   /* Remove from hash */
++   if(j>0)
++     d->field[j].list_next = d->field[i].list_next;
++   else
++     d->hash[h] = d->field[i].list_next;
++
++   /* Remove from queue */
++   d->field[d->field[i].queue_next].queue_prev = d->field[i].queue_prev;
++   d->field[d->field[i].queue_prev].queue_next = d->field[i].queue_next;
++
++   /* Back to free space */
++   d->field[i].list_next = QUEUE_AVAIL(d);
++   QUEUE_AVAIL(d) = i;
++}
++
++/*
++ * Recalculate the penaly by expotential decay and new points. If the new
++ * penalty is high enough, move it to the front of the queue, otherwise
++ * remove it completely.
++ */
++static void
++queue_update(void * data, dns_dampening_entry_t ** entry, uint16_t points, isc_stdtime_t now) {
++   queue_t * d = data;
++   uint16_t e;
++
++   INSIST(data != NULL);
++   INSIST(entry != NULL);
++   e = (queue_entry_t*)*entry - d->field;
++   RUNTIME_CHECK(0 < e && e < d->length);
++
++   if(update_penalty(d->conf, *entry, points, now) == 0)
++     queue_delete(d, e);
++   else if(QUEUE_FRONT(d) != e) {
++      /* Move to front */
++      d->field[e].queue_prev = d->field[QUEUE_FRONT(d)].queue_prev;
++      d->field[QUEUE_FRONT(d)].queue_prev = e;
++      d->field[e].queue_next = QUEUE_FRONT(d);
++      QUEUE_FRONT(d) = e;
++   }
++}
++
++/*
++ * Add a new element by inserting it into the front of the hash list
++ * and the decay queue. Recalculate the oldest element to get free space
++ * if necessary.
++ */
++static void
++queue_add(void * data, const isc_netaddr_t * netaddr,
++	  uint16_t points, isc_stdtime_t now) {
++   queue_t * d = data;
++   uint16_t n, h = queue_makehash(data,netaddr);
++
++   INSIST(data != NULL);
++   INSIST(h < d->length);
++
++   if(QUEUE_AVAIL(d) == 0) {   /* full */
++      dns_dampening_entry_t * e;
++
++      /* Check against least used element */
++      INSIST(QUEUE_REAR(d) != 0);
++      e = &(d->field[QUEUE_REAR(d)].entry);
++      update_penalty(d->conf, e, 0, now);
++
++      if(e->penalty > points) {
++	 queue_update(d, &e, 0, now);
++	 return;
++      } else 
++	queue_delete(d, QUEUE_REAR(d));
++   }
++
++   INSIST(QUEUE_AVAIL(d) != 0);
++
++   /* Allocate n */
++   n = QUEUE_AVAIL(d);
++   QUEUE_AVAIL(d) = d->field[n].list_next;
++
++   /* Link to hash */
++   d->field[n].list_next = d->hash[h];
++   d->hash[h] = n;
++
++   /* Place in front */
++   d->field[n].queue_prev = d->field[QUEUE_FRONT(d)].queue_prev;
++   d->field[QUEUE_FRONT(d)].queue_prev = n;
++   d->field[n].queue_next = QUEUE_FRONT(d);
++   QUEUE_FRONT(d) = n;
++
++   /* Setup */
++   memset(&d->field[n].entry, 0, sizeof(d->field[n].entry));
++   memcpy(&d->field[n].entry.netaddr, netaddr, sizeof(d->field[n].entry.netaddr));
++   d->field[n].entry.penalty       = points;
++   d->field[n].entry.last_updated  = now;
++}
++
++/*
++ * Free the memory for this data structure.
++ */
++static void
++queue_destroy(void ** pdata) {
++
++   INSIST(pdata != NULL);
++   if(*pdata != NULL) {
++      queue_t * d = *pdata;
++
++      if(d->hash != NULL)
++	isc_mem_put(d->mctx, d->hash, d->length * sizeof(*(d->hash)));
++
++      if(d->field != NULL)
++	isc_mem_put(d->mctx, d->field, d->length * sizeof(*(d->field)));
++
++      isc_mem_put(d->mctx, d, sizeof(*d));
++      *pdata = NULL;
++   }
++
++   INSIST(*pdata == NULL);
++}
++
++/*
++ * Allocate the memory for this data structure.
++ */
++isc_result_t queue_init(isc_mem_t * mctx, dns_dampening_implementation_t * impl,
++			dns_dampening_t * conf, uint16_t size) {
++   queue_t * d;
++   int i;
++
++   INSIST(mctx != NULL);
++   INSIST(impl != NULL);
++   INSIST(size > 0);
++
++   impl->destroy = queue_destroy;
++
++   impl->data = d = isc_mem_get(mctx, sizeof(*d));
++   if(d == NULL)
++          return ISC_R_NOMEMORY;
++   memset(d, 0, sizeof(*d));
++
++   d->length = size+1;
++   d->field = isc_mem_get(mctx, d->length * sizeof(*(d->field)));
++   d->hash  = isc_mem_get(mctx, d->length * sizeof(*(d->hash)));
++   d->mctx = mctx;
++   d->conf = conf;
++   if(d->field == NULL || d->hash == NULL) {
++      impl->destroy(&impl->data);
++      return ISC_R_NOMEMORY;
++   }
++
++   /* Initialize free space */
++   for(i=0; i < d->length - 1; i++) {
++      d->field[i].list_next = i+1;
++      d->hash[i] = 0;
++   }
++   /* last element */
++   d->field[i].list_next = 0;
++   d->hash[i] = 0;
++
++   /* Sentiel values */
++   QUEUE_FRONT(d) = QUEUE_REAR(d) = 0;
++   QUEUE_AVAIL(d) = 1;
++
++
++   impl->search  = queue_search;
++   impl->add     = queue_add;
++   impl->update  = queue_update;
++
++   isc_log_write(dns_lctx, DNS_LOGCATEGORY_DAMPENING,
++		 DNS_LOGMODULE_REQUEST, ISC_LOG_INFO,
++		 "Queue initialized to %d entries and %d hash: %u bytes",
++		 size, size+1,
++		 (sizeof(*d->hash)+sizeof(*d->field))*(1+size));
++   return ISC_R_SUCCESS;
++}
+diff --git a/lib/dns/include/dns/dampening.h b/lib/dns/include/dns/dampening.h
+new file mode 100644
+index 0000000..e43af49
+--- /dev/null
++++ b/lib/dns/include/dns/dampening.h
+@@ -0,0 +1,89 @@
++/*
++ * (C) 2012 Lutz Donnerhacke
++ */
++
++#ifndef DNS_DAMPENING_H
++#define DNS_DAMPENING_H 1
++
++#include <isc/mutex.h>
++#include <isc/stdtime.h>
++#include <dns/acl.h>
++
++typedef enum {
++   DNS_DAMPENING_STATE_NORMAL,
++   DNS_DAMPENING_STATE_SUPPRESS
++} dns_dampening_state_t;
++
++typedef struct dns_dampening_entry {
++   isc_netaddr_t netaddr;
++   isc_stdtime_t last_updated;
++   dns_messageid_t last_id;
++   unsigned int dampening : 1, last_id_count : 15, penalty : 16;
++} dns_dampening_entry_t;
++
++typedef struct dns_dampening_implementation {
++   /* Interals */
++   void * data;
++   struct dns_dampening * conf;
++   /* API */
++   void (*destroy)(void **);
++   dns_dampening_entry_t * (*search)(void *, const isc_netaddr_t * netaddr);
++   void (*add)(void *, const isc_netaddr_t * netaddr, uint16_t points, isc_stdtime_t now);
++   void (*update)(void *, dns_dampening_entry_t ** entry, uint16_t points, isc_stdtime_t now);
++   /* Used by externals */
++   isc_mutex_t lock;
++   struct {
++      struct timeval lock, search, update, add;
++      unsigned int allowed, denied, skipped;
++      isc_stdtime_t last_report;
++   } statistics;
++}  dns_dampening_implementation_t;
++
++typedef struct dns_dampening {
++   dns_acl_t	*exempt;
++   int		max_entries;
++   dns_dampening_implementation_t * workers;
++   int workers_count;
++
++   struct dns_dampening_prefix {
++      unsigned int ipv4;
++      unsigned int ipv6;
++   } prefixlen;
++
++   struct dns_dampening_decay {
++      int halflife;
++      int updatedelay;
++   } decay;
++
++   struct dns_dampening_limit {
++      unsigned int
++	maximum            : 16,
++	enable_dampening   : 16,
++	disable_dampening  : 16,
++	irrelevant         : 16;
++   } limit;
++
++   struct dns_dampening_score {
++      unsigned int
++	first_query  : 16,
++	per_query    : 16,
++	duplicates   : 16,
++	qtype_any    : 16,
++	size_penalty : 16,
++	minimum_size : 16,
++	maximum_size : 16;
++   } score;
++
++   struct dns_dampening_statistics {
++      int report_interval;
++   } statistics;
++
++} dns_dampening_t;
++
++dns_dampening_state_t dns_dampening_query(dns_dampening_t *, const isc_sockaddr_t *, isc_stdtime_t, int *);
++void dns_dampening_score_qtype(dns_dampening_t *, const isc_sockaddr_t *, isc_stdtime_t, dns_messageid_t, int);
++void dns_dampening_score_size(dns_dampening_t *, const isc_sockaddr_t *, isc_stdtime_t, int);
++isc_result_t dns_dampening_init(dns_view_t *, int);
++void dns_dampening_destroy(dns_view_t *);
++
++#endif
+diff --git a/lib/dns/include/dns/log.h b/lib/dns/include/dns/log.h
+index a3b7e5a..5c43e72 100644
+--- a/lib/dns/include/dns/log.h
++++ b/lib/dns/include/dns/log.h
+@@ -44,6 +44,7 @@ LIBDNS_EXTERNAL_DATA extern isc_logmodule_t dns_modules[];
+ #define DNS_LOGCATEGORY_EDNS_DISABLED	(&dns_categories[11])
+ #define DNS_LOGCATEGORY_RPZ		(&dns_categories[12])
+ #define DNS_LOGCATEGORY_RRL		(&dns_categories[13])
++#define DNS_LOGCATEGORY_DAMPENING	(&dns_categories[14])
+ 
+ /* Backwards compatibility. */
+ #define DNS_LOGCATEGORY_GENERAL		ISC_LOGCATEGORY_GENERAL
+diff --git a/lib/dns/include/dns/view.h b/lib/dns/include/dns/view.h
+index 342f661..5c92736 100644
+--- a/lib/dns/include/dns/view.h
++++ b/lib/dns/include/dns/view.h
+@@ -72,6 +72,7 @@
+ #include <isc/stdtime.h>
+ 
+ #include <dns/acl.h>
++#include <dns/dampening.h>
+ #include <dns/fixedname.h>
+ #include <dns/rrl.h>
+ #include <dns/rdatastruct.h>
+@@ -144,6 +145,7 @@ struct dns_view {
+ 	dns_rbt_t *			denyanswernames;
+ 	dns_rbt_t *			answernames_exclude;
+ 	dns_rrl_t *			rrl;
++	dns_dampening_t *		dampening;
+ 	isc_boolean_t			provideixfr;
+ 	isc_boolean_t			requestnsid;
+ 	dns_ttl_t			maxcachettl;
+diff --git a/lib/dns/log.c b/lib/dns/log.c
+index b5c8b05..1dd24b0 100644
+--- a/lib/dns/log.c
++++ b/lib/dns/log.c
+@@ -46,6 +46,7 @@ LIBDNS_EXTERNAL_DATA isc_logcategory_t dns_categories[] = {
+ 	{ "edns-disabled", 0 },
+ 	{ "rpz",	0 },
+ 	{ "rate-limit",	0 },
++	{ "dampening",	0 },
+ 	{ NULL, 	0 }
+ };
+ 
+diff --git a/lib/dns/view.c b/lib/dns/view.c
+index 142b09e..387f726 100644
+--- a/lib/dns/view.c
++++ b/lib/dns/view.c
+@@ -34,6 +34,7 @@
+ #include <dns/acl.h>
+ #include <dns/adb.h>
+ #include <dns/cache.h>
++#include <dns/dampening.h>
+ #include <dns/db.h>
+ #include <dns/dispatch.h>
+ #include <dns/dlz.h>
+@@ -125,6 +126,7 @@ dns_view_create(isc_mem_t *mctx, dns_rdataclass_t rdclass,
+ 	view->acache = NULL;
+ 	view->cache = NULL;
+ 	view->cachedb = NULL;
++	view->dampening = NULL;
+ 	view->dlzdatabase = NULL;
+ 	view->hints = NULL;
+ 	view->resolver = NULL;
+@@ -367,6 +369,8 @@ destroy(dns_view_t *view) {
+ 		dns_acl_detach(&view->cacheacl);
+ 	if (view->cacheonacl != NULL)
+ 		dns_acl_detach(&view->cacheonacl);
++	if (view->dampening != NULL)
++		dns_dampening_destroy(view);
+ 	if (view->queryacl != NULL)
+ 		dns_acl_detach(&view->queryacl);
+ 	if (view->queryonacl != NULL)
+diff --git a/lib/isccfg/namedconf.c b/lib/isccfg/namedconf.c
+index 452a275..755a470 100644
+--- a/lib/isccfg/namedconf.c
++++ b/lib/isccfg/namedconf.c
+@@ -1305,6 +1305,43 @@ static cfg_type_t cfg_type_rrl = {
+ };
+ #endif /* USE_RRL */
+ 
++/*
++ * dampening
++ */
++
++static cfg_clausedef_t dampening_clauses[] = {
++     { "min-table-size", &cfg_type_uint32, 0 },
++     { "max-table-size", &cfg_type_uint32, 0 },
++     { "halflife", &cfg_type_uint32, 0 },
++     { "update-delay", &cfg_type_uint32, 0 },
++     { "limit-maximum", &cfg_type_uint32, 0 },
++     { "limit-enable-dampening", &cfg_type_uint32, 0 },
++     { "limit-disable-dampening", &cfg_type_uint32, 0 },
++     { "limit-irrelevant", &cfg_type_uint32, 0 },
++     { "score-first-query", &cfg_type_uint32, 0 },
++     { "score-per-query", &cfg_type_uint32, 0 },
++     { "score-qtype-any", &cfg_type_uint32, 0 },
++     { "minimum-score-size", &cfg_type_uint32, 0 },
++     { "maximum-score-size", &cfg_type_uint32, 0 },
++     { "score-size", &cfg_type_uint32, 0 },
++     { "score-duplicates", &cfg_type_uint32, 0 },
++     { "IPv4-prefix-length", &cfg_type_uint32, 0 },
++     { "IPv6-prefix-length", &cfg_type_uint32, 0 },
++     { "report-interval", &cfg_type_uint32, 0 },
++     { "exempt-clients", &cfg_type_bracketed_aml, 0 },
++     { NULL, NULL, 0 }
++};
++
++static cfg_clausedef_t * dampening_clauseset[] = {
++     dampening_clauses,
++     NULL
++};
++
++static cfg_type_t cfg_type_dampening = {
++   "dampening", cfg_parse_map, cfg_print_map, cfg_doc_map,
++     &cfg_rep_map, dampening_clauseset
++};
++
+ /*%
+  * dnssec-lookaside
+  */
+@@ -1462,6 +1499,7 @@ view_clauses[] = {
+ #ifdef USE_RRL
+ 	{ "rate-limit", &cfg_type_rrl, 0 },
+ #endif /* USE_RRL */
++	{ "dampening", &cfg_type_dampening, 0 },
+ 	{ NULL, NULL, 0 }
+ };
+ 
+diff --git a/version b/version
+index 1acc271..e6fbb79 100644
+--- a/version
++++ b/version
+@@ -7,7 +7,7 @@ PRODUCT=BIND
+ DESCRIPTION="(Extended Support Version)"
+ MAJORVER=9
+ MINORVER=9
+-PATCHVER=5
++PATCHVER=5+damp
+ RELEASETYPE=
+ RELEASEVER=
+ EXTENSIONS="$(dpkg-parsechangelog | sed -n '/^Version/s/[^-]*//p')-$(dpkg-vendor --query Vendor)"

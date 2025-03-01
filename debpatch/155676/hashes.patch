@@ -1,0 +1,183 @@
+diff -urb dpkg-1.15.5.6/debian/changelog dpkg-1.15.5.6-aj/debian/changelog
+--- dpkg-1.15.5.6/debian/changelog	2010-01-09 04:02:03.000000000 +1000
++++ dpkg-1.15.5.6-aj/debian/changelog	2010-03-07 04:13:03.171356041 +1000
+@@ -1,3 +1,11 @@
++dpkg (1.15.5.6+aj) unstable; urgency=low
++
++  * Non-maintainer upload.
++  * Automatically create /var/lib/dpkg/info/pkg.hashes containing MD5 hashes
++    for unpacked files.
++
++ -- Anthony Towns <aj@lazuline>  Sun, 07 Mar 2010 04:12:32 +1000
++
+ dpkg (1.15.5.6) unstable; urgency=low
+ 
+   * dpkg-source: with format "3.0 (quilt)" ensure quilt's .pc directory is
+diff -urb dpkg-1.15.5.6/configure.ac dpkg-1.15.5.6-aj/configure.ac
+--- dpkg-1.15.5.6/configure.ac	2010-01-08 18:00:34.000000000 +1000
++++ dpkg-1.15.5.6-aj/configure.ac	2010-03-07 04:38:32.547372468 +1000
+@@ -51,6 +51,16 @@
+ esac])
+ AC_SUBST(admindir)
+ 
++# Allow alternative default hash function
++hashtype="md5"
++AC_ARG_WITH(hashtype,
++	AS_HELP_STRING([--with-hashtype=HASH],
++	               [hash function to use for .hashes files]),
++[case "$with_hashtype" in
++      "md5"|"none") hashtype="$with_hashtype" ;;
++      *) AC_MSG_ERROR([invalid hashtype specified]) ;;
++esac])
++AC_SUBST(hashtype)
+ 
+ # Checks for programs.
+ AC_PROG_CC
+diff -urb dpkg-1.15.5.6/src/Makefile.am dpkg-1.15.5.6-aj/src/Makefile.am
+--- dpkg-1.15.5.6/src/Makefile.am	2010-01-09 03:23:06.000000000 +1000
++++ dpkg-1.15.5.6-aj/src/Makefile.am	2010-03-07 04:28:18.771356095 +1000
+@@ -6,6 +6,7 @@
+ AM_CPPFLAGS = \
+ 	-DLOCALEDIR=\"$(localedir)\" \
+ 	-DADMINDIR=\"$(admindir)\" \
++	-DHASHTYPE=\"$(hashtype)\" \
+ 	-idirafter $(top_srcdir)/lib/compat \
+ 	-I$(top_builddir) \
+ 	-I$(top_srcdir)/lib
+diff -urb dpkg-1.15.5.6/src/main.c dpkg-1.15.5.6-aj/src/main.c
+--- dpkg-1.15.5.6/src/main.c	2010-01-09 03:23:06.000000000 +1000
++++ dpkg-1.15.5.6-aj/src/main.c	2010-03-07 04:29:59.271360858 +1000
+@@ -187,6 +187,7 @@
+ const char *admindir= ADMINDIR;
+ const char *instdir= "";
+ struct pkg_list *ignoredependss = NULL;
++const char *hashtype= HASHTYPE;
+ 
+ static const struct forceinfo {
+   const char *name;
+@@ -516,6 +517,7 @@
+   { "admindir",          0,   1, NULL,          &admindir, NULL,          0 },
+   { "instdir",           0,   1, NULL,          &instdir,  NULL,          0 },
+   { "ignore-depends",    0,   1, NULL,          NULL,      ignoredepends, 0 },
++  { "hash",              0,   1, NULL,          &hashtype, NULL,          0 },
+   { "force",             0,   2, NULL,          NULL,      setforce,      1 },
+   { "refuse",            0,   2, NULL,          NULL,      setforce,      0 },
+   { "no-force",          0,   2, NULL,          NULL,      setforce,      0 },
+diff -urb dpkg-1.15.5.6/src/archives.c dpkg-1.15.5.6-aj/src/archives.c
+--- dpkg-1.15.5.6/src/archives.c	2010-01-09 03:23:06.000000000 +1000
++++ dpkg-1.15.5.6-aj/src/archives.c	2010-03-07 04:51:53.743360015 +1000
+@@ -629,7 +629,7 @@
+     /* We create the file with mode 0 to make sure nobody can do anything with
+      * it until we apply the proper mode, which might be a statoverride.
+      */
+-    fd= open(fnamenewvb.buf, (O_CREAT|O_EXCL|O_WRONLY), 0);
++    fd= open(fnamenewvb.buf, (O_CREAT|O_EXCL|O_RDWR), 0);
+     if (fd < 0)
+       ohshite(_("unable to create `%.255s' (while processing `%.255s')"), fnamenewvb.buf, ti->Name);
+     push_cleanup(cu_closefd, ehflag_bombout, NULL, 0, 1, &fd);
+@@ -642,6 +642,13 @@
+     }
+     r= ti->Size % TARBLKSZ;
+     if (r > 0) r= safe_read(tc->backendpipe,databuf,TARBLKSZ - r);
++
++    if (tc->hashfn)
++    {
++      lseek(fd, 0, SEEK_SET);
++      tc->hashfn(tc, fd, fnamevb.buf);
++    }
++
+     if (nifd->namenode->statoverride) 
+       debug(dbg_eachfile, "tarobject ... stat override, uid=%d, gid=%d, mode=%04o",
+ 			  nifd->namenode->statoverride->uid,
+diff -urb dpkg-1.15.5.6/src/archives.h dpkg-1.15.5.6-aj/src/archives.h
+--- dpkg-1.15.5.6/src/archives.h	2010-01-08 18:00:34.000000000 +1000
++++ dpkg-1.15.5.6-aj/src/archives.h	2010-03-07 03:41:10.871370703 +1000
+@@ -27,6 +27,8 @@
+   int backendpipe;
+   struct pkginfo *pkg;
+   struct fileinlist **newfilesp;
++  void (*hashfn)(struct tarcontext *tc, int fd, char *fname);
++  FILE *hashfile;
+ };
+ 
+ struct pkg_deconf_list {
+diff -urb dpkg-1.15.5.6/src/main.h dpkg-1.15.5.6-aj/src/main.h
+--- dpkg-1.15.5.6/src/main.h	2010-01-09 03:23:06.000000000 +1000
++++ dpkg-1.15.5.6-aj/src/main.h	2010-03-07 04:27:39.835358649 +1000
+@@ -127,6 +127,7 @@
+ extern const char *admindir;
+ extern const char *instdir;
+ extern struct pkg_list *ignoredependss;
++extern const char *hashtype;
+ extern const char architecture[];
+ 
+ struct invoke_hook {
+diff -urb dpkg-1.15.5.6/src/processarc.c dpkg-1.15.5.6-aj/src/processarc.c
+--- dpkg-1.15.5.6/src/processarc.c	2010-01-09 03:23:06.000000000 +1000
++++ dpkg-1.15.5.6-aj/src/processarc.c	2010-03-07 04:42:17.299356104 +1000
+@@ -72,6 +72,28 @@
+   return pfilename;
+ }
+ 
++static void 
++nullhashfn(struct tarcontext *tc, int fd, char *fname)
++{
++  if (fname[0] == '/') 
++    fname += 1;
++  if (fname[0] == '\0')
++    return;
++  fprintf(tc->hashfile, "-  %s\n", fname);
++}
++
++static void 
++md5hashfn(struct tarcontext *tc, int fd, char *fname)
++{
++  char md5hash[MD5HASHLEN+1];
++  if (fname[0] == '/') 
++    fname += 1;
++  if (fname[0] == '\0')
++    return;
++  fd_md5(fd, md5hash, -1, _("md5hash"));
++  fprintf(tc->hashfile, "MD5:%s  %s\n", md5hash, fname);
++}
++
+ void process_archive(const char *filename) {
+   static const struct TarFunctions tf = {
+     .Read = tarfileread,
+@@ -608,6 +630,18 @@
+   tc.pkg= pkg;
+   tc.backendpipe= p1[0];
+ 
++  strcpy(cidirrest, "hashes");
++  tc.hashfile= fopen(cidir, "w");
++  if (tc.hashfile) {
++    push_cleanup(cu_closefile, ehflag_bombout, NULL, 0, 1, (void *)tc.hashfile);
++
++    if (strcmp(hashtype, "md5") == 0) {
++      tc.hashfn= md5hashfn;
++    } else {
++      tc.hashfn= nullhashfn;
++    }
++  }
++
+   r= TarExtractor((void*)&tc, &tf);
+   if (r) {
+     if (errno) {
+@@ -616,11 +650,17 @@
+       ohshit(_("corrupted filesystem tarfile - corrupted package archive"));
+     }
+   }
++
+   fd_null_copy(p1[0], -1, _("dpkg-deb: zap possible trailing zeros"));
+   close(p1[0]);
+   p1[0] = -1;
+   subproc_wait_check(c1, BACKEND " --fsys-tarfile", PROCPIPE);
+ 
++  if (tc.hashfile) {
++    pop_cleanup(ehflag_normaltidy); /* tc.hashfile= fopen() */
++    if (fclose(tc.hashfile)) ohshite(_("error closing %.250s"),cidir);
++  }
++
+   if (oldversionstatus == stat_halfinstalled || oldversionstatus == stat_unpacked) {
+     /* Packages that were in `installed' and `postinstfailed' have been reduced
+      * to `unpacked' by now, by the running of the prerm script.

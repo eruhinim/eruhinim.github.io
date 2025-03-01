@@ -1,0 +1,209 @@
+From f5c7ec43dcb41d6fc34e3ae6c9e7ea17ec6e7478 Mon Sep 17 00:00:00 2001
+From: Petter Reinholdtsen <pere@hungry.com>
+Date: Sat, 17 Sep 2016 08:03:03 +0000
+Subject: [PATCH] First draft for fixing bug #765527.
+
+---
+ debian/control                            |  8 ++++
+ debian/eatmydata-udeb.eatmydata-install   | 67 +++++++++++++++++++++++++++++++
+ debian/eatmydata-udeb.finish-install      | 18 +++++++++
+ debian/eatmydata-udeb.post-base-installer | 27 +++++++++++++
+ debian/eatmydata-udeb.pre-pkgsel          | 18 +++++++++
+ debian/rules                              |  8 ++++
+ 6 files changed, 146 insertions(+)
+ create mode 100755 debian/eatmydata-udeb.eatmydata-install
+ create mode 100644 debian/eatmydata-udeb.finish-install
+ create mode 100644 debian/eatmydata-udeb.post-base-installer
+ create mode 100644 debian/eatmydata-udeb.pre-pkgsel
+
+diff --git a/debian/control b/debian/control
+index 03df616..aa0401c 100644
+--- a/debian/control
++++ b/debian/control
+@@ -46,3 +46,11 @@ Description: Library and utilities to disable fsync and friends - shared library
+  the operation of the eatmydata package. Users typically want to use or depend
+  on the eatmydata package instead of this one, so see its description for
+  further information.
++
++Package: eatmydata-udeb
++Package-Type: udeb
++Architecture: all
++Section: debian-installer
++Depends: ${misc:Depends},
++Description: Disable fsync and friends during installtion to speed up the install
++ ...
+diff --git a/debian/eatmydata-udeb.eatmydata-install b/debian/eatmydata-udeb.eatmydata-install
+new file mode 100755
+index 0000000..dd6c05d
+--- /dev/null
++++ b/debian/eatmydata-udeb.eatmydata-install
+@@ -0,0 +1,67 @@
++#!/bin/sh
++# Speed up package installation by disabling all file system flushing
++# when dpkg is executed.  If something go wrong on first time
++# installation, try again.  This override is put in place
++# post-base-installer.d and pre-pkgsel.d and undone in
++# finish-install.d.  See also bug #613428 and #765527.
++
++set -e
++
++log() { logger -t eatmydata-udeb/eatmydata-install "$@"; }
++info() { log  "info: $@"; }
++warning() { log  "warning: $@"; }
++error() { log  "error: $@"; }
++
++at_exit() {
++    error "script $0 terminated unexpectedly."
++}
++disable_exception() { trap - INT TERM EXIT; }
++trap at_exit INT TERM EXIT
++
++enable_override() {
++    apt-install eatmydata || true
++    if [ -x /target/usr/bin/eatmydata ] ; then
++      if [ ! -f /target/etc/apt/apt.conf.d/95install-dpkg-eatmydata ]; then
++        info "Adding apt config to call dpkg via eatmydata"
++        printf "#!/bin/sh\nexec eatmydata dpkg \"\$@\"\n" \
++            > /target/var/tmp/dpkg-eatmydata-wrapper
++        chmod 755 /target/var/tmp/dpkg-eatmydata-wrapper
++        cat > /target/etc/apt/apt.conf.d/95install-dpkg-eatmydata <<EOF
++Dir::Bin::dpkg "/var/tmp/dpkg-eatmydata-wrapper";
++EOF
++      else
++	    info "apt redirect for eatmydata already in place"
++      fi
++    else
++        error "unable to find /usr/bin/eatmydata after installing the eatmydata package"
++    fi
++}
++
++disable_override() {
++    for override in \
++	/etc/apt/apt.conf.d/95install-dpkg-eatmydata \
++	/var/tmp/dpkg-eatmydata-wrapper ; do
++	info "Removing apt config to use eatmydata when running dpkg."
++	if [ -f /target$override ] ; then
++            rm -f /target$override
++	else
++            warning "missing /target$override"
++	fi
++    done
++    sync # Flush file buffers before continuing
++}
++
++case "$1" in
++    enable)
++        enable_override
++        ;;
++    disable)
++        disable_override
++        ;;
++    *)
++        error "invalid argument $1"
++        ;;
++
++esac
++
++disable_exception
+diff --git a/debian/eatmydata-udeb.finish-install b/debian/eatmydata-udeb.finish-install
+new file mode 100644
+index 0000000..1b1a90b
+--- /dev/null
++++ b/debian/eatmydata-udeb.finish-install
+@@ -0,0 +1,18 @@
++#! /bin/sh -e
++#
++# Last finishing touch before rebooting into the installed system.
++
++log() { logger -t eatmydata-udeb/finish-install "$@"; }
++info() { log "info: $*"; }
++error() { log "error: $*"; }
++
++at_exit() {
++    error "script $0 terminated unexpectedly."
++}
++disable_exception() { trap - INT TERM EXIT; }
++trap at_exit INT TERM EXIT
++
++eatmydata-install disable
++
++disable_exception
++exit 0
+diff --git a/debian/eatmydata-udeb.post-base-installer b/debian/eatmydata-udeb.post-base-installer
+new file mode 100644
+index 0000000..fa7365f
+--- /dev/null
++++ b/debian/eatmydata-udeb.post-base-installer
+@@ -0,0 +1,27 @@
++#!/bin/sh
++#
++# Executed using the post-base-installer hooks after the base system
++# is installed, and before most packages are installed.  APT is only
++# using packages on the CD / DVD / USB stick at this point.
++
++set -e
++
++. /usr/share/debconf/confmodule
++
++log() { logger -t eatmydata-udeb/post-base-installer "$@"; }
++info() { log "info: $*"; }
++error() { log "error: $*"; }
++
++at_exit() {
++    error "script $0 terminated unexpectedly."
++}
++disable_exception() { trap - INT TERM EXIT; }
++trap at_exit INT TERM EXIT
++
++# First try here, in case the eatmydata package is available on the
++# ISO or we are installing via PXE.  Next try is in the
++# pre-pkgsel step.
++eatmydata-install enable
++
++disable_exception
++exit 0
+diff --git a/debian/eatmydata-udeb.pre-pkgsel b/debian/eatmydata-udeb.pre-pkgsel
+new file mode 100644
+index 0000000..c3937eb
+--- /dev/null
++++ b/debian/eatmydata-udeb.pre-pkgsel
+@@ -0,0 +1,18 @@
++#!/bin/sh
++
++set -e
++
++log() { logger -t eatmydata-udeb/post-base-installer "$@"; }
++info() { log "info: $*"; }
++error() { log "error: $*"; }
++
++at_exit() {
++    error "script $0 terminated unexpectedly."
++}
++disable_exception() { trap - INT TERM EXIT; }
++trap at_exit INT TERM EXIT
++
++eatmydata-install enable
++
++disable_exception
++exit 0
+diff --git a/debian/rules b/debian/rules
+index 7b98100..c180249 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -13,5 +13,13 @@ override_dh_install:
+ 		$(CURDIR)/debian/eatmydata/usr/bin/eatmydata
+ 	dh_install --list-missing
+ 
++	#
++	# eatmydata-udeb
++	#
++	cp debian/eatmydata-udeb.eatmydata-install $(CURDIR)/debian/eatmydata-udeb/usr/bin/eatmydata-install
++	cp debian/eatmydata-udeb.post-base-installer $(CURDIR)/debian/eatmydata-udeb/usr/lib/post-base-installer.d/01eatmydata-udeb
++	cp debian/eatmydata-udeb.pre-pkgsel $(CURDIR)/debian/eatmydata-udeb/usr/lib/pre-pkgsel.d/10eatmydata-udeb
++	cp debian/eatmydata-udeb.finish-install $(CURDIR)/debian/eatmydata-udeb/usr/lib/finish-install.d/13eatmydata-udeb
++
+ %:
+ 	dh $@ --with autoreconf
+-- 
+2.9.3
+

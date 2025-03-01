@@ -1,0 +1,211 @@
+diff --git a/apt-pkg/contrib/proxy.cc b/apt-pkg/contrib/proxy.cc
+index b68a053..d1f8274 100644
+--- a/apt-pkg/contrib/proxy.cc
++++ b/apt-pkg/contrib/proxy.cc
+@@ -1,9 +1,18 @@
++#include<apt-pkg/configuration.h>
++#include<apt-pkg/error.h>
++#include<apt-pkg/fileutl.h>
++
++#include<iostream>
++#include <unistd.h>
++
+ #include "proxy.h"
+ 
++
++
+ // AutoDetectProxy - auto detect proxy			/*{{{*/
+ // ---------------------------------------------------------------------
+ /* */
+-bool AutoDetectProxy(const URI &URL)
++bool AutoDetectProxy(URI &URL)
+ {
+    bool Debug = _config->FindB("Debug::Acquire::http",false);
+    // option is "Acquire::http::Proxy-Auto-Detect" but we allow the old
+@@ -15,7 +24,7 @@ bool AutoDetectProxy(const URI &URL)
+       return true;
+ 
+    if (Debug)
+-      clog << "Using auto proxy detect command: " << AutoDetectProxyCmd << endl;
++      std::clog << "Using auto proxy detect command: " << AutoDetectProxyCmd << std::endl;
+ 
+    int Pipes[2] = {-1,-1};
+    if (pipe(Pipes) != 0)
+@@ -30,10 +39,10 @@ bool AutoDetectProxy(const URI &URL)
+ 
+       const char *Args[4];
+       Args[0] = AutoDetectProxyCmd.c_str();
+-      Args[1] = URL.c_str();
++      Args[1] = string(URL).c_str();
+       Args[2] = 0;
+       execv(Args[0],(char **)Args);
+-      cerr << "Failed to exec method " << Args[0] << endl;
++      std::cerr << "Failed to exec method " << Args[0] << std::endl;
+       _exit(100);
+    }
+    char buf[512];
+@@ -51,7 +60,7 @@ bool AutoDetectProxy(const URI &URL)
+    buf[res] = 0;
+ 
+    if (Debug)
+-      clog << "auto detect command returned: '" << buf << "'" << endl;
++      std::clog << "auto detect command returned: '" << buf << "'" << std::endl;
+ 
+    URI Tmp(URL);
+    if (strstr(buf, "http://") == buf)
+diff --git a/apt-pkg/contrib/proxy.h b/apt-pkg/contrib/proxy.h
+index b7ebf61..be31791 100644
+--- a/apt-pkg/contrib/proxy.h
++++ b/apt-pkg/contrib/proxy.h
+@@ -11,7 +11,7 @@
+ 
+ #include <apt-pkg/strutl.h>
+ 
+-bool AutoDetectProxy(const URI &URL);
++bool AutoDetectProxy(URI &URL);
+ 
+ 
+ #endif
+diff --git a/methods/http.cc b/methods/http.cc
+index 7c7949e..06325e9 100644
+--- a/methods/http.cc
++++ b/methods/http.cc
+@@ -34,6 +34,7 @@
+ #include <apt-pkg/hashes.h>
+ #include <apt-pkg/netrc.h>
+ #include <apt-pkg/strutl.h>
++#include <apt-pkg/proxy.h>
+ 
+ #include <stddef.h>
+ #include <stdlib.h>
+@@ -51,6 +52,7 @@
+ #include "connect.h"
+ #include "http.h"
+ 
++
+ #include <apti18n.h>
+ 									/*}}}*/
+ using namespace std;
+@@ -60,6 +62,7 @@ unsigned long long CircleBuf::BwTickReadData=0;
+ struct timeval CircleBuf::BwReadTick={0,0};
+ const unsigned int CircleBuf::BW_HZ=10;
+ 
++
+ // CircleBuf::CircleBuf - Circular input buffer				/*{{{*/
+ // ---------------------------------------------------------------------
+ /* */
+@@ -304,8 +307,10 @@ bool HttpServerState::Open()
+    Persistent = true;
+    
+    // Determine the proxy setting
++   AutoDetectProxy(ServerName);
++
+    string SpecificProxy = _config->Find("Acquire::http::Proxy::" + ServerName.Host);
+-   if (!SpecificProxy.empty())
++   if (SpecificProxy != "")
+    {
+ 	   if (SpecificProxy == "DIRECT")
+ 		   Proxy = "";
+@@ -762,66 +767,6 @@ bool HttpMethod::Configuration(string Message)
+ 				  PipelineDepth);
+    Debug = _config->FindB("Debug::Acquire::http",false);
+ 
+-   // Get the proxy to use
+-   AutoDetectProxy();
+-
+-   return true;
+-}
+-									/*}}}*/
+-// HttpMethod::AutoDetectProxy - auto detect proxy			/*{{{*/
+-// ---------------------------------------------------------------------
+-/* */
+-bool HttpMethod::AutoDetectProxy()
+-{
+-   // option is "Acquire::http::Proxy-Auto-Detect" but we allow the old
+-   // name without the dash ("-")
+-   AutoDetectProxyCmd = _config->Find("Acquire::http::Proxy-Auto-Detect",
+-                                      _config->Find("Acquire::http::ProxyAutoDetect"));
+-
+-   if (AutoDetectProxyCmd.empty())
+-      return true;
+-
+-   if (Debug)
+-      clog << "Using auto proxy detect command: " << AutoDetectProxyCmd << endl;
+-
+-   int Pipes[2] = {-1,-1};
+-   if (pipe(Pipes) != 0)
+-      return _error->Errno("pipe", "Failed to create Pipe");
+-
+-   pid_t Process = ExecFork();
+-   if (Process == 0)
+-   {
+-      close(Pipes[0]);
+-      dup2(Pipes[1],STDOUT_FILENO);
+-      SetCloseExec(STDOUT_FILENO,false);
+-
+-      const char *Args[2];
+-      Args[0] = AutoDetectProxyCmd.c_str();
+-      Args[1] = 0;
+-      execv(Args[0],(char **)Args);
+-      cerr << "Failed to exec method " << Args[0] << endl;
+-      _exit(100);
+-   }
+-   char buf[512];
+-   int InFd = Pipes[0];
+-   close(Pipes[1]);
+-   int res = read(InFd, buf, sizeof(buf)-1);
+-   ExecWait(Process, "ProxyAutoDetect", true);
+-
+-   if (res < 0)
+-      return _error->Errno("read", "Failed to read");
+-   if (res == 0)
+-      return _error->Warning("ProxyAutoDetect returned no data");
+-
+-   // add trailing \0
+-   buf[res] = 0;
+-
+-   if (Debug)
+-      clog << "auto detect command returned: '" << buf << "'" << endl;
+-
+-   if (strstr(buf, "http://") == buf)
+-      _config->Set("Acquire::http::proxy", _strstrip(buf));
+-
+    return true;
+ }
+ 									/*}}}*/
+diff --git a/methods/http.h b/methods/http.h
+index 5406ce4..1df9fa0 100644
+--- a/methods/http.h
++++ b/methods/http.h
+@@ -124,9 +124,6 @@ class HttpMethod : public ServerMethod
+    public:
+    virtual void SendReq(FetchItem *Itm);
+ 
+-   /** \brief Try to AutoDetect the proxy */
+-   bool AutoDetectProxy();
+-
+    virtual bool Configuration(std::string Message);
+ 
+    virtual ServerState * CreateServerState(URI uri);
+diff --git a/methods/https.cc b/methods/https.cc
+index e0348ab..0499af0 100644
+--- a/methods/https.cc
++++ b/methods/https.cc
+@@ -20,6 +20,7 @@
+ #include <apt-pkg/configuration.h>
+ #include <apt-pkg/macros.h>
+ #include <apt-pkg/strutl.h>
++#include <apt-pkg/proxy.h>
+ 
+ #include <sys/stat.h>
+ #include <sys/time.h>
+@@ -107,6 +108,9 @@ void HttpsMethod::SetupProxy()  					/*{{{*/
+ {
+    URI ServerName = Queue->Uri;
+ 
++   // Determine the proxy setting
++   AutoDetectProxy(ServerName);
++
+    // Curl should never read proxy settings from the environment, as
+    // we determine which proxy to use.  Do this for consistency among
+    // methods and prevent an environment variable overriding a

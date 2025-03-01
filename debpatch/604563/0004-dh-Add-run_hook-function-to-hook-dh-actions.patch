@@ -1,0 +1,247 @@
+From 669af77c0e0d6bc68526ca189141d61347f7917a Mon Sep 17 00:00:00 2001
+From: Roger Leigh <rleigh@debian.org>
+Date: Sat, 27 Nov 2010 11:03:01 +0000
+Subject: [PATCH 4/5] dh: Add run_hook function to hook dh actions
+
+For a given command dh_foo, the following actions will be taken:
+
+1) run either dh_foo or "debian/rules override_dh_foo" (unchanged
+   behaviour)
+2) run "debian/rules dh_foo_hook"
+3) run "debian/rules dh_foo_arch_hook" (if building arch packages)
+4) run "debian/rules dh_foo_indep_hook" (if building indep packages)
+
+This means that additional actions may be performed after running a
+debhelper command.  This eliminates the primary need for using
+make conditionals with the output of dh_listpackages to perform
+package-specific actions, making for cleaner, more readable and
+maintainable rules files.
+
+The override_dh_foo target is still useful, but is now only required
+if additional options need passing to dh_foo, rather than if additional
+commands need running after dh_foo.
+
+Signed-off-by: Roger Leigh <rleigh@debian.org>
+---
+ dh |  141 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++------
+ 1 files changed, 128 insertions(+), 13 deletions(-)
+
+diff --git a/dh b/dh
+index f8628e8..a94a14c 100755
+--- a/dh
++++ b/dh
+@@ -32,6 +32,18 @@ target. The override target can then run the command with additional options,
+ or run entirely different commands instead. See examples below. (Note that to
+ use this feature, you should Build-Depend on debhelper 7.0.50 or above.)
+ 
++If F<debian/rules> contains a target with a name like
++I<dh_command>B<_hook>, I<dh_command>B<_indep_hook> or
++I<dh_command>B<_arch_hook>, these targets will be called I<after>
++I<dh_command> has been run.  I<dh_command_hook> will be run for all
++packages, while I<dh_command_indep_hook> will only be run for
++architecture independent packages and I<dh_command_arch_hook> will
++only be run for architecture dependent packages.  The hook targets may
++be used to run additional commands after the I<dh_command> has
++run. See examples below. (Note that to use this feature, you should
++Build-Depend on debhelper 8.1.0 or above.)
++
++
+ =head1 OPTIONS
+ 
+ =over 4
+@@ -151,6 +163,16 @@ either and instead run your own commands.
+ 	override_dh_auto_build:
+ 		make universe-explode-in-delight
+ 
++If running a configure script, it may be necessary to prevent it being
++run twice, once for architecture-independent packages, and again for
++architecture-dependent packages.  This may be accomplished by
++overriding L<dh_autoconfigure(1)>:
++
++	override_dh_auto_configure: config.status
++
++	config.status:
++		dh_auto_configure -- $configure_options
++
+ Another common case is wanting to do something manually before or
+ after a particular debhelper command is run.
+ 
+@@ -232,13 +254,38 @@ L<dh_listpackages(1)> to test what is being built. For example:
+ 	#!/usr/bin/make -f
+ 	%:
+ 		dh $@
+-	
++
+ 	override_dh_fixperms:
+ 		dh_fixperms
+ 	ifneq (,$(filter foo, $(shell dh_listpackages)))
+ 		chmod 4755 debian/foo/usr/bin/foo
+ 	endif
+ 
++Or using a hook, run after dh_fixperms:
++
++	#!/usr/bin/make -f
++	%:
++		dh $@
++
++	dh_fixperms_hook:
++	ifneq (,$(filter foo, $(shell dh_listpackages)))
++		chmod 4755 debian/foo/usr/bin/foo
++	endif
++
++It may also be possible to do this more simply using a more specific
++hook:
++
++	#!/usr/bin/make -f
++	%:
++		dh $@
++
++	dh_fixperms_arch_hook:
++		chmod 4755 debian/foo/usr/bin/foo
++
++This is for the case where foo is an architecture dependent package;
++if foo is an architecture independent package then
++dh_fixperms_indep_hook would be the correct target to use.
++
+ Finally, remember that you are not limited to using override targets in the
+ rules file when using B<dh>. You can also explicitly define any of the regular
+ rules file targets when it makes sense to do so. A common reason to do this
+@@ -249,13 +296,21 @@ B<build-indep> to avoid build daemons redundantly building the documentation.
+ 	#!/usr/bin/make -f
+ 	%:
+ 		dh $@
+-	
+-	build: build-arch build-indep ;
++
+ 	build-indep:
+ 		$(MAKE) docs
+ 	build-arch:
+ 		$(MAKE) bins
+ 
++Or alternatively, using hooks:
++
++	dh_auto_build_indep_hook:
++		$(MAKE) docs
++
++	dh_auto_build_arch_hook:
++		$(MAKE) bins
++
++
+ =head1 INTERNALS
+ 
+ If you're curious about B<dh>'s internals, here's how it works under the hood.
+@@ -680,22 +735,76 @@ sub run {
+ 	# to prevent them from being acted on.
+ 	push @options, map { "-N$_" } @exclude;
+ 
++	my $arch = grep {$_ eq '-a'} @options;
++	my $indep = grep {$_ eq '-i'} @options;
++	my $orig_command = $command;
++
++	# Check for override targets in debian/rules and
++	# run them instead of running the command directly.
++	my $has_explicit_target = rules_explicit_target("override_".$orig_command);
++	if (defined $has_explicit_target) {
++	    run_hook("override_".$orig_command, \@packages, \@exclude, @options);
++	}
++	else {
++		# Pass additional command options if any
++		unshift @options, @{$command_opts{$command}} if exists $command_opts{$command};
++		if (defined $command) {
++			# 3 space indent lines the command being run up under the
++			# sequence name after "dh ".
++			print "   ".escape_shell($command, @options)."\n";
++		}
++
++		if (! $dh{NO_ACT}) {
++			if (defined $command) {
++				my $ret=system($command, @options);
++				if ($ret >> 8 != 0) {
++					exit $ret >> 8;
++				}
++				elsif ($ret) {
++					exit 1;
++				}
++			}
++		}
++	}
++
++	if ($arch || $indep) {
++	    $has_explicit_target = rules_explicit_target($orig_command."_hook");
++	    if (defined $has_explicit_target) {
++		run_hook($orig_command."_hook", \@packages, \@exclude, @options);
++	    }
++	}
++	if ($arch) {
++	    $has_explicit_target = rules_explicit_target($orig_command."_arch_hook");
++	    if (defined $has_explicit_target) {
++		run_hook($orig_command."_arch_hook", \@packages, \@exclude, @options);
++	    }
++	}
++	if ($indep) {
++	    $has_explicit_target = rules_explicit_target($orig_command."_indep_hook");
++	    if (defined $has_explicit_target) {
++		run_hook($orig_command."_indep_hook", \@packages, \@exclude, @options);
++	    }
++	}
++}
++
++sub run_hook {
++	my $command=shift;
++	my @packages=@{shift()};
++	my @exclude=@{shift()};
++	my @options=@_;
++
++	my @orig_options = @options;
++
+ 	# Check for override targets in debian/rules and
+ 	# run them instead of running the command directly.
+ 	my $override_command;
+-	my $has_explicit_target = rules_explicit_target("override_".$command);
++	my $has_explicit_target = rules_explicit_target($command);
+ 	if (defined $has_explicit_target) {
+ 		$override_command=$command;
+ 		# Check if target isn't noop
+ 		if ($has_explicit_target) {
+-			# This passes the options through to commands called
+-			# inside the target.
+-			$ENV{DH_INTERNAL_OPTIONS}=join("\x1e", @options);
+-			# Prevent commands called inside the target from
+-			# logging.
+-			$ENV{DH_INHIBIT_LOG}=$command;
+ 			$command="debian/rules";
+-			@options="override_".$override_command;
++			@options=$override_command;
+ 		}
+ 		else {
+ 			$command = undef;
+@@ -717,6 +826,12 @@ sub run {
+ 
+ 	if (! $dh{NO_ACT}) {
+ 		if (defined $command) {
++			# This passes the options through to commands called
++			# inside the target.
++			$ENV{DH_INTERNAL_OPTIONS}=join("\x1e", @orig_options);
++			# Prevent commands called inside the target from
++			# logging.
++			$ENV{DH_INHIBIT_LOG}=$command;
+ 			my $ret=system($command, @options);
+ 			if ($ret >> 8 != 0) {
+ 				exit $ret >> 8;
+@@ -724,11 +839,11 @@ sub run {
+ 			elsif ($ret) {
+ 				exit 1;
+ 			}
++			delete $ENV{DH_INTERNAL_OPTIONS};
++			delete $ENV{DH_INHIBIT_LOG};
+ 		}
+ 
+ 		if (defined $override_command) {
+-			delete $ENV{DH_INTERNAL_OPTIONS};
+-			delete $ENV{DH_INHIBIT_LOG};
+ 			# Update log for overridden command now that it has
+ 			# finished successfully.
+ 			# (But avoid logging for dh_clean since it removes
+-- 
+1.7.2.3
+

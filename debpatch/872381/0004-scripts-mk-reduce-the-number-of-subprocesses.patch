@@ -1,0 +1,151 @@
+From ee2850385c228af1c6e7aaab4294dfc72d3c7ee6 Mon Sep 17 00:00:00 2001
+From: Nicolas Boulenguez <nicolas@debian.org>
+Date: Thu, 11 Feb 2021 16:26:50 +0100
+Subject: [PATCH 4/6] scripts/mk: reduce the number of subprocesses
+
+architecture.mk and buildflags.mk spawn less subshells, improving the
+overall speed (the tests run twice faster according to bash time
+builtin).
+
+pkg-info.mk uses the same trick than buildflags.mk in order to spawn
+at most one subshell. The performance gain is visible, but minor
+because there are way less variables.
+---
+ scripts/mk/architecture.mk | 18 +++++++++++-----
+ scripts/mk/buildflags.mk   | 23 ++++++++++++++------
+ scripts/mk/pkg-info.mk     | 44 +++++++++++++++++++++++++++++++-------
+ 3 files changed, 66 insertions(+), 19 deletions(-)
+
+diff --git a/scripts/mk/architecture.mk b/scripts/mk/architecture.mk
+index 2aa115822..198e5e145 100644
+--- a/scripts/mk/architecture.mk
++++ b/scripts/mk/architecture.mk
+@@ -2,10 +2,18 @@
+ # DEB_BUILD_* variables that dpkg-architecture can return. Existing values
+ # of those variables are preserved as per policy.
+ 
+-dpkg_lazy_eval ?= $$(or $$(value DPKG_CACHE_$(1)),$$(eval DPKG_CACHE_$(1) := $$(shell $(2)))$$(value DPKG_CACHE_$(1)))
+-
+-dpkg_architecture_setvar = export $(1) ?= $(call dpkg_lazy_eval,$(1),dpkg-architecture -q$(1))
+-
++dpkg-architecture_vars := \
+ $(foreach machine,BUILD HOST TARGET,\
+   $(foreach var,ARCH ARCH_ABI ARCH_LIBC ARCH_OS ARCH_CPU ARCH_BITS ARCH_ENDIAN GNU_CPU GNU_SYSTEM GNU_TYPE MULTIARCH,\
+-    $(eval $(call dpkg_architecture_setvar,DEB_$(machine)_$(var)))))
++    DEB_$(machine)_$(var)))
++
++# Spare a subprocess in the frequent case where dpkg-buildpackage
++# has already exported all variables.
++ifneq (,$(filter undefined,$(foreach v,$(dpkg-architecture_vars),$(origin $(v)))))
++
++  # ?= preserves overriddes from debian/rules or its command line.
++  $(foreach v,$(subst =,?=,$(shell dpkg-architecture)),$(eval $(v)))
++
++endif
++
++export $(dpkg-architecture_vars)
+diff --git a/scripts/mk/buildflags.mk b/scripts/mk/buildflags.mk
+index 9cef0c0c4..868581a7f 100644
+--- a/scripts/mk/buildflags.mk
++++ b/scripts/mk/buildflags.mk
+@@ -18,11 +18,13 @@
+ # This list is kept in sync with the default set of flags returned
+ # by dpkg-buildflags.
+ 
+-dpkg_lazy_eval ?= $$(or $$(value DPKG_CACHE_$(1)),$$(eval DPKG_CACHE_$(1) := $$(shell $(2)))$$(value DPKG_CACHE_$(1)))
+-
+ DPKG_BUILDFLAGS_LIST = ASFLAGS CFLAGS CPPFLAGS CXXFLAGS OBJCFLAGS OBJCXXFLAGS \
+                        GCJFLAGS DFLAGS FFLAGS FCFLAGS LDFLAGS
+ 
++# Accumulate the parameters for dpkg-buildflags, in case it is ever
++# called.
++
++DPKG_BUILDFLAGS_EXPORT_ENVVAR :=
+ define dpkg_buildflags_export_envvar
+   ifdef $(1)
+     DPKG_BUILDFLAGS_EXPORT_ENVVAR += $(1)="$$(value $(1))"
+@@ -36,11 +38,20 @@ $(foreach flag,$(DPKG_BUILDFLAGS_LIST),\
+   $(foreach operation,SET STRIP APPEND PREPEND,\
+     $(eval $(call dpkg_buildflags_export_envvar,DEB_$(flag)_MAINT_$(operation)))))
+ 
+-dpkg_buildflags_setvar = $(1) = $(call dpkg_lazy_eval,$(1),$(DPKG_BUILDFLAGS_EXPORT_ENVVAR) dpkg-buildflags --get $(1))
+-
+-$(foreach flag,$(DPKG_BUILDFLAGS_LIST),\
+-  $(eval $(call dpkg_buildflags_setvar,$(flag))))
++# This variable is only expanded on demand, and we ensure that it
++# happens at most once..
++dpkg-buildflags_run = $(eval $(shell \
++  $(DPKG_BUILDFLAGS_EXPORT_ENVVAR) dpkg-buildflags \
++  | sed 's/^\([^=]*\)\(.*\)/$$(eval \1:\2)/'))
+ 
+ ifdef DPKG_EXPORT_BUILDFLAGS
++  # We must compute all values right now.
++  $(dpkg-buildflags_run)
+   export $(DPKG_BUILDFLAGS_LIST)
++else
++  # Only run a subprocess when a variable is actually used,
++  # but then replace each recursive definition with a non-recursive one
++  # (and of course return the asked value).
++  $(foreach var,$(DPKG_BUILDFLAGS_LIST),\
++    $(eval $(var)=$$(dpkg-buildflags_run)$$($(var))))
+ endif
+diff --git a/scripts/mk/pkg-info.mk b/scripts/mk/pkg-info.mk
+index bccde2317..27e16c50c 100644
+--- a/scripts/mk/pkg-info.mk
++++ b/scripts/mk/pkg-info.mk
+@@ -12,16 +12,44 @@
+ #   SOURCE_DATE_EPOCH: source release date as seconds since the epoch, as
+ #     specified by <https://reproducible-builds.org/specs/source-date-epoch/>
+ #     (since dpkg 1.18.8).
++#     If it is undefined, the date of the latest changelog entry is used.
++#     In both cases, the value is exported.
+ 
+-dpkg_late_eval ?= $(or $(value DPKG_CACHE_$(1)),$(eval DPKG_CACHE_$(1) := $(shell $(2)))$(value DPKG_CACHE_$(1)))
+ 
+-DEB_SOURCE = $(call dpkg_late_eval,DEB_SOURCE,dpkg-parsechangelog -SSource)
+-DEB_VERSION = $(call dpkg_late_eval,DEB_VERSION,dpkg-parsechangelog -SVersion)
+-DEB_VERSION_EPOCH_UPSTREAM = $(call dpkg_late_eval,DEB_VERSION_EPOCH_UPSTREAM,echo '$(DEB_VERSION)' | sed -e 's/-[^-]*$$//')
+-DEB_VERSION_UPSTREAM_REVISION = $(call dpkg_late_eval,DEB_VERSION_UPSTREAM_REVISION,echo '$(DEB_VERSION)' | sed -e 's/^[0-9]*://')
+-DEB_VERSION_UPSTREAM = $(call dpkg_late_eval,DEB_VERSION_UPSTREAM,echo '$(DEB_VERSION_EPOCH_UPSTREAM)' | sed -e 's/^[0-9]*://')
+-DEB_DISTRIBUTION = $(call dpkg_late_eval,DEB_DISTRIBUTION,dpkg-parsechangelog -SDistribution)
++# This variable is only expanded on demand, and we ensure that it
++# happens at most once..
++dpkg-parsechangelog_run = $(eval $(shell dpkg-parsechangelog \
++                                   | sed -n '$(dpkg-parsechangelog_sed)'))
+ 
+-SOURCE_DATE_EPOCH ?= $(call dpkg_late_eval,SOURCE_DATE_EPOCH,dpkg-parsechangelog -STimestamp)
++dpkg-parsechangelog_sed := \
++  s/^Source: \(.*\)/\
++    $$(eval DEB_SOURCE                    := \1)/p;\
++  s/^Version: \([0-9]*:\)\?\(.*\)\(-[^-]*\)$$/\
++    $$(eval DEB_VERSION                   := \1\2\3)\
++    $$(eval DEB_VERSION_EPOCH_UPSTREAM    := \1\2)\
++    $$(eval DEB_VERSION_UPSTREAM_REVISION := \2\3)\
++    $$(eval DEB_VERSION_UPSTREAM          := \2)/p;\
++  s/^Distribution: \(.*\)/\
++    $$(eval DEB_DISTRIBUTION              := \1)/p
++
++ifdef SOURCE_DATE_EPOCH
++  # Only parse the changelog if a variable is actually used,
++  # but then replace each recursive definition with a non-recursive one
++  # (and of course return the asked value).
++  $(foreach var,\
++    DEB_SOURCE \
++    DEB_VERSION \
++    DEB_VERSION_EPOCH_UPSTREAM \
++    DEB_VERSION_UPSTREAM_REVISION \
++    DEB_VERSION_UPSTREAM \
++    DEB_DISTRIBUTION \
++    ,$(eval $(var) = $$(dpkg-parsechangelog_run)$$($(var))))
++else
++  # We must run a subshell in order to compute SOURCE_DATE_EPOCH,
++  # so we may as well set all variables.
++  dpkg-parsechangelog_sed += \
++    ;s/^Timestamp: \(.*\)/$$(eval SOURCE_DATE_EPOCH:=\1)/p
++  $(dpkg-parsechangelog_run)
++endif
+ 
+ export SOURCE_DATE_EPOCH
+-- 
+2.30.2
+

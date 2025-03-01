@@ -1,0 +1,159 @@
+------------------------------------------------------------
+revno: 2
+committer: Andres Salomon <dilinger@debian.org>
+branch nick: cryptsetup-1.0.2+1.0.3-rc3
+timestamp: Fri 2006-04-21 20:55:53 -0400
+message:
+  Instead of using getpass() (which the manpage claims is obsolete), manually
+  read() and disabling ECHO on the terminal.  Remove the signal based timeout,
+  and instead select on a (buffered) descriptor.  This should fix a bug
+  described in <http://bugs.debian.org/364153>.
+------------------------------------------------------------
+revno: 1
+committer: Andres Salomon <dilinger@debian.org>
+branch nick: cryptsetup-1.0.2+1.0.3-rc3
+timestamp: Fri 2006-04-21 13:45:56 -0400
+message:
+  Initial import.
+
+=== modified file 'lib/setup.c'
+--- lib/setup.c	
++++ lib/setup.c	
+@@ -7,6 +7,7 @@
+ #include <sys/mman.h>
+ #include <fcntl.h>
+ #include <unistd.h>
++#include <termios.h>
+ #include <errno.h>
+ #include <signal.h>
+ #include <assert.h>
+@@ -23,12 +24,6 @@
+ 
+ static int memory_unsafe = 0;
+ static char *default_backend = NULL;
+-
+-static void catch_alarm(int sig_num)
+-{
+-       fprintf(stderr, "Operation timed out. Exiting.\n");
+-       exit(0);
+-}
+ 
+ static int setup_enter(struct setup_backend *backend)
+ {
+@@ -70,6 +65,66 @@
+ 		munlockall();
+ 
+ 	return 0;
++}
++
++static int untimed_read(int fd, char *pass, size_t maxlen)
++{
++	ssize_t i;
++
++	i = read(fd, pass, maxlen);
++	if (i > 0) {
++		pass[i-1] = '\0';
++		i = 0;
++	}
++	return i;
++}
++
++static int timed_read(int fd, char *pass, size_t maxlen, long timeout)
++{
++	struct timeval t;
++	fd_set fds;
++	int failed = -1;
++
++	FD_ZERO(&fds);
++	FD_SET(fd, &fds);
++	t.tv_sec = timeout;
++	t.tv_usec = 0;
++
++	if (select(fd+1, &fds, NULL, NULL, &t) > 0)
++		failed = untimed_read(fd, pass, maxlen);
++	else
++		fprintf(stderr, "Operation timed out.\n");
++	return failed;
++}
++
++static int interactive_pass(const char *prompt, char *pass, size_t maxlen,
++		long timeout)
++{
++	struct termios orig, tmp;
++	int failed = -1;
++
++	if (maxlen < 1)
++		goto out_err;
++
++	if (tcgetattr(STDIN_FILENO, &orig)) {
++		set_error("Unable to get terminal");
++		goto out_err;
++	}
++	memcpy(&tmp, &orig, sizeof(tmp));
++	tmp.c_lflag &= ~ECHO;
++
++	write(STDOUT_FILENO, prompt, strlen(prompt));
++	tcsetattr(STDIN_FILENO, TCSAFLUSH, &tmp);
++	if (timeout)
++		failed = timed_read(STDIN_FILENO, pass, maxlen, timeout);
++	else
++		failed = untimed_read(STDIN_FILENO, pass, maxlen);
++	tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig);
++
++out_err:
++	if (!failed)
++		write(STDOUT_FILENO, "\n", 1);
++	return failed;
+ }
+ 
+ /*
+@@ -107,32 +162,23 @@
+ 		newline_stop = 1;
+ 	}	
+ 
+-	signal(SIGALRM, catch_alarm);
+-	if(options->timeout) {
+-		alarm(options->timeout);
+-	} else {
+-		alarm(0);
+-	}
+-	
+ 	/* Interactive case */
+ 	if(isatty(fd)) {
+-		char *pass2;
+-		
+-		pass2 = getpass(prompt);
+-		if (!pass2) {
++		int i;
++
++		pass = safe_alloc(512);
++		if (!pass || (i = interactive_pass(prompt, pass, 512, options->timeout))) {
+ 			set_error("Error reading passphrase");
+ 			goto out_err;
+ 		}
+-		pass = safe_strdup(pass2);
+-		memset(pass2, 0, strlen(pass2));
+-		
+ 		if (verify || verify_if_possible) {
+-			char *pass_verify = getpass("Verify passphrase: ");
+-			if (!pass_verify || strcmp(pass, pass_verify) != 0) {
++			char pass_verify[512];
++			i = interactive_pass("Verify passphrase: ", pass_verify, sizeof(pass_verify), options->timeout);
++			if (i || strcmp(pass, pass_verify) != 0) {
+ 				set_error("Passphrases do not match");
+ 				goto out_err;
+ 			}
+-			memset(pass_verify, 0, strlen(pass_verify));
++			memset(pass_verify, 0, sizeof(pass_verify));
+ 		}
+ 		*passLen = strlen(pass);
+ 		*key = pass;
+@@ -185,7 +231,6 @@
+ 		pass[i] = 0;
+ 		*key = pass;
+ 		*passLen = i;
+-		alarm(0);
+ 	}
+ 	return;
+ 
+

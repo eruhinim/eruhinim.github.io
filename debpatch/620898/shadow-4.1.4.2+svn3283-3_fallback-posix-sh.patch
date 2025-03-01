@@ -1,0 +1,272 @@
+diff --git a/configure.in b/configure.in
+index 4021479..585bdb1 100644
+--- a/configure.in
++++ b/configure.in
+@@ -574,7 +574,7 @@ if test "$enable_utmpx" = "yes"; then
+ 	          [Define if utmpx should be used])
+ fi
+ 
+-AC_DEFINE_UNQUOTED(SHELL, ["$SHELL"], [The default shell.])
++AC_DEFINE_UNQUOTED(SHELL, ["/bin/sh"], [The default shell.])
+ 
+ AM_GNU_GETTEXT_VERSION(0.16)
+ AM_GNU_GETTEXT([external], [need-ngettext])
+diff --git a/lib/prototypes.h b/lib/prototypes.h
+index 1f6e5b3..76c84b3 100644
+--- a/lib/prototypes.h
++++ b/lib/prototypes.h
+@@ -337,6 +337,8 @@ extern void spw_free (/*@out@*/ /*@only@*/struct spwd *spent);
+ 
+ /* shell.c */
+ extern int shell (const char *file, /*@null@*/const char *arg, char *const envp[]);
++extern bool shell_is_listed (const char *sh);
++extern bool shell_must_fallback (const char *sh);
+ 
+ /* system.c */
+ extern int safe_system (const char *command,
+diff --git a/libmisc/setupenv.c b/libmisc/setupenv.c
+index 666b1c7..7e8ab41 100644
+--- a/libmisc/setupenv.c
++++ b/libmisc/setupenv.c
+@@ -241,7 +241,8 @@ void setup_env (struct passwd *info)
+ 	 * Create the SHELL environmental variable and export it.
+ 	 */
+ 
+-	if ((NULL == info->pw_shell) || ('\0' == *info->pw_shell)) {
++	if ((NULL == info->pw_shell) || ('\0' == *info->pw_shell) ||
++	    shell_must_fallback (info->pw_shell)) {
+ 		static char temp_pw_shell[] = SHELL;
+ 
+ 		info->pw_shell = temp_pw_shell;
+diff --git a/libmisc/shell.c b/libmisc/shell.c
+index d815f2d..6bc5b1d 100644
+--- a/libmisc/shell.c
++++ b/libmisc/shell.c
+@@ -42,6 +42,84 @@ extern char **newenvp;
+ extern size_t newenvc;
+ 
+ /*
++ * shell_is_listed - see if the user's login shell is listed in /etc/shells
++ *
++ * The /etc/shells file is read for valid names of login shells.  If the
++ * /etc/shells file does not exist the user cannot set any shell unless
++ * they are root.
++ *
++ * If getusershell() is available (Linux, *BSD, possibly others), use it
++ * instead of re-implementing it.
++ */
++bool shell_is_listed (const char *sh)
++{
++	char *cp;
++	bool found = false;
++
++#ifndef HAVE_GETUSERSHELL
++	char buf[BUFSIZ];
++	FILE *fp;
++#endif
++
++#ifdef HAVE_GETUSERSHELL
++	setusershell ();
++	while ((cp = getusershell ())) {
++		if (*cp == '#') {
++			continue;
++		}
++
++		if (strcmp (cp, sh) == 0) {
++			found = true;
++			break;
++		}
++	}
++	endusershell ();
++#else
++	fp = fopen (SHELLS_FILE, "r");
++	if (NULL == fp) {
++		return false;
++	}
++
++	while (fgets (buf, sizeof (buf), fp) == buf) {
++		cp = strrchr (buf, '\n');
++		if (NULL != cp) {
++			*cp = '\0';
++		}
++
++		if (buf[0] == '#') {
++			continue;
++		}
++
++		if (strcmp (buf, sh) == 0) {
++			found = true;
++			break;
++		}
++	}
++	fclose (fp);
++#endif
++	return found;
++}
++
++/*
++ * shell_must_fallback - see if must fallback to the default POSIX shell
++ *
++ * Check if the shell specified does not exist, but is known in /etc/shells,
++ * and thus it's safe to fallback to the default POSIX shell. Otherwise
++ * user accounts disabled by setting the login shell to a non-existent path
++ * would be allowed which is not what we want.
++ */
++bool shell_must_fallback (const char *sh)
++{
++	if (access (sh, R_OK|X_OK) == 0)
++		return false;
++
++	if (!shell_is_listed (sh))
++		return false;
++
++	return true;
++}
++
++/*
+  * shell - execute the named program
+  *
+  *	shell begins by trying to figure out what argv[0] is going to
+@@ -53,6 +131,7 @@ extern size_t newenvc;
+ 
+ int shell (const char *file, /*@null@*/const char *arg, char *const envp[])
+ {
++	const char *fallback_arg;
+ 	char arg0[1024];
+ 	int err;
+ 
+@@ -71,6 +150,10 @@ int shell (const char *file, /*@null@*/const char *arg, char *const envp[])
+ 		(void) snprintf (arg0, sizeof arg0, "-%s", Basename ((char *) file));
+ 		arg0[sizeof arg0 - 1] = '\0';
+ 		arg = arg0;
++
++		fallback_arg = "-sh";
++	} else {
++		fallback_arg = arg;
+ 	}
+ 
+ 	/*
+@@ -81,6 +164,17 @@ int shell (const char *file, /*@null@*/const char *arg, char *const envp[])
+ 	(void) execle (file, arg, (char *) 0, envp);
+ 	err = errno;
+ 
++	if (shell_is_listed (file)) {
++		/*
++		 * There seems to be a problem with the requested shell,
++		 * fallback to a POSIX shell, but only if the requested
++		 * shell is a known one, as it's common to disable accounts
++		 * by using a non-existing path, which we would not want
++		 * to allow here.
++		 */
++		(void) execle (SHELL, fallback_arg, (char *)0, envp);
++	}
++
+ 	if (access (file, R_OK|X_OK) == 0) {
+ 		/*
+ 		 * Assume this is a shell script (with no shebang).
+diff --git a/src/chsh.c b/src/chsh.c
+index 2d3cf36..d640a6e 100644
+--- a/src/chsh.c
++++ b/src/chsh.c
+@@ -74,7 +74,6 @@ static bool pw_locked = false;
+ static void fail_exit (int code);
+ static void usage (int status);
+ static void new_fields (void);
+-static bool shell_is_listed (const char *);
+ static bool is_restricted_shell (const char *);
+ static void process_flags (int argc, char **argv);
+ static void check_perms (const struct passwd *pw);
+@@ -139,65 +138,6 @@ static bool is_restricted_shell (const char *sh)
+ }
+ 
+ /*
+- * shell_is_listed - see if the user's login shell is listed in /etc/shells
+- *
+- * The /etc/shells file is read for valid names of login shells.  If the
+- * /etc/shells file does not exist the user cannot set any shell unless
+- * they are root.
+- *
+- * If getusershell() is available (Linux, *BSD, possibly others), use it
+- * instead of re-implementing it.
+- */
+-static bool shell_is_listed (const char *sh)
+-{
+-	char *cp;
+-	bool found = false;
+-
+-#ifndef HAVE_GETUSERSHELL
+-	char buf[BUFSIZ];
+-	FILE *fp;
+-#endif
+-
+-#ifdef HAVE_GETUSERSHELL
+-	setusershell ();
+-	while ((cp = getusershell ())) {
+-		if (*cp == '#') {
+-			continue;
+-		}
+-
+-		if (strcmp (cp, sh) == 0) {
+-			found = true;
+-			break;
+-		}
+-	}
+-	endusershell ();
+-#else
+-	fp = fopen (SHELLS_FILE, "r");
+-	if (NULL == fp) {
+-		return false;
+-	}
+-
+-	while (fgets (buf, sizeof (buf), fp) == buf) {
+-		cp = strrchr (buf, '\n');
+-		if (NULL != cp) {
+-			*cp = '\0';
+-		}
+-
+-		if (buf[0] == '#') {
+-			continue;
+-		}
+-
+-		if (strcmp (buf, sh) == 0) {
+-			found = true;
+-			break;
+-		}
+-	}
+-	fclose (fp);
+-#endif
+-	return found;
+-}
+-
+-/*
+  *  * process_flags - parse the command line options
+  *
+  *	It will not return if an error is encountered.
+diff --git a/src/newgrp.c b/src/newgrp.c
+index 123f9ca..4aa3088 100644
+--- a/src/newgrp.c
++++ b/src/newgrp.c
+@@ -756,7 +756,8 @@ int main (int argc, char **argv)
+ 	cp = getenv ("SHELL");
+ 	if (!initflag && (NULL != cp)) {
+ 		prog = cp;
+-	} else if ((NULL != pwd->pw_shell) && ('\0' != pwd->pw_shell[0])) {
++	} else if ((NULL != pwd->pw_shell) && ('\0' != pwd->pw_shell[0]) &&
++	           !shell_must_fallback (pwd->pw_shell)) {
+ 		prog = pwd->pw_shell;
+ 	} else {
+ 		prog = SHELL;
+diff --git a/src/su.c b/src/su.c
+index f3ff666..a74024f 100644
+--- a/src/su.c
++++ b/src/su.c
+@@ -759,7 +759,8 @@ int main (int argc, char **argv)
+ 	/*
+ 	 * Set the default shell.
+ 	 */
+-	if ((NULL == shellstr) || ('\0' == shellstr[0])) {
++	if ((NULL == shellstr) || ('\0' == shellstr[0]) ||
++	    shell_must_fallback (pwent.pw_shell)) {
+ 		shellstr = SHELL;
+ 	}
+ 

@@ -1,0 +1,179 @@
+From 805f0588efc33b5e57cfc2608c4960a82ea149c3 Mon Sep 17 00:00:00 2001
+From: Dan Nicholson <nicholson@endlessm.com>
+Date: Tue, 27 Jun 2017 13:20:22 -0500
+Subject: [PATCH] Add support for fix binary flag
+
+Recent kernels provide a binfmt flag F referred to as fix binary[1].
+This flag instructs the kernel to open the interpreter immediately and
+use always use the opened image. This has a big advantage in containers
+or chroots where the interpreter may not exist at the specified path.
+
+A primary use case would be for a static linked QEMU user emulator where
+an architecture can be emulated in a container or chroot without any
+alterations so long as the binfmt configuration is handled on the host.
+
+1. https://www.kernel.org/doc/html/latest/admin-guide/binfmt-misc.html
+---
+ man/update-binfmts.man8 |  7 ++++++-
+ src/format.c            |  5 +++++
+ src/format.h            |  1 +
+ src/update-binfmts.c    | 17 +++++++++++++++--
+ 4 files changed, 27 insertions(+), 3 deletions(-)
+
+diff --git a/man/update-binfmts.man8 b/man/update-binfmts.man8
+index a5e5f7a..01b7163 100644
+--- a/man/update-binfmts.man8
++++ b/man/update-binfmts.man8
+@@ -237,6 +237,10 @@ Whether to preserve the original
+ .Li argv[0]
+ when running the interpreter, rather than overwriting it with the full path
+ to the binary.
++.It Fl Fl fix-binary Cm yes , Fl Fl fix-binary Cm no
++Whether to open the emulator binary immediately and always use the opened
++image. This allows the emulator from the host to be used regardless of usage
++in changeroots or different mount namespaces.
+ .El
+ .Ss FORMAT FILES
+ A format file is a sequence of options, one per line, corresponding roughly
+@@ -259,8 +263,9 @@ The
+ .Ar extension ,
+ .Ar detector ,
+ .Ar credentials ,
++.Ar preserve ,
+ and
+-.Ar preserve
++.Ar fix-binary
+ options correspond to the command-line options of the same names.
+ .Sh EXIT STATUS
+ .Bl -tag -width 4n
+diff --git a/src/format.c b/src/format.c
+index 0bfdfe1..89bbbb2 100644
+--- a/src/format.c
++++ b/src/format.c
+@@ -77,6 +77,7 @@ struct binfmt *binfmt_load (const char *name, const char *filename, int quiet)
+     READ_LINE (detector, 1);
+     READ_LINE (credentials, 1);
+     READ_LINE (preserve, 1);
++    READ_LINE (fix_binary, 1);
+ 
+ #undef READ_LINE
+ 
+@@ -108,6 +109,7 @@ struct binfmt *binfmt_new (const char *name, Hash_table *args)
+     SET_FIELD (detector);
+     SET_FIELD (credentials);
+     SET_FIELD (preserve);
++    SET_FIELD (fix_binary);
+ 
+ #undef SET_FIELD
+ 
+@@ -182,6 +184,7 @@ int binfmt_write (const struct binfmt *binfmt, const char *filename)
+     WRITE_FIELD (detector);
+     WRITE_FIELD (credentials);
+     WRITE_FIELD (preserve);
++    WRITE_FIELD (fix_binary);
+ 
+ #undef WRITE_FIELD
+ 
+@@ -207,6 +210,7 @@ void binfmt_print (const struct binfmt *binfmt)
+     PRINT_FIELD (detector);
+     PRINT_FIELD (credentials);
+     PRINT_FIELD (preserve);
++    PRINT_FIELD (fix_binary);
+ 
+ #undef PRINT_FIELD
+ }
+@@ -231,6 +235,7 @@ void binfmt_free (struct binfmt *binfmt)
+     free (binfmt->detector);
+     free (binfmt->credentials);
+     free (binfmt->preserve);
++    free (binfmt->fix_binary);
+     free (binfmt);
+ }
+ 
+diff --git a/src/format.h b/src/format.h
+index 54a09e0..82fa924 100644
+--- a/src/format.h
++++ b/src/format.h
+@@ -32,6 +32,7 @@ struct binfmt {
+     char *detector;
+     char *credentials;
+     char *preserve;
++    char *fix_binary;
+ };
+ 
+ struct binfmt *binfmt_load (const char *name, const char *filename, int quiet);
+diff --git a/src/update-binfmts.c b/src/update-binfmts.c
+index 857b214..6aea32c 100644
+--- a/src/update-binfmts.c
++++ b/src/update-binfmts.c
+@@ -363,6 +363,7 @@ static int act_enable (const char *name)
+ 	const char *interpreter;
+ 	const char *credentials;
+ 	const char *preserve;
++	const char *fix_binary;
+ 	char *regstring;
+ 
+ 	procdir_name = xasprintf ("%s/%s", procdir, name);
+@@ -417,10 +418,13 @@ static int act_enable (const char *name)
+ 		? "C" : "";
+ 	preserve = (binfmt->preserve && !strcmp (binfmt->preserve, "yes"))
+ 		? "P" : "";
+-	regstring = xasprintf (":%s:%c:%s:%s:%s:%s:%s%s\n",
++	fix_binary =
++		(binfmt->fix_binary && !strcmp (binfmt->fix_binary, "yes"))
++		? "F" : "";
++	regstring = xasprintf (":%s:%c:%s:%s:%s:%s:%s%s%s\n",
+ 			       name, type, binfmt->offset, binfmt->magic,
+ 			       binfmt->mask, interpreter,
+-			       credentials, preserve);
++			       credentials, preserve, fix_binary);
+ 	if (test)
+ 	    printf ("enable %s with the following format string:\n %s",
+ 		    name, regstring);
+@@ -808,6 +812,7 @@ enum opts {
+     OPT_DETECTOR,
+     OPT_CREDENTIALS,
+     OPT_PRESERVE,
++    OPT_FIX_BINARY,
+     OPT_PACKAGE,
+     OPT_ADMINDIR,
+     OPT_IMPORTDIR,
+@@ -850,6 +855,8 @@ static struct argp_option options[] = {
+ 	"use credentials of original binary for interpreter (yes/no)" },
+     { "preserve",	OPT_PRESERVE, "YES/NO",	OPTION_HIDDEN,
+ 	"preserve argv[0] of original binary for interpreter (yes/no)" },
++    { "fix-binary",	OPT_FIX_BINARY, "YES/NO",	OPTION_HIDDEN,
++	"open intepreter binary immediately and always use open image (yes/no)" },
+     { "package",	OPT_PACKAGE,	"PACKAGE-NAME",	0,
+ 	"for --install and --remove, specify the current package name", 1 },
+     { "admindir",	OPT_ADMINDIR,	"DIRECTORY",	0,
+@@ -876,6 +883,7 @@ static struct {
+     const char *detector;
+     const char *credentials;
+     const char *preserve;
++    const char *fix_binary;
+ } spec;
+ 
+ static const char *mode_name (enum opts m)
+@@ -1004,6 +1012,10 @@ static error_t parse_opt (int key, char *arg, struct argp_state *state)
+ 	    spec.preserve = arg;
+ 	    return 0;
+ 
++	case OPT_FIX_BINARY:
++	    spec.fix_binary = arg;
++	    return 0;
++
+ 	case OPT_PACKAGE:
+ 	    if (package)
+ 		argp_error (state, "more than one --package option given");
+@@ -1116,6 +1128,7 @@ int main (int argc, char **argv)
+ 	ADD_SPEC (detector);
+ 	ADD_SPEC (credentials);
+ 	ADD_SPEC (preserve);
++	ADD_SPEC (fix_binary);
+ #undef ADD_SPEC
+ 	binfmt = binfmt_new (name, format_args);
+ 
+-- 
+2.1.4
+

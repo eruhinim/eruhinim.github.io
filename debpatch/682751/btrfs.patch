@@ -1,0 +1,98 @@
+--- /usr/share/initramfs-tools/hooks/cryptroot	2014-08-17 20:44:51.515290131 +0100
++++ ./debian/initramfs/cryptroot-hook	2014-08-17 21:36:14.359222493 +0100
+@@ -16,8 +16,8 @@
+ 
+ . /usr/share/initramfs-tools/hook-functions
+ 
+-get_root_device() {
+-	local device mount type options dump pass
++get_root_devices() {
++	local device devices mount type options dump pass canonical
+ 
+ 	if [ ! -r /etc/fstab ]; then
+ 		return 1
+@@ -26,9 +26,21 @@
+ 	grep -s '^[^#]' /etc/fstab | \
+ 	while read device mount type options dump pass; do
+ 		if [ "$mount" = "/" ]; then
+-			device=$(canonical_device "$device") || return 0
+-			echo "$device"
+-			return
++			if is_btrfs_filesystem "$device" ; then
++				devices=$(get_btrfs_siblings "$device")
++				if [ -z "$devices" ] ; then
++					echo "cryptsetup: BUG: internal failure to get btrfs siblings." >&2
++					devices="$device"
++				fi
++			else
++				devices="$device"
++			fi
++			for device in $devices ; do
++				if canonical=$(canonical_device "$device") ; then
++					echo $canonical
++				fi
++			done
++			return 0
+ 		fi
+ 	done
+ }
+@@ -168,6 +180,28 @@
+ 	return 0
+ }
+ 
++is_btrfs_filesystem() {
++	blkid -t TYPE=btrfs $1 >/dev/null
++}
++
++is_btrfs_tool_available() {
++	which btrfs > /dev/null
++}
++
++get_btrfs_siblings() {
++	local node="$1"
++	if ! is_btrfs_tool_available ; then
++		echo "cryptsetup: WARNING: \"$node\" is btrfs, but btrfs tool is not available." >&2
++		echo "            If there are other devices in this filesystem they will not be" >&2
++		echo "            decrypted at boot time." >&2
++		echo "$node"
++		return 0
++	fi
++
++	btrfs filesystem show "$node" | grep /dev/ | \
++	   sed 's/[^\/]*\(\/dev\/[^ ]*\)/\1/g'
++}
++
+ get_device_opts() {
+ 	local target source link extraopts rootopts opt
+ 	target="$1"
+@@ -502,6 +536,9 @@
+ setup="no"
+ rootdev=""
+ resumedevs=""
++# This set contains rootdev, but may contain more devices in case of filesystems
++# which are spanned accross several devices (e.g. btrfs).
++all_rootdevs=""
+ 
+ # Include cryptsetup modules, regardless of _this_ machine
+ # configuration
+@@ -511,15 +548,17 @@
+ 
+ # Find the root and resume device(s)
+ if [ -r /etc/crypttab ]; then
+-	rootdev=$(get_root_device)
+-	if [ -z "$rootdev" ]; then
++	all_rootdevs=$(get_root_devices)
++	if [ -z "$all_rootdevs" ]; then
+ 		echo "cryptsetup: WARNING: could not determine root device from /etc/fstab" >&2
++	else
++		rootdev=$(echo $all_rootdevs | ( read first rest ; echo $first ))
+ 	fi
+ 	resumedevs=$(get_resume_devices)
+ fi
+ 
+ # Load the config opts and modules for each device
+-for dev in $rootdev $resumedevs ; do
++for dev in $all_rootdevs $resumedevs; do
+ 	if ! modules=$(add_device "$dev"); then
+ 		echo "cryptsetup: FAILURE: could not determine configuration for $dev" >&2
+ 		continue

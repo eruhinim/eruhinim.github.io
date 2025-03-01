@@ -1,0 +1,195 @@
+From 4af9fa8484d4d85a701d934888ef8ada535d61f2 Mon Sep 17 00:00:00 2001
+From: Sebastian Harl <sh@tokkee.org>
+Date: Sat, 6 Sep 2008 19:07:28 +0200
+Subject: [PATCH] fai-mirror: Added support for the -a command line option.
+
+This option may be used to specify the architectures which should be included
+in the mirror.
+
+Signed-off-by: Sebastian Harl <sh@tokkee.org>
+---
+ bin/fai-mirror   |  111 +++++++++++++++++++++++++++++++++++++++--------------
+ man/fai-mirror.1 |    5 ++
+ 2 files changed, 86 insertions(+), 30 deletions(-)
+
+diff --git a/bin/fai-mirror b/bin/fai-mirror
+index 1d14609..187d504 100755
+--- a/bin/fai-mirror
++++ b/bin/fai-mirror
+@@ -151,6 +151,8 @@ initialize() {
+ }
+ # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+ delete_base_packages() {
++    local arch=$1
++    shift
+ 
+     # now delete all packages that are already included in base.tgz
+     local p
+@@ -162,14 +164,18 @@ delete_base_packages() {
+     fi
+     echo "Removing packages that are already included in base.tgz"
+     for p in $(cat $NFSROOT/var/tmp/base-pkgs.lis); do
+-	if [ -f $archivedir/${p}_*.deb ]; then
+-	    [ $verbose -eq 1 ] && echo "deleting package $p"
+-	    rm $archivedir/${p}_*.deb
++	# There might be more than one file - even for this architecture.
++	local files=$(ls $archivedir/${p}_{$arch,all}.deb 2> /dev/null)
++	for file in $files; do
++	    if [ -f $file ]; then
++		[ $verbose -eq 1 ] && echo "deleting package $p"
++		rm $file
+         # else commands only for debugging
+         #    else
+         #	echo "package $p not found"
+         #	ls $archivedir/${p}_*.deb
+-	fi
++	    fi
++	done
+     done
+ }
+ # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+@@ -225,7 +231,8 @@ preserve=0
+ verbose=0
+ add=1
+ qflag=-qq
+-while getopts "Bvhx:pc:C:" opt ; do
++archs="`dpkg-architecture -qDEB_HOST_ARCH`"
++while getopts "Bvhx:pc:C:a:" opt ; do
+     case "$opt" in
+ 	B) add=0 ;;
+ 	C) cfdir=$OPTARG ;;
+@@ -234,6 +241,7 @@ while getopts "Bvhx:pc:C:" opt ; do
+ 	c) cclasses="$OPTARG";;
+ 	p) preserve=1;;
+ 	v) verbose=1; vflag=-v; qflag='';;
++	a) archs="$OPTARG";;
+ 	?) die 1 "Unknown option";;
+     esac
+ done
+@@ -290,17 +298,26 @@ fi
+ # TODO: use -p to preserve sources.list
+ perl -p -e 's/file:/copy:/' $cfdir/apt/sources.list > $aptcache/etc/apt/sources.list
+ 
+-echo "Getting package information"
+-apt-get $quiet $aptoptions update >/dev/null
+-
+-set-classes
+-echo "Downloading packages for classes:" $classes
+-FAI=$FAI_CONFIGDIR install_packages -d $vflag
+-[ $add -eq 1 ] && add_base_packages
+-get_addpackages
+-umount_dirs
+-trap "" EXIT ERR
+-[ $add -eq 0 ] && delete_base_packages
++archs=${archs//,/ }
++for arch in $archs; do
++    arch=$(echo $arch | tr '[[:upper:]]' '[[:lower:]]')
++    aptoptions_noarch="$aptoptions"
++    aptoptions=" -o APT::Architecture=$arch $aptoptions_noarch"
++
++    echo "Getting package information for architecture $arch"
++    apt-get $quiet $aptoptions update >/dev/null
++
++    set-classes
++    echo "Downloading packages for classes:" $classes
++    FAI=$FAI_CONFIGDIR install_packages -d $vflag
++    [ $add -eq 1 ] && add_base_packages
++    get_addpackages
++    umount_dirs
++    trap "" EXIT ERR
++    [ $add -eq 0 ] && delete_base_packages $arch
++
++    aptoptions="$aptoptions_noarch"
++done
+ 
+ # create mirror directory structure
+ echo "Calling apt-move"
+@@ -315,21 +332,55 @@ CONTENTS=no
+ PKGCOMP='none gzip'
+ EOF
+ apt-move $quiet -c $aptmovefile update
+-# since Packages.gz from apt-move does not include packages from my
+-# repository, let's use apt-ftparchive for generiating correct index
+-# files
+-pfilegz=$(find $mirrordir/dists -name Packages.gz)
+-pfile=$(find $mirrordir/dists -name Packages)
+-pdist=$(cd $mirrordir/dists ; ls)
++
++# apt-move does not handle Packages files for multiple architectures,
++# so we're creating those ourselves. Also, we're creating our own
++# Release files.
++#
++# We trust in dists and components being created by apt-move.
++echo "Creating Packages and Release files"
+ cd $mirrordir
+-# md5sums of apt-move are not valid, when we recreate Packages.gz using
+-# apt-ftparchive, but we can use the header of the Release file
+-grep -B99 MD5Sum:  $mirrordir/dists/$pdist/Release | grep -v MD5Sum: > $mirrordir/tmpfile
+-rm $mirrordir/dists/$pdist/Release
+-apt-ftparchive packages pool > $pfile
+-gzip -c $pfile > $pfilegz
+-apt-ftparchive release dists/$pdist >> tmpfile
+-mv tmpfile dists/$pdist/Release
++dists=$(cd $mirrordir/dists ; find * -maxdepth 0 -type d | xargs echo -n)
++for dist in $dists; do
++    distdir="$mirrordir/dists/$dist"
++
++    components=$(cd $distdir ; find * -maxdepth 0 -type d | xargs echo -n)
++    for component in $components; do
++        componentdir="$distdir/$component"
++
++        for arch in $archs; do
++            archdir="$componentdir/binary-$arch"
++            mkdir -p "$archdir"
++            rm -rf $archdir/Packages{,gz}
++
++            dpkg-scanpackages --arch $arch . > $archdir/Packages
++            gzip -c $archdir/Packages > $archdir/Packages.gz
++
++            cat > $archdir/Release <<EOF
++Archive: $dist
++Component: $component
++Origin: fai-mirror
++Label: fai-mirror
++Architecture: $arch
++EOF
++        done
++    done
++
++    mirror_archs=$(cd $distdir ; \
++            ls */ | grep '^binary-' | cut -d'-' -f2- | xargs echo -n)
++    cat > $distdir/Release <<EOF
++Origin: fai-mirror
++Label: fai-mirror
++Suite: $dist
++Codename: unknown
++Date: `date -Ru`
++Architectures: $mirror_archs
++Components: $components
++Description: unknown
++EOF
++
++    apt-ftparchive release dists/$dist >> $distdir/Release
++done
+ 
+ echo "$0 finished."
+ echo -n "Mirror size and location: ";du -sh $mirrordir
+diff --git a/man/fai-mirror.1 b/man/fai-mirror.1
+index daac1aa..4ffab54 100644
+--- a/man/fai-mirror.1
++++ b/man/fai-mirror.1
+@@ -71,6 +71,11 @@ Show simle help and version.
+ Exclude these classes. Do not add the packages of these classes to
+ the mirror.
+ .TP
++.B "\-a " ARCH[,ARCH]
++Create the mirror for the given architectures. Default is the host
++architecture. This has no influence on the list of classes. This might have to
++be combined with -B to prevent architecture specific packages to be pulled in.
++.TP
+ .B \-p
+ Preserve existing sources.list. NOT YET IMPLEMENTED.
+ .TP
+-- 
+1.6.0.1.216.g1b23a
+

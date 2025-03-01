@@ -1,0 +1,273 @@
+From 39133030f13386e4ad9a40866f4ee530475e46b0 Mon Sep 17 00:00:00 2001
+From: Simon McVittie <simon.mcvittie@collabora.co.uk>
+Date: Mon, 7 Oct 2013 19:45:32 +0100
+Subject: [PATCH] Add support for various forms of the ID parameter
+
+The Android mkbootimg tool uses the (raw binary) SHA-1 of various
+bits of the image, zero-padded at the end, as the image's unique ID.
+I am not aware of any devices that require this, but you never know.
+
+Rockchip devices like the RK3188 have their own variant image format
+in which the end of the header is also included in the SHA-1,
+resulting in a different ID. These devices' bootloader *does*
+verify the hash, so an ordinary mkbootimg or abootimg will not
+produce a bootable kernel.
+
+This modified mkbootimg produces that SHA1, for instance:
+https://github.com/naobsd/cm_system_core/tree/ics-rockchip-naobsd/mkbootimg
+
+This does add a dependency, by requiring a SHA1 implementation.
+I used gcrypt here, since it's reasonably small and part of
+Debian 'standard' as of wheezy; any other SHA1 implementation
+with support for incremental updates would do.
+
+I also included support for arbitrary human-readable or binary image
+IDs, since that was rather easier.
+---
+ Makefile   |   4 +-
+ abootimg.c | 149 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 148 insertions(+), 5 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index ed39f9b..d0d89af 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,7 +1,7 @@
+ 
+-CPPFLAGS=-DHAS_BLKID
++CPPFLAGS=-DHAS_BLKID -DHAS_GCRYPT
+ CFLAGS=-O3 -Wall
+-LDLIBS=-lblkid
++LDLIBS=-lblkid -lgcrypt
+ 
+ all: abootimg
+ 
+diff --git a/abootimg.c b/abootimg.c
+index a55c5c8..6a1cc7e 100644
+--- a/abootimg.c
++++ b/abootimg.c
+@@ -16,7 +16,7 @@
+  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+  */
+ 
+-
++#include <assert.h>
+ #include <stdlib.h>
+ #include <stdio.h>
+ #include <string.h>
+@@ -51,6 +51,10 @@
+ #include <blkid/blkid.h>
+ #endif
+ 
++#ifdef HAS_GCRYPT
++#include <gcrypt.h>
++#endif
++
+ #include "version.h"
+ #include "bootimg.h"
+ 
+@@ -64,6 +68,13 @@ enum command {
+   create
+ };
+ 
++enum id_mode {
++  id_mode_none,
++  id_mode_sha1,
++  id_mode_rockchip,
++  id_mode_string,
++  id_mode_hex
++};
+ 
+ typedef struct
+ {
+@@ -75,6 +86,8 @@ typedef struct
+   char*        kernel_fname;
+   char*        ramdisk_fname;
+   char*        second_fname;
++  enum id_mode id_mode;
++  char*        id_arg;
+ 
+   FILE*        stream;
+ 
+@@ -152,7 +165,7 @@ void print_usage(void)
+  "      - ramdisk image (default name initrd.img)\n"
+  "      - second stage image (default name stage2.img)\n"
+  "\n"
+- " abootimg -u <bootimg> [-c \"param=value\"] [-f <bootimg.cfg>] [-k <kernel>] [-r <ramdisk>] [-s <secondstage>]\n"
++ " abootimg -u <bootimg> [-c \"param=value\"] [-f <bootimg.cfg>] [-k <kernel>] [-r <ramdisk>] [-s <secondstage>] [--id sha1|rockchip|string:<...>|hex:<...>]\n"
+  "\n"
+  "      update a current boot image with objects given in command line\n"
+  "      - header informations given in arguments (several can be provided)\n"
+@@ -161,9 +174,17 @@ void print_usage(void)
+  "      - ramdisk image\n"
+  "      - second stage image\n"
+  "\n"
++ "      The image ID will be set according to the id parameter:\n"
++ "      - sha1: SHA1 of kernel image and size, ramdisk image and size,\n"
++ "          second stage image and size (as written by Android mkbootimg)\n"
++ "      - rockchip: SHA1 of the same things as sha1, plus the rest of\n"
++ "          the header (required by the Rockchip boot loader)\n"
++ "      - string:myimagename: any user-supplied text up to 32 bytes\n"
++ "      - hex:0123456789abcdef...: any user-supplied binary up to 32 bytes\n"
++ "\n"
+  "      bootimg has to be valid Android Boot Image, or the update will abort.\n"
+  "\n"
+- " abootimg --create <bootimg> [-c \"param=value\"] [-f <bootimg.cfg>] -k <kernel> -r <ramdisk> [-s <secondstage>]\n"
++ " abootimg --create <bootimg> [-c \"param=value\"] [-f <bootimg.cfg>] -k <kernel> -r <ramdisk> [-s <secondstage>] [--id <...>]\n"
+  "\n"
+  "      create a new image from scratch.\n"
+  "      if the boot image file is a block device, sanity check will be performed to avoid overwriting a existing\n"
+@@ -266,6 +287,24 @@ enum command parse_args(int argc, char** argv, t_abootimg* img)
+             return none;
+           img->second_fname = argv[i];
+         }
++        else if (!strcmp(argv[i], "--id")) {
++          if (++i >= argc)
++            return none;
++          if (!strcmp(argv[i], "sha1"))
++            img->id_mode = id_mode_sha1;
++          else if (!strcmp(argv[i], "rockchip"))
++            img->id_mode = id_mode_rockchip;
++          else if (!strncmp(argv[i], "string:", strlen("string:"))) {
++            img->id_mode = id_mode_string;
++            img->id_arg = argv[i] + strlen("string:");
++          }
++          else if (!strncmp(argv[i], "hex:", strlen("hex:"))) {
++            img->id_mode = id_mode_hex;
++            img->id_arg = argv[i] + strlen("hex:");
++          }
++          else
++            return none;
++        }
+         else
+           return none;
+       }
+@@ -628,7 +667,109 @@ void update_images(t_abootimg *img)
+     abort_printf("%s: updated is too big for the Boot Image (%u vs %u bytes)\n", img->fname, total_size, img->size);
+ }
+ 
++#ifdef HAS_GCRYPT
++void hash_object (gcry_md_hd_t hd, char *bytes, unsigned size)
++{
++  /* FIXME: this assumes a little-endian host platform with 4-byte int,
++   * matching the target platform */
++  assert(sizeof(size) == 4);
++  assert(htole32(0x12345678) == 0x12345678);
+ 
++  gcry_md_write(hd, bytes, size);
++  gcry_md_write(hd, &size, sizeof(size));
++}
++#endif
++
++void update_id(t_abootimg *img)
++{
++  switch (img->id_mode) {
++    case id_mode_none:
++      break;
++
++    case id_mode_sha1:
++    case id_mode_rockchip:
++#ifdef HAS_GCRYPT
++        {
++          gcry_error_t err;
++          gcry_md_hd_t hd;
++          size_t len = gcry_md_get_algo_dlen(GCRY_MD_SHA1);
++
++          err = gcry_md_open(&hd, GCRY_MD_SHA1, 0);
++
++          if (err) {
++              abort_printf("%s\n", gcry_strerror(err));
++          }
++
++          hash_object(hd, img->kernel, img->header.kernel_size);
++          hash_object(hd, img->ramdisk, img->header.ramdisk_size);
++          hash_object(hd, img->second, img->header.second_size);
++
++          if (img->id_mode == id_mode_rockchip) {
++              /* Rockchip images hash the rest of the header, too */
++              gcry_md_write(hd, &img->header.tags_addr, sizeof(img->header.tags_addr));
++              gcry_md_write(hd, &img->header.page_size, sizeof(img->header.page_size));
++              gcry_md_write(hd, &img->header.unused, sizeof(img->header.unused));
++              gcry_md_write(hd, &img->header.name, sizeof(img->header.name));
++              gcry_md_write(hd, &img->header.cmdline, sizeof(img->header.cmdline));
++          }
++
++          /* Truncate the SHA1 to fit */
++          memcpy((char *)&img->header.id, gcry_md_read(hd, GCRY_MD_SHA1), len > sizeof(img->header.id) ? sizeof(img->header.id) : len);
++          gcry_md_close(hd);
++        }
++#else
++      abort_printf("abootimg was compiled without SHA-1 support\n");
++#endif
++      break;
++
++    case id_mode_string:
++      memset(img->header.id, 0, sizeof(img->header.id));
++      strncpy((char *)&img->header.id, img->id_arg, sizeof(img->header.id));
++      break;
++
++    case id_mode_hex:
++        {
++          unsigned char buf[sizeof(img->header.id)] = { 0 };
++          unsigned i;
++
++          for (i = 0; i < sizeof(img->header.id); i++) {
++            const char *p = img->id_arg + (i * 2);
++
++            if (p[0] == '\0')
++              break;
++
++            if (p[1] == '\0')
++              abort_printf("odd number of hex digits given\n");
++
++            if (p[0] >= '0' && p[0] <= '9')
++              buf[i] = p[0] - '0';
++            else if (p[0] >= 'A' && p[0] <= 'F')
++              buf[i] = (p[0] - 'A' + 10);
++            else if (p[0] >= 'a' && p[0] <= 'f')
++              buf[i] = (p[0] - 'a' + 10);
++            else
++              abort_printf("'%c' is not a hex digit\n", p[0]);
++
++            buf[i] <<= 4;
++
++            if (p[1] >= '0' && p[1] <= '9')
++              buf[i] |= (p[1] - '0');
++            else if (p[1] >= 'A' && p[1] <= 'F')
++              buf[i] |= (p[1] - 'A' + 10);
++            else if (p[1] >= 'a' && p[1] <= 'f')
++              buf[i] |= (p[1] - 'a' + 10);
++            else
++              abort_printf("'%c' is not a hex digit\n", p[1]);
++          }
++
++          memcpy(img->header.id, buf, sizeof(img->header.id));
++        }
++      break;
++
++    default:
++      abort_printf("unexpected --id mode\n");
++  }
++}
+ 
+ void write_bootimg(t_abootimg* img)
+ {
+@@ -928,6 +1069,7 @@ int main(int argc, char** argv)
+       read_header(bootimg);
+       update_header(bootimg);
+       update_images(bootimg);
++      update_id(bootimg);
+       write_bootimg(bootimg);
+       break;
+ 
+@@ -940,6 +1082,7 @@ int main(int argc, char** argv)
+       open_bootimg(bootimg, "w");
+       update_header(bootimg);
+       update_images(bootimg);
++      update_id(bootimg);
+       if (check_boot_img_header(bootimg))
+         abort_printf("%s: Sanity cheks failed", bootimg->fname);
+       write_bootimg(bootimg);
+-- 
+1.8.4.rc3
+

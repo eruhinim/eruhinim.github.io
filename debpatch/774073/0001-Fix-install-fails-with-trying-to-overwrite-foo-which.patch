@@ -1,0 +1,144 @@
+From 1037863029557e6f03252c0d0f7256c9d8f0e45e Mon Sep 17 00:00:00 2001
+From: Andy Beverley <andy@andybev.com>
+Date: Sun, 28 Dec 2014 23:57:06 +0000
+Subject: [PATCH] Fix install fails with "trying to overwrite foo which is
+ also in bar"
+
+This patch installs dpkg-divert lines into preinst and postrm
+to preserve files that are also installed by core packages. If
+a module is built that is also part of core, these lines will
+allow the 2 packages to coexist on the same system.
+---
+ debian/rules.dh.core                |   30 ++++++++++++++++++++++++++++++
+ lib/Debian/Rules.pm                 |   13 +++++++++++++
+ lib/DhMakePerl/Command/Packaging.pm |    7 +++++--
+ lib/DhMakePerl/Command/make.pm      |    6 ++++--
+ 4 files changed, 52 insertions(+), 4 deletions(-)
+ create mode 100755 debian/rules.dh.core
+
+diff --git a/debian/rules.dh.core b/debian/rules.dh.core
+new file mode 100755
+index 0000000..6a8f24b
+--- /dev/null
++++ b/debian/rules.dh.core
+@@ -0,0 +1,30 @@
++#!/usr/bin/make -f
++
++# Rules file for core modules. This adds dpkg-divert commands to the
++# package to save existing copies of files that will be overwritten
++
++%:
++	dh $@
++
++override_dh_auto_configure:
++	dh_auto_configure -- NO_PERLLOCAL=1
++
++override_dh_md5sums:
++	# md5sums will contain all the files to be installed. Once it's been
++	# created, see whether any of the files to be installed already exist
++	# as part of another package
++	dh_md5sums
++	# The initial part of the shell script
++	echo '#!/bin/sh\n\nset -e\n\nif [ "$$1" = install ] || [ "$$1" = upgrade ]\nthen' > debian/PACKAGENAME/DEBIAN/preinst
++	# For each file in md5sums, see if it exists in another package on the
++	# system, and if it does, add the dpkg-divert commands
++	cut -d ' ' -f 3 debian/PACKAGENAME/DEBIAN/md5sums|xargs dpkg -S / 2> /dev/null|awk '/^perl/ {print "dpkg-divert --add --package PACKAGENAME --rename --divert " $$2 ".bundled " $$2 }' >> debian/PACKAGENAME/DEBIAN/preinst
++	# The end of the script
++	echo 'fi\nexit 0' >> debian/PACKAGENAME/DEBIAN/preinst
++	# Make the preinst file executable
++	chmod +x debian/PACKAGENAME/DEBIAN/preinst
++	# Same again for the package removal (postrm)
++	echo '#!/bin/sh\n\nset -e\n\nif [ "$$1" = remove ]\nthen' > debian/PACKAGENAME/DEBIAN/postrm
++	cut -d ' ' -f 3 debian/PACKAGENAME/DEBIAN/md5sums|xargs dpkg -S / 2> /dev/null|awk '/^perl/ {print "dpkg-divert --remove --package PACKAGENAME --rename --divert " $$2 ".bundled " $$2 }' >> debian/PACKAGENAME/DEBIAN/postrm
++	echo 'fi\nexit 0' >> debian/PACKAGENAME/DEBIAN/postrm
++	chmod +x debian/PACKAGENAME/DEBIAN/postrm
+diff --git a/lib/Debian/Rules.pm b/lib/Debian/Rules.pm
+index 9adc5e2..259d6af 100644
+--- a/lib/Debian/Rules.pm
++++ b/lib/Debian/Rules.pm
+@@ -369,6 +369,19 @@ sub write {
+     }
+ }
+ 
++=item transform $sub
++
++Transforms each line of the file using the subroutine $sub
++
++=cut
++
++sub transform {
++    my $self = shift;
++    my $sub = shift or die "Please pass a regular expression with which to transform";
++
++    $self->lines( [ map { $sub->($_) } @{ $self->lines } ] );
++}
++
+ sub DESTROY {
+     my $self = shift;
+ 
+diff --git a/lib/DhMakePerl/Command/Packaging.pm b/lib/DhMakePerl/Command/Packaging.pm
+index 6c0b158..e615c38 100644
+--- a/lib/DhMakePerl/Command/Packaging.pm
++++ b/lib/DhMakePerl/Command/Packaging.pm
+@@ -20,7 +20,7 @@ __PACKAGE__->mk_accessors(
+         mod_cpan_version
+         meta perlname author
+         version rules docs examples copyright
+-        control
++        control core_module
+     )
+ );
+ 
+@@ -867,7 +867,7 @@ sub create_rules {
+ 
+     $self->backup_file($file);
+ 
+-    my $rulesname = 'rules.dh.tiny';
++    my $rulesname = $self->core_module ? 'rules.dh.core' : 'rules.dh.tiny';
+ 
+     for my $source (
+         catfile( $self->cfg->home_dir, $rulesname ),
+@@ -876,6 +876,9 @@ sub create_rules {
+         if ( -e $source ) {
+             print "Using rules: $source\n" if $self->cfg->verbose;
+             $self->rules->read($source);
++            my $pkgname = $self->pkgname;
++            # Substitute any variables in the rules file
++            $self->rules->transform( sub{ s/PACKAGENAME/$pkgname/g; $_ } );
+             last;
+         };
+     }
+diff --git a/lib/DhMakePerl/Command/make.pm b/lib/DhMakePerl/Command/make.pm
+index 64a067f..1449737 100644
+--- a/lib/DhMakePerl/Command/make.pm
++++ b/lib/DhMakePerl/Command/make.pm
+@@ -14,7 +14,7 @@ __PACKAGE__->mk_accessors(
+         perlname version pkgversion
+         copyright author
+         extrasfields  extrapfields
+-        docs examples
++        docs examples core_module
+         )
+ );
+ 
+@@ -76,6 +76,8 @@ sub execute {
+ 
+     $self->check_deprecated_overrides;
+ 
++    $self->core_module(1) if is_core_module($self->cfg->cpan);
++
+     my $tarball = $self->setup_dir();
+     $self->process_meta;
+     $self->findbin_fix();
+@@ -301,7 +303,7 @@ sub setup_dir {
+         $orig_pwd = $ENV{'PWD'};
+ 
+         # Is the module a core module?
+-       if ( is_core_module( $self->cfg->cpan ) ) {
++       if ( $self->core_module ) {
+             die $self->cfg->cpan
+             . " is a standard module. Will not build without --core-ok.\n"
+                 unless $self->cfg->core_ok;
+-- 
+1.7.10.4
+

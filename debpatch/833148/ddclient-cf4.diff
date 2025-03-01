@@ -1,0 +1,181 @@
+diff --git a/debian/changelog b/debian/changelog
+index 1268b2e..e6e7ea9 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -8,6 +8,9 @@ ddclient (3.8.3-2) UNRELEASED; urgency=medium
+   * Bump Standards-Version to 3.9.8 (no changes required)
+   * Update Vcs-Browser, Vcd-Git to use https URLs
+ 
++  [ Craig Small ]
++  * Update CloudFlare API to v4
++
+  -- Martin Pitt <mpitt@debian.org>  Wed, 22 Jun 2016 17:44:54 +0200
+ 
+ ddclient (3.8.3-1) unstable; urgency=medium
+diff --git a/debian/patches/cloudflare-api-v4.diff b/debian/patches/cloudflare-api-v4.diff
+new file mode 100644
+index 0000000..9f46575
+--- /dev/null
++++ b/debian/patches/cloudflare-api-v4.diff
+@@ -0,0 +1,152 @@
++Description: Update CloudFlare API to v4
++Author: Harry-Xue on Github
++Origin: upstream, https://github.com/wimpunk/ddclient/pull/42
++Reviewed-by: Craig Small <csmall@debian.org>
++Last-Update: 2016-08-01
++--- a/ddclient
+++++ b/ddclient
++@@ -448,7 +448,7 @@
++ 	'zone'                => setv(T_STRING, 1, 1, 1, '',                  undef),
++     },
++ 	'cloudflare-common-defaults'       => {
++-		'server'	      => setv(T_FQDNP,  1, 0, 1, 'www.cloudflare.com', undef),
+++		'server'	      => setv(T_FQDNP,  1, 0, 1, 'api.cloudflare.com/client/v4', undef),
++ 		'zone'                => setv(T_FQDN,   1, 0, 1, '',                  undef),
++ 		'static'              => setv(T_BOOL,   0, 1, 1, 0,                   undef),
++ 		'wildcard'            => setv(T_BOOL,   0, 1, 1, 0,                   undef),
++@@ -621,7 +621,7 @@
++         'update'     => \&nic_cloudflare_update,
++         'examples'   => \&nic_cloudflare_examples,
++         'variables'  => merge(
++-            { 'server'       => setv(T_FQDNP,  1, 0, 1, 'www.cloudflare.com', undef)          },
+++            { 'server'       => setv(T_FQDNP,  1, 0, 1, 'api.cloudflare.com/client/v4', undef)          },
++             { 'min-interval' => setv(T_DELAY,  0, 0, 1, interval('5m'), 0),},
++             $variables{'cloudflare-common-defaults'},
++             $variables{'service-common-defaults'},
++@@ -1924,6 +1924,9 @@
++     my $url      = shift || '';
++     my $login    = shift || '';
++     my $password = shift || '';
+++    my $headers  = shift || '';
+++    my $method   = shift || 'GET';
+++    my $data     = shift || '';
++     my ($peer, $server, $port, $default_port, $use_ssl);
++     my ($sd, $rq, $request, $reply);
++ 
++@@ -1964,7 +1967,7 @@
++     my $to =  sprintf "%s%s", $server, $proxy ? " via proxy $peer:$port" : "";
++     verbose("CONNECT:", "%s", $to);
++ 
++-    $request  = "GET ";
+++    $request  = "$method ";
++     $request .= "http://$server" if $proxy;
++     $request .= "/$url HTTP/1.0\n";
++     $request .= "Host: $server\n";
++@@ -1973,7 +1976,10 @@
++     $request .= "Authorization: Basic $auth\n" if $login || $password;
++     $request .= "User-Agent: ${program}/${version}\n";
++     $request .= "Connection: close\n";
+++    $request .= "$headers\n";
+++    $request .= "Content-Length: ".length($data)."\n" if $data;
++     $request .= "\n";
+++    $request .= $data;
++ 
++     ## make sure newlines are <cr><lf> for some pedantic proxy servers
++     ($rq = $request) =~ s/\n/\r\n/g;
++@@ -4102,7 +4108,7 @@
++ 
++ Configuration variables applicable to the 'cloudflare' protocol are:
++   protocol=cloudflare          ## 
++-  server=fqdn.of.service       ## defaults to www.cloudflare.com
+++  server=fqdn.of.service       ## defaults to api.cloudflare.com/client/v4
++   login=service-login          ## login name and password  registered with the service
++   password=service-password    ##
++   fully.qualified.host         ## the host registered with the service.
++@@ -4139,6 +4145,10 @@
++ 		my $key   = $hosts[0];
++ 		my $ip    = $config{$key}{'wantip'};
++ 
+++		my $headers = "X-Auth-Email: $config{$key}{'login'}\n";
+++		$headers .= "X-Auth-Key: $config{$key}{'password'}\n";
+++		$headers .= "Content-Type: application/json";
+++
++ 		# FQDNs
++ 		for my $domain (@hosts) {
++ 			(my $hostname = $domain) =~ s/\.$config{$key}{zone}$//;
++@@ -4146,14 +4156,11 @@
++ 
++ 			info("setting IP address to %s for %s", $ip, $domain);
++ 			verbose("UPDATE:","updating %s", $domain);
+++			# Get zone ID
+++			my $url = "https://$config{$key}{'server'}/zones?";
+++			$url   .= "name=".$config{$key}{'zone'};
++ 
++-			# Get domain ID
++-			my $url = "https://$config{$key}{'server'}/api_json.html?a=rec_load_all";
++-			$url   .= "&z=".$config{$key}{'zone'};
++-			$url   .= "&email=".$config{$key}{'login'};	
++-			$url   .= "&tkn=".$config{$key}{'password'};
++-
++-			my $reply = geturl(opt('proxy'), $url);
+++			my $reply = geturl(opt('proxy'), $url, undef, undef, $headers);
++ 			unless ($reply) {
++ 				failed("updating %s: Could not connect to %s.", $domain, $config{$key}{'server'});
++ 				last;
++@@ -4169,23 +4176,44 @@
++ 			}
++ 
++ 			# Pull the ID out of the json, messy
++-			my ($id) = map { $_->{name} eq $domain ? $_->{rec_id} : () } @{ $response->{response}->{recs}->{objs} };
++-			unless($id) {
++-				failed("updating %s: No domain ID found.", $domain);
+++			my ($zone_id) = map { $_->{name} eq $config{$key}{'zone'} ? $_->{id} : () } @{ $response->{result} };
+++			unless($zone_id) {
+++				failed("updating %s: No zone ID found.", $config{$key}{'zone'});
++ 				next;
++ 			}
+++			info("zone ID is $zone_id");
++ 
++-			# Set domain
++-			$url   = "https://$config{$key}{'server'}/api_json.html?a=rec_edit&type=A&ttl=1";
++-			$url     .= "&name=$hostname";
++-			$url     .= "&z=".$config{$key}{'zone'};
++-			$url     .= "&id=".$id;	
++-			$url     .= "&email=".$config{$key}{'login'};	
++-			$url     .= "&tkn=".$config{$key}{'password'};    
++-			$url     .= "&content=";
++-			$url     .= "$ip"       if $ip;
+++			# Get DNS record ID
+++			$url = "https://$config{$key}{'server'}/zones/$zone_id/dns_records?";
+++			$url .= "type=A&name=$domain";
++ 
++-			$reply = geturl(opt('proxy'), $url);
+++			$reply = geturl(opt('proxy'), $url, undef, undef, $headers);
+++			unless ($reply) {
+++				failed("updating %s: Could not connect to %s.", $domain, $config{$key}{'server'});
+++				last;
+++			}
+++			last if !header_ok($domain, $reply);
+++
+++			# Strip header
+++			$reply =~ s/^.*?\n\n//s;
+++			$response = JSON::Any->jsonToObj($reply);
+++			if ($response->{result} eq 'error') {
+++				failed ("%s", $response->{msg});
+++				next;
+++			}
+++
+++			# Pull the ID out of the json, messy
+++			my ($dns_rec_id) = map { $_->{name} eq $domain ? $_->{id} : () } @{ $response->{result} };
+++			unless($dns_rec_id) {
+++				failed("updating %s: No DNS record ID found.", $domain);
+++				next;
+++			}
+++			info("DNS record ID is $dns_rec_id");
+++
+++			# Set domain
+++			$url   = "https://$config{$key}{'server'}/zones/$zone_id/dns_records/$dns_rec_id";
+++			my $data = "{\"content\":\"$ip\"}";
+++			$reply = geturl(opt('proxy'), $url, undef, undef, $headers, "PATCH", $data);
++ 			unless ($reply) {
++ 				failed("updating %s: Could not connect to %s.", $domain, $config{$domain}{'server'});
++ 				last;
+diff --git a/debian/patches/series b/debian/patches/series
+index d096468..0fe4a5e 100644
+--- a/debian/patches/series
++++ b/debian/patches/series
+@@ -2,3 +2,4 @@ smc-barricade-fw-alt.diff
+ config_path.diff
+ maxinterval.diff
+ usev6.diff
++cloudflare-api-v4.diff

@@ -1,0 +1,187 @@
+From 39efbdc63a5dcff2ecb3444f14a97baed2804d62 Mon Sep 17 00:00:00 2001
+From: David Bremner <bremner@debian.org>
+Date: Mon, 14 Oct 2013 18:17:50 -0300
+Subject: [PATCH] partial manual backport of "additional data checks backported
+ from 0.15.4"
+
+This corresponds to upstream commit c4e374e
+
+changes to libraw_datastream.cpp were ignored, as that file does not
+exist in this version.
+---
+ src/external/LibRaw/internal/dcraw_common.cpp | 72 ++++++++++++++++++++++-----
+ 1 file changed, 60 insertions(+), 12 deletions(-)
+
+diff --git a/src/external/LibRaw/internal/dcraw_common.cpp b/src/external/LibRaw/internal/dcraw_common.cpp
+index 7684690..ec6e7ca 100644
+--- a/src/external/LibRaw/internal/dcraw_common.cpp
++++ b/src/external/LibRaw/internal/dcraw_common.cpp
+@@ -653,7 +653,10 @@ void CLASS ljpeg_end (struct jhead *jh)
+ int CLASS ljpeg_diff (ushort *huff)
+ {
+   int len, diff;
+-
++#ifdef LIBRAW_LIBRARY_BUILD
++  if(!huff)
++    throw LIBRAW_EXCEPTION_IO_CORRUPT;
++#endif
+   len = gethuff(huff);
+   if (len == 16 && (!dng_version || dng_version >= 0x1010000))
+     return -32768;
+@@ -667,6 +670,8 @@ int CLASS ljpeg_diff (ushort *huff)
+ int CLASS ljpeg_diff_new (LibRaw_bit_buffer& bits, LibRaw_byte_buffer* buf,ushort *huff)
+ {
+   int len, diff;
++  if(!huff || !buf)
++    throw LIBRAW_EXCEPTION_IO_CORRUPT;
+ 
+   len = bits._gethuff_lj(buf,*huff,huff+1);
+   if (len == 16 && (!dng_version || dng_version >= 0x1010000))
+@@ -803,6 +808,10 @@ void CLASS lossless_jpeg_load_raw()
+ 
+ 
+   if (!ljpeg_start (&jh, 0)) return;
++#ifdef LIBRAW_LIBRARY_BUILD
++  if(jh.wide<1 || jh.high<1 || jh.clrs<1 || jh.bits <1)
++    throw LIBRAW_EXCEPTION_IO_CORRUPT;
++#endif
+   jwide = jh.wide * jh.clrs;
+ 
+ #ifdef LIBRAW_LIBRARY_BUILD
+@@ -819,13 +828,18 @@ void CLASS lossless_jpeg_load_raw()
+       }
+        
+   slices = slicesWcnt * jh.high;
++  if(!slices)
++    throw LIBRAW_EXCEPTION_IO_CORRUPT;
+   offset = (unsigned*)calloc(slices+1,sizeof(offset[0]));
+-  
++
+   for(slice=0;slice<slices;slice++)
+       {
+           offset[slice] = (t_x + t_y * raw_width)| (t_s<<28);
+-          if(offset[slice] & 0x0fffffff >= raw_width * raw_height)
++          if((offset[slice] & 0x0fffffff) >= raw_width * raw_height)
++            {
++              free(offset);
+               throw LIBRAW_EXCEPTION_IO_BADFILE; 
++            }
+           t_y++;
+           if(t_y == jh.high)
+               {
+@@ -877,11 +891,27 @@ void CLASS lossless_jpeg_load_raw()
+       pixno++;
+       if (0 == --pixelsInSlice)
+           {
++            if(slice > slices)
++              {
++                free(offset);
++                throw LIBRAW_EXCEPTION_IO_CORRUPT;
++              }
+               unsigned o = offset[slice++];
+               pixno = o & 0x0fffffff;
+               pixelsInSlice = slicesW[o>>28];
+           }
+ #endif
++
++      if(row>raw_height)
++#ifdef LIBRAW_LIBRARY_BUILD
++      {
++        free(offset);
++        throw LIBRAW_EXCEPTION_IO_CORRUPT;
++      }
++#else
++        longjmp (failure, 3);
++#endif
++
+       if (raw_width == 3984 && (col -= 2) < 0)
+               col += (row--,raw_width);
+ 
+@@ -2443,6 +2473,13 @@ void CLASS quicktake_100_load_raw()
+ #define PREDICTOR (c ? (buf[c][y-1][x] + buf[c][y][x+1]) / 2 \
+ : (buf[c][y-1][x+1] + 2*buf[c][y-1][x] + buf[c][y][x+1]) / 4)
+ 
++#ifdef __GNUC__
++# if __GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 8)
++# pragma GCC optimize("no-aggressive-loop-optimizations")
++# endif
++#endif
++
++
+ void CLASS kodak_radc_load_raw()
+ {
+   static const char src[] = {
+@@ -2977,7 +3014,10 @@ void CLASS sony_decrypt (unsigned *data, int len, int start, int key)
+       pad[p] = htonl(pad[p]);
+   }
+   while (len--)
+-    *data++ ^= pad[p++ & 127] = pad[(p+1) & 127] ^ pad[(p+65) & 127];
++  {
++    *data++ ^= pad[p & 127] = pad[(p+1) & 127] ^ pad[(p+65) & 127];
++    p++;
++  }
+ #ifndef LIBRAW_NOTHREADS
+ #undef pad
+ #undef p
+@@ -5518,6 +5558,7 @@ int CLASS parse_tiff_ifd (int base)
+ 	  data_offset = get4()+base;
+ 	  ifd++;  break;
+ 	}
++        if(len > 1000) len=1000; /* 1000 SubIFDs is enough */
+ 	while (len--) {
+ 	  i = ftell(ifp);
+ 	  fseek (ifp, get4()+base, SEEK_SET);
+@@ -5753,7 +5794,7 @@ guess_cfa_pc:
+ 	break;
+       case 50715:			/* BlackLevelDeltaH */
+       case 50716:			/* BlackLevelDeltaV */
+-	for (num=i=0; i < len; i++)
++	for (num=i=0; i < len && i < 65536; i++)
+ 	  num += getreal(type);
+ 	black += num/len + 0.5;
+ 	break;
+@@ -5887,9 +5928,12 @@ void CLASS apply_tiff()
+   if (thumb_offset) {
+     fseek (ifp, thumb_offset, SEEK_SET);
+     if (ljpeg_start (&jh, 1)) {
+-      thumb_misc   = jh.bits;
+-      thumb_width  = jh.wide;
+-      thumb_height = jh.high;
++      if((unsigned)jh.bits<17 && (unsigned)jh.wide < 0x10000 && (unsigned)jh.high < 0x10000)
++        {
++          thumb_misc   = jh.bits;
++          thumb_width  = jh.wide;
++          thumb_height = jh.high;
++        }
+     }
+   }
+   for (i=0; i < tiff_nifds; i++) {
+@@ -5897,7 +5941,8 @@ void CLASS apply_tiff()
+ 	max_samp = tiff_ifd[i].samples;
+     if (max_samp > 3) max_samp = 3;
+     if ((tiff_ifd[i].comp != 6 || tiff_ifd[i].samples != 3) &&
+-	(tiff_ifd[i].t_width | tiff_ifd[i].t_height) < 0x10000 &&
++        unsigned(tiff_ifd[i].t_width | tiff_ifd[i].t_height) < 0x10000 &&
++        (unsigned)tiff_ifd[i].bps < 33 && (unsigned)tiff_ifd[i].samples < 13 &&
+ 	tiff_ifd[i].t_width*tiff_ifd[i].t_height > raw_width*raw_height) {
+       raw_width     = tiff_ifd[i].t_width;
+       raw_height    = tiff_ifd[i].t_height;
+@@ -5971,9 +6016,12 @@ void CLASS apply_tiff()
+ 	  !strstr(model2,"DEBUG RAW")))
+       is_raw = 0;
+   for (i=0; i < tiff_nifds; i++)
+-    if (i != raw && tiff_ifd[i].samples == max_samp &&
+-	tiff_ifd[i].t_width * tiff_ifd[i].t_height / SQR(tiff_ifd[i].bps+1) >
+-	      thumb_width *       thumb_height / SQR(thumb_misc+1)) {
++     if (i != raw && tiff_ifd[i].samples == max_samp &&
++         tiff_ifd[i].bps>0 && tiff_ifd[i].bps < 33 &&
++         unsigned(tiff_ifd[i].t_width | tiff_ifd[i].t_height) < 0x10000 &&
++         tiff_ifd[i].t_width * tiff_ifd[i].t_height / SQR(tiff_ifd[i].bps+1) >
++         thumb_width *       thumb_height / SQR(thumb_misc+1)
++	 && tiff_ifd[i].comp != 34892) {
+       thumb_width  = tiff_ifd[i].t_width;
+       thumb_height = tiff_ifd[i].t_height;
+       thumb_offset = tiff_ifd[i].offset;
+-- 
+1.8.4.rc3
+

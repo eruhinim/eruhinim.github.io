@@ -1,0 +1,239 @@
+diff -Nru debian-goodies-0.63/checkrestart debian-goodies-0.63simon1/checkrestart
+--- debian-goodies-0.63/checkrestart	2013-07-05 14:37:50.000000000 +0200
++++ debian-goodies-0.63simon1/checkrestart	2014-08-31 23:11:24.000000000 +0200
+@@ -59,7 +59,7 @@
+      return 1
+ 
+ def usage():
+-    sys.stderr.write('usage: checkrestart [-vhpa] [-bblacklist] [-iignore]\n')
++    sys.stderr.write('usage: checkrestart [-vhpam] [-bblacklist] [-iignore]\n')
+ 
+ def main():
+     global lc_all_c_env, file_query_check
+@@ -75,7 +75,7 @@
+ 
+ # Process options
+     try:
+-        opts, args = getopt.getopt(sys.argv[1:], "hvpab:i:", ["help", "verbose", "packages", "all", "blacklist", "ignore"])
++        opts, args = getopt.getopt(sys.argv[1:], "hvpamb:i:", ["help", "verbose", "packages", "all", "machine", "blacklist", "ignore"])
+     except getopt.GetoptError, err:
+         # print help information and exit:
+         print str(err) # will print something like "option -x not recognized"
+@@ -89,6 +89,8 @@
+     onlyPackageFiles = False
+     # Look for any deleted file
+     allFiles = False
++    # Generate machine parsable output
++    machineOutput = False
+ 
+     for o, a in opts:
+         if o in ("-v", "--verbose"):
+@@ -101,6 +103,8 @@
+         elif o in ("-a", "--all"):
+             allFiles = True
+             onlyPackageFiles = False
++        elif o in ("-m", "--machine"):
++            machineOutput = True
+         elif o in ("-b", "--blacklist"):
+             blacklistFiles.append(a)
+             onlyPackageFiles = False
+@@ -130,7 +134,8 @@
+ 
+     toRestart = lsofcheck(blacklist = blacklist)
+ 
+-    print "Found %d processes using old versions of upgraded files" % len(toRestart)
++    if not machineOutput:
++        print "Found %d processes using old versions of upgraded files" % len(toRestart)
+ 
+     if len(toRestart) == 0:
+         sys.exit(0)
+@@ -140,16 +145,20 @@
+         programs.setdefault(process.program, [])
+         programs[process.program].append(process)
+ 
+-    if len(programs) == 1:
+-        print "(%d distinct program)" % len(programs)
+-    else:
+-        print "(%d distinct programs)" % len(programs)
++    if not machineOutput:
++        if len(programs) == 1:
++            print "(%d distinct program)" % len(programs)
++        else:
++            print "(%d distinct programs)" % len(programs)
+ 
+ # Verbose information
+     if verbose:
+         for process in toRestart:
+-            print "Process %s (PID: %d) "  % (process.program, process.pid)
+-            process.listDeleted()
++            if not machineOutput:
++                print "Process %s (PID: %d) "  % (process.program, process.pid)
++                process.listDeleted()
++            else:
++                process.listDeletedMachine()
+ 
+     packages = {}
+     diverted = None
+@@ -157,13 +166,13 @@
+     dpkgQuery = ["dpkg-query", "--search"] + programs.keys()
+     dpkgProc = subprocess.Popen(dpkgQuery, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 env = lc_all_c_env)
+-    if verbose:
++    if verbose and not machineOutput:
+         print "Running:%s" % dpkgQuery
+     while True:
+             line = dpkgProc.stdout.readline()
+             if not line:
+                 break
+-            if verbose:
++            if verbose and not machineOutput:
+                 print "Reading line: %s" % line
+             if line.startswith('local diversion'):
+                 continue
+@@ -195,11 +204,13 @@
+     # Close the pipe
+     dpkgProc.stdout.close()
+ 
+-    print "(%d distinct packages)" % len(packages)
++    if not machineOutput:
++        print "(%d distinct packages)" % len(packages)
+ 
+     if len(packages) == 0:
+-        print "No packages seem to need to be restarted."
+-        print "(please read checkrestart(1))"
++        if not machineOutput:
++            print "No packages seem to need to be restarted."
++            print "(please read checkrestart(1))"
+         sys.exit(0)
+ 
+     for package in packages.values():
+@@ -243,25 +254,31 @@
+             nonrestartable.append(package)
+             
+     if len(restartable) > 0:
+-        print
+-        print "Of these, %d seem to contain init scripts which can be used to restart them:" % len(restartable)
+-        # TODO - consider putting this in a --verbose option
+-        print "The following packages seem to have init scripts that could be used\nto restart them:"
+-        for package in restartable:
+-              print package.name + ':'
+-              for process in package.processes:
+-                   print "\t%s\t%s" % (process.pid,process.program)
+-                    
+-        print
+-        print "These are the init scripts:"
+-        print '\n'.join(restartCommands)
+-        print
++        if not machineOutput:
++            print
++            print "Of these, %d seem to contain init scripts which can be used to restart them:" % len(restartable)
++            # TODO - consider putting this in a --verbose option
++            print "The following packages seem to have init scripts that could be used\nto restart them:"
++            for package in restartable:
++                print package.name + ':'
++                for process in package.processes:
++                    print "\t%s\t%s" % (process.pid,process.program)
++                        
++            print
++            print "These are the init scripts:"
++            print '\n'.join(restartCommands)
++            print
++        else:
++            for package in restartable:
++                for process in package.processes:
++                    print 'init\t%s\t%s\t%s' % (package.name,process.pid,process.program)
+ 
+     if len(nonrestartable) == 0:
+         sys.exit(0)
+ 
+     # TODO - consider putting this in a --verbose option
+-    print "These processes do not seem to have an associated init script to restart them:"
++    if not machineOutput:
++        print "These processes do not seem to have an associated init script to restart them:"
+     for package in nonrestartable:
+         skip = False
+         if ignorelist:
+@@ -270,9 +287,13 @@
+                     skip = True
+         if skip:
+             continue
+-        print package.name + ':'
+-        for process in package.processes:
+-            print "\t%s\t%s" % (process.pid,process.program)
++        if not machineOutput:
++            print package.name + ':'
++            for process in package.processes:
++                print "\t%s\t%s" % (process.pid,process.program)
++        else:
++            for process in package.processes:
++                print 'no-init\t%s\t%s\t%s' % (package.name,process.pid,process.program)
+ 
+ def lsofcheck(blacklist = None):
+     processes = {}
+@@ -600,16 +621,22 @@
+                 # print "Changing usr to " + newusr + " result:" +f; # Debugging
+         return re.sub('( \(deleted\)|.dpkg-new).*$','',f)
+ 
+-    def listDeleted(self):
++    def listDeletedHelper(self):
+         listfiles = []
+-        listdescriptors = []
+         for f in self.files:
+             if isdeletedFile(f):
+                 listfiles.append(f)
+-        if  listfiles != []:
++        return listfiles
++    def listDeleted(self):
++        listfiles = self.listDeletedHelper()
++        if listfiles != []:
+             print "List of deleted files in use:"
+             for file in listfiles:
+                 print "\t" + file
++    def listDeletedMachine(self):
++        listfiles = self.listDeletedHelper()
++        for file in listfiles:
++            print 'file\t%s\t%s\t%s' % (self.pid, self.program, file)
+ 
+     # Check if a process needs to be restarted, previously we would
+     # just check if it used libraries named '.dpkg-new' since that's
+diff -Nru debian-goodies-0.63/checkrestart.1 debian-goodies-0.63simon1/checkrestart.1
+--- debian-goodies-0.63/checkrestart.1	2013-07-05 13:47:13.000000000 +0200
++++ debian-goodies-0.63simon1/checkrestart.1	2014-08-31 23:19:26.000000000 +0200
+@@ -6,7 +6,7 @@
+ .SH NAME
+ checkrestart \- check which processes need to be restarted after an upgrade
+ .SH SYNOPSIS
+-.B checkrestart [ -hvpa ] [ -b blacklist_file ] [ -i package_name ]
++.B checkrestart [ -hvpam ] [ -b blacklist_file ] [ -i package_name ]
+ .SH DESCRIPTION
+ The
+ .B checkrestart
+@@ -58,6 +58,13 @@
+ option.
+ 
+ .TP
++.BI -m, --machine
++Generate machine readable output. One line is printed per program which must
++restarted: "<type>\\t<package>\\t<pid>\\t<program>". <type> is "init", if an
++init script is available to restart the program, "no-init" otherwise (without
++the quotes).
++
++.TP
+ .BI -b\ file, --blacklist=file
+ Read a blacklist of regular expressions from
+ .I file.
+@@ -128,6 +135,14 @@
+   isc-dhcp-client:
+           3775    /sbin/dhclient
+ 
++This is another example to show the machine-readable output:
++
++  # checkrestart --machine
++  init    bcfg2-server    6974    /usr/sbin/bcfg2-server
++  init    exim4-daemon-light      857     /usr/sbin/exim4
++  no-init aptitude        11679   /usr/bin/aptitude-curses
++  no-init xscreensaver    6562    /usr/bin/xscreensaver
++
+ .SH BUGS
+ This program might fail if the output of the \fIlsof\fP utility changes since it
+ depends on it to detect which deleted files are used by processes. It might

@@ -1,0 +1,80 @@
+diff --exclude='config*' --exclude=changelog --exclude='*~' -urpN ../cvs/dpkg-1.10.21/utils/Makefile.in dpkg-1.10.21.ogi.2/utils/Makefile.in
+--- ../cvs/dpkg-1.10.21/utils/Makefile.in	2002-08-24 22:54:19.000000000 +0300
++++ dpkg-1.10.21.ogi.2/utils/Makefile.in	2004-05-24 19:39:59.000000000 +0300
+@@ -71,6 +71,9 @@ endif
+ 	$(mkinstalldirs) $(DESTDIR)/$(man1dir)
+ 	$(INSTALL_DATA) $(srcdir)/$(MD5_MANPAGES) $(DESTDIR)/$(man1dir)
+ 
++# When compiled for the Hurd, start-stop-daemon.c should be compiled
++# with C99 features enabled.
++start-stop-daemon.o: CFLAGS += -std=gnu99
+ start-stop-daemon: $(SSD_OBJECTS) ../lib/libdpkg.a
+ 	$(CC) $(LDFLAGS) -o $@ $(SSD_OBJECTS) $(LIBS) $(SSD_LIBS)
+ 
+diff --exclude='config*' --exclude=changelog --exclude='*~' -urpN ../cvs/dpkg-1.10.21/utils/start-stop-daemon.c dpkg-1.10.21.ogi.2/utils/start-stop-daemon.c
+--- ../cvs/dpkg-1.10.21/utils/start-stop-daemon.c	2004-03-12 17:07:43.000000000 +0200
++++ dpkg-1.10.21.ogi.2/utils/start-stop-daemon.c	2004-05-24 19:42:47.000000000 +0300
+@@ -650,9 +650,10 @@ pid_is_user(pid_t pid, uid_t uid)
+ 		return 0;
+ 	return (sb.st_uid == uid);
+ 	pstat = proc_stat_list_pid_proc_stat (procset, pid);
+-	if (pstat == NULL)
+-		fatal ("Error getting process information: NULL proc_stat struct");
+-	proc_stat_set_flags (pstat, PSTAT_PID | PSTAT_OWNER_UID);
++	if (pstat)
++		proc_stat_set_flags (pstat, PSTAT_PID | PSTAT_OWNER_UID);
++	else
++		return 1;
+ 	return (pstat->owner_uid == uid);
+ }
+ 
+@@ -661,9 +662,10 @@ pid_is_cmd(pid_t pid, const char *name)
+ {
+ 	struct proc_stat *pstat;
+ 	pstat = proc_stat_list_pid_proc_stat (procset, pid);
+-	if (pstat == NULL)
+-		fatal ("Error getting process information: NULL proc_stat struct");
+-	proc_stat_set_flags (pstat, PSTAT_PID | PSTAT_ARGS);
++	if (pstat)
++		proc_stat_set_flags (pstat, PSTAT_PID | PSTAT_ARGS);
++	else
++		return 1;
+ 	return (!strcmp (name, pstat->args));
+ }
+ #endif /* OSHURD */
+@@ -751,17 +753,16 @@ do_procinit(void)
+ 
+ 
+ #if defined(OSHURD)
+-error_t
+-check_all(void *ptr)
++static void
++do_procinit(void)
+ {
+-	struct proc_stat *pstat = ptr;
+-
+-	check(pstat->pid);
+-	return 0;
++	/* Nothing */
+ }
+ 
++static void do_libpsinit(void)  __attribute__ ((constructor));
++
+ static void
+-do_procinit(void)
++do_libpsinit(void)
+ {
+ 	struct ps_context *context;
+ 	error_t err;
+@@ -779,7 +780,10 @@ do_procinit(void)
+ 		error(1, err, "proc_stat_list_add_all");
+ 
+ 	/* Check all pids */
+-	ihash_iterate(context->procs, check_all);
++	HURD_IHASH_ITERATE (&context->procs, ptr) {
++		struct proc_stat *pstat = ptr;
++		check(pstat->pid);
++	}
+ }
+ #endif /* OSHURD */
+ 

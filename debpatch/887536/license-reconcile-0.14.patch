@@ -1,0 +1,77 @@
+diff -Nurp license-reconcile-0.14.orig/Build.PL license-reconcile-0.14/Build.PL
+--- license-reconcile-0.14.orig/Build.PL	2017-01-28 15:51:20.000000000 +0100
++++ license-reconcile-0.14/Build.PL	2018-06-30 17:01:04.596353038 +0200
+@@ -25,7 +25,7 @@ my $builder = Module::Build->new(
+         'Debian::Copyright' => '0.2',
+         'Dpkg::Version' => 0,
+         'Parse::DebianChangelog' => 0,
+-        'Email::Address' => 0,
++        'Email::Address::XS' => '1.01',
+         'List::MoreUtils'=>0,
+         'Readonly'=>0,
+         'File::Slurp' => 0,
+diff -Nurp license-reconcile-0.14.orig/lib/Debian/LicenseReconcile/Filter/ChangeLog.pm license-reconcile-0.14/lib/Debian/LicenseReconcile/Filter/ChangeLog.pm
+--- license-reconcile-0.14.orig/lib/Debian/LicenseReconcile/Filter/ChangeLog.pm	2017-01-28 15:51:20.000000000 +0100
++++ license-reconcile-0.14/lib/Debian/LicenseReconcile/Filter/ChangeLog.pm	2018-06-30 17:04:57.643697170 +0200
+@@ -4,33 +4,7 @@ use 5.006;
+ use strict;
+ use warnings;
+ use base qw(Debian::LicenseReconcile::Filter);
+-use Readonly;
+-
+-Readonly my $ACTUAL_NAME_RE => '\pL[\s\pL\-\'\.]*\pL';
+-
+-# See http://www.faqs.org/rfcs/rfc2822.html
+-# Section 3.4.1
+-use Email::Address;
+-Readonly my $EMAIL_RE => $Email::Address::addr_spec;
+-
+-Readonly my $EMAIL_CHANGES_RE => qr{
+-    ^                           # beginining of line
+-    \s+\*\s                     # item marker
+-    Email\schange:\s            # email change token
+-    ($ACTUAL_NAME_RE)           # actual name
+-    \s+->\s+                    # gap between name and email
+-    ($EMAIL_RE)                 # email address
+-    $                           # end of line
+-}xms;
+-
+-Readonly my $PERSON_PARSE_RE => qr{
+-    \A                          # beginining of string
+-    ($ACTUAL_NAME_RE)           # actual name
+-    \s                          # gap
+-    \<$EMAIL_RE\>               # logged email
+-    \z                          # end of string
+-}xms;
+-
++use Email::Address::XS 1.01;
+ 
+ sub get_info {
+     my $self = shift;
+@@ -42,17 +16,23 @@ sub get_info {
+         my $date        = $_->Date;
+         my @date_pieces = split( " ", $date );
+         my $year        = $date_pieces[3];
+-        if (my %changes = ($_->Changes =~ m/$EMAIL_CHANGES_RE/xmsg)) {
++        if (my %changes = ($_->Changes =~ m/^\s+\*\sEmail\schange:\s+(.*?)\s+->\s+(.*?)\s*$/xmsg)) {
+             # This way round since we are going backward in time thru changelog
+             foreach my $p (keys %changes) {
+-                $changes{$p} =~ s{[\s\n]+$}{}xms;
++                # Parse bare email address; undef if it not an email address
++                my $address = Email::Address::XS->parse_bare_address($changes{$p})->address();
++                if ($address) {
++                    $changes{$p} = $address;
++                } else {
++                    delete $changes{$p};
++                }
+             }
+             %email_changes = (
+                 %changes,
+                 %email_changes
+             );
+         }
+-        if (my ($name) = ($person =~ $PERSON_PARSE_RE)) {
++        if (my $name = Email::Address::XS->parse($person)->phrase()) {
+             if (exists $email_changes{$name}) {
+                 $person = "$name <$email_changes{$name}>";
+             }

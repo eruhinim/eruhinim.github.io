@@ -1,0 +1,87 @@
+From 01290cbd3a4ab76139bbb6848c260fbed4a28cfa Mon Sep 17 00:00:00 2001
+From: Anders Kaseorg <andersk@mit.edu>
+Date: Fri, 8 Jul 2011 02:52:22 -0400
+Subject: [PATCH 1/6] Read and write .md5sums files at multiarch paths when
+ needed
+
+Signed-off-by: Anders Kaseorg <andersk@mit.edu>
+---
+ debsums |   27 ++++++++++++++++++++++-----
+ 1 files changed, 22 insertions(+), 5 deletions(-)
+
+diff --git a/debsums b/debsums
+index 855fbf7..d64a5e7 100755
+--- a/debsums
++++ b/debsums
+@@ -151,6 +151,8 @@ my @debpath = '.';
+ @debpath = map +(length) ? $_ : '.', split /:/, $debpath, -1 if $debpath;
+ 
+ my $arch;
++chomp ($arch = `/usr/bin/dpkg --print-architecture`);
++
+ my %generate;
+ if ($gen_opt)
+ {
+@@ -172,8 +174,6 @@ if ($gen_opt)
+     $generate{missing}++ unless $generate{all} or $generate{missing};
+     $generate{keep}++    if $generate{nocheck};
+ 
+-    chomp ($arch = `/usr/bin/dpkg --print-architecture`);
+-
+     # ensure generated files are world readable
+     umask 022;
+ }
+@@ -254,6 +254,23 @@ sub dpkg_cmp
+     !system '/usr/bin/dpkg', '--compare-versions', $ver, $op, $testver;
+ }
+ 
++sub md5sums_path
++{
++    # Calling dpkg-query --control-path for every package is too slow,
++    # so we cheat a little bit.
++
++    my ($pack) = @_;
++    if (-e "$DPKG/info/$pack.list") {
++	return "$DPKG/info/$pack.md5sums";
++    } elsif ($pack !~ /:/ and -e "$DPKG/info/$pack:$arch.list") {
++	return "$DPKG/info/$pack:$arch.md5sums";
++    } elsif ($pack =~ /^(.*):/ and -e "$DPKG/info/$1.list") {
++	return "$DPKG/info/$1.md5sums";
++    } else {
++	die "Cannot find md5sums path for $pack\n";
++    }
++}
++
+ sub is_replaced
+ {
+     my ($pack, $path, $sum) = @_;
+@@ -273,7 +290,7 @@ sub is_replaced
+ 
+     for my $p (@{$installed{$pack}{ReplacedBy} || []})
+     {
+-	open S, "$DPKG/info/$p.md5sums" or next;
++	open S, md5sums_path($p) or next;
+ 	while (<S>)
+ 	{
+ 	    if ($_ eq "$sum  $path\n")
+@@ -460,7 +477,7 @@ for (@ARGV)
+ 	}
+ 	else
+ 	{
+-	    $sums = "$DPKG/info/$pack.md5sums";
++	    $sums = md5sums_path($pack);
+ 	    unless (-f $sums or $config)
+ 	    {
+ 		if ($missing)
+@@ -626,7 +643,7 @@ for (@ARGV)
+ 
+ 	if ($generate{keep})
+ 	{
+-	    my $target = "$DPKG/info/$pack.md5sums";
++	    my $target = md5sums_path($pack);
+ 	    copy $sums, $target
+ 		or die "$self: can't copy sums to $target ($!)\n";
+ 	}
+-- 
+1.7.6
+

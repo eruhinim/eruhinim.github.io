@@ -1,0 +1,167 @@
+diff -Naur orig/usr/bin/apt-move new/usr/bin/apt-move
+--- orig/usr/bin/apt-move	2012-03-31 20:32:03.000000000 +0200
++++ new/usr/bin/apt-move	2012-03-31 22:47:23.000000000 +0200
+@@ -3,6 +3,7 @@
+ #  Copyright (c) 1999 Michael Merten <mikemerten@yahoo.com>
+ #  Copyright (c) 1999-2000 Gregory T. Norris <adric@debian.org>
+ #  Copyright (c) 2000-2003 Herbert Xu <herbert@debian.org>
++#  Copyright (c) 2012 Mario Koppensteiner <mariok@rantanplan.org>
+ #
+ #  License:  This script is distributed under the terms of version 2
+ #            of the GNU GPL. See the LICENSE file included with the package.
+@@ -137,6 +138,20 @@
+ 	exit 64
+ }
+ 
++apt_move_sha1() {
++    while read line
++    do
++      sha1sum ${line} | cut -d" " -f 1
++    done
++}
++
++apt_move_sha256() {
++    while read line
++    do
++      sha256sum ${line} | cut -d" " -f 1
++    done
++}
++
+ apt_move_stat() {
+ 	perl -lpe '$_ = (stat)[7];'
+ }
+@@ -754,8 +769,8 @@
+ 
+ 	local pf i bif
+ 	pf=$TMPHOME/movefiles
+-	rm -f $pf-fifo1 $pf-fifo2
+-	mkfifo $pf-fifo1 $pf-fifo2
++	rm -f $pf-fifo1 $pf-fifo2 $pf-fifo3 $pf-fifo4
++	mkfifo $pf-fifo1 $pf-fifo2 $pf-fifo3 $pf-fifo4
+ 	rm -rf $pf
+ 	mkdir $pf
+ 
+@@ -786,9 +801,11 @@
+ 	mkdir $pf/deb $pf/dsc
+ 
+ 	if [ $GET_BINARY ]; then
++	        < $pf-deb apt_move_sha256 > $pf-fifo3&
++	        < $pf-deb apt_move_sha1 > $pf-fifo4&
+ 		< $pf-deb apt_move_stat > $pf-fifo1&
+ 		< $pf-deb xargs -r md5sum |
+-			$MOVE4 $pf/deb $pf-fifo1 $pf-skip1 $pf-pkg $CONTENTS
++			$MOVE4 $pf/deb $pf-fifo1 $pf-skip1 $pf-pkg $pf-fifo3 $pf-fifo4 $CONTENTS
+ 		waitall
+ 	fi > $pf-mvdeb
+ 
+@@ -1253,6 +1270,8 @@
+ 			$(md5sum $l) $size $j/$k/$l
+ 		printf ' %40s%.s %16d %s\n' \
+ 			$(sha1sum $l) $size $j/$k/$l >&3
++		printf ' %40s%.s %16d %s\n' \
++			$(sha256sum $l) $size $j/$k/$l >&4
+ 	done
+ }
+ 
+@@ -1312,7 +1331,7 @@
+ 		fi
+ 
+ 		cd $prev
+-	done > $pf-md5sum 3> $pf-sha1sum
++	done > $pf-md5sum 3> $pf-sha1sum 4> $pf-sha256sum
+ 
+ 	[ -n "$compo" ] || return 0
+ 
+@@ -1334,6 +1353,8 @@
+ 	cat $pf-md5sum
+ 	echo SHA1:
+ 	cat $pf-sha1sum
++	echo SHA256:
++	cat $pf-sha256sum
+ 
+ 	exec >&-
+ 
+diff -Naur orig/usr/share/apt-move/move4 new/usr/share/apt-move/move4
+--- orig/usr/share/apt-move/move4	2012-03-31 20:32:29.000000000 +0200
++++ new/usr/share/apt-move/move4	2012-03-31 20:33:11.000000000 +0200
+@@ -30,12 +30,36 @@
+ 	return size
+ }
+ 
++function readsha256(sha256f, sha256) {
++	err = getline sha256 < sha256f
++	if (err < 0) {
++		print "getline failed on " sha256f > "/dev/stderr"
++		exit 1
++	} else if (err == 0) {
++		return -1
++	}
++	return sha256
++}
++
++function readsha1(sha1f, sha1) {
++	err = getline sha1 < sha1f
++	if (err < 0) {
++		print "getline failed on " sha1f > "/dev/stderr"
++		exit 1
++	} else if (err == 0) {
++		return -1
++	}
++	return sha1
++}
++
+ BEGIN {
+ 	pref = ARGV[1]
+ 	sizef = ARGV[2]
+ 	skipf = ARGV[3]
+ 	pkgf = ARGV[4]
+-	contents = ARGV[5] == "yes"
++	sha256f = ARGV[5]
++	sha1f = ARGV[6]
++	contents = ARGV[7] == "yes"
+ 	ARGC = 1
+ 
+ 	isbin = pref ~ /deb$/
+@@ -72,6 +96,7 @@
+ 		pri[++i] = "Filename"
+ 		pri[++i] = "Size"
+ 		pri[++i] = "MD5sum"
++		pri[i++] = "SHA256sum"
+ 		pri[++i] = "SHA1sum"
+ 		pri[++i] = "Description"
+ 	} else {
+@@ -94,6 +119,8 @@
+ 	prilen = i
+ 
+ 	nextsize = readsize(sizef)
++	nextsha256 = readsha256(sha256f)
++	nextsha1 = readsha1(sha1f)
+ 	printf "" > skipf
+ 	if (isbin) {
+ 		printf "" > pkgf
+@@ -110,6 +137,16 @@
+ 	nextsize = readsize(sizef)
+ }
+ 
++{
++	sha256 = nextsha256
++	nextsha256 = readsha256(sha256f)
++}
++
++{
++	sha1 = nextsha1
++	nextsha1 = readsha1(sha1f)
++}
++
+ isbin {
+ 	suffix = substr($2, length($2) - 3)
+ 	if (suffix == "udeb") {
+@@ -147,6 +184,8 @@
+ 
+ 	tv["md5sum"] = " " $1
+ 	tv["size"] = " " size
++	tv["sha256"] = " " sha256
++	tv["sha1"] = " " sha1
+ 	if ("revision" in tv) {
+ 		tv["version"] = tv["version"] "-" tv["revision"]
+ 		delete tv["revision"]

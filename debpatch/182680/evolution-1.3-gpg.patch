@@ -1,0 +1,111 @@
+Index: ChangeLog
+===================================================================
+RCS file: /cvs/gnome/evolution/camel/ChangeLog,v
+retrieving revision 1.1747
+diff -u -r1.1747 ChangeLog
+--- ChangeLog	26 Feb 2003 22:51:02 -0000	1.1747
++++ ChangeLog	26 Feb 2003 23:14:18 -0000
+@@ -1,2 +1,13 @@
++2003-02-26  Jeffrey Stedfast  <fejj@ximian.com>
++
++	* camel-mime-filter-canon.c (complete): Don't add a eol -
++	otherwise we will fail to verify some mutt signatures that do not
++	have a blank line before the boundary line (and note that the last
++	\n before the boundary really belongs to the boundary anyway).
++
++	* camel-stream-filter.c (do_eos): Make sure there is not any
++	unfiltered data in any of the filters before returning eos as
++	TRUE.
++
+ 2003-02-26  Jeffrey Stedfast  <fejj@ximian.com>
+ 
+Index: camel-mime-filter-canon.c
+===================================================================
+RCS file: /cvs/gnome/evolution/camel/camel-mime-filter-canon.c,v
+retrieving revision 1.3
+diff -u -r1.3 camel-mime-filter-canon.c
+--- camel-mime-filter-canon.c	21 Jan 2003 16:38:53 -0000	1.3
++++ camel-mime-filter-canon.c	26 Feb 2003 23:14:19 -0000
+@@ -26,6 +26,7 @@
+ #include <config.h>
+ #endif
+ 
++#include <stdio.h>
+ #include <string.h>
+ #include <ctype.h>
+ 
+@@ -170,7 +171,7 @@
+ 	if (len)
+ 		filter(f, in, len, prespace, out, outlen, outprespace);
+ 
+-	/* the data didn't contain an eol or was too short for "From ", we only need to check for "From" and add an eol */
++	/* the data didn't contain an eol or was too short for "From ", we only need to check for "From" */
+ 	if (f->backlen) {
+ 		inptr = (unsigned char *)f->backbuf;
+ 		inend = (unsigned char *)f->backbuf + f->backlen;
+@@ -195,19 +196,6 @@
+ 			while (o>starto && (o[-1] == ' ' || o[-1] == '\t' || o[-1]=='\r'))
+ 				o--;
+ 		}
+-		/* check end of line canonicalisation */
+-		if (o>starto) {
+-			if (flags & CAMEL_MIME_FILTER_CANON_CRLF) {
+-				if (o[-1] != '\r')
+-					*o++ = '\r';
+-			} else {
+-				if (o[-1] == '\r')
+-					o--;
+-			}
+-		}
+-		
+-		/* and always finish with an eol */
+-		*o++ = '\n';
+ 		
+ 		*outlen = o - *out;
+ 		
+Index: camel-stream-filter.c
+===================================================================
+RCS file: /cvs/gnome/evolution/camel/camel-stream-filter.c,v
+retrieving revision 1.24
+diff -u -r1.24 camel-stream-filter.c
+--- camel-stream-filter.c	19 Jul 2002 11:25:02 -0000	1.24
++++ camel-stream-filter.c	26 Feb 2003 23:14:19 -0000
+@@ -19,11 +19,16 @@
+  * Boston, MA 02111-1307, USA.
+  */
+ 
++
++#ifdef HAVE_CONFIG_H
++#include <config.h>
++#endif
++
++#include <stdio.h>
+ #include <string.h>
+ #include "camel-stream-filter.h"
+ 
+ #define d(x)
+-/*#include <stdio.h>*/
+ 
+ /* use my malloc debugger? */
+ /*extern void g_check(void *mp);*/
+@@ -368,10 +373,18 @@
+ {
+ 	CamelStreamFilter *filter = (CamelStreamFilter *)stream;
+ 	struct _CamelStreamFilterPrivate *p = _PRIVATE(filter);
+-
++	struct _filter *f;
++	
+ 	if (p->filteredlen > 0)
+ 		return FALSE;
+-
++	
++	f = p->filters;
++	while (f) {
++		if (f->filter->backlen > 0)
++			return FALSE;
++		f = f->next;
++	}
++	
+ 	return camel_stream_eos(filter->source);
+ }
+ 

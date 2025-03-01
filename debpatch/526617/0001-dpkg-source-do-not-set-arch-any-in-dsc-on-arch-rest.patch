@@ -1,0 +1,88 @@
+From a002b7705dae84f436a57e92660f2bf6b7c92b26 Mon Sep 17 00:00:00 2001
+From: Philipp Kern <pkern@debian.org>
+Date: Sat, 2 May 2009 11:39:00 +0200
+Subject: [PATCH] dpkg-source: do not set arch:any in dsc on arch-restricted packages
+
+dpkg-source was pretty liberal in setting `Architecture: any' in the
+dsc: as soon as there are two binary packages, one being arch:all and
+one being arch-restricted, you get arch:any in the dsc.  This is
+incorrect because the package will only build on the autobuilders
+if there are architecture-dependent binary packages available.
+
+Thus this patch only produces arch:any if at least one binary package
+specifies it.  Otherwise it outputs the set of all binary architectures
+(including arch:all).
+
+Signed-off-by: Philipp Kern <pkern@debian.org>
+---
+ scripts/dpkg-source.pl |   47 ++++++++++++++++++++++-------------------------
+ 1 files changed, 22 insertions(+), 25 deletions(-)
+
+diff --git a/scripts/dpkg-source.pl b/scripts/dpkg-source.pl
+index 75482d0..a32049a 100755
+--- a/scripts/dpkg-source.pl
++++ b/scripts/dpkg-source.pl
+@@ -195,31 +195,23 @@ if ($options{'opmode'} eq 'build') {
+ 	foreach $_ (keys %{$pkg}) {
+ 	    my $v = $pkg->{$_};
+             if (m/^Architecture$/) {
+-		if (debarch_eq($v, 'any')) {
+-                    @sourcearch= ('any');
+-		} elsif (debarch_eq($v, 'all')) {
+-                    if (!@sourcearch || $sourcearch[0] eq 'all') {
+-                        @sourcearch= ('all');
+-                    } else {
+-                        @sourcearch= ('any');
+-                    }
+-                } else {
+-		    if (@sourcearch && grep($sourcearch[0] eq $_, 'any', 'all')) {
+-			@sourcearch= ('any');
+-		    } else {
+-			for my $a (split(/\s+/, $v)) {
+-			    error(_g("`%s' is not a legal architecture string"),
+-			          $a)
+-				unless $a =~ /^[\w-]+$/;
+-			    error(_g("architecture %s only allowed on its " .
+-			             "own (list for package %s is `%s')"),
+-			          $a, $p, $a)
+-				if grep($a eq $_, 'any','all');
+-                            push(@sourcearch,$a) unless $archadded{$a}++;
+-                        }
+-                }
+-                }
+-                $fields->{'Architecture'}= join(' ',@sourcearch);
++	        # Gather all binary architectures in one set.  any and all
++	        # are special-cased as they need to be the only ones in the
++	        # current stanza if present.
++	        if (debarch_eq($v, 'any') || debarch_eq($v, 'all')) {
++	            push(@sourcearch,$v) unless $archadded{$v}++;
++	        } else {
++	            for my $a (split(/\s+/, $v)) {
++	                error(_g("`%s' is not a legal architecture string"),
++	                      $a)
++	                    unless $a =~ /^[\w-]+$/;
++	                error(_g("architecture %s only allowed on its " .
++	                         "own (list for package %s is `%s')"),
++	                      $a, $p, $a)
++	                    if grep($a eq $_, 'any','all');
++	                push(@sourcearch,$a) unless $archadded{$a}++;
++	            }
++	        }
+             } elsif (s/^X[BC]*S[BC]*-//i) { # Include XS-* fields
+                 $fields->{$_} = $v;
+             } elsif (m/^$control_pkg_field_regex$/ ||
+@@ -229,6 +221,11 @@ if ($options{'opmode'} eq 'build') {
+             }
+ 	}
+     }
++    if (grep($_ eq 'any', @sourcearch)) {
++	# If we encounter one any then the other arches become insignificant.
++	@sourcearch = ('any');
++    }
++    $fields->{'Architecture'}= join(' ',@sourcearch);
+ 
+     # Scan fields of dpkg-parsechangelog
+     foreach $_ (keys %{$changelog}) {
+-- 
+1.5.6.5
+

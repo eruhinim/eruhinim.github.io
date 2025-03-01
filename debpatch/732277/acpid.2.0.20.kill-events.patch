@@ -1,0 +1,149 @@
+diff -ur acpid-2.0.20.orig/acpid.8 acpid-2.0.20/acpid.8
+--- acpid-2.0.20.orig/acpid.8	2013-02-15 14:22:20.000000000 +0000
++++ acpid-2.0.20/acpid.8	2013-12-16 08:45:48.098952122 +0000
+@@ -47,6 +47,13 @@
+ ordering is guaranteed), as well as one rule to be defined for multiple events.
+ To force \fBacpid\fP to reload the rule configuration, send it a SIGHUP.
+ .PP
++The pseudo-action DIEDIEDIE causes the event to be dropped
++completely and no further processing undertaken; clients connecting
++via the UNIX domain socket (see below) will not be notified of the
++event. This may be useful on some machines, such as certain laptops which
++generate spurious battery events at frequent intervals. The name of
++this pseudo-action may be redefined with a commandline option.
++.PP
+ In addition to rule files, \fBacpid\fP also accepts connections on a UNIX
+ domain socket (\fI/var/run/acpid.socket\fP by default).  Any application may
+ connect to this socket.  Once connected, \fBacpid\fP will send the text of
+@@ -124,6 +131,11 @@
+ the file exists, it will be removed and over-written.
+ Default is \fI/var/run/acpid.pid\fP.
+ .TP
++.BI \-k "\fR, \fP" \-\-killstring " string"
++This option defines the pseudo-action which tells \fBacpid\fP to abort
++all processing of an event, including client notifications.
++Default is \fIDIEDIEDIE\fP.
++.TP
+ .BI \-v "\fR, \fP" \-\-version
+ Print version information and exit.
+ .TP
+diff -ur acpid-2.0.20.orig/acpid.c acpid-2.0.20/acpid.c
+--- acpid-2.0.20.orig/acpid.c	2013-08-15 21:12:51.000000000 +0100
++++ acpid-2.0.20/acpid.c	2013-12-16 07:56:43.022309944 +0000
+@@ -64,6 +64,7 @@
+ static int foreground;
+ static const char *pidfile = ACPID_PIDFILE;
+ static int netlink;
++const char *killstring = KILL_STR;
+ 
+ int
+ main(int argc, char **argv)
+@@ -206,6 +207,7 @@
+ 		{"pidfile", 1, 0, 'p'},
+ 		{"lockfile", 1, 0, 'L'},
+ 		{"netlink", 0, 0, 'n'},
++		{"killstring", 1, 0, 'k'},
+ 		{"version", 0, 0, 'v'},
+ 		{"help", 0, 0, 'h'},
+ 		{NULL, 0, 0, 0},
+@@ -224,6 +226,7 @@
+ 		"Use the specified PID file.",		/* pidfile */
+ 		"Use the specified lockfile to stop processing.", /* lockfile */
+ 		"Force netlink/input layer mode. (overrides -e)", /* netlink */
++		"Define the pseudo-command to drop an event.", /* killstring */
+ 		"Print version information.",		/* version */
+ 		"Print this message.",			/* help */
+ 	};
+@@ -234,7 +237,7 @@
+ 	for (;;) {
+ 		int i;
+ 		i = getopt_long(*argc, *argv,
+-		    "c:C:de:flg:m:s:Sp:L:nvh", opts, NULL);
++		    "c:C:de:flg:m:s:Sp:L:nk:vh", opts, NULL);
+ 		if (i == -1) {
+ 			break;
+ 		}
+@@ -280,6 +283,9 @@
+ 		case 'n':
+ 			netlink = 1;
+ 			break;
++		case 'k':
++			killstring = optarg;
++			break;
+ 		case 'v':
+ 			printf(PACKAGE "-" VERSION "\n");
+ 			exit(EXIT_SUCCESS);
+Only in acpid-2.0.20.orig: config.h
+diff -ur acpid-2.0.20.orig/event.c acpid-2.0.20/event.c
+--- acpid-2.0.20.orig/event.c	2012-09-03 23:14:24.000000000 +0100
++++ acpid-2.0.20/event.c	2013-12-16 07:54:39.459131817 +0000
+@@ -84,6 +84,8 @@
+ static char *parse_cmd(const char *cmd, const char *event);
+ static int check_escapes(const char *str);
+ 
++extern const char *killstring;
++
+ /*
+  * read in all the configuration files
+  */
+@@ -536,7 +538,9 @@
+ {
+ 	struct rule *p;
+ 	int nrules = 0;
+-	struct rule_list *ar[] = { &client_list, &cmd_list, NULL };
++	/* cmd_list must come before client_list so kill rules are
++	 * processed before client rules */
++	struct rule_list *ar[] = { &cmd_list, &client_list, NULL };
+ 	struct rule_list **lp;
+ 
+ 	/* make an event be atomic wrt known signals */
+@@ -558,7 +562,13 @@
+ 				}
+ 				nrules++;
+ 				if (p->type == RULE_CMD) {
+-					do_cmd_rule(p, event);
++					if (do_cmd_rule(p, event) == KILL_VAL) {
++						/* Abort processing if event matches kill rule */
++						if (logevents) acpid_log(LOG_INFO, "Event must die");
++						while (*++lp);
++						lp--;
++						break;
++					}
+ 				} else if (p->type == RULE_CLIENT) {
+ 					do_client_rule(p, event);
+ 				} else {
+@@ -631,14 +641,19 @@
+ 	int status;
+ 	const char *action;
+ 
++	/* Moved outside switch to avoid overhead of fork() on
++	 * killed events */
++	/* parse the commandline, doing any substitutions needed */
++	action = parse_cmd(rule->action.cmd, event);
++	/* If it is so decreed, proclaim that the event is to be killed */
++	if (!strcmp(action, killstring)) return(KILL_VAL);
++
+ 	pid = fork();
+ 	switch (pid) {
+ 	case -1:
+ 		acpid_log(LOG_ERR, "fork(): %s", strerror(errno));
+ 		return -1;
+ 	case 0: /* child */
+-		/* parse the commandline, doing any substitutions needed */
+-		action = parse_cmd(rule->action.cmd, event);
+ 		if (logevents) {
+ 			acpid_log(LOG_INFO,
+ 			    "executing action \"%s\"", action);
+diff -ur acpid-2.0.20.orig/event.h acpid-2.0.20/event.h
+--- acpid-2.0.20.orig/event.h	2009-05-02 03:11:51.000000000 +0100
++++ acpid-2.0.20/event.h	2013-12-16 07:53:34.675562812 +0000
+@@ -23,6 +23,9 @@
+ #ifndef EVENT_H__
+ #define EVENT_H__
+ 
++#define KILL_STR "DIEDIEDIE"
++#define KILL_VAL 1
++
+ extern int acpid_read_conf(const char *confdir);
+ extern int acpid_add_client(int client, const char *origin);
+ extern int acpid_cleanup_rules(int do_detach);

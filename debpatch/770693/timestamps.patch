@@ -1,0 +1,85 @@
+diff --git a/src/exec.c b/src/exec.c
+index cfd82a3..b9a7365 100644
+--- a/src/exec.c
++++ b/src/exec.c
+@@ -744,8 +744,8 @@ static void *exec_notification_one (void *arg) /* {{{ */
+ 
+   fprintf (fh,
+       "Severity: %s\n"
+-      "Time: %.3f\n",
+-      severity, CDTIME_T_TO_DOUBLE (n->time));
++      "Time: %u\n",
++      severity, (unsigned int)CDTIME_T_TO_TIME_T(n->time));
+ 
+   /* Print the optional fields */
+   if (strlen (n->host) > 0)
+diff --git a/src/pyvalues.c b/src/pyvalues.c
+index 307af17..4f5c4ce 100644
+--- a/src/pyvalues.c
++++ b/src/pyvalues.c
+@@ -767,7 +771,7 @@ static void Values_dealloc(PyObject *self) {
+ }
+ 
+ static PyMemberDef Values_members[] = {
+-	{"interval", T_INT, offsetof(Values, interval), 0, interval_doc},
++	{"interval", T_DOUBLE, offsetof(Values, interval), 0, interval_doc},
+ 	{"values", T_OBJECT_EX, offsetof(Values, values), 0, values_doc},
+ 	{"meta", T_OBJECT_EX, offsetof(Values, meta), 0, meta_doc},
+ 	{NULL}
+diff --git a/src/threshold.c b/src/threshold.c
+index 7df4d61..887dbca 100644
+--- a/src/threshold.c
++++ b/src/threshold.c
+@@ -942,6 +942,7 @@ static int ut_missing (const value_list_t *vl,
+   cdtime_t missing_time;
+   char identifier[6 * DATA_MAX_NAME_LEN];
+   notification_t n;
++  cdtime_t now;
+ 
+   if (threshold_tree == NULL)
+     return (0);
+@@ -951,13 +952,15 @@ static int ut_missing (const value_list_t *vl,
+   if ((th == NULL) || ((th->flags & UT_FLAG_INTERESTING) == 0))
+     return (0);
+ 
+-  missing_time = cdtime () - vl->time;
++  now = cdtime ();
++  missing_time = now - vl->time;
+   FORMAT_VL (identifier, sizeof (identifier), vl);
+ 
+   NOTIFICATION_INIT_VL (&n, vl);
+   ssnprintf (n.message, sizeof (n.message),
+       "%s has not been updated for %.3f seconds.",
+       identifier, CDTIME_T_TO_DOUBLE (missing_time));
++  n.time = now;
+ 
+   plugin_dispatch_notification (&n);
+ 
+diff --git a/src/utils_cmd_putnotif.c b/src/utils_cmd_putnotif.c
+index 5a9faff..d3cf383 100644
+--- a/src/utils_cmd_putnotif.c
++++ b/src/utils_cmd_putnotif.c
+@@ -49,13 +49,18 @@ static int set_option_severity (notification_t *n, const char *value)
+ 
+ static int set_option_time (notification_t *n, const char *value)
+ {
+-  time_t tmp;
+-  
+-  tmp = (time_t) atoi (value);
+-  if (tmp <= 0)
++  char *endptr = NULL;
++  double tmp;
++
++  errno = 0;
++  tmp = strtod (value, &endptr);
++  if ((errno != 0)         /* Overflow */
++      || (endptr == value) /* Invalid string */
++      || (endptr == NULL)  /* This should not happen */
++      || (*endptr != 0))   /* Trailing chars */
+     return (-1);
+ 
+-  n->time = tmp;
++  n->time = DOUBLE_TO_CDTIME_T (tmp);
+ 
+   return (0);
+ } /* int set_option_time */

@@ -1,0 +1,77 @@
+From 603e5879b499215937e51d1ec1cdb498881e0dab Mon Sep 17 00:00:00 2001
+From: Jon DeVree <nuxi@vault24.org>
+Date: Mon, 19 Sep 2016 21:05:41 -0400
+Subject: [PATCH 2/2] Don't throw away udev_ctrl in forking mode.
+
+This fixes a bug in forking mode where udev_ctrl is thrown away
+which prevents it from being cleanly disposed of during shutdown.
+
+Signed-off-by: Jon DeVree <nuxi@vault24.org>
+---
+ src/udev/udevd.c | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/src/udev/udevd.c b/src/udev/udevd.c
+index 1236f73..64615d4 100644
+--- a/src/udev/udevd.c
++++ b/src/udev/udevd.c
+@@ -1269,13 +1269,14 @@ static int on_post(sd_event_source *s, void *userdata) {
+         return 1;
+ }
+ 
+-static int listen_fds(int *rctrl, int *rnetlink) {
++static int listen_fds(int *rctrl, int *rnetlink, struct udev_ctrl **ctrlp) {
+         _cleanup_udev_unref_ struct udev *udev = NULL;
+         int ctrl_fd = -1, netlink_fd = -1;
+         int fd, n, r;
+ 
+         assert(rctrl);
+         assert(rnetlink);
++        assert(ctrlp);
+ 
+         n = sd_listen_fds(true);
+         if (n < 0)
+@@ -1300,13 +1301,13 @@ static int listen_fds(int *rctrl, int *rnetlink) {
+         }
+ 
+         if (ctrl_fd < 0) {
+-                _cleanup_udev_ctrl_unref_ struct udev_ctrl *ctrl = NULL;
++                struct udev_ctrl *ctrl = NULL;
+ 
+                 udev = udev_new();
+                 if (!udev)
+                         return -ENOMEM;
+ 
+-                ctrl = udev_ctrl_new(udev);
++                *ctrlp = ctrl = udev_ctrl_new(udev);
+                 if (!ctrl)
+                         return log_error_errno(EINVAL, "error initializing udev control socket");
+ 
+@@ -1655,6 +1656,7 @@ exit:
+ }
+ 
+ int main(int argc, char *argv[]) {
++        _cleanup_udev_ctrl_unref_ struct udev_ctrl *ctrl = NULL;
+         _cleanup_free_ char *cgroup = NULL;
+         int fd_ctrl = -1, fd_uevent = -1;
+         int r;
+@@ -1728,7 +1730,7 @@ int main(int argc, char *argv[]) {
+                 }
+         }
+ 
+-        r = listen_fds(&fd_ctrl, &fd_uevent);
++        r = listen_fds(&fd_ctrl, &fd_uevent, &ctrl);
+         if (r < 0) {
+                 r = log_error_errno(r, "could not listen on fds: %m");
+                 goto exit;
+@@ -1764,6 +1766,7 @@ int main(int argc, char *argv[]) {
+         r = run(fd_ctrl, fd_uevent, cgroup);
+ 
+ exit:
++        udev_ctrl_cleanup(ctrl);
+         mac_selinux_finish();
+         log_close();
+         return r < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+-- 
+2.9.3
+

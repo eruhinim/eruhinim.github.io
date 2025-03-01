@@ -1,0 +1,220 @@
+From 1ef3ac1141c08361f4e2da81b9a0994ade411ff9 Mon Sep 17 00:00:00 2001
+From: Niels Thykier <niels@thykier.net>
+Date: Fri, 29 Dec 2017 11:28:08 +0000
+Subject: [PATCH] Initial draft for Rules-Requires-Root
+
+Signed-off-by: Niels Thykier <niels@thykier.net>
+---
+ policy/ch-controlfields.rst | 110 ++++++++++++++++++++++++++++++++++++++++++++
+ policy/ch-source.rst        |  53 ++++++++++++++++++++-
+ 2 files changed, 162 insertions(+), 1 deletion(-)
+
+diff --git a/policy/ch-controlfields.rst b/policy/ch-controlfields.rst
+index 0771346..7fc9216 100644
+--- a/policy/ch-controlfields.rst
++++ b/policy/ch-controlfields.rst
+@@ -129,6 +129,8 @@ package) are:
+ 
+ -  :ref:`Testsuite <s-f-Testsuite>`
+ 
++-  :ref:`Rules-Requires-Root <s-f-Rules-Requires-Root>`
++
+ The fields in the binary package paragraphs are:
+ 
+ -  :ref:`Package <s-f-Package>` (mandatory)
+@@ -1020,6 +1022,114 @@ This field is automatically added to Debian source control files
+ field may also be used in source package control files
+ (``debian/control``) if needed in other situations.
+ 
++.. _s-f-Rules-Requires-Root:
++
++``Rules-Requires-Root``
++~~~~~~~~~~~~~~~~~~~~~~~
++
++Simple field that defines if the source package requires access to
++root (or fakeroot) during selected targets in the :ref:`Main building
++script: debian/rules <s-debianrules>`.
++
++The field can consist of exactly one of either of the following:
++
++ - ``no``: Declares that neither root nor fakeroot is required.
++   Package builders (e.g. dpkg-buildpackage) may choose to invoke any
++   target in ``debian/rules`` with an unprivileged user.
++
++ - ``binary-targets`` (default): Declares that the package will need
++   the root (or fakeroot) when either of the ``binary``,
++   ``binary-arch`` or ``binary-indep`` targets are called.  This is
++   how every tool behaved before this field was defined.
++
++ - A space separated list of keywords described below.  These must
++   always contain a forward slash, which sets them apart from the
++   other values.  When this list is provided, the builder must provide
++   a `gain root command` (as defined in :ref:`debian/rules - Gain root
++   api for Rules-Requires-Root <s-debianrules-gainrootapi>`) *or*
++   pretend that the value was set to ``binary-targets`` and both
++   parties must degrade accordingly (see below).
++
++If the package builder supports the field and want to enable the
++feature, then it must set the environment variable
++``DEB_RULES_REQUIRES_ROOT`` when invoking the package building script
++``debian/rules``.  The value of ``DEB_RULES_REQUIRES_ROOT`` should be
++one of:
++
++ * The same value as the ``Rules-Requires-Root`` if the builder can
++   provide the necessary support.  The builder may trim unnecessary
++   whitespace used to format the field for readability.
++
++ * The value ``binary-targets`` if it cannot provide the necessary
++   support.
++
++All packages and builders must support ``binary-targets`` as this was
++the historical behaviour prior to the introduction of this field.
++
++Please note that any tool (partiularly older versions of them) may be
++unaware of this field and behave like the field was set to
++``binary-targets``.  The package build must gracefully cope with this
++and produce the same semantical result regardless.
++
++A compliant builder may also leave ``DEB_RULES_REQUIRES_ROOT`` unset
++or set it to ``binary-targets`` if it has been requested to test
++whether the package it builds correctly implements the fall-back for
++legacy builders.
++
++This field intentionally does not enable a package to request a true
++root over fakeroot.
++
++**Definition of the keywords**:
++
++The keywords have the format ``<namespace>/<case>``, where:
++
++ * ``<namespace>`` must consist entirely of printable ASCII characters
++   except for any whitespace and the forward slash (``/``).  It must
++   consist of at least 2 characters.
++
++ * ``/`` (between ``<namespace>`` and ``<case>``) is a single ASCII
++   forward slash.
++
++ * ``<case>`` must consist entirely of printable ASCII characters
++   except for any whitespace.  It must consist of at least 2
++   characters.
++
++These keywords define where the package build script (or the tools
++called from it) will need access to root or fakeroot.  If ``debian/rules``
++directly needs to invoke a tool as root or under fakeroot, then it must
++use the keyword ``dpkg/target-subcommand``.
++
++Furthermore, each tool or package may claim its own namespace named
++after it and create keywords based on that namespace.  The tool may
++use the `gain root command` to perform a given action as root or under
++fakeroot if (but only if) a package lists of said keyword in the
++``Rules-Requires-Root`` field.
++
++All tools must ignore keywords with namespaces they do not know or
++own.  A tool may choose warn or abort with an error if it finds
++unknown keywords in namespaces it provides or owns (but it is not
++required to do this for all keywords in the namespace).
++
++
++**Provided keywords**:
++
++The following incomplete list of keywords are defined:
++
++ * ``dpkg/target-subcommand``: When the package needs to run a given
++   command under (fake)root within the ``debian/rules`` files
++   directly, this must be declared via this keyword.
++
++ * ``dpkg/target/<target-name>``: When a specific "debian/rules"
++   unofficial target (none of the root-requiring ``binary-indep``,
++   ``binary-arch``, ``binary``, ``clean``, nor the non-root-requiring
++   ``build-indep``, ``build-arch``, ``build``) needs to be run under
++   (fake)root, this must be declared via this dynamic keyword, where
++   ``<target-name>`` is the name of the ``debian/rules`` target.
++
++The policy is not intended to contain a complete list of these
++keywords.  Please consult the documentation of the tool or package in
++question for which keywords it defines and when they are needed.
++
+ .. _s5.7:
+ 
+ User-defined fields
+diff --git a/policy/ch-source.rst b/policy/ch-source.rst
+index e3b1981..009716c 100644
+--- a/policy/ch-source.rst
++++ b/policy/ch-source.rst
+@@ -346,7 +346,9 @@ The targets are as follows:
+     architecture-dependent or not), it must still exist and must always
+     succeed.
+ 
+-    The ``binary`` targets must be invoked as root.  [#]_
++    The ``binary`` targets may be invoked as root depending on the
++    value of the :ref:`Rules-Requires-Root <s-f-Rules-Requires-Root>`
++    field.  [#]_
+ 
+ ``clean`` (required)
+     This must undo any effects that the ``build`` and ``binary``
+@@ -435,6 +437,12 @@ should not be used to get the CPU or system information; the
+ that. GNU style variables should generally only be used with upstream
+ build systems.
+ 
++The builder should set ``DEB_RULES_REQUIRES_ROOT`` environment
++variable when calling any of the mandatory targets as defined in
++:ref:`Rules-Requires-Root <s-f-Rules-Requires-Root>`.  If the variable
++is not set, the package must behave as if it was set to
++``binary-targets``.
++
+ .. _s-debianrules-options:
+ 
+ ``debian/rules`` and ``DEB_BUILD_OPTIONS``
+@@ -525,6 +533,49 @@ order to make it work for your package.
+             # Code to run the package test suite.
+     endif
+ 
++
++.. _s-debianrules-gainrootapi:
++
++``debian/rules`` - Gain root api for ``Rules-Requires-Root``
++~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++
++Depending on the value of the :ref:`Rules-Requires-Root
++<s-f-Rules-Requires-Root>` field, the package builder
++(e.g. dpkg-buildpackage) may run the ``debian/rules`` target as an
++unprivileged user and provide a `gain root command`.
++
++The `gain root command` is passed to the build script via the
++``DEB_GAIN_ROOT_CMD`` environment variable.  It is space separated
++list with the first word being the command (which should available be
++in PATH) and additional words being arguments.  The `gain root
++command` might not be used via a shell and accordingly it must not
++rely on shell features.
++
++The `gain root command` must not prompt or require human interaction
++(as the build script itself must not require interaction).  The `gain
++root command` must be possible to preprend the command to an existing
++command without having to alter or quote the command being invoked.
++Furthermore, it must retain the environment variables without the
++caller having to explicitly request it.
++
++The following are examples of valid defitions root commands (in the sh
++syntax) provided the tools are available and properly configured::
++
++  # Command "sudo", with arguments "-nE" and "--"
++  export DEB_GAIN_ROOT_CMD='sudo -nE --'
++  # Command "fakeroot" with the single argument "--"
++  export DEB_GAIN_ROOT_CMD='fakeroot --'
++
++Examples of valid use of the `gain root command`::
++
++  # sh-syntax (assumes set -e semantics for error handling)
++  $DEB_GAIN_ROOT_CMD some-cmd --which-requires-root
++
++  # perl
++  my @cmd = ('some-cmd', '--which-requires-root');
++  unshift(@cmd, split(' ', $ENV{DEB_GAIN_ROOT_CMD})) if $ENV{DEB_GAIN_ROOT_CMD};
++  system(@cmd) == or die("@cmd failed");
++
+ .. _s-substvars:
+ 
+ Variable substitutions: ``debian/substvars``
+-- 
+2.16.1
+

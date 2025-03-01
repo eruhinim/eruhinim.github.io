@@ -1,0 +1,153 @@
+From 7a61549b6313d31c5a97fff46367cd5188804f92 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=A9my=20Bobbio?= <lunar@debian.org>
+Date: Fri, 29 Aug 2014 03:46:09 +0000
+Subject: [PATCH] dh_fixmtimes: introduce new helper to fix mtimes for
+ reproducibility
+
+To enable reproducible builds, file modification times written in binary
+packages should be the same accross multiple builds of the same source
+package. This helper will change the modification time of any file that
+has been created later than the time of the latest debian/changelog
+entry to the time of the latest debian/changelog entry.
+
+See https://wiki.debian.org/ReproducibleBuilds for more information on
+reproducible builds in Debian.
+---
+ Debian/Debhelper/Dh_Lib.pm |    4 ++-
+ dh                         |    1 +
+ dh_fixmtimes               |   76 ++++++++++++++++++++++++++++++++++++++++++++
+ man/po4a/po4a.cfg          |    1 +
+ 4 files changed, 81 insertions(+), 1 deletion(-)
+ create mode 100755 dh_fixmtimes
+
+diff --git a/Debian/Debhelper/Dh_Lib.pm b/Debian/Debhelper/Dh_Lib.pm
+index 6a79c9c..44c3ced 100644
+--- a/Debian/Debhelper/Dh_Lib.pm
++++ b/Debian/Debhelper/Dh_Lib.pm
+@@ -477,7 +477,8 @@ sub pkgfilename {
+ }
+ 
+ # Returns 1 if the package is a native debian package, null otherwise.
+-# As a side effect, sets $dh{VERSION} to the version of this package.
++# As a side effect, sets $dh{VERSION} to the version of this package,
++# and $dh{DATE} to the date of the latest changelog entry.
+ {
+ 	# Caches return code so it only needs to run dpkg-parsechangelog once.
+ 	my %isnative_cache;
+@@ -499,6 +500,7 @@ sub pkgfilename {
+ 		if (! defined $dh{VERSION}) {
+ 			error("changelog parse failure");
+ 		}
++		($dh{DATE})=$version=~m/Date:\s*(.*)/m;
+ 
+ 		# Is this a native Debian package?
+ 		if ($dh{VERSION}=~m/.*-/) {
+diff --git a/dh b/dh
+index f3bd321..fc300b8 100755
+--- a/dh
++++ b/dh
+@@ -408,6 +408,7 @@ my @b=qw{
+ 	dh_installdeb
+ 	dh_gencontrol
+ 	dh_md5sums
++	dh_fixmtimes
+ 	dh_builddeb
+ };
+ $sequences{clean} = [qw{
+diff --git a/dh_fixmtimes b/dh_fixmtimes
+new file mode 100755
+index 0000000..28122c7
+--- /dev/null
++++ b/dh_fixmtimes
+@@ -0,0 +1,76 @@
++#!/usr/bin/perl -w
++
++=encoding utf-8
++
++=head1 NAME
++
++dh_fixperms - fix mtimes of files in package build directories
++
++=cut
++
++use strict;
++use Config;
++use Debian::Debhelper::Dh_Lib;
++
++=head1 SYNOPSIS
++
++B<dh_fixmtimes> [S<I<debhelper options>>] [B<-X>I<item>]
++
++=head1 DESCRIPTION
++
++B<dh_fixmtimes> is a debhelper program that is responsible for setting the
++modification times of files and directories in package build directories to
++a state easily reproducible accross multiple builds.
++
++B<dh_fixperms> will examine the modification time of all files in the package
++build directory. If the file is newer than the date of the latest
++debian/changelog entry, we assume the file is a result of a build, and its
++modification time will be set to the date of the latest debian/changelog entry.
++
++This removes unneeded variations accross builds of the same package.
++
++=head1 OPTIONS
++
++=over 4
++
++=item B<-X>I<item>, B<--exclude> I<item>
++
++Exclude files that contain I<item> anywhere in their filename from having
++their modification times changed. You may use this option multiple times to
++build up a list of things to exclude.
++
++=back
++
++=cut
++
++init();
++
++foreach my $package (@{$dh{DOPACKAGES}}) {
++	my $tmp=tmpdir($package);
++
++	# XXX: not nice, we only run this for the side effect of getting $dh{DATE} set
++	isnative($package);
++
++	my $timestamp=`date -d'$dh{DATE}' +%s`;
++	chomp $timestamp;
++
++	my $find_options='';
++	if (defined($dh{EXCLUDE_FIND}) && $dh{EXCLUDE_FIND} ne '') {
++		$find_options="! \\( $dh{EXCLUDE_FIND} \\)";
++	}
++
++	complex_doit("find $tmp -newermt '$dh{DATE}' $find_options -print0",
++		"2>/dev/null | xargs -0r touch --no-dereference --date='$dh{DATE}'");
++}
++
++=head1 SEE ALSO
++
++L<debhelper(7)>
++
++This program is a part of debhelper.
++
++=head1 AUTHOR
++
++Jérémy Bobbio <lunar@debian.org>
++
++=cut
+diff --git a/man/po4a/po4a.cfg b/man/po4a/po4a.cfg
+index 311762f..39e3876 100644
+--- a/man/po4a/po4a.cfg
++++ b/man/po4a/po4a.cfg
+@@ -17,6 +17,7 @@
+ [type: pod] dh_compress 	$lang:man/$lang/dh_compress.pod		add_fr:man/po4a/add.fr	add_es:man/po4a/add1.es  add_de:man/po4a/add.de  add_pt:man/po4a/add.pt
+ [type: pod] dh_desktop		$lang:man/$lang/dh_desktop.pod		add_fr:man/po4a/add.fr	add_es:man/po4a/add1.es  add_de:man/po4a/add.de  add_pt:man/po4a/add.pt
+ [type: pod] dh_fixperms 	$lang:man/$lang/dh_fixperms.pod		add_fr:man/po4a/add.fr	add_es:man/po4a/add1.es  add_de:man/po4a/add.de  add_pt:man/po4a/add.pt
++[type: pod] dh_fixmtimes	$lang:man/$lang/dh_fixmtimes.pod	add_fr:man/po4a/add.fr	add_es:man/po4a/add1.es  add_de:man/po4a/add.de  add_pt:man/po4a/add.pt
+ [type: pod] dh_gconf 		$lang:man/$lang/dh_gconf.pod		add_fr:man/po4a/add.fr	add_es:man/po4a/add1.es  add_de:man/po4a/add.de  add_pt:man/po4a/add.pt
+ [type: pod] dh_gencontrol 	$lang:man/$lang/dh_gencontrol.pod	add_fr:man/po4a/add.fr	add_es:man/po4a/add1.es  add_de:man/po4a/add.de  add_pt:man/po4a/add.pt
+ [type: pod] dh_icons		$lang:man/$lang/dh_icons.pod		add_fr:man/po4a/add.fr	add_es:man/po4a/add3.es  add_de:man/po4a/add.de  add_pt:man/po4a/add.pt
+-- 
+1.7.10.4
+

@@ -1,0 +1,348 @@
+This patch adds support for the %parse-param and %lex-param directives used in
+bison. This patch bears some similarity to netbsd's changes to byacc at
+http://www.mail-archive.com/source-changes-full@netbsd.org/msg08143.html.
+
+--- byacc-20100216.orig/skeleton.c
++++ byacc-20100216/skeleton.c
+@@ -40,38 +40,7 @@ const char *banner[] =
+ 
+ const char *xdecls[] =
+ {
+-    "",
+-    "/* compatibility with bison */",
+-    "#ifdef YYPARSE_PARAM",
+-    "/* compatibility with FreeBSD */",
+-    "#ifdef YYPARSE_PARAM_TYPE",
+-    "#define YYPARSE_DECL() yyparse(YYPARSE_PARAM_TYPE YYPARSE_PARAM)",
+-    "#else",
+-    "#define YYPARSE_DECL() yyparse(void *YYPARSE_PARAM)",
+-    "#endif",
+-    "#else",
+-    "#define YYPARSE_DECL() yyparse(void)",
+-    "#endif /* YYPARSE_PARAM */",
+-    "",
+     "extern int YYPARSE_DECL();",
+-    "",
+-    "/* compatibility with bison pure-parser and flex reentrant options */",
+-    "#if defined YYPURE && defined YYLEX_PARAM",
+-    "#define YYLEX_DECL() yylex(YYSTYPE *yylval, void *YYLEX_PARAM)",
+-    "#define YYLEX yylex(&yylval, YYLEX_PARAM)",
+-    "/* compatibility with flex reentrant option */",
+-    "#elif defined YYLEX_PARAM",
+-    "#define YYLEX_DECL() yylex(void *YYLEX_PARAM)",
+-    "#define YYLEX yylex(YYLEX_PARAM)",
+-    "/* compatilibity with bison pure-parser option */",
+-    "#elif defined YYPURE",
+-    "#define YYLEX_DECL() yylex(YYSTYPE *yylval)",
+-    "#define YYLEX yylex(&yylval)",
+-    "#else",
+-    "#define YYLEX_DECL() yylex(void)",
+-    "#define YYLEX yylex()",
+-    "#endif",
+-    "",
+     "extern int YYLEX_DECL();",
+     "",
+     0
+--- byacc-20100216.orig/output.c
++++ byacc-20100216/output.c
+@@ -1178,6 +1178,121 @@ output_semantic_actions(void)
+ }
+ 
+ static void
++output_parse_decl(void)
++{
++    ++outline;
++    fprintf(code_file, "/* compatibility with bison */\n");
++    ++outline;
++    fprintf(code_file, "#ifdef YYPARSE_PARAM\n");
++    ++outline;
++    fprintf(code_file, "/* compatibility with FreeBSD */\n");
++    ++outline;
++    fprintf(code_file, "# ifdef YYPARSE_PARAM_TYPE\n");
++    ++outline;
++    fprintf(code_file, "#  define YYPARSE_DECL() "
++        "yyparse(YYPARSE_PARAM_TYPE YYPARSE_PARAM)\n");
++    ++outline;
++    fprintf(code_file, "# else\n");
++    ++outline;
++    fprintf(code_file, "#  define YYPARSE_DECL() "
++        "yyparse(void *YYPARSE_PARAM)\n");
++    ++outline;
++    fprintf(code_file, "# endif\n");
++    ++outline;
++    fprintf(code_file, "#else\n");
++    ++outline;
++    fprintf(code_file, "# define YYPARSE_DECL() yyparse(");
++    if (!parse_param)
++        fprintf(code_file, "void");
++    else
++    {
++        param *p;
++        for (p = parse_param; p; p = p->next)
++            fprintf(code_file, "%s %s%s", p->type, p->name,
++                p->next ? ", " : "");
++    }
++    fprintf(code_file, ")\n");
++    outline += 2;
++    fprintf(code_file, "#endif\n\n");
++}
++
++static void
++output_lex_decl(void)
++{
++    ++outline;
++    fprintf(code_file, "/* Parameters sent to lex. */\n");
++    ++outline;
++    fprintf(code_file, "#ifdef YYLEX_PARAM\n");
++    if (pure_parser)
++    {
++        ++outline;
++        fprintf(code_file, "# define YYLEX_DECL() yylex(YYSTYPE *yylval, "
++            "void *YYLEX_PARAM)\n");
++        ++outline;
++        fprintf(code_file, "# define YYLEX yylex(&yylval, YYLEX_PARAM)\n");
++    }
++    else
++    {
++        ++outline;
++        fprintf(code_file, "# define YYLEX_DECL() yylex(void *YYLEX_PARAM)\n");
++        ++outline;
++        fprintf(code_file, "# define YYLEX yylex(YYLEX_PARAM)\n");
++    }
++    ++outline;
++    fprintf(code_file, "#else\n");
++    if (pure_parser && lex_param)
++    {
++        fprintf(code_file, "# define YYLEX_DECL() yylex(YYSTYPE *yylval, ");
++        param *p;
++        for (p = lex_param; p; p = p->next)
++            fprintf(code_file, "%s %s%s", p->type, p->name,
++                p->next ? ", " : "");
++        ++outline;
++        fprintf(code_file, ")\n");
++
++        fprintf(code_file, "# define YYLEX yylex(&yylval, ");
++        for (p = lex_param; p; p = p->next)
++            fprintf(code_file, "%s%s", p->name, p->next ? ", " : "");
++        ++outline;
++        fprintf(code_file, ")\n");
++    }
++    else if (pure_parser)
++    {
++        ++outline;
++        fprintf(code_file, "# define YYLEX_DECL() yylex(YYSTYPE *yylval)\n");
++
++        ++outline;
++        fprintf(code_file, "# define YYLEX yylex(&yylval)\n");
++    }
++    else if (lex_param)
++    {
++        fprintf(code_file, "# define YYLEX_DECL() yylex(");
++        param *p;
++        for (p = lex_param; p; p = p->next)
++            fprintf(code_file, "%s %s%s", p->type, p->name,
++                p->next ? ", " : "");
++        ++outline;
++        fprintf(code_file, ")\n");
++
++        fprintf(code_file, "# define YYLEX yylex(");
++        for (p = lex_param; p; p = p->next)
++            fprintf(code_file, "%s%s", p->name, p->next ? ", " : "");
++        ++outline;
++        fprintf(code_file, ")\n");
++    }
++    else
++    {
++        ++outline;
++        fprintf(code_file, "# define YYLEX_DECL() yylex(void)\n");
++
++        ++outline;
++        fprintf(code_file, "# define YYLEX yylex()\n");
++    }
++    outline += 2;
++    fprintf(code_file, "#endif\n\n");
++}
++
++static void
+ free_itemsets(void)
+ {
+     core *cp, *next;
+@@ -1225,6 +1340,8 @@ output(void)
+     output_prefix(output_file);
+     output_pure_parser();
+     output_stored_text();
++    output_parse_decl();
++    output_lex_decl();
+     write_section(xdecls);
+     output_defines();
+     output_rule_data();
+--- byacc-20100216.orig/reader.c
++++ byacc-20100216/reader.c
+@@ -42,6 +42,9 @@ static char *name_pool;
+ 
+ char line_format[] = "#line %d \"%s\"\n";
+ 
++param *lex_param;
++param *parse_param;
++
+ static void
+ cachec(int c)
+ {
+@@ -276,6 +279,10 @@ keyword(void)
+ 	    return (EXPECT_RR);
+ 	if (strcmp(cache, "pure-parser") == 0)
+ 	    return (PURE_PARSER);
++	if (strcmp(cache, "parse-param") == 0)
++	    return (PARSE_PARAM);
++	if (strcmp(cache, "lex-param") == 0)
++	    return (LEX_PARAM);
+     }
+     else
+     {
+@@ -615,6 +622,87 @@ copy_union(void)
+     }
+ }
+ 
++/*
++ * Keep a linked list of parameters
++ */
++static void
++copy_param(int k)
++{
++    char *buf;
++    int c;
++    param *head, *p;
++    int i;
++
++    c = nextc();
++    if (c == EOF)
++	unexpected_EOF();
++    if (c != '{')
++	goto out;
++    cptr++;
++
++    c = nextc();
++    if (c == EOF)
++	unexpected_EOF();
++    if (c == '}')
++	goto out;
++
++    buf = MALLOC(linesize);
++    if (buf == NULL)
++	goto nospace;
++
++    for (i = 0; (c = *cptr++) != '}'; i++) {
++	if (c == EOF)
++	    unexpected_EOF();
++	buf[i] = c;
++    }
++
++    if (i == 0)
++	goto out;
++
++    buf[i--] = '\0';
++    while (i >= 0 && isspace((unsigned char)buf[i]))
++	buf[i--] = '\0';
++    while (i >= 0 && isalnum((unsigned char)buf[i]))
++	i--;
++
++    if (!isspace((unsigned char)buf[i]) && buf[i] != '*')
++	goto out;
++
++    p = MALLOC(sizeof(*p));
++    if (p == NULL)
++	goto nospace;
++
++    p->name = strdup(buf + i + 1);
++    if (p->name == NULL)
++	goto nospace;
++
++    buf[i + 1] = '\0';
++    p->type = buf;
++
++    if (k == LEX_PARAM)
++	head = lex_param;
++    else
++	head = parse_param;
++
++    if (head != NULL) {
++	while (head->next)
++	    head = head->next;
++	head->next = p;
++    } else {
++	if (k == LEX_PARAM)
++	    lex_param = p;
++	else
++	    parse_param = p;
++    }
++    p->next = NULL;
++    return;
++
++out:
++    syntax_error(lineno, line, cptr);
++nospace:
++    no_space();
++}
++
+ static int
+ hexval(int c)
+ {
+@@ -1142,7 +1230,12 @@ read_declarations(void)
+ 	case PURE_PARSER:
+ 	    pure_parser = 1;
+ 	    break;
+-	}
++
++	case PARSE_PARAM:
++	case LEX_PARAM:
++	    copy_param(k);
++	    break;
++}
+     }
+ }
+ 
+--- byacc-20100216.orig/defs.h
++++ byacc-20100216/defs.h
+@@ -93,6 +93,8 @@
+ #define EXPECT 10
+ #define EXPECT_RR 11
+ #define PURE_PARSER 12
++#define PARSE_PARAM 13
++#define LEX_PARAM 14
+ 
+ /*  symbol classes  */
+ 
+@@ -204,6 +206,15 @@ struct action
+     char suppressed;
+ };
+ 
++/*  the structure used to store parse/lex parameters  */
++typedef struct param param;
++struct param
++{
++    struct param *next;
++    char *name;
++    char *type;
++};
++
+ /* global variables */
+ 
+ extern char dflag;
+@@ -220,6 +231,7 @@ extern char *line;
+ extern int lineno;
+ extern int outline;
+ extern int exit_code;
++extern int pure_parser;
+ 
+ extern const char *banner[];
+ extern const char *xdecls[];
+@@ -309,6 +321,9 @@ extern Value_t *itemset;
+ extern Value_t *itemsetend;
+ extern unsigned *ruleset;
+ 
++extern param *lex_param;
++extern param *parse_param;
++
+ /* global functions */
+ 
+ extern bucket *lookup(const char *);

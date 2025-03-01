@@ -1,0 +1,192 @@
+From 221885918cd28ba5ef242df654007968ebecf9ac Mon Sep 17 00:00:00 2001
+From: Mathieu Parent <math.parent@gmail.com>
+Date: Sun, 19 Jul 2015 16:22:58 +0200
+Subject: [PATCH] Add suport for PHP PEAR and PECL packages
+
+---
+ debmake/analyze.py | 17 +++++++++++++++++
+ debmake/control.py | 19 +++++++++++++++++--
+ debmake/debs.py    | 20 +++++++++++++++++++-
+ debmake/para.py    | 14 ++++++++++++++
+ debmake/sanity.py  |  6 ++++--
+ 5 files changed, 71 insertions(+), 5 deletions(-)
+
+diff --git a/debmake/analyze.py b/debmake/analyze.py
+index 37ea828..f16770f 100755
+--- a/debmake/analyze.py
++++ b/debmake/analyze.py
+@@ -368,6 +368,23 @@ def analyze(para):
+         para['build_depends'].update({'qt4-qmake'})
+         if setmultiarch:
+             para['override'].update({'multiarch'})
++    # PEAR or PECL
++    elif os.path.isfile('package.xml'):
++        para['section'] = 'php'
++        # XXX FIXME para['fullname'] = 'Debian PHP PEAR Maintainers'
++        # XXX FIXME para['email'] = '<pkg-php-pear@lists.alioth.debian.org>'
++        # XXX FIXME para['uploaders'] = ...
++        # XXX FIXME para['homepage'] = 'http://pear.php.net/package/' + para['pearname'] + '/'
++        para['vcsvcs'] = 'git://anonscm.debian.org/pkg-php/' + para['package'] + '.git'
++        para['vcsbrowser'] = 'http://anonscm.debian.org/gitweb/?p=pkg-php/' + para['package'] + '.git'
++        para['dh_buildsystem'] = 'phppear'
++        para['dh_with'].update({'phppear'})
++        para['build_type']      = 'PEAR'
++        para['build_depends'].update({'pkg-php-tools'})
++        if para['desc'] == '':
++            para['desc'] = '${phppear:summary}'
++        if para['desc_long'] == '':
++            para['desc_long'] = ' ${phppear:description}'
+     else:
+         para['build_type']      = 'Unknown'
+         if setmultiarch:
+diff --git a/debmake/control.py b/debmake/control.py
+index b4e9a34..20aab45 100755
+--- a/debmake/control.py
++++ b/debmake/control.py
+@@ -184,13 +184,25 @@ def control_bin(para, deb):
+         section = 'Section: doc\n'
+     else:
+         section = ''
++    if deb['recommends']:
++        recommends = 'Recommends: ' + deb['recommends'] + '\n'
++    else:
++        recommends = ''
++    if deb['suggests']:
++        suggests = 'Suggests: ' + deb['suggests'] + '\n'
++    else:
++        suggests = ''
++    if deb['breaks']:
++        breaks = 'Breaks: ' + deb['breaks'] + '\n'
++    else:
++        breaks = ''
+     ###################################################################
+     return '''\
+ Package: {0}
+ {1}Architecture: {2}
+ {3}{4}Depends: {5}
+-Description: {6}
+-{7}
++{6}{7}{8}Description: {9}
++{10}
+ '''.format(
+             deb['package'],
+             section,
+@@ -198,6 +210,9 @@ Description: {6}
+             multiarch,
+             predepends,
+             ',\n\t'.join(deb['depends']),
++            recommends,
++            suggests,
++            breaks,
+             deb['desc'],
+             deb['desc_long'])
+ 
+diff --git a/debmake/debs.py b/debmake/debs.py
+index d70fc94..84b7666 100755
+--- a/debmake/debs.py
++++ b/debmake/debs.py
+@@ -66,6 +66,9 @@ def debs(binaryspec, package, monoarch, dh_with):
+         m = 'foreign'   # muiti-arch
+         t = ''          # type
+         dp = {'${misc:Depends}'}
++        rec = {}
++        sug = {}
++        br = {}
+         pd = set()
+         ###################################################################
+         # Prefix names should come first to be overriden later
+@@ -171,6 +174,10 @@ def debs(binaryspec, package, monoarch, dh_with):
+                 a = 'all'
+                 m = 'foreign'
+                 t = 'ruby'
++            elif match_prefix(t, 'phppear'): # PHP PEAR or PECL
++                a = 'all' # XXX FIXME any for PECL
++                m = 'foreign'
++                t = 'phppear'
+             elif match_prefix(t, 'sc') or (t == 'sh'): # script
+                 a = 'all'
+                 m = 'foreign'
+@@ -215,6 +222,9 @@ def debs(binaryspec, package, monoarch, dh_with):
+             elif 'python3' in dh_with:
+                 a = 'all'
+                 t = 'python3'
++            elif 'phppear' in dh_with:
++                a = 'all' # XXX FIXME any for PECL
++                t = 'phppear'
+             elif a == 'any': # bin as default 
+                 t = 'bin'
+             else:
+@@ -247,6 +257,11 @@ def debs(binaryspec, package, monoarch, dh_with):
+             dp.update({'${python3:Depends}'})
+         elif t == 'ruby': # gem2deb ??? XXXX FIXME XXXX
+             dp.update({'${ruby:Depends}'})
++        elif t == 'phppear': # dh_phppear
++            dp.update({'${phppear:Debian-Depends}'})
++            rec.update({'${phppear:Debian-Recommends}'})
++            sug.update({'${phppear:Debian-Suggests}'})
++            br.update({'${phppear:Debian-Breaks}'})
+         else:
+             pass
+         ###################################################################
+@@ -268,7 +283,10 @@ def debs(binaryspec, package, monoarch, dh_with):
+         debs.append({'package': p, 
+                 'arch': a, 
+                 'multiarch': m, 
+-                'depends': dp, 
++                'depends': dp,
++                'recommends': rec,
++                'suggests': sug,
++                'breaks': br,
+                 'pre-depends': pd,
+                 'type': t})
+     ###################################################################
+diff --git a/debmake/para.py b/debmake/para.py
+index 61170f8..1ad32d2 100755
+--- a/debmake/para.py
++++ b/debmake/para.py
+@@ -140,6 +140,18 @@ Argument may need to be quoted to protect from the shell.
+             help = 'set the tarball type, extension=(tar.gz|tar.bz2|tar.xz)',
+             metavar = 'extension')
+     p.add_argument(
++            '--vcsvcs',
++            action = 'store',
++            default = '',
++            help = 'set the Vcs-... control header',
++            metavar = 'url')
++    p.add_argument(
++            '--vcsbrowser',
++            action = 'store',
++            default = '',
++            help = 'set the Vcs-Browser control header',
++            metavar = 'url')
++    p.add_argument(
+              '-b', 
+              '--binaryspec', 
+             action = 'store', 
+@@ -265,6 +277,8 @@ Argument may need to be quoted to protect from the shell.
+         para['archive'] = False
+         para['tarball'] = ''
+     #############################################
++    para['vcsvcs']          = args.vcsvcs
++    para['vcsbrowser']      = args.vcsbrowser
+     para['binaryspec']      = args.binaryspec   # -b
+     para['copyright']       = min(args.copyright, 6)   # -c
+     if para['copyright'] >=4:
+diff --git a/debmake/sanity.py b/debmake/sanity.py
+index cf98c10..958c0e9 100755
+--- a/debmake/sanity.py
++++ b/debmake/sanity.py
+@@ -190,6 +190,8 @@ def sanity(para):
+     para['section'] = 'unknown'
+     para['priority'] = 'extra'
+     para['homepage'] = '<insert the upstream URL, if relevant>'
+-    para['vcsvcs'] = 'git://anonscm.debian.org/collab-maint/' + para['package'] + '.git'
+-    para['vcsbrowser'] = 'http://anonscm.debian.org/gitweb/?p=collab-maint/' + para['package'] + '.git'
++    if para['vcsvcs'] == '':
++        para['vcsvcs'] = 'git://anonscm.debian.org/collab-maint/' + para['package'] + '.git'
++    if para['vcsbrowser'] == '':
++        para['vcsbrowser'] = 'http://anonscm.debian.org/gitweb/?p=collab-maint/' + para['package'] + '.git'
+     return para
+-- 
+2.1.4
+

@@ -1,0 +1,523 @@
+From 79b564f7d52e08d88aae20d55602b2b1b147a515 Mon Sep 17 00:00:00 2001
+From: Mike Hommey <mh@glandium.org>
+Date: Fri, 20 Oct 2017 20:39:08 +0900
+Subject: [PATCH 2/2] Use libarchive instead of zipinfo/bsdtar for zip files
+
+---
+ diffoscope/comparators/apk.py           |  10 +--
+ diffoscope/comparators/zip.py           | 123 +++-----------------------------
+ tests/comparators/test_apk.py           |  28 +++-----
+ tests/comparators/test_dex.py           |  11 ++-
+ tests/comparators/test_epub.py          |   6 +-
+ tests/comparators/test_zip.py           |   7 --
+ tests/data/apk_zipinfo_expected_diff    |   6 --
+ tests/data/dex_expected_diffs           |  17 -----
+ tests/data/epub_expected_diffs          |  42 +++++------
+ tests/data/mozzip_zipinfo_expected_diff |  18 +----
+ tests/data/zip_bsdtar_expected_diff     |   6 +-
+ tests/data/zip_zipinfo_expected_diff    |  12 ++--
+ 12 files changed, 55 insertions(+), 231 deletions(-)
+ delete mode 100644 tests/data/apk_zipinfo_expected_diff
+
+diff --git a/diffoscope/comparators/apk.py b/diffoscope/comparators/apk.py
+index 7623f82..e00d9f2 100644
+--- a/diffoscope/comparators/apk.py
++++ b/diffoscope/comparators/apk.py
+@@ -26,10 +26,9 @@ from diffoscope.tools import tool_required
+ from diffoscope.tempfiles import get_temporary_directory
+ from diffoscope.difference import Difference
+ 
+-from .utils.file import File
+ from .utils.archive import Archive
+ from .utils.compare import compare_files
+-from .zip import Zipinfo, ZipinfoVerbose
++from .zip import ZipFile
+ from .missing_file import MissingFile
+ 
+ logger = logging.getLogger(__name__)
+@@ -146,17 +145,12 @@ class ApkContainer(Archive):
+         return differences
+ 
+ 
+-class ApkFile(File):
++class ApkFile(ZipFile):
+     FILE_TYPE_HEADER_PREFIX = b"PK\x03\x04"
+     FILE_TYPE_RE = re.compile(r'^(Java|Zip) archive data.*\b')
+     FILE_EXTENSION_SUFFIX = '.apk'
+     CONTAINER_CLASS = ApkContainer
+ 
+-    def compare_details(self, other, source=None):
+-        zipinfo_difference = Difference.from_command(Zipinfo, self.path, other.path) or \
+-                             Difference.from_command(ZipinfoVerbose, self.path, other.path)
+-        return [zipinfo_difference]
+-
+ 
+ def filter_apk_metadata(filepath, archive_name):
+     new_filename = os.path.join(os.path.dirname(filepath), 'APK metadata')
+diff --git a/diffoscope/comparators/zip.py b/diffoscope/comparators/zip.py
+index 0815ddc..01f5071 100644
+--- a/diffoscope/comparators/zip.py
++++ b/diffoscope/comparators/zip.py
+@@ -23,84 +23,14 @@ import shutil
+ import os.path
+ import zipfile
+ 
+-from diffoscope.tools import tool_required
+ from diffoscope.difference import Difference
+-
+ from .utils.file import File
++from .utils.libarchive import LibarchiveContainer, list_libarchive
+ from .directory import Directory
+-from .utils.archive import Archive, ArchiveMember
+-from .utils.command import Command
+-
+-
+-class Zipinfo(Command):
+-    @tool_required('zipinfo')
+-    def cmdline(self):
+-        return ['zipinfo', self.path]
+-
+-    def filter(self, line):
+-        # we don't care about the archive file path
+-        if line.startswith(b'Archive:'):
+-            return b''
+-        return line
+-
+-
+-class ZipinfoVerbose(Zipinfo):
+-    @tool_required('zipinfo')
+-    def cmdline(self):
+-        return ['zipinfo', '-v', self.path]
+-
+-
+-class BsdtarVerbose(Command):
+-    @tool_required('bsdtar')
+-    def cmdline(self):
+-        return ['bsdtar', '-tvf', self.path]
+-
+-
+-class ZipDirectory(Directory, ArchiveMember):
+-    def __init__(self, archive, member_name):
+-        ArchiveMember.__init__(self, archive, member_name)
+-
+-    def compare(self, other, source=None):
+-        return None
+-
+-    def has_same_content_as(self, other):
+-        return False
+-
+-    def is_directory(self):
+-        return True
+-
+-    def get_member_names(self):
+-        raise ValueError("Zip archives are compared as a whole.")  # noqa
+-
+-    def get_member(self, member_name):
+-        raise ValueError("Zip archives are compared as a whole.")  # noqa
+-
+ 
+-class ZipContainer(Archive):
+-    def open_archive(self):
+-        return zipfile.ZipFile(self.source.path, 'r')
+ 
+-    def close_archive(self):
+-        self.archive.close()
+-
+-    def get_member_names(self):
+-        return self.archive.namelist()
+-
+-    def extract(self, member_name, dest_dir):
+-        # We don't really want to crash if the filename in the zip archive
+-        # can't be encoded using the filesystem encoding. So let's replace
+-        # any weird character so we can get to the bytes.
+-        targetpath = os.path.join(dest_dir, os.path.basename(member_name)).encode(sys.getfilesystemencoding(), errors='replace')
+-        with self.archive.open(member_name) as source, open(targetpath, 'wb') as target:
+-            shutil.copyfileobj(source, target)
+-        return targetpath.decode(sys.getfilesystemencoding())
+-
+-    def get_member(self, member_name):
+-        zipinfo = self.archive.getinfo(member_name)
+-        if zipinfo.filename[-1] == '/':
+-            return ZipDirectory(self, member_name)
+-        else:
+-            return ArchiveMember(self, member_name)
++class ZipContainer(LibarchiveContainer):
++    pass
+ 
+ 
+ class ZipFile(File):
+@@ -108,47 +38,16 @@ class ZipFile(File):
+     FILE_TYPE_RE = re.compile(r'^(Zip archive|Java archive|EPUB document|OpenDocument (Text|Spreadsheet|Presentation|Drawing|Formula|Template|Text Template))\b')
+ 
+     def compare_details(self, other, source=None):
+-        zipinfo_difference = Difference.from_command(Zipinfo, self.path, other.path) or \
+-                             Difference.from_command(ZipinfoVerbose, self.path, other.path) or \
+-                             Difference.from_command(BsdtarVerbose, self.path, other.path)
+-        return [zipinfo_difference]
+-
+-
+-class MozillaZipCommandMixin(object):
+-    def wait(self):
+-        # zipinfo emits an error when reading Mozilla-optimized ZIPs,
+-        # which is fine to ignore.
+-        super(Zipinfo, self).wait()
+-        return 0
+-
+-
+-class MozillaZipinfo(MozillaZipCommandMixin, Zipinfo):
+-    pass
+-
+-
+-class MozillaZipinfoVerbose(MozillaZipCommandMixin, ZipinfoVerbose):
+-    pass
++        return [Difference.from_text_readers(list_libarchive(self.path),
++                                             list_libarchive(other.path),
++                                             self.path, other.path, source="file list")]
+ 
+ 
+ class MozillaZipContainer(ZipContainer):
+-    def open_archive(self):
+-        # This is gross: Monkeypatch zipfile._EndRecData to work with
+-        # Mozilla-optimized ZIPs
+-        _orig_EndRecData = zipfile._EndRecData
+-
+-        def _EndRecData(fh):
+-            endrec = _orig_EndRecData(fh)
+-            if endrec:
+-                endrec[zipfile._ECD_LOCATION] = (endrec[zipfile._ECD_OFFSET] +
+-                                                 endrec[zipfile._ECD_SIZE])
+-            return endrec
+-        zipfile._EndRecData = _EndRecData
+-        result = super(MozillaZipContainer, self).open_archive()
+-        zipfile._EndRecData = _orig_EndRecData
+-        return result
++    pass
+ 
+ 
+-class MozillaZipFile(File):
++class MozillaZipFile(ZipFile):
+     CONTAINER_CLASS = MozillaZipContainer
+ 
+     @classmethod
+@@ -157,9 +56,3 @@ class MozillaZipFile(File):
+         # indicating the amount of data to preload, followed by the ZIP
+         # central directory (with a PK\x01\x02 signature)
+         return file.file_header[4:8] == b'PK\x01\x02'
+-
+-    def compare_details(self, other, source=None):
+-        zipinfo_difference = Difference.from_command(MozillaZipinfo, self.path, other.path) or \
+-                             Difference.from_command(MozillaZipinfoVerbose, self.path, other.path) or \
+-                             Difference.from_command(BsdtarVerbose, self.path, other.path)
+-        return [zipinfo_difference]
+diff --git a/tests/comparators/test_apk.py b/tests/comparators/test_apk.py
+index 379cbce..4fbf0da 100644
+--- a/tests/comparators/test_apk.py
++++ b/tests/comparators/test_apk.py
+@@ -49,34 +49,26 @@ def differences2(apk1, apk3):
+     return apk1.compare(apk3).details
+ 
+ 
+-@skip_unless_tools_exist('apktool', 'zipinfo')
++@skip_unless_tools_exist('apktool')
+ def test_compare_non_existing(monkeypatch, apk1):
+     assert_non_existing(monkeypatch, apk1)
+ 
+ 
+-@skip_unless_tools_exist('apktool', 'zipinfo')
+-def test_zipinfo(differences):
+-    assert differences[0].source1 == 'zipinfo {}'
+-    assert differences[0].source2 == 'zipinfo {}'
+-    expected_diff = get_data('apk_zipinfo_expected_diff')
+-    assert differences[0].unified_diff == expected_diff
+-
+-
+-@skip_unless_tools_exist('apktool', 'zipinfo')
++@skip_unless_tools_exist('apktool')
+ def test_android_manifest(differences):
+-    assert differences[1].source1 == 'AndroidManifest.xml (decoded)'
+-    assert differences[1].source2 == 'AndroidManifest.xml (decoded)'
++    assert differences[0].source1 == 'AndroidManifest.xml (decoded)'
++    assert differences[0].source2 == 'AndroidManifest.xml (decoded)'
+     expected_diff = get_data('apk_manifest_expected_diff')
+-    assert differences[1].details[0].unified_diff == expected_diff
++    assert differences[0].details[0].unified_diff == expected_diff
+ 
+ 
+-@skip_unless_tools_exist('apktool', 'zipinfo')
++@skip_unless_tools_exist('apktool')
+ def test_apk_metadata_source(differences):
+-    assert differences[2].source1 == 'APK metadata'
+-    assert differences[2].source2 == 'APK metadata'
++    assert differences[1].source1 == 'APK metadata'
++    assert differences[1].source2 == 'APK metadata'
+ 
+ 
+-@skip_unless_tools_exist('apktool', 'zipinfo')
++@skip_unless_tools_exist('apktool')
+ def test_skip_undecoded_android_manifest(differences):
+     assert not any(difference.source1 == 'original/AndroidManifest.xml'
+                    for difference in differences)
+@@ -89,7 +81,7 @@ def test_skip_undecoded_android_manifest(differences):
+                    for difference in differences)
+ 
+ 
+-@skip_unless_tools_exist('apktool', 'zipinfo')
++@skip_unless_tools_exist('apktool')
+ def test_no_android_manifest(differences2):
+     undecoded_manifest = 'AndroidManifest.xml (original / undecoded)'
+     assert differences2[2].source1 == undecoded_manifest
+diff --git a/tests/comparators/test_dex.py b/tests/comparators/test_dex.py
+index 7565c81..baec781 100644
+--- a/tests/comparators/test_dex.py
++++ b/tests/comparators/test_dex.py
+@@ -60,24 +60,21 @@ def differences(dex1, dex2):
+     return dex1.compare(dex2).details
+ 
+ 
+-@skip_unless_tools_exist('enjarify', 'zipinfo', 'javap')
++@skip_unless_tools_exist('enjarify', 'javap')
+ @skip_unless_tool_is_at_least('javap', javap_version, '1.8')
+ @skip_unless_tool_is_at_least('enjarify', enjarify_version, '1.0.3')
+ def test_differences(differences):
+     assert differences[0].source1 == 'test1.jar'
+     assert differences[0].source2 == 'test2.jar'
+-    zipinfo = differences[0].details[0]
+-    classdiff = differences[0].details[1]
+-    assert zipinfo.source1 == 'zipinfo -v {}'
+-    assert zipinfo.source2 == 'zipinfo -v {}'
++    classdiff = differences[0].details[0]
+     assert classdiff.source1 == 'com/example/MainActivity.class'
+     assert classdiff.source2 == 'com/example/MainActivity.class'
+     expected_diff = get_data('dex_expected_diffs')
+-    found_diff = zipinfo.unified_diff + classdiff.details[0].unified_diff
++    found_diff = classdiff.details[0].unified_diff
+     assert expected_diff == found_diff
+ 
+ 
+-@skip_unless_tools_exist('enjarify', 'zipinfo', 'javap')
++@skip_unless_tools_exist('enjarify', 'javap')
+ def test_compare_non_existing(monkeypatch, dex1):
+     monkeypatch.setattr(Config(), 'new_file', True)
+     difference = dex1.compare(MissingFile('/nonexisting', dex1))
+diff --git a/tests/comparators/test_epub.py b/tests/comparators/test_epub.py
+index 893d9d5..d774b01 100644
+--- a/tests/comparators/test_epub.py
++++ b/tests/comparators/test_epub.py
+@@ -45,10 +45,9 @@ def differences(epub1, epub2):
+     return epub1.compare(epub2).details
+ 
+ 
+-@skip_unless_tools_exist('zipinfo')
+ def test_differences(differences):
+-    assert differences[0].source1 == 'zipinfo {}'
+-    assert differences[0].source2 == 'zipinfo {}'
++    assert differences[0].source1 == 'file list'
++    assert differences[0].source2 == 'file list'
+     assert differences[1].source1 == 'content.opf'
+     assert differences[1].source2 == 'content.opf'
+     assert differences[2].source1 == 'toc.ncx'
+@@ -59,7 +58,6 @@ def test_differences(differences):
+     assert expected_diff == "".join(map(lambda x: x.unified_diff, differences))
+ 
+ 
+-@skip_unless_tools_exist('zipinfo')
+ def test_compare_non_existing(monkeypatch, epub1):
+     monkeypatch.setattr(Config(), 'new_file', True)
+     difference = epub1.compare(MissingFile('/nonexisting', epub1))
+diff --git a/tests/comparators/test_zip.py b/tests/comparators/test_zip.py
+index 31c4b60..9ae6d7b 100644
+--- a/tests/comparators/test_zip.py
++++ b/tests/comparators/test_zip.py
+@@ -52,13 +52,11 @@ def differences2(zip1, zip3):
+     return zip1.compare(zip3).details
+ 
+ 
+-@skip_unless_tools_exist('zipinfo')
+ def test_metadata(differences):
+     expected_diff = get_data('zip_zipinfo_expected_diff')
+     assert differences[0].unified_diff == expected_diff
+ 
+ 
+-@skip_unless_tools_exist('zipinfo')
+ def test_compressed_files(differences):
+     assert differences[1].source1 == 'dir/text'
+     assert differences[1].source2 == 'dir/text'
+@@ -66,13 +64,11 @@ def test_compressed_files(differences):
+     assert differences[1].unified_diff == expected_diff
+ 
+ 
+-@skip_unless_tools_exist('zipinfo', 'bsdtar')
+ def test_extra_fields(differences2):
+     expected_diff = get_data('zip_bsdtar_expected_diff')
+     assert differences2[0].unified_diff == expected_diff
+ 
+ 
+-@skip_unless_tools_exist('zipinfo')
+ def test_compare_non_existing(monkeypatch, zip1):
+     assert_non_existing(monkeypatch, zip1)
+ 
+@@ -91,7 +87,6 @@ def mozzip_differences(mozzip1, mozzip2):
+     return mozzip1.compare(mozzip2).details
+ 
+ 
+-@skip_unless_tools_exist('zipinfo')
+ def test_mozzip_metadata(mozzip_differences, mozzip1, mozzip2):
+     expected_diff = get_data('mozzip_zipinfo_expected_diff')
+     diff = mozzip_differences[0].unified_diff
+@@ -99,7 +94,6 @@ def test_mozzip_metadata(mozzip_differences, mozzip1, mozzip2):
+                 .replace(mozzip2.path, 'test2.mozzip')) == expected_diff
+ 
+ 
+-@skip_unless_tools_exist('zipinfo')
+ def test_mozzip_compressed_files(mozzip_differences):
+     assert mozzip_differences[1].source1 == 'dir/text'
+     assert mozzip_differences[1].source2 == 'dir/text'
+@@ -107,6 +101,5 @@ def test_mozzip_compressed_files(mozzip_differences):
+     assert mozzip_differences[1].unified_diff == expected_diff
+ 
+ 
+-@skip_unless_tools_exist('zipinfo')
+ def test_mozzip_compare_non_existing(monkeypatch, mozzip1):
+     assert_non_existing(monkeypatch, mozzip1)
+diff --git a/tests/data/apk_zipinfo_expected_diff b/tests/data/apk_zipinfo_expected_diff
+deleted file mode 100644
+index d1810dc..0000000
+--- a/tests/data/apk_zipinfo_expected_diff
++++ /dev/null
+@@ -1,6 +0,0 @@
+-@@ -1,3 +1,3 @@
+--Zip file size: 866 bytes, number of entries: 1
+-+Zip file size: 864 bytes, number of entries: 1
+- -rw----     2.0 fat     2096 bl defN 80-Jan-01 02:00 AndroidManifest.xml
+--1 file, 2096 bytes uncompressed, 714 bytes compressed:  65.9%
+-+1 file, 2096 bytes uncompressed, 712 bytes compressed:  66.0%
+diff --git a/tests/data/dex_expected_diffs b/tests/data/dex_expected_diffs
+index 822c9cd..12f8bc9 100644
+--- a/tests/data/dex_expected_diffs
++++ b/tests/data/dex_expected_diffs
+@@ -1,20 +1,3 @@
+-@@ -54,15 +54,15 @@
+-   version of encoding software:                   2.0
+-   minimum file system compatibility required:     MS-DOS, OS/2 or NT FAT
+-   minimum software version required to extract:   2.0
+-   compression method:                             none (stored)
+-   file security status:                           not encrypted
+-   extended local header:                          no
+-   file last modified on (DOS date/time):          1980 Jan 1 00:00:00
+--  32-bit CRC value (hex):                         bc28236e
+-+  32-bit CRC value (hex):                         59c3af78
+-   compressed size:                                305 bytes
+-   uncompressed size:                              305 bytes
+-   length of filename:                             30 characters
+-   length of extra field:                          0 bytes
+-   length of file comment:                         0 characters
+-   disk number on which file begins:               disk 1
+-   apparent file type:                             binary
+ @@ -17,16 +17,16 @@
+    #12 = Methodref          #4.#11         // android/app/Activity.onCreate:(Landroid/os/Bundle;)V
+    #13 = Integer            2130903040
+diff --git a/tests/data/epub_expected_diffs b/tests/data/epub_expected_diffs
+index a111c76..8dbac6b 100644
+--- a/tests/data/epub_expected_diffs
++++ b/tests/data/epub_expected_diffs
+@@ -1,26 +1,22 @@
+-@@ -1,11 +1,11 @@
+--Zip file size: 3320 bytes, number of entries: 9
+---rw----     0.0 fat       20 b- stor 15-Oct-27 11:32 mimetype
+---rw----     0.0 fat      246 b- defX 15-Oct-27 11:32 META-INF/container.xml
+---rw----     0.0 fat      160 b- defX 15-Oct-27 11:32 META-INF/com.apple.ibooks.display-options.xml
+---rw----     0.0 fat      439 b- defX 15-Oct-27 11:32 stylesheet.css
+---rw----     0.0 fat      529 b- defX 15-Oct-27 11:32 title_page.xhtml
+---rw----     0.0 fat     1129 b- defX 15-Oct-27 11:32 content.opf
+---rw----     0.0 fat      742 b- defX 15-Oct-27 11:32 toc.ncx
+---rw----     0.0 fat      655 b- defX 15-Oct-27 11:32 nav.xhtml
+---rw----     0.0 fat      615 b- defX 15-Oct-27 11:32 ch001.xhtml
+--9 files, 4535 bytes uncompressed, 2328 bytes compressed:  48.7%
+-+Zip file size: 3317 bytes, number of entries: 9
+-+-rw----     0.0 fat       20 b- stor 15-Oct-27 11:33 mimetype
+-+-rw----     0.0 fat      246 b- defX 15-Oct-27 11:33 META-INF/container.xml
+-+-rw----     0.0 fat      160 b- defX 15-Oct-27 11:33 META-INF/com.apple.ibooks.display-options.xml
+-+-rw----     0.0 fat      439 b- defX 15-Oct-27 11:33 stylesheet.css
+-+-rw----     0.0 fat      529 b- defX 15-Oct-27 11:33 title_page.xhtml
+-+-rw----     0.0 fat     1129 b- defX 15-Oct-27 11:33 content.opf
+-+-rw----     0.0 fat      742 b- defX 15-Oct-27 11:33 toc.ncx
+-+-rw----     0.0 fat      655 b- defX 15-Oct-27 11:33 nav.xhtml
+-+-rw----     0.0 fat      615 b- defX 15-Oct-27 11:33 ch001.xhtml
+-+9 files, 4535 bytes uncompressed, 2325 bytes compressed:  48.7%
++@@ -1,9 +1,9 @@
++--rw-rw-r--   0        0        0       20 2015-10-27 11:32:54.000000 mimetype
++--rw-rw-r--   0        0        0      246 2015-10-27 11:32:54.000000 META-INF/container.xml
++--rw-rw-r--   0        0        0      160 2015-10-27 11:32:54.000000 META-INF/com.apple.ibooks.display-options.xml
++--rw-rw-r--   0        0        0      439 2015-10-27 11:32:54.000000 stylesheet.css
++--rw-rw-r--   0        0        0      529 2015-10-27 11:32:54.000000 title_page.xhtml
++--rw-rw-r--   0        0        0     1129 2015-10-27 11:32:54.000000 content.opf
++--rw-rw-r--   0        0        0      742 2015-10-27 11:32:54.000000 toc.ncx
++--rw-rw-r--   0        0        0      655 2015-10-27 11:32:54.000000 nav.xhtml
++--rw-rw-r--   0        0        0      615 2015-10-27 11:32:54.000000 ch001.xhtml
+++-rw-rw-r--   0        0        0       20 2015-10-27 11:33:20.000000 mimetype
+++-rw-rw-r--   0        0        0      246 2015-10-27 11:33:20.000000 META-INF/container.xml
+++-rw-rw-r--   0        0        0      160 2015-10-27 11:33:20.000000 META-INF/com.apple.ibooks.display-options.xml
+++-rw-rw-r--   0        0        0      439 2015-10-27 11:33:20.000000 stylesheet.css
+++-rw-rw-r--   0        0        0      529 2015-10-27 11:33:20.000000 title_page.xhtml
+++-rw-rw-r--   0        0        0     1129 2015-10-27 11:33:20.000000 content.opf
+++-rw-rw-r--   0        0        0      742 2015-10-27 11:33:20.000000 toc.ncx
+++-rw-rw-r--   0        0        0      655 2015-10-27 11:33:20.000000 nav.xhtml
+++-rw-rw-r--   0        0        0      615 2015-10-27 11:33:20.000000 ch001.xhtml
+ @@ -1,13 +1,13 @@
+  <?xml version="1.0" encoding="UTF-8"?>
+  <package version="2.0" xmlns="http://www.idpf.org/2007/opf" unique-identifier="epub-id-1">
+diff --git a/tests/data/mozzip_zipinfo_expected_diff b/tests/data/mozzip_zipinfo_expected_diff
+index 9cc8134..c1ae321 100644
+--- a/tests/data/mozzip_zipinfo_expected_diff
++++ b/tests/data/mozzip_zipinfo_expected_diff
+@@ -1,15 +1,3 @@
+-@@ -1,8 +1,8 @@
+--Zip file size: 409 bytes, number of entries: 1
+--warning [test1.mozzip]:  329 extra bytes at beginning or within zipfile
+-+Zip file size: 552 bytes, number of entries: 1
+-+warning [test2.mozzip]:  472 extra bytes at beginning or within zipfile
+-   (attempting to process anyway)
+--error [test1.mozzip]:  reported length of central directory is
+--  -329 bytes too long (Atari STZip zipfile?  J.H.Holm ZIPSPLIT 1.1
+-+error [test2.mozzip]:  reported length of central directory is
+-+  -472 bytes too long (Atari STZip zipfile?  J.H.Holm ZIPSPLIT 1.1
+-   zipfile?).  Compensating...
+---rw-r--r--  2.0 unx      446 b- defX 10-Jan-01 00:00 dir/text
+--1 file, 446 bytes uncompressed, 269 bytes compressed:  39.7%
+-+-rw-r--r--  2.0 unx      671 b- defX 10-Jan-01 00:00 dir/text
+-+1 file, 671 bytes uncompressed, 412 bytes compressed:  38.6%
++@@ -1 +1 @@
++--rw-r--r--   0        0        0      446 2010-01-01 00:00:00.000000 dir/text
+++-rw-r--r--   0        0        0      671 2010-01-01 00:00:00.000000 dir/text
+diff --git a/tests/data/zip_bsdtar_expected_diff b/tests/data/zip_bsdtar_expected_diff
+index 5f2cc51..8ce034b 100644
+--- a/tests/data/zip_bsdtar_expected_diff
++++ b/tests/data/zip_bsdtar_expected_diff
+@@ -1,4 +1,4 @@
+ @@ -1,2 +1,2 @@
+- drwxr-xr-x  0 1000   1000        0 Jun 24  2015 dir/
+---rw-r--r--  0 1000   1000      446 Jun 24  2015 dir/text
+-+-rw-r--r--  0 1000   1000      446 Sep 10  2004 dir/text
++ drwxr-xr-x   0     1000     1000        0 2015-06-24 13:44:53.000000 dir/
++--rw-r--r--   0     1000     1000      446 2015-06-24 13:44:53.000000 dir/text
+++-rw-r--r--   0     1000     1000      446 2004-09-10 05:53:05.000000 dir/text
+diff --git a/tests/data/zip_zipinfo_expected_diff b/tests/data/zip_zipinfo_expected_diff
+index b1683bf..7ff83df 100644
+--- a/tests/data/zip_zipinfo_expected_diff
++++ b/tests/data/zip_zipinfo_expected_diff
+@@ -1,8 +1,4 @@
+-@@ -1,4 +1,4 @@
+--Zip file size: 571 bytes, number of entries: 2
+-+Zip file size: 714 bytes, number of entries: 2
+- drwxr-xr-x  3.0 unx        0 bx stor 15-Jun-24 13:44 dir/
+---rw-r--r--  3.0 unx      446 tx defN 15-Jun-24 13:44 dir/text
+--2 files, 446 bytes uncompressed, 269 bytes compressed:  39.7%
+-+-rw-r--r--  3.0 unx      671 tx defN 15-Jun-24 13:45 dir/text
+-+2 files, 671 bytes uncompressed, 412 bytes compressed:  38.6%
++@@ -1,2 +1,2 @@
++ drwxr-xr-x   0     1000     1000        0 2015-06-24 13:44:53.000000 dir/
++--rw-r--r--   0     1000     1000      446 2015-06-24 13:44:53.000000 dir/text
+++-rw-r--r--   0     1000     1000      671 2015-06-24 13:45:24.000000 dir/text
+-- 
+2.14.1
+

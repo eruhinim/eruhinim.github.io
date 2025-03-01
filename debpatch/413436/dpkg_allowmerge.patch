@@ -1,0 +1,196 @@
+diff -Narup dpkg-1.13.25-orig/lib/dbmodify.c dpkg-1.13.25/lib/dbmodify.c
+--- dpkg-1.13.25-orig/lib/dbmodify.c	2006-06-21 15:41:12.000000000 +0200
++++ dpkg-1.13.25/lib/dbmodify.c	2007-03-05 19:46:18.000000000 +0100
+@@ -286,6 +286,7 @@ void modstatdb_note(struct pkginfo *pkg)
+ }
+ 
+ const char *log_file= NULL;
++const char *merge_tool= NULL;
+ 
+ void log_message(const char *fmt, ...) {
+   static struct varbuf *log= NULL;
+@@ -324,3 +325,38 @@ void log_message(const char *fmt, ...) {
+   strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", localtime(&now));
+   fprintf(logfd, "%s %s\n", time_str, log->buf);
+ }
++
++int call_merge(const char *old, const char *new){
++	int pid;
++	int r;
++	int status;
++
++	if(!merge_tool)
++		return -1;
++
++	if (!(pid=m_fork())) {
++		/* Child process */
++		const char*     s;              /* shell */
++		char            cmdbuf[1024];   /* command to run */
++
++		snprintf(cmdbuf, sizeof cmdbuf, "%s %s %s", merge_tool, old, new);
++
++		s=getenv(SHELLENV);
++		if (!s || !*s)
++			s=DEFAULTSHELL;
++
++		execlp(s,s,"-c", cmdbuf, NULL);
++		ohshite(_("failed to merge with %s (%.250s)"), merge_tool, cmdbuf);
++	}
++
++	/* Parent process */
++	while (((r=waitpid(pid,&status,0))==-1) && (errno==EINTR))
++		;
++
++	if (r!=pid) {
++		onerr_abort++;
++		ohshite(_("wait for shell failed"));
++		return -1;
++	}
++	return 0;
++}
+diff -Narup dpkg-1.13.25-orig/lib/dpkg-db.h dpkg-1.13.25/lib/dpkg-db.h
+--- dpkg-1.13.25-orig/lib/dpkg-db.h	2006-06-29 02:15:10.000000000 +0200
++++ dpkg-1.13.25/lib/dpkg-db.h	2007-03-05 19:46:18.000000000 +0100
+@@ -175,6 +175,7 @@ void modstatdb_shutdown(void);
+ extern char *statusfile, *availablefile; /* initialised by modstatdb_init */
+ 
+ void log_message(const char *fmt, ...);
++int call_merge(const char *, const char *);
+ 
+ /*** from database.c ***/
+ 
+diff -Narup dpkg-1.13.25-orig/man/C/dpkg.1 dpkg-1.13.25/man/C/dpkg.1
+--- dpkg-1.13.25-orig/man/C/dpkg.1	2006-08-18 04:54:25.000000000 +0200
++++ dpkg-1.13.25/man/C/dpkg.1	2007-03-05 19:46:18.000000000 +0100
+@@ -490,6 +490,11 @@ upgrade, remove, purge; and `YYYY-MM-DD 
+ <decision>' for conffile changes where \fI<decision>\fP is either install
+ or keep.
+ .TP
++\fB\-\-merge-tool=\fP\fIprogram\fP
++If dpkg will install a new configuration file and there are changes
++from the old one, dpkg will use the specified program to do a manual or
++automatic merge of the files depending on the used program.
++.TP
+ \fB\-\-no\-debsig\fP
+ Do not try to verify package signatures.
+ .
+diff -Narup dpkg-1.13.25-orig/src/configure.c dpkg-1.13.25/src/configure.c
+--- dpkg-1.13.25-orig/src/configure.c	2006-06-19 03:22:03.000000000 +0200
++++ dpkg-1.13.25/src/configure.c	2007-03-05 19:46:18.000000000 +0100
+@@ -226,6 +226,12 @@ void deferred_configure(struct pkginfo *
+ 			what=promptconfaction(conff->name, cdr.buf, cdr2.buf, useredited, distedited, what);
+ 
+ 			switch (what & ~(cfof_isnew|cfof_userrmd)) {
++				case cfo_merge:
++					if(call_merge(cdr.buf, cdr2.buf) == -1)
++						fprintf(stderr,
++								_("dpkg: %s: warning - failed to merge `%.250s %.250s': %s\n"),
++								pkg->name, cdr2.buf, cdr.buf, strerror(errno));
++					break;
+ 				case cfo_keep | cfof_backup:
+ 					strcpy(cdr2rest,DPKGOLDEXT);
+ 					if (unlink(cdr2.buf) && errno != ENOENT)
+@@ -607,13 +613,21 @@ static enum conffopt promptconfaction(co
+ 			}
+ 		}
+ 
+-
+-		fprintf(stderr,
+-				_("   What would you like to do about it ?  Your options are:\n"
+-					"    Y or I  : install the package maintainer's version\n"
+-					"    N or O  : keep your currently-installed version\n"
+-					"      D     : show the differences between the versions\n"
+-					"      Z     : background this process to examine the situation\n"));
++		if(!merge_tool)
++			fprintf(stderr,
++					_("   What would you like to do about it ?  Your options are:\n"
++						"    Y or I  : install the package maintainer's version\n"
++						"    N or O  : keep your currently-installed version\n"
++						"      D     : show the differences between the versions\n"
++						"      Z     : background this process to examine the situation\n"));
++		else
++			fprintf(stderr,
++					_("   What would you like to do about it ?  Your options are:\n"
++						"    Y or I  : install the package maintainer's version\n"
++						"    N or O  : keep your currently-installed version\n"
++						"      D     : show the differences between the versions\n"
++						"      Z     : background this process to examine the situation\n"
++						"      M     : start merge-tool to merge new and old version\n"));
+ 
+ 		if (what & cfof_keep)
+ 			fprintf(stderr, _(" The default action is to keep your current version.\n"));
+@@ -651,7 +665,7 @@ static enum conffopt promptconfaction(co
+ 		if (cc == 'z')
+ 			suspend();
+ 
+-	} while (!strchr("yino",cc));
++	} while (!strchr("yinom",cc));
+ 
+ 	log_message("conffile %s %s", cfgfile,
+ 		    (cc == 'i' || cc == 'y') ? "install" : "keep");
+@@ -668,6 +682,12 @@ static enum conffopt promptconfaction(co
+ 		case 'o':
+ 			what |= cfof_keep|cfof_backup;
+ 			break;
++		case 'm':
++			if(merge_tool)
++				what = cfof_merge;
++			else
++				what |= cfof_keep|cfof_backup;
++			break;
+ 
+ 		default:
+ 			internerr("unknown response");
+diff -Narup dpkg-1.13.25-orig/src/main.c dpkg-1.13.25/src/main.c
+--- dpkg-1.13.25-orig/src/main.c	2006-06-19 03:22:03.000000000 +0200
++++ dpkg-1.13.25/src/main.c	2007-03-05 19:46:18.000000000 +0100
+@@ -115,6 +115,7 @@ static void usage(void) {
+ "  -D|--debug=<octal>         Enable debugging (see -Dhelp or --debug=help).\n"
+ "  --status-fd <n>            Send status change updates to file descriptor <n>.\n"
+ "  --log=<filename>           Log status changes and actions to <filename>.\n"
++"  --merge-tool=<program>     Use program when merging config files.\n"
+ "  --ignore-depends=<package>,...\n"
+ "                             Ignore dependencies involving <package>.\n"
+ "  --force-...                Override problems (see --force-help).\n"
+@@ -374,6 +375,7 @@ static void setforce(const struct cmdinf
+ }
+ 
+ extern const char *log_file;
++extern const char *merge_tool;
+ 
+ static const char okpassshortopts[]= "D";
+ 
+@@ -425,6 +427,7 @@ static const struct cmdinfo cmdinfos[]= 
+   
+   { "status-fd",	  0,   1,  0,              0,  setpipe, 0, &status_pipes },
+   { "log",                0,   1,  0, &log_file,       0                             },
++  { "merge-tool",         0,   1,  0, &merge_tool,     0                             },
+   { "pending",           'a',  0,  &f_pending,     0,  0,             1              },
+   { "recursive",         'R',  0,  &f_recursive,   0,  0,             1              },
+   { "no-act",             0,   0,  &f_noact,       0,  0,             1              },
+diff -Narup dpkg-1.13.25-orig/src/main.h dpkg-1.13.25/src/main.h
+--- dpkg-1.13.25-orig/src/main.h	2006-06-19 03:22:03.000000000 +0200
++++ dpkg-1.13.25/src/main.h	2007-03-05 19:46:46.000000000 +0100
+@@ -67,12 +67,14 @@ enum conffopt {
+   cfof_isnew         =   00400,
+   cfof_isold         =   01000,
+   cfof_userrmd       =   02000,
++  cfof_merge         =   04000,
+   cfom_main          =     007,
+   cfo_keep           =   cfof_keep,
+   cfo_prompt_keep    =   cfof_keep | cfof_prompt,
+   cfo_prompt         =               cfof_prompt,
+   cfo_prompt_install =               cfof_prompt | cfof_install,
+   cfo_install        =                             cfof_install,
++  cfo_merge          =   cfof_merge,
+   cfo_newconff       =                             cfof_install | cfof_newconff,
+   cfo_identical      =   cfof_keep
+ };
+@@ -80,6 +82,7 @@ enum conffopt {
+ extern int conffoptcells[2][2];
+ extern const char *const statusstrings[];
+ 
++extern const char *merge_tool;
+ extern const struct cmdinfo *cipaction;
+ extern int f_pending, f_recursive, f_alsoselect, f_skipsame, f_noact;
+ extern int f_autodeconf, f_largemem, f_nodebsig;

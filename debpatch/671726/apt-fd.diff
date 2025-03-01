@@ -1,0 +1,53 @@
+diff --git a/apt-pkg/deb/dpkgpm.cc b/apt-pkg/deb/dpkgpm.cc
+index 6cb8bc6..dabf48c 100644
+--- a/apt-pkg/deb/dpkgpm.cc
++++ b/apt-pkg/deb/dpkgpm.cc
+@@ -328,8 +328,9 @@ bool pkgDPkgPM::SendV2Pkgs(FILE *F)
+ // DPkgPM::RunScriptsWithPkgs - Run scripts with package names on stdin /*{{{*/
+ // ---------------------------------------------------------------------
+ /* This looks for a list of scripts to run from the configuration file
+-   each one is run and is fed on standard input a list of all .deb files
+-   that are due to be installed. */
++   each one is run and is fed on standard input (or another fd, if
++   HookAvoidStdin is set) a list of all .deb files that are due to be
++   installed. */
+ bool pkgDPkgPM::RunScriptsWithPkgs(const char *Cnf)
+ {
+    Configuration::Item const *Opts = _config->Tree(Cnf);
+@@ -352,10 +353,14 @@ bool pkgDPkgPM::RunScriptsWithPkgs(const char *Cnf)
+       
+       unsigned int Version = _config->FindI(OptSec+"::Version",1);
+ 
++      // Feed subprocess via stdin, unless HookAvoidStdin is true
++      bool const UseStdin = !_config->FindB(OptSec+"::HookAvoidStdin",false);
++
+       // Create the pipes
+       int Pipes[2];
+       if (pipe(Pipes) != 0)
+             return _error->Errno("pipe","Failed to create IPC pipe to subprocess");
++      if (UseStdin == true)
+           SetCloseExec(Pipes[0],true);
+       SetCloseExec(Pipes[1],true);
+       
+@@ -364,7 +369,21 @@ bool pkgDPkgPM::RunScriptsWithPkgs(const char *Cnf)
+       if (Process == 0)
+       {
+ 	 // Setup the FDs
++	 if (UseStdin == true)
+ 		dup2(Pipes[0],STDIN_FILENO);
++       else
++       {
++		// small fd numbers (<5) are closed down the process tree, so use
++		// a higher number instead
++		int ChildReadFd = fcntl(Pipes[0], F_DUPFD, 20);
++		if (ChildReadFd < 0)
++			return _error->Errno("fcntl","Failed to duplicate file descriptor");
++		char AptHookEnv[80];
++		if (sprintf(AptHookEnv, "AptHookFd=%d", ChildReadFd) < 0)
++			return _error->Errno("sprintf","Failed to contruct environment variable value");
++		if (putenv(AptHookEnv) != 0)
++			return _error->Errno("putenv","Failed to set environment variable AptHookFd");
++       }
+ 	 SetCloseExec(STDOUT_FILENO,false);
+ 	 SetCloseExec(STDIN_FILENO,false);      
+ 	 SetCloseExec(STDERR_FILENO,false);

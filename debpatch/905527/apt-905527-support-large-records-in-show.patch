@@ -1,0 +1,97 @@
+commit 1af83ad5e621f91c6865211563da17f3a6ee06fd
+Author: David Kalnischkies <david@kalnischkies.de>
+Date:   Wed Aug 15 00:23:37 2018 +0200
+
+    Support records larger than 32kb in 'apt show'
+    
+    The default buffer size for pkgTagFile is 32kb which should be big
+    enough for everything… expect for enormous lists of provides,
+    resulting in:
+    
+    $ apt show librust-winapi-dev
+    E: Unable to parse package file /var/lib/apt/lists/ftp.br.debian.org_debian_dists_unstable_main_binary-amd64_Packages (2)
+    E: Internal Error, Unable to parse a package record
+    
+    The "apt-cache show" codepath uses instead a max size for all files,
+    which seems a bit excessive, but works – using the max size for the file
+    in question seems most appropriate.
+    
+    The patch is written for the 1.6.y series as a rewrite of the related
+    code in the 1.7.y series (commit bf53f39c9a0221b670ffff74053ed36fc502d5a0)
+    removed this problem before it was reported.
+    
+    Closes: #905527
+    LP: #1787120
+
+diff --git a/apt-private/private-show.cc b/apt-private/private-show.cc
+index afe448a33..0403fbed7 100644
+--- a/apt-private/private-show.cc
++++ b/apt-private/private-show.cc
+@@ -177,9 +177,9 @@ static bool DisplayRecordV2(pkgCacheFile &CacheFile, pkgCache::VerIterator const
+ 
+    // Read the record
+    pkgTagSection Tags;
+-   pkgTagFile TagF(&PkgF);
++   pkgTagFile TagF(&PkgF, Vf->Size);
+ 
+-   if (TagF.Jump(Tags, V.FileList()->Offset) == false)
++   if (TagF.Jump(Tags, Vf->Offset) == false)
+       return _error->Error("Internal Error, Unable to parse a package record");
+ 
+    // make size nice
+diff --git a/test/integration/test-apt-cli-show b/test/integration/test-apt-cli-show
+index 935d93d86..a37dbd8e6 100755
+--- a/test/integration/test-apt-cli-show
++++ b/test/integration/test-apt-cli-show
+@@ -7,11 +7,19 @@ TESTDIR="$(readlink -f "$(dirname "$0")")"
+ setupenvironment
+ configarchitecture 'i386' 'amd64'
+ 
++generatelotsofnames() {
++	for i in $(seq 0 10000); do
++		printf ', this-is-a-long-pkg-name-%s (= 0.a.long.version)' "$i"
++	done
++}
++
+ DESCR='Some description
+  That has multiple lines'
+ insertpackage 'unstable' 'foo' 'all' '1.0' '' '' "$DESCR"
+ insertpackage 'unstable' 'bar' 'i386,amd64' '1' '' '' "$DESCR"
+ insertpackage 'unstable' 'big' 'i386,amd64' '1' 'Installed-Size: 4129421' '' "$DESCR"
++insertpackage 'unstable' 'large' 'all' '1' "Provides: pkga$(generatelotsofnames)" '' "$DESCR"
++insertpackage 'unstable' 'large2' 'all' '1' "Provides: foobar, pkga$(generatelotsofnames)" '' "$DESCR"
+ insertinstalledpackage 'foo' 'all' '1.0'
+ 
+ setupaptarchive
+@@ -66,6 +74,31 @@ Description: Some description
+  That has multiple lines
+ " apt show big:amd64
+ 
++testsuccessequal "Package: large
++Version: 1
++Priority: optional
++Section: other
++Maintainer: Joe Sixpack <joe@example.org>
++Installed-Size: 43.0 kB
++Provides: pkga$(generatelotsofnames)
++Download-Size: unknown
++APT-Sources: file:$APTARCHIVE unstable/main all Packages
++Description: Some description
++ That has multiple lines
++" apt show large
++testsuccessequal "Package: large2
++Version: 1
++Priority: optional
++Section: other
++Maintainer: Joe Sixpack <joe@example.org>
++Installed-Size: 43.0 kB
++Provides: foobar, pkga$(generatelotsofnames)
++Download-Size: unknown
++APT-Sources: file:$APTARCHIVE unstable/main all Packages
++Description: Some description
++ That has multiple lines
++" apt show large2
++
+ # this is the default, but disabled by the testcases
+ testsuccess apt show foo -o Apt::Cmd::Disable-Script-Warning=0
+ cp rootdir/tmp/testsuccess.output aptshow.output

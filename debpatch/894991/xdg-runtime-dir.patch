@@ -1,0 +1,158 @@
+diff -Nur a/debian/init b/debian/init
+--- a/debian/init	2016-02-01 03:10:08.000000000 -0500
++++ b/debian/init	2018-04-05 15:37:25.023320892 -0400
+@@ -62,13 +62,13 @@
+ 	# then it failed somehow.  This works around the fact
+ 	# that alsactl doesn't return nonzero status when it
+ 	# can't restore settings for the card
+-	if MSG="$(alsactl -E HOME="$ALSACTLHOME" restore $CARD 2>&1 >/dev/null)" && [ ! "$MSG" ] ; then
++	if MSG="$(alsactl -E HOME="$ALSACTLHOME" -E XDG_RUNTIME_DIR="${ALSACTLRUNTIME}" restore $CARD 2>&1 >/dev/null)" && [ ! "$MSG" ] ; then
+ 		return 0
+ 	else
+ 		# Retry with the "force" option.  This restores more levels
+ 		# but it results in much longer error messages.
+ 		alsactl -F restore $CARD >/dev/null 2>&1
+-		log_action_cont_msg "warning: 'alsactl -E HOME="$ALSACTLHOME" restore${CARD:+ $CARD}' failed with error message '$MSG'"
++		log_action_cont_msg "warning: 'alsactl -E HOME="$ALSACTLHOME" -E XDG_RUNTIME_DIR="${ALSACTLRUNTIME}" restore${CARD:+ $CARD}' failed with error message '$MSG'"
+ 		return 1
+ 	fi
+ }
+@@ -78,11 +78,11 @@
+ {
+ 	CARD="$1"
+ 	[ "$1" = all ] && CARD=""
+-	if MSG="$(alsactl -E HOME="$ALSACTLHOME" store $CARD 2>&1)" ; then
++	if MSG="$(alsactl -E HOME="$ALSACTLHOME" -E XDG_RUNTIME_DIR="${ALSACTLRUNTIME}" store $CARD 2>&1)" ; then
+ 		sleep 1
+ 		return 0
+ 	else
+-		log_action_cont_msg "warning: 'alsactl store${CARD:+ $CARD}' failed with error message '$MSG'"
++		log_action_cont_msg "warning: 'alsactl store${CARD:+ $CARD}' -E HOME="$ALSACTLHOME" -E XDG_RUNTIME_DIR=@alsactlruntime@ failed with error message '$MSG'"
+ 		return 1
+ 	fi
+ }
+diff -Nur a/debian/patches/alsactl_xdg_runtime.patch b/debian/patches/alsactl_xdg_runtime.patch
+--- a/debian/patches/alsactl_xdg_runtime.patch	1969-12-31 19:00:00.000000000 -0500
++++ b/debian/patches/alsactl_xdg_runtime.patch	2018-04-05 18:12:56.212235503 -0400
+@@ -0,0 +1,71 @@
++Author: Antonio Russo <antonio.e.russo@gmail.com>
++Description: add new configure switch to set alsactl's runtimedir.
++
++Index: c/alsactl/90-alsa-restore.rules.in
++===================================================================
++--- c.orig/alsactl/90-alsa-restore.rules.in
+++++ c/alsactl/90-alsa-restore.rules.in
++@@ -2,7 +2,7 @@ ACTION=="add", SUBSYSTEM=="sound", KERNE
++ GOTO="alsa_restore_end"
++ 
++ LABEL="alsa_restore_go"
++-TEST!="@daemonswitch@", RUN+="@sbindir@/alsactl -E HOME=@alsactlhome@ restore $attr{device/number}"
++-TEST=="@daemonswitch@", RUN+="@sbindir@/alsactl -E HOME=@alsactlhome@ nrestore $attr{device/number}"
+++TEST!="@daemonswitch@", RUN+="@sbindir@/alsactl -E HOME=@alsactlhome@ -E XDG_RUNTIME_DIR=@alsactlruntime@ restore $attr{device/number}"
+++TEST=="@daemonswitch@", RUN+="@sbindir@/alsactl -E HOME=@alsactlhome@ -E XDG_RUNTIME_DIR=@alsactlruntime@ nrestore $attr{device/number}"
++ 
++ LABEL="alsa_restore_end"
++Index: c/alsactl/Makefile.am
++===================================================================
++--- c.orig/alsactl/Makefile.am
+++++ c/alsactl/Makefile.am
++@@ -41,6 +41,7 @@ edit = \
++ 	$(SED) -r -e 's,@sbindir\@,$(sbindir),g' \
++ 		  -e 's,@mydatadir\@,$(mydatadir),g' \
++ 		  -e 's,@alsactlhome\@,$(ALSACTL_HOME_DIR),g' \
+++		  -e 's,@alsactlruntime\@,$(ALSACTL_RUNTIME_DIR),g' \
++ 		  -e 's,@daemonswitch\@,$(ALSACTL_DAEMONSWITCH),g' \
++ 							< $< > $@ || rm $@
++ 
++Index: c/alsactl/alsa-restore.service.in
++===================================================================
++--- c.orig/alsactl/alsa-restore.service.in
+++++ c/alsactl/alsa-restore.service.in
++@@ -12,6 +12,6 @@ After=alsa-state.service
++ [Service]
++ Type=oneshot
++ RemainAfterExit=true
++-ExecStart=-@sbindir@/alsactl -E HOME=@alsactlhome@ restore
++-ExecStop=-@sbindir@/alsactl -E HOME=@alsactlhome@ store
+++ExecStart=-@sbindir@/alsactl -E HOME=@alsactlhome@ -E XDG_RUNTIME_DIR=@alsactlruntime@ restore
+++ExecStop=-@sbindir@/alsactl -E HOME=@alsactlhome@ -E XDG_RUNTIME_DIR=@alsactlruntime@ store
++ StandardOutput=syslog
++Index: c/alsactl/alsa-state.service.in
++===================================================================
++--- c.orig/alsactl/alsa-state.service.in
+++++ c/alsactl/alsa-state.service.in
++@@ -10,5 +10,5 @@ After=sysinit.target
++ 
++ [Service]
++ Type=simple
++-ExecStart=-@sbindir@/alsactl -E HOME=@alsactlhome@ -s -n 19 -c rdaemon
++-ExecStop=-@sbindir@/alsactl -E HOME=@alsactlhome@ -s kill save_and_quit
+++ExecStart=-@sbindir@/alsactl -E HOME=@alsactlhome@ -E XDG_RUNTIME_DIR=@alsactlruntime@ -s -n 19 -c rdaemon
+++ExecStop=-@sbindir@/alsactl -E HOME=@alsactlhome@ -E XDG_RUNTIME_DIR=@alsactlruntime@ -s kill save_and_quit
++Index: c/configure.ac
++===================================================================
++--- c.orig/configure.ac
+++++ c/configure.ac
++@@ -409,6 +409,12 @@ AC_ARG_WITH([alsactl-pidfile-dir],
++         [ALSACTL_PIDFILE_DIR="/var/run"])
++ AC_SUBST(ALSACTL_PIDFILE_DIR)
++ 
+++AC_ARG_WITH([alsactl-runtime-dir],
+++        AS_HELP_STRING([--with-alsactl-runtime-dir=DIR], [Directory to use as runtimedir for alsactl]),
+++        [ALSACTL_RUNTIME_DIR="$withval"],
+++        [ALSACTL_RUNTIME_DIR="/var/run/alsa/runtime"])
+++AC_SUBST(ALSACTL_RUNTIME_DIR)
+++
++ AC_ARG_WITH([alsactl-home-dir],
++         AS_HELP_STRING([--with-alsactl-home-dir=DIR], [Directory to use as homedir for alsactl]),
++         [ALSACTL_HOME_DIR="$withval"],
+diff -Nur a/debian/patches/series b/debian/patches/series
+--- a/debian/patches/series	2017-01-15 18:24:00.000000000 -0500
++++ b/debian/patches/series	2018-04-05 18:13:02.836257001 -0400
+@@ -1,4 +1,5 @@
+ alsactl_home.patch
++alsactl_xdg_runtime.patch
+ systemd_standardoutput.patch
+ udev_test_alsactl.patch
+ spellfixes.patch
+diff -Nur a/debian/patches/systemd_standardoutput.patch b/debian/patches/systemd_standardoutput.patch
+--- a/debian/patches/systemd_standardoutput.patch	2017-01-15 18:24:00.000000000 -0500
++++ b/debian/patches/systemd_standardoutput.patch	2018-04-05 15:48:43.745785846 -0400
+@@ -16,6 +16,6 @@
+ +++ alsa-utils-1.1.3/alsactl/alsa-restore.service.in
+ @@ -14,4 +14,3 @@ Type=oneshot
+  RemainAfterExit=true
+- ExecStart=-@sbindir@/alsactl -E HOME=@alsactlhome@ restore
+- ExecStop=-@sbindir@/alsactl -E HOME=@alsactlhome@ store
++ ExecStart=-@sbindir@/alsactl -E HOME=@alsactlhome@ -E XDG_RUNTIME_DIR=@alsactlruntime@ restore
++ ExecStop=-@sbindir@/alsactl -E HOME=@alsactlhome@ -E XDG_RUNTIME_DIR=@alsactlruntime@ store
+ -StandardOutput=syslog
+diff -Nur a/debian/patches/udev_test_alsactl.patch b/debian/patches/udev_test_alsactl.patch
+--- a/debian/patches/udev_test_alsactl.patch	2017-01-15 18:24:00.000000000 -0500
++++ b/debian/patches/udev_test_alsactl.patch	2018-04-05 15:50:04.897419686 -0400
+@@ -13,9 +13,9 @@
+  GOTO="alsa_restore_end"
+  
+  LABEL="alsa_restore_go"
+--TEST!="@daemonswitch@", RUN+="@sbindir@/alsactl -E HOME=@alsactlhome@ restore $attr{device/number}"
+--TEST=="@daemonswitch@", RUN+="@sbindir@/alsactl -E HOME=@alsactlhome@ nrestore $attr{device/number}"
+-+TEST!="@daemonswitch@", TEST=="/usr/sbin/alsactl", RUN+="@sbindir@/alsactl -E HOME=@alsactlhome@ restore $attr{device/number}"
+-+TEST=="@daemonswitch@", TEST=="/usr/sbin/alsactl", RUN+="@sbindir@/alsactl -E HOME=@alsactlhome@ nrestore $attr{device/number}"
++-TEST!="@daemonswitch@", RUN+="@sbindir@/alsactl -E HOME=@alsactlhome@ -E XDG_RUNTIME_DIR=@alsactlruntime@ restore $attr{device/number}"
++-TEST=="@daemonswitch@", RUN+="@sbindir@/alsactl -E HOME=@alsactlhome@ -E XDG_RUNTIME_DIR=@alsactlruntime@ nrestore $attr{device/number}"
+++TEST!="@daemonswitch@", TEST=="/usr/sbin/alsactl", RUN+="@sbindir@/alsactl -E HOME=@alsactlhome@ -E XDG_RUNTIME_DIR=@alsactlruntime@ restore $attr{device/number}"
+++TEST=="@daemonswitch@", TEST=="/usr/sbin/alsactl", RUN+="@sbindir@/alsactl -E HOME=@alsactlhome@ -E XDG_RUNTIME_DIR=@alsactlruntime@ nrestore $attr{device/number}"
+  
+  LABEL="alsa_restore_end"
+diff -Nur a/debian/rules b/debian/rules
+--- a/debian/rules	2017-01-15 18:24:01.000000000 -0500
++++ b/debian/rules	2018-04-05 17:42:01.621171674 -0400
+@@ -9,6 +9,7 @@
+ 	dh_auto_configure -- \
+ 			--with-asound-state-dir=/var/lib/alsa \
+ 			--with-alsactl-home-dir=/run/alsa \
++			--with-alsactl-runtime-dir=/run/alsa/runtime \
+ 			--with-systemdsystemunitdir=/lib/systemd/system \
+ 			--disable-alsaconf
+ 
+

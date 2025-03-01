@@ -1,0 +1,166 @@
+From e0459edc5f02984de0338d085a46c4060bbea5b7 Mon Sep 17 00:00:00 2001
+From: Adam Borowski <kilobyte@angband.pl>
+Date: Sat, 3 Dec 2016 09:46:11 +0100
+Subject: [PATCH 2/2] Allow setting --word-chars.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+There's intentionally no way to change non-ASCII ones; this is on par with
+most GUI terminals.  In theory, we could allow altering U+00A0..U+00FF, but
+it'd probably be too confusing for most users.
+
+Non-ASCII are hard-coded to:
+U+00A0..U+00BF, U+00D7, U+00F7: not word-chars:
+ ¡¢£¤¥¦§ ¨©ª«¬-®¯ °±²³´µ¶· ¸¹º»¼½¾¿ × ÷
+U+00C0..U+00FE except U+00D7, U+00F7: word-chars:
+ÀÁÂÃÄÅÆÇ ÈÉÊËÌÍÎÏ ÐÑÒÓÔÕÖ  ØÙÚÛÜÝÞß àáâãäåæç èéêëìíîï ðñòóôõö  øùúûüýþÿ
+
+Anything U+00FF..U+FFFF is hard-coded to be word-chars in the kernel, with
+no possibility of altering by userspace.  This includes even line-drawing
+which we really would like to exclude.
+
+The kernel doesn't support Unicode above Plane 0 at all -- I know how much
+people miss U+1F4A9 (💩) but with only 256/512 characters vgacon can possibly
+support, that'd be a waste of effort.
+---
+ src/consolation.h |  2 +-
+ src/input.c       |  2 +-
+ src/selection.c   | 24 +++++++++++++++++++++++-
+ src/shared.c      | 11 +++++++++++
+ src/shared.h      |  1 +
+ 5 files changed, 37 insertions(+), 3 deletions(-)
+
+diff --git a/src/consolation.h b/src/consolation.h
+index cf74711..18e7a15 100644
+--- a/src/consolation.h
++++ b/src/consolation.h
+@@ -29,7 +29,7 @@ void select_word(int x, int y);
+ void select_line(int x, int y);
+ void paste(void);
+ void scroll(int sc);
+-void set_lut(void);
++void set_lut(const char *word_chars);
+ 
+ /* action.c */
+ 
+diff --git a/src/input.c b/src/input.c
+index 846d585..766f569 100644
+--- a/src/input.c
++++ b/src/input.c
+@@ -227,7 +227,7 @@ event_main(void)
+   if (!li)
+     return 1;
+ 
+-  set_lut();
++  set_lut(context.options.word_chars);
+ 
+   mainloop(li);
+ 
+diff --git a/src/selection.c b/src/selection.c
+index 912dd0b..29dba14 100644
+--- a/src/selection.c
++++ b/src/selection.c
+@@ -110,7 +110,12 @@ void scroll(int sc)
+   close(fd);
+ }
+ 
+-void set_lut(void)
++static int goodchar(char x)
++{
++  return x >= 0x20 && x < 0x7f;
++}
++
++void set_lut(const char *def)
+ {
+   int fd;
+   struct {
+@@ -129,6 +134,23 @@ void set_lut(void)
+   }; /* all of Unicode above U+00FF is considered "word" chars, even
+         frames and the likes */
+ 
++  /* we allow changing only U+0020..U+7E */
++  l.lut[1] = l.lut[2] = l.lut[3] = 0;
++
++  while (*def) {
++    char c = *def++;
++    if (!goodchar(c))
++      continue;
++    if (*def == '-' && goodchar(def[1])) {
++      ++def;
++      for (; c <= *def; ++c)
++        l.lut[c >> 5] |= 1 << (uint32_t)(c & 31);
++      ++def;
++    }
++    else
++      l.lut[c >> 5] |= 1 << (uint32_t)(c & 31);
++  }
++
+   fd = open("/dev/tty0",O_RDWR);
+   if(ioctl(fd, TIOCLINUX, &l)<0)
+     perror("set_lut: TIOCLINUX");
+diff --git a/src/shared.c b/src/shared.c
+index 9acbf76..578a69d 100644
+--- a/src/shared.c
++++ b/src/shared.c
+@@ -65,6 +65,7 @@ enum options {
+ 	OPT_SCROLL_BUTTON,
+ 	OPT_SPEED,
+ 	OPT_PROFILE,
++	OPT_WORD_CHARS,
+ 	OPT_VERSION
+ };
+ 
+@@ -84,6 +85,7 @@ tools_usage()
+ 	       "--udev <seat>.... Use udev device discovery (default).\n"
+ 	       "		  Specifying a seat ID is optional.\n"
+ 	       "--device /path/to/device .... open the given device only\n"
++	       "--word-chars '-A-Za-z0-9,./?%&#:_=+@~' (ASCII only)\n"
+ 	       "\n"
+ 	       "Features:\n"
+ 	       "--enable-tap\n"
+@@ -145,6 +147,7 @@ tools_init_context(struct tools_context *context)
+ 	options->seat = "seat0";
+ 	options->speed = 0.0;
+ 	options->profile = LIBINPUT_CONFIG_ACCEL_PROFILE_NONE;
++	options->word_chars = "-A-Za-z0-9,./?%&#:_=+@~";
+ }
+ 
+ int
+@@ -181,6 +184,7 @@ tools_parse_args(int argc, char **argv, struct tools_context *context)
+ 			{ "set-scroll-button", 1, 0, OPT_SCROLL_BUTTON },
+ 			{ "set-profile", 1, 0, OPT_PROFILE },
+ 			{ "speed", 1, 0, OPT_SPEED },
++			{ "word-chars", 1, 0, OPT_WORD_CHARS },
+ 			{ 0, 0, 0, 0}
+ 		};
+ 
+@@ -333,6 +337,13 @@ tools_parse_args(int argc, char **argv, struct tools_context *context)
+ 				return 1;
+ 			}
+ 			break;
++		case OPT_WORD_CHARS:
++			if (!optarg) {
++				tools_usage();
++				return 1;
++			}
++			options->word_chars = optarg;
++			break;
+ 		default:
+ 			tools_usage();
+ 			return 1;
+diff --git a/src/shared.h b/src/shared.h
+index d18fcbb..9b6ee93 100644
+--- a/src/shared.h
++++ b/src/shared.h
+@@ -52,6 +52,7 @@ struct tools_options {
+ 	double speed;
+ 	int dwt;
+ 	enum libinput_config_accel_profile profile;
++	const char *word_chars;
+ };
+ 
+ struct tools_context {
+-- 
+2.10.2
+

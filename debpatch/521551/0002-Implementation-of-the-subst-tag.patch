@@ -1,0 +1,570 @@
+From 74d201134f9cc7a590905fb72b2d23e68dd56a5f Mon Sep 17 00:00:00 2001
+From: Modestas Vainius <modestas@vainius.eu>
+Date: Sat, 20 Jun 2009 01:28:57 +0300
+Subject: [PATCH 2/2] Implementation of the subst tag.
+
+Add support for the tag 'subst'. When this tag is specified, the symbol name is
+considered to have substitutions. The symbol name substitution is a string
+between {} brackets which can appear anywhere in the symbol name.  Substitution
+can have a value assigned to it which is separated from its name with the '='
+character. Substitutions are replaced during processing phase with their real
+values which typically vary according to the current host architecture.
+Multiple substitutions are allowed in the symbol name.
+
+Currently supported substitutions:
+
+  * ssize_t - mangling of C++ type ssize_t:
+    - long (l) on amd64, ia64, alpha, s390
+    - int (i) on others
+  * size_t - mangling of C++ type size_t:
+    - unsigned long (m) on amd64, ia64, alpha, s390
+    - unsigned int (j) on others
+  * int64_t - mangling of C++ type int64_t:
+    - long (l) on 64bit arches
+    - long long (x) on others (32bit arches)
+  * uint64_t - mangling of C++ type uint64_t:
+    - unsigned long (m) on 64bit arches
+    - unsgined long long (y) on others (32bit arches)
+  * qreal - mangling of C++ type qreal:
+    - float (f) on arm(el)
+    - double (d) on others
+  * vt=number - C++ virtual table offset:
+    - multiply number by 2 on 64bit arches
+    - leave unchanged on 32bit arches
+
+Examples:
+
+  (subst)_ZN6Phonon11AudioOutput13volumeChangedE{qreal}@Base 4:4.2.0
+
+  is considered to be "_ZN6Phonon11AudioOutput13volumeChangedEf@Base 4:4.2.0"
+  on armel and "_ZN6Phonon11AudioOutput13volumeChangedEf@Base 4:4.2.0" on
+  others arches (when dumping in non-template mode).
+
+  (subst)_ZThn{vt=8}_N6Phonon11VideoPlayerD0Ev@Base 4:4.2.0
+
+  is considered to be "_ZThn8_N6Phonon11VideoPlayerD0Ev@Base 4:4.2.0" on
+  32bit arches (e.g. i386) and "_ZThn16_N6Phonon11VideoPlayerD0Ev@Base 4:4.2.0"
+  on 64bit arches (e.g. amd64) (when dumping in non-template mode).
+
+Signed-off-by: Modestas Vainius <modestas@vainius.eu>
+---
+ scripts/Dpkg/Shlibs/Symbol.pm                |  108 ++++++++++++++++++++++++++
+ scripts/Makefile.am                          |    5 +-
+ scripts/t/200_Dpkg_Shlibs.t                  |   22 +++++-
+ scripts/t/200_Dpkg_Shlibs/objdump.tags-amd64 |   66 ++++++++--------
+ scripts/t/200_Dpkg_Shlibs/objdump.tags-i386  |   68 ++++++++--------
+ scripts/t/200_Dpkg_Shlibs/substtest.cpp      |   35 ++++++++
+ scripts/t/200_Dpkg_Shlibs/symbols.substtest  |   18 ++++
+ scripts/t/200_Dpkg_Shlibs/symbols.tags.in    |    2 +
+ scripts/t/200_Dpkg_Shlibs/symboltags.c       |   14 ++++
+ 9 files changed, 271 insertions(+), 67 deletions(-)
+ create mode 100644 scripts/t/200_Dpkg_Shlibs/substtest.cpp
+ create mode 100644 scripts/t/200_Dpkg_Shlibs/symbols.substtest
+
+diff --git a/scripts/Dpkg/Shlibs/Symbol.pm b/scripts/Dpkg/Shlibs/Symbol.pm
+index 557f46b..f165b21 100644
+--- a/scripts/Dpkg/Shlibs/Symbol.pm
++++ b/scripts/Dpkg/Shlibs/Symbol.pm
+@@ -131,6 +131,17 @@ sub parse {
+ # Called from Dpkg::Shlibs::SymbolFile::load(). Empty for now.
+ sub process_tags {
+     my $self = shift;
++    # Process tags in the order which they are specified.
++    # Tag processing may change symbol name.
++    for my $tag (@{$self->{tagorder}}) {
++	if ($tag eq "subst") {
++	    # Expand substitutions in the symbol name. See below.
++	    if ($self->expand_substitutions(@_) == 0) {
++		# Redundant subst tag. Warn.
++		warning(_g("%s: no substitutions found in the symbol name, 'subst' tag redundant"), $self->get_symbolname());
++	    }
++	}
++    }
+ }
+ 
+ sub get_symbolname {
+@@ -237,3 +248,100 @@ sub get_symbolspec {
+     $spec .= " $self->{dep_id}" if $self->{dep_id};
+     return $spec;
+ }
++
++##### Symbol substitutions #####
++our %SUBSTITUTIONS = (
++    'ssize_t' => \&subst_ssize_t,
++    'size_t' => \&subst_size_t,
++    'int64_t' => \&subst_int64_t,
++    'uint64_t' => \&subst_uint64_t,
++    'qreal' => \&subst_qreal,
++    'vt' => \&subst_vt,
++);
++
++sub expand_substitutions {
++    my $self = shift;
++    my $symbol = $self->{symbol};
++    my %substs;
++
++    # Collect substitutions in the symbol name
++    while ($symbol =~ /\{(([^}=]+)(?:=([^}]+))?)\}/g) {
++	my $subst = $1;
++	my $name = $2;
++	my $val = $3;
++	unless (exists $substs{$name}) {
++	    my $subroutine = $SUBSTITUTIONS{$name};
++	    if (defined $subroutine) {
++		$substs{$subst} = &$subroutine($name, $val, @_);
++		if (!defined $substs{$subst}) {
++		    error(_g("%s: unable to process symbol substitution '%s'"), $symbol, $subst);
++		}
++	    } # If not defined, silently ignore.
++	}
++    }
++
++    # Expand substitutions
++    for my $subst (keys %substs) {
++	$symbol =~ s/\Q{$subst}\E/$substs{$subst}/g;
++    }
++
++    $self->{symbol} = $symbol;
++    return scalar(keys %substs);
++}
++
++# Mangling of C++ type ssize_t:
++# - long (l) on amd64, ia64, alpha, s390
++# - int (i) on others
++sub subst_ssize_t {
++    my ($name, $val, %opts) = @_;
++    return undef unless exists $opts{arch};
++    return ($opts{arch} =~ /amd64|ia64|alpha|s390/) ? 'l' : 'i';
++}
++
++# Mangling of C++ type size_t:
++# - unsigned long (m) on amd64, ia64, alpha, s390
++# - unsigned int (j) on others
++sub subst_size_t {
++    my ($name, $val, %opts) = @_;
++    return undef unless exists $opts{arch};
++    return ($opts{arch} =~ /amd64|ia64|alpha|s390/) ? 'm' : 'j';
++}
++
++# Mangling of C++ type int64_t:
++# - long (l) on 64bit arches
++# - long long (x) on others (32bit arches)
++sub subst_int64_t {
++    my ($name, $val, %opts) = @_;
++    return undef unless exists $opts{arch};
++    return ($opts{arch} =~ $arches64bit) ? 'l' : 'x';
++}
++
++# Mangling of C++ type uint64_t:
++# - unsigned long (m) on 64bit arches
++# - unsgined long long (y) on others (32bit arches)
++sub subst_uint64_t {
++    my ($name, $val, %opts) = @_;
++    return undef unless exists $opts{arch};
++    return ($opts{arch} =~ $arches64bit) ? 'm' : 'y';
++}
++
++# Mangling of C++ type qreal:
++# - float (f) on arm(el)
++# - double (d) on others
++sub subst_qreal {
++    my ($name, $val, %opts) = @_;
++    return undef unless exists $opts{arch};
++    return ($opts{arch} =~ /arm/) ? 'f' : 'd';
++}
++
++# C++ virtual table offsets:
++# - multiply value by 2 on 64bit arches
++# - leave unchanged on 32bit arches
++sub subst_vt {
++    my ($name, $val, %opts) = @_;
++    return undef unless exists $opts{arch} &&
++           defined $val && $val =~ /^\d+$/;
++
++    $val *= ($opts{arch} =~ $arches64bit) ? 2 : 1;
++    return "$val";
++}
+diff --git a/scripts/Makefile.am b/scripts/Makefile.am
+index bec817c..ad7afb7 100644
+--- a/scripts/Makefile.am
++++ b/scripts/Makefile.am
+@@ -179,7 +179,10 @@ clean-local:
+ mkdir_t_tmp:
+ 	$(mkdir_p) t.tmp
+ 
+-check: $(TEST_FILES) $(wildcard $(srcdir)/t/200_Dpkg_Shlibs/ld.so.conf*) mkdir_t_tmp
++t.tmp/libsubsttest.so.1: $(srcdir)/t/200_Dpkg_Shlibs/substtest.cpp mkdir_t_tmp
++	$(CXX) $(CXXFLAGS) -shared -fPIC -Wl,-soname -Wl,libsubsttest.so.1 -o $@ $<
++
++check: $(TEST_FILES) $(wildcard $(srcdir)/t/200_Dpkg_Shlibs/ld.so.conf*) t.tmp/libsubsttest.so.1 mkdir_t_tmp
+ # a bit hacky...
+ 	cp -dRl $(srcdir)/t/200_Dpkg_Shlibs/ld.so.conf* t.tmp/
+ 	PATH="$(top_builddir)/src:$(top_builddir)/scripts:$(PATH)" srcdir=$(srcdir) PERL5LIB=$(srcdir) DPKG_DATADIR=$(srcdir)/.. PERL_DL_NONLAZY=1 $(PERL) -I$(srcdir) "-MExtUtils::Command::MM" "-e" "test_harness($(TEST_VERBOSE), '.')" $(TEST_FILES)
+diff --git a/scripts/t/200_Dpkg_Shlibs.t b/scripts/t/200_Dpkg_Shlibs.t
+index 99cfe09..34e8c7e 100644
+--- a/scripts/t/200_Dpkg_Shlibs.t
++++ b/scripts/t/200_Dpkg_Shlibs.t
+@@ -1,6 +1,6 @@
+ # -*- mode: cperl;-*-
+ 
+-use Test::More tests => 61;
++use Test::More tests => 64;
+ use IO::String;
+ 
+ use strict;
+@@ -229,6 +229,8 @@ is(${$io->string_ref()},
+  symbol21_amd64@Base 2.1
+  symbol31_randomtag@Base 3.1
+  symbol51_untagged@Base 5.1
++ symbol61_subst_this_is_size_t_m@Base 6.1
++ symbol62_all_substs_1l_2m_3l_4m_5d_616_7104@Base 6.2
+ ', "template vs. non-template on amd64" );
+ 
+ # Dumping in non-template mode (i386) (test for arch, subst tags)
+@@ -244,6 +246,8 @@ is(${$io->string_ref()},
+  symbol31_randomtag@Base 3.1
+  symbol41_i386_and_optional@Base 4.1
+  symbol51_untagged@Base 5.1
++ symbol61_subst_this_is_size_t_j@Base 6.1
++ symbol62_all_substs_1i_2j_3x_4y_5d_68_752@Base 6.2
+ ', "template vs. non-template on i386" );
+ 
+ ok (defined $sym_file->{objects}{'libsymboltags.so.1'}{syms}{'symbol21_amd64@Base'},
+@@ -353,3 +357,19 @@ is_deeply($sym, Dpkg::Shlibs::Symbol->new( 'symbol' => 'symbol51_untagged@Base',
+ 		  'tags' => { 'optional' => 'from parent', 't' => 'v' },
+ 		  'tagorder' => [ 'optional', 't' ] ),
+ 	    'symbols are properly cloned when #including');
++
++# Tests for subst tag
++ok (defined $sym_file->{objects}{'libsymboltags.so.1'}{syms}{'symbol61_subst_this_is_size_t_j@Base'},
++    "syms keys are post-processed symbol names without quotes");
++
++# Live tests for C++ substs
++$obj = Dpkg::Shlibs::Objdump::Object->new("t.tmp/libsubsttest.so.1");
++$sym_file = Dpkg::Shlibs::SymbolFile->new(file => "$srcdir/symbols.substtest");
++$sym_file_dup = Dpkg::Shlibs::SymbolFile->new(file => "$srcdir/symbols.substtest");
++$sym_file->merge_symbols($obj, '100.MISSING');
++
++@tmp = map { $_->get_symbolname() } $sym_file->get_lost_symbols($sym_file_dup);
++is_deeply( \@tmp, [], "no LOST symbols if all substs were expanded.");
++
++@tmp = map { $_->get_symbolname() } $sym_file->get_new_symbols($sym_file_dup);
++is_deeply( \@tmp, [], "no NEW symbols if all substs were expanded.");
+diff --git a/scripts/t/200_Dpkg_Shlibs/objdump.tags-amd64 b/scripts/t/200_Dpkg_Shlibs/objdump.tags-amd64
+index 8e2207d..f1dc413 100644
+--- a/scripts/t/200_Dpkg_Shlibs/objdump.tags-amd64
++++ b/scripts/t/200_Dpkg_Shlibs/objdump.tags-amd64
+@@ -2,41 +2,41 @@
+ libsymboltags.so.1:     file format elf64-x86-64
+ architecture: i386:x86-64, flags 0x00000150:
+ HAS_SYMS, DYNAMIC, D_PAGED
+-start address 0x0000000000000500
++start address 0x0000000000000590
+ 
+ Program Header:
+     LOAD off    0x0000000000000000 vaddr 0x0000000000000000 paddr 0x0000000000000000 align 2**21
+-         filesz 0x0000000000000714 memsz 0x0000000000000714 flags r-x
+-    LOAD off    0x0000000000000718 vaddr 0x0000000000200718 paddr 0x0000000000200718 align 2**21
++         filesz 0x0000000000000804 memsz 0x0000000000000804 flags r-x
++    LOAD off    0x0000000000000808 vaddr 0x0000000000200808 paddr 0x0000000000200808 align 2**21
+          filesz 0x0000000000000208 memsz 0x0000000000000218 flags rw-
+- DYNAMIC off    0x0000000000000740 vaddr 0x0000000000200740 paddr 0x0000000000200740 align 2**3
++ DYNAMIC off    0x0000000000000830 vaddr 0x0000000000200830 paddr 0x0000000000200830 align 2**3
+          filesz 0x00000000000001a0 memsz 0x00000000000001a0 flags rw-
+-EH_FRAME off    0x0000000000000668 vaddr 0x0000000000000668 paddr 0x0000000000000668 align 2**2
+-         filesz 0x000000000000002c memsz 0x000000000000002c flags r--
++EH_FRAME off    0x0000000000000718 vaddr 0x0000000000000718 paddr 0x0000000000000718 align 2**2
++         filesz 0x000000000000003c memsz 0x000000000000003c flags r--
+    STACK off    0x0000000000000000 vaddr 0x0000000000000000 paddr 0x0000000000000000 align 2**3
+          filesz 0x0000000000000000 memsz 0x0000000000000000 flags rw-
+ 
+ Dynamic Section:
+   NEEDED               libc.so.6
+   SONAME               libsymboltags.so.1
+-  INIT                 0x00000000000004c0
+-  FINI                 0x0000000000000658
++  INIT                 0x0000000000000550
++  FINI                 0x0000000000000708
+   HASH                 0x0000000000000158
+-  GNU_HASH             0x00000000000001a8
+-  STRTAB               0x0000000000000340
+-  SYMTAB               0x00000000000001f0
+-  STRSZ                0x00000000000000c6
++  GNU_HASH             0x00000000000001b0
++  STRTAB               0x0000000000000380
++  SYMTAB               0x0000000000000200
++  STRSZ                0x0000000000000112
+   SYMENT               0x0000000000000018
+-  PLTGOT               0x00000000002008f8
++  PLTGOT               0x00000000002009e8
+   PLTRELSZ             0x0000000000000018
+   PLTREL               0x0000000000000007
+-  JMPREL               0x00000000000004a8
+-  RELA                 0x0000000000000448
++  JMPREL               0x0000000000000538
++  RELA                 0x00000000000004d8
+   RELASZ               0x0000000000000060
+   RELAENT              0x0000000000000018
+-  VERNEED              0x0000000000000428
++  VERNEED              0x00000000000004b8
+   VERNEEDNUM           0x0000000000000001
+-  VERSYM               0x0000000000000406
++  VERSYM               0x0000000000000492
+   RELACOUNT            0x0000000000000001
+ 
+ Version References:
+@@ -44,27 +44,29 @@ Version References:
+     0x09691a75 0x00 02 GLIBC_2.2.5
+ 
+ DYNAMIC SYMBOL TABLE:
+-00000000000004c0 l    d  .init	0000000000000000              .init
++0000000000000550 l    d  .init	0000000000000000              .init
+ 0000000000000000  w   D  *UND*	0000000000000000              __gmon_start__
+ 0000000000000000  w   D  *UND*	0000000000000000              _Jv_RegisterClasses
+ 0000000000000000  w   DF *UND*	0000000000000000  GLIBC_2.2.5 __cxa_finalize
+-00000000000005f0 g    DF .text	0000000000000002  Base        symbol21_amd64
+-0000000000200930 g    D  *ABS*	0000000000000000  Base        _end
+-0000000000200920 g    D  *ABS*	0000000000000000  Base        _edata
+-0000000000200920 g    D  *ABS*	0000000000000000  Base        __bss_start
+-00000000000004c0 g    DF .init	0000000000000000  Base        _init
+-0000000000000658 g    DF .fini	0000000000000000  Base        _fini
+-00000000000005e0 g    DF .text	0000000000000002  Base        symbol11_optional
+-0000000000000600 g    DF .text	0000000000000002  Base        symbol31_randomtag
+-0000000000000610 g    DF .text	0000000000000002  Base        symbol51_untagged
++0000000000000680 g    DF .text	0000000000000002  Base        symbol21_amd64
++0000000000200a20 g    D  *ABS*	0000000000000000  Base        _end
++0000000000200a10 g    D  *ABS*	0000000000000000  Base        _edata
++00000000000006c0 g    DF .text	0000000000000002  Base        symbol62_all_substs_1l_2m_3l_4m_5d_616_7104
++0000000000200a10 g    D  *ABS*	0000000000000000  Base        __bss_start
++00000000000006b0 g    DF .text	0000000000000002  Base        symbol61_subst_this_is_size_t_m
++0000000000000550 g    DF .init	0000000000000000  Base        _init
++0000000000000708 g    DF .fini	0000000000000000  Base        _fini
++0000000000000670 g    DF .text	0000000000000002  Base        symbol11_optional
++0000000000000690 g    DF .text	0000000000000002  Base        symbol31_randomtag
++00000000000006a0 g    DF .text	0000000000000002  Base        symbol51_untagged
+ 
+ 
+ DYNAMIC RELOCATION RECORDS
+ OFFSET           TYPE              VALUE 
+-0000000000200918 R_X86_64_RELATIVE  *ABS*+0x0000000000200918
+-00000000002008e0 R_X86_64_GLOB_DAT  __gmon_start__
+-00000000002008e8 R_X86_64_GLOB_DAT  _Jv_RegisterClasses
+-00000000002008f0 R_X86_64_GLOB_DAT  __cxa_finalize
+-0000000000200910 R_X86_64_JUMP_SLOT  __cxa_finalize
++0000000000200a08 R_X86_64_RELATIVE  *ABS*+0x0000000000200a08
++00000000002009d0 R_X86_64_GLOB_DAT  __gmon_start__
++00000000002009d8 R_X86_64_GLOB_DAT  _Jv_RegisterClasses
++00000000002009e0 R_X86_64_GLOB_DAT  __cxa_finalize
++0000000000200a00 R_X86_64_JUMP_SLOT  __cxa_finalize
+ 
+ 
+diff --git a/scripts/t/200_Dpkg_Shlibs/objdump.tags-i386 b/scripts/t/200_Dpkg_Shlibs/objdump.tags-i386
+index 5231b8e..314cc05 100644
+--- a/scripts/t/200_Dpkg_Shlibs/objdump.tags-i386
++++ b/scripts/t/200_Dpkg_Shlibs/objdump.tags-i386
+@@ -2,41 +2,41 @@
+ libsymboltags.so.1:     file format elf64-x86-64
+ architecture: i386:x86-64, flags 0x00000150:
+ HAS_SYMS, DYNAMIC, D_PAGED
+-start address 0x0000000000000530
++start address 0x00000000000005d0
+ 
+ Program Header:
+     LOAD off    0x0000000000000000 vaddr 0x0000000000000000 paddr 0x0000000000000000 align 2**21
+-         filesz 0x0000000000000774 memsz 0x0000000000000774 flags r-x
+-    LOAD off    0x0000000000000778 vaddr 0x0000000000200778 paddr 0x0000000000200778 align 2**21
++         filesz 0x0000000000000874 memsz 0x0000000000000874 flags r-x
++    LOAD off    0x0000000000000878 vaddr 0x0000000000200878 paddr 0x0000000000200878 align 2**21
+          filesz 0x0000000000000208 memsz 0x0000000000000218 flags rw-
+- DYNAMIC off    0x00000000000007a0 vaddr 0x00000000002007a0 paddr 0x00000000002007a0 align 2**3
++ DYNAMIC off    0x00000000000008a0 vaddr 0x00000000002008a0 paddr 0x00000000002008a0 align 2**3
+          filesz 0x00000000000001a0 memsz 0x00000000000001a0 flags rw-
+-EH_FRAME off    0x00000000000006a8 vaddr 0x00000000000006a8 paddr 0x00000000000006a8 align 2**2
+-         filesz 0x0000000000000034 memsz 0x0000000000000034 flags r--
++EH_FRAME off    0x0000000000000768 vaddr 0x0000000000000768 paddr 0x0000000000000768 align 2**2
++         filesz 0x0000000000000044 memsz 0x0000000000000044 flags r--
+    STACK off    0x0000000000000000 vaddr 0x0000000000000000 paddr 0x0000000000000000 align 2**3
+          filesz 0x0000000000000000 memsz 0x0000000000000000 flags rw-
+ 
+ Dynamic Section:
+   NEEDED               libc.so.6
+   SONAME               libsymboltags.so.1
+-  INIT                 0x00000000000004f8
+-  FINI                 0x0000000000000698
++  INIT                 0x0000000000000590
++  FINI                 0x0000000000000758
+   HASH                 0x0000000000000158
+-  GNU_HASH             0x00000000000001a8
+-  STRTAB               0x0000000000000360
+-  SYMTAB               0x00000000000001f8
+-  STRSZ                0x00000000000000e0
++  GNU_HASH             0x00000000000001b0
++  STRTAB               0x00000000000003a8
++  SYMTAB               0x0000000000000210
++  STRSZ                0x000000000000012a
+   SYMENT               0x0000000000000018
+-  PLTGOT               0x0000000000200958
++  PLTGOT               0x0000000000200a58
+   PLTRELSZ             0x0000000000000018
+   PLTREL               0x0000000000000007
+-  JMPREL               0x00000000000004e0
+-  RELA                 0x0000000000000480
++  JMPREL               0x0000000000000578
++  RELA                 0x0000000000000518
+   RELASZ               0x0000000000000060
+   RELAENT              0x0000000000000018
+-  VERNEED              0x0000000000000460
++  VERNEED              0x00000000000004f8
+   VERNEEDNUM           0x0000000000000001
+-  VERSYM               0x0000000000000440
++  VERSYM               0x00000000000004d2
+   RELACOUNT            0x0000000000000001
+ 
+ Version References:
+@@ -44,28 +44,30 @@ Version References:
+     0x09691a75 0x00 02 GLIBC_2.2.5
+ 
+ DYNAMIC SYMBOL TABLE:
+-00000000000004f8 l    d  .init	0000000000000000              .init
++0000000000000590 l    d  .init	0000000000000000              .init
+ 0000000000000000  w   D  *UND*	0000000000000000              __gmon_start__
+ 0000000000000000  w   D  *UND*	0000000000000000              _Jv_RegisterClasses
+ 0000000000000000  w   DF *UND*	0000000000000000  GLIBC_2.2.5 __cxa_finalize
+-0000000000000640 g    DF .text	0000000000000002  Base        symbol41_i386_and_optional
+-0000000000200990 g    D  *ABS*	0000000000000000  Base        _end
+-0000000000200980 g    D  *ABS*	0000000000000000  Base        _edata
+-0000000000000620 g    DF .text	0000000000000002  Base        symbol22_i386
+-0000000000200980 g    D  *ABS*	0000000000000000  Base        __bss_start
+-00000000000004f8 g    DF .init	0000000000000000  Base        _init
+-0000000000000698 g    DF .fini	0000000000000000  Base        _fini
+-0000000000000610 g    DF .text	0000000000000002  Base        symbol11_optional
+-0000000000000630 g    DF .text	0000000000000002  Base        symbol31_randomtag
+-0000000000000650 g    DF .text	0000000000000002  Base        symbol51_untagged
++00000000000006e0 g    DF .text	0000000000000002  Base        symbol41_i386_and_optional
++0000000000200a90 g    D  *ABS*	0000000000000000  Base        _end
++0000000000000710 g    DF .text	0000000000000002  Base        symbol62_all_substs_1i_2j_3x_4y_5d_68_752
++0000000000200a80 g    D  *ABS*	0000000000000000  Base        _edata
++0000000000000700 g    DF .text	0000000000000002  Base        symbol61_subst_this_is_size_t_j
++00000000000006c0 g    DF .text	0000000000000002  Base        symbol22_i386
++0000000000200a80 g    D  *ABS*	0000000000000000  Base        __bss_start
++0000000000000590 g    DF .init	0000000000000000  Base        _init
++0000000000000758 g    DF .fini	0000000000000000  Base        _fini
++00000000000006b0 g    DF .text	0000000000000002  Base        symbol11_optional
++00000000000006d0 g    DF .text	0000000000000002  Base        symbol31_randomtag
++00000000000006f0 g    DF .text	0000000000000002  Base        symbol51_untagged
+ 
+ 
+ DYNAMIC RELOCATION RECORDS
+ OFFSET           TYPE              VALUE 
+-0000000000200978 R_X86_64_RELATIVE  *ABS*+0x0000000000200978
+-0000000000200940 R_X86_64_GLOB_DAT  __gmon_start__
+-0000000000200948 R_X86_64_GLOB_DAT  _Jv_RegisterClasses
+-0000000000200950 R_X86_64_GLOB_DAT  __cxa_finalize
+-0000000000200970 R_X86_64_JUMP_SLOT  __cxa_finalize
++0000000000200a78 R_X86_64_RELATIVE  *ABS*+0x0000000000200a78
++0000000000200a40 R_X86_64_GLOB_DAT  __gmon_start__
++0000000000200a48 R_X86_64_GLOB_DAT  _Jv_RegisterClasses
++0000000000200a50 R_X86_64_GLOB_DAT  __cxa_finalize
++0000000000200a70 R_X86_64_JUMP_SLOT  __cxa_finalize
+ 
+ 
+diff --git a/scripts/t/200_Dpkg_Shlibs/substtest.cpp b/scripts/t/200_Dpkg_Shlibs/substtest.cpp
+new file mode 100644
+index 0000000..040823a
+--- /dev/null
++++ b/scripts/t/200_Dpkg_Shlibs/substtest.cpp
+@@ -0,0 +1,35 @@
++// ssize_t and size_t
++#include <sys/types.h>
++
++// int64_t and uint64_t
++#include <stdint.h>
++
++// qreal needs libqt4-dev dependency. Skipping the test.
++
++class SubstTestA {
++public:
++    void test_ssize_t(ssize_t p);
++    void test_size_t(size_t p);
++    void test_int64_t(int64_t p);
++    void test_uint64_t(uint64_t p);
++    virtual void test_vt();
++};
++
++class SubstTestB {
++public:
++    virtual void test_vt();
++};
++
++class SubstTestC : public SubstTestA, SubstTestB {
++public:
++    void test_vt();
++};
++
++void SubstTestA::test_ssize_t(ssize_t p) {}
++void SubstTestA::test_size_t(size_t p) {}
++void SubstTestA::test_int64_t(int64_t p) {}
++void SubstTestA::test_uint64_t(uint64_t p) {}
++
++void SubstTestA::test_vt() {}
++void SubstTestB::test_vt() {}
++void SubstTestC::test_vt() {}
+diff --git a/scripts/t/200_Dpkg_Shlibs/symbols.substtest b/scripts/t/200_Dpkg_Shlibs/symbols.substtest
+new file mode 100644
+index 0000000..52e59e5
+--- /dev/null
++++ b/scripts/t/200_Dpkg_Shlibs/symbols.substtest
+@@ -0,0 +1,18 @@
++libsubsttest.so.1 libsubsttest1 #MINVER#
++ (subst)_ZN10SubstTestA11test_size_tE{size_t}@Base 1.0
++ (subst)_ZN10SubstTestA12test_int64_tE{int64_t}@Base 1.0
++ (subst)_ZN10SubstTestA12test_ssize_tE{ssize_t}@Base 1.0
++ (subst)_ZN10SubstTestA13test_uint64_tE{uint64_t}@Base 1.0
++ _ZN10SubstTestA7test_vtEv@Base 1.0
++ _ZN10SubstTestB7test_vtEv@Base 1.0
++ _ZN10SubstTestC7test_vtEv@Base 1.0
++ _ZTI10SubstTestA@Base 1.0
++ _ZTI10SubstTestB@Base 1.0
++ _ZTI10SubstTestC@Base 1.0
++ _ZTS10SubstTestA@Base 1.0
++ _ZTS10SubstTestB@Base 1.0
++ _ZTS10SubstTestC@Base 1.0
++ _ZTV10SubstTestA@Base 1.0
++ _ZTV10SubstTestB@Base 1.0
++ _ZTV10SubstTestC@Base 1.0
++ (subst)_ZThn{vt=4}_N10SubstTestC7test_vtEv@Base 1.0
+diff --git a/scripts/t/200_Dpkg_Shlibs/symbols.tags.in b/scripts/t/200_Dpkg_Shlibs/symbols.tags.in
+index 9a9c12e..487f3ad 100644
+--- a/scripts/t/200_Dpkg_Shlibs/symbols.tags.in
++++ b/scripts/t/200_Dpkg_Shlibs/symbols.tags.in
+@@ -6,3 +6,5 @@ libsymboltags.so.1 libsymboltags1 #MINVER#
+  (randomtagname=randomtagvalue)symbol31_randomtag@Base 3.1
+  (arch=i386|optional=reason)"symbol41_i386_and_optional@Base" 4.1
+  symbol51_untagged@Base 5.1
++ (subst)"symbol61_subst_this_is_size_t_{size_t}@Base" 6.1
++ (subst)symbol62_all_substs_1{ssize_t}_2{size_t}_3{int64_t}_4{uint64_t}_5{qreal}_6{vt=8}_7{vt=52}@Base 6.2
+diff --git a/scripts/t/200_Dpkg_Shlibs/symboltags.c b/scripts/t/200_Dpkg_Shlibs/symboltags.c
+index a4d1de0..3aa5d49 100644
+--- a/scripts/t/200_Dpkg_Shlibs/symboltags.c
++++ b/scripts/t/200_Dpkg_Shlibs/symboltags.c
+@@ -21,3 +21,17 @@ void symbol41_i386_and_optional() {}
+ #endif
+ 
+ void symbol51_untagged() {}
++
++// (subst)symbol61_subst_this_is_size_t_{size_t}@Base
++#ifdef AMD64
++void symbol61_subst_this_is_size_t_m() {}
++#else
++void symbol61_subst_this_is_size_t_j() {}
++#endif
++
++// (subst)symbol62_all_substs_1{ssize_t}_2{size_t}_3{int64_t}_4{uint64_t}_5{qreal}_6{vt=8}_7{vt=52}@Base
++#ifdef AMD64
++void symbol62_all_substs_1l_2m_3l_4m_5d_616_7104() {}
++#else
++void symbol62_all_substs_1i_2j_3x_4y_5d_68_752() {}
++#endif
+-- 
+1.6.3.1
+

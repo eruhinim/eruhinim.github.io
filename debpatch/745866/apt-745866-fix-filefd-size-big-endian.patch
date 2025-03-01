@@ -1,0 +1,55 @@
+commit 05eab8afb692823f86c53c4c2ced783a7c185cf9
+Author: Adam Conrad <adconrad@debian.org>
+Date:   Sat Apr 26 10:24:40 2014 +0200
+
+    fix FileFd::Size bitswap on big-endian architectures
+    
+    gzip only gives us 32bit of size, storing it in a 64bit container and
+    doing a 32bit flip on it has therefore unintended results.
+    So we just go with a exact size container and let the flipping be handled
+    by eglibc provided le32toh removing our #ifdef machinery.
+    
+    Closes: 745866
+
+diff --git a/apt-pkg/contrib/fileutl.cc b/apt-pkg/contrib/fileutl.cc
+index de73a7f..b77c7ff 100644
+--- a/apt-pkg/contrib/fileutl.cc
++++ b/apt-pkg/contrib/fileutl.cc
+@@ -58,13 +58,10 @@
+ 	#include <bzlib.h>
+ #endif
+ #ifdef HAVE_LZMA
+-	#include <stdint.h>
+ 	#include <lzma.h>
+ #endif
+-
+-#ifdef WORDS_BIGENDIAN
+-#include <inttypes.h>
+-#endif
++#include <endian.h>
++#include <stdint.h>
+ 
+ #include <apti18n.h>
+ 									/*}}}*/
+@@ -1880,19 +1877,13 @@ unsigned long long FileFd::Size()
+ 	  FileFdErrno("lseek","Unable to seek to end of gzipped file");
+ 	  return 0;
+        }
+-       size = 0;
++       uint32_t size = 0;
+        if (read(iFd, &size, 4) != 4)
+        {
+ 	  FileFdErrno("read","Unable to read original size of gzipped file");
+ 	  return 0;
+        }
+-
+-#ifdef WORDS_BIGENDIAN
+-       uint32_t tmp_size = size;
+-       uint8_t const * const p = (uint8_t const * const) &tmp_size;
+-       tmp_size = (p[3] << 24) | (p[2] << 16) | (p[1] << 8) | p[0];
+-       size = tmp_size;
+-#endif
++       size = le32toh(size);
+ 
+        if (lseek(iFd, oldPos, SEEK_SET) < 0)
+        {

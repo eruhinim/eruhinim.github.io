@@ -1,0 +1,358 @@
+From 4325fb4becab6745f38b437b37661515f45d12f8 Mon Sep 17 00:00:00 2001
+From: =?iso8859-2?q?Ji=F8=ED=20Pale=E8ek?= <jpalecek@web.de>
+Date: Sun, 27 Oct 2019 18:55:06 +0100
+Subject: [PATCH 1/4] Don't pass before-build stage when first patch doesn't
+ apply with format V3-quilt
+
+ When the first patch doesn't apply, dpkg-source --before-build
+ silently continues. This behaviour is meant to allow it to continue
+ when the patch series has been applied, however, it also makes it
+ very prone to breakage. Particularly, if your first patch is applied
+ but the rest isn't (eg. has been applied upstream), or if it is
+ defective, you are going to get a package built with Debian patches
+ silently ignored. V2 doesn't offer any such functionality, so IMHO
+ the cleanest behaviour is to rely on quilt and fail if patches
+ according to its bookkeeping should be applied but can't.
+
+ However, to support the workflows where the package source directory
+ contains applied patches, but no .pc directory, this patch retains
+ the old behavior when we lack it.
+
+ This patch also contains test for these scenarios.
+---
+ scripts/Dpkg/Source/Package/V3/Quilt.pm   |   8 +-
+ scripts/t/dpkg_source.t                   | 208 +++++++++++++++++++++-
+ scripts/t/dpkg_source/testsuite_3.1-1.dsc |  19 ++
+ 3 files changed, 223 insertions(+), 12 deletions(-)
+ create mode 100644 scripts/t/dpkg_source/testsuite_3.1-1.dsc
+
+diff --git a/scripts/Dpkg/Source/Package/V3/Quilt.pm b/scripts/Dpkg/Source/Package/V3/Quilt.pm
+index 45237d26a..647a7f018 100644
+--- a/scripts/Dpkg/Source/Package/V3/Quilt.pm
++++ b/scripts/Dpkg/Source/Package/V3/Quilt.pm
+@@ -235,9 +235,11 @@ sub check_patches_applied {
+     my $next = $quilt->next();
+     return if not defined $next;
+
+-    my $first_patch = File::Spec->catfile($dir, 'debian', 'patches', $next);
+-    my $patch_obj = Dpkg::Source::Patch->new(filename => $first_patch);
+-    return unless $patch_obj->check_apply($dir, fatal_dupes => 1);
++    unless (-d $quilt->get_db_dir) {
++        my $first_patch = File::Spec->catfile($dir, 'debian', 'patches', $next);
++        my $patch_obj = Dpkg::Source::Patch->new(filename => $first_patch);
++        return unless $patch_obj->check_apply($dir, fatal_dupes => 1);
++    }
+
+     $self->apply_patches($dir, usage => 'preparation', verbose => 1);
+ }
+diff --git a/scripts/t/dpkg_source.t b/scripts/t/dpkg_source.t
+index a0c343846..424f0627a 100644
+--- a/scripts/t/dpkg_source.t
++++ b/scripts/t/dpkg_source.t
+@@ -16,12 +16,12 @@
+ use strict;
+ use warnings;
+
+-use Test::More tests => 8;
++use Test::More tests => 46;
+ use Test::Dpkg qw(:paths test_neutralize_checksums);
+
+ use File::Spec::Functions qw(rel2abs);
+ use File::Compare;
+-use File::Path qw(make_path);
++use File::Path qw(make_path remove_tree);
+
+ use Dpkg::IPC;
+ use Dpkg::Substvars;
+@@ -30,6 +30,9 @@ my $srcdir = rel2abs($ENV{srcdir} || '.');
+ my $datadir = "$srcdir/t/dpkg_source";
+ my $tmpdir = test_get_temp_path();
+
++# because $tmpdir is still the same, clear it not to be distracted by leftovers
++remove_tree glob "$tmpdir/*";
++
+ $ENV{$_} = rel2abs($ENV{$_}) foreach qw(DPKG_DATADIR DPKG_ORIGINS_DIR);
+
+ # Delete variables that can affect the tests.
+@@ -37,12 +40,8 @@ delete $ENV{SOURCE_DATE_EPOCH};
+
+ chdir $tmpdir;
+
+-my $tmpl_format = <<'TMPL_FORMAT';
+-3.0 (native)
+-TMPL_FORMAT
+-
+ my $tmpl_changelog = <<'TMPL_CHANGELOG';
+-${source-name} (${source-version}) ${suite}; urgency=${urgency}
++${source-name} (${debian-version}) ${suite}; urgency=${urgency}
+
+   * Test package.
+
+@@ -86,6 +85,14 @@ sub gen_source
+ {
+     my (%options) = @_;
+
++    my $tmpl_format;
++    if (defined $options{'debian-version'}) {
++        $tmpl_format="3.0 (quilt)\n";
++    } else {
++        $tmpl_format="3.0 (native)\n";
++        $options{'debian-version'} = $options{'source-version'} // $default_substvars{'source-version'};
++    }
++
+     my $substvars = Dpkg::Substvars->new();
+     foreach my $var ((keys %default_substvars, keys %options)) {
+         my $value = $options{$var} // $default_substvars{$var};
+@@ -99,6 +106,9 @@ sub gen_source
+
+     make_path("$dirname/debian/source");
+
++    spawn(exec => [ 'tar', '-caf', "${source}_$version.orig.tar.gz", "$dirname"],
++          wait_child => 1);
++
+     gen_from_tmpl("$dirname/debian/source/format", $tmpl_format, $substvars);
+     gen_from_tmpl("$dirname/debian/changelog", $tmpl_changelog, $substvars);
+     gen_from_tmpl("$dirname/debian/control", $tmpl_control, $substvars);
+@@ -108,6 +118,17 @@ sub gen_source
+         gen_from_tmpl("$dirname/debian/tests/control", $options{'control-test'}, $substvars);
+     }
+
++    if (defined $options{'patches'}) {
++        make_path("$dirname/debian/patches");
++        my $i = 0;
++        my $series = '';
++        for my $content (@{$options{'patches'}}) {
++            gen_from_tmpl("$dirname/debian/patches/patch$i.patch", $content, $substvars);
++            $series .= "patch$i.patch\n";
++            $i++;
++        }
++        gen_from_tmpl("$dirname/debian/patches/series", $series, $substvars);
++    }
+     return $dirname;
+ }
+
+@@ -130,8 +151,13 @@ sub test_diff
+ sub test_build_source
+ {
+     my ($name) = shift;
++    my $basename = shift;
+     my $stderr;
+
++    $basename //= $name =~ tr/-/_/r;
++    # we're checking that this file is built
++    unlink "$basename.dsc";
++
+     spawn(exec => [ $ENV{PERL}, "$srcdir/dpkg-source.pl", '--build', $name ],
+           error_to_string => \$stderr,
+           wait_child => 1, nocheck => 1);
+@@ -139,11 +165,96 @@ sub test_build_source
+     ok($? == 0, 'dpkg-source --build succeeded');
+     diag($stderr) unless $? == 0;
+
+-    my $basename = $name =~ tr/-/_/r;
+-
+     test_diff("$basename.dsc");
+ }
+
++sub test_build_source_fail
++{
++    my ($name) = shift;
++    my ($stdout, $stderr);
++
++    spawn(exec => [ $ENV{PERL}, "$srcdir/dpkg-source.pl", '--build', $name ],
++          wait_child => 1, nocheck => 1, to_string => \$stdout, error_to_string => \$stderr);
++
++    ok($? != 0, 'dpkg-source --build failed');
++}
++
++sub test_xxx_build
++{
++    my $dirname = shift;
++    my $oper = shift;
++    my $expect_files = shift // [];
++    my $nexpect_files = shift // [];
++    my $stderr;
++
++    spawn(exec => [ $ENV{PERL}, "$srcdir/dpkg-source.pl", "--$oper-build", $dirname ],
++          error_to_string => \$stderr,
++          wait_child => 1, nocheck => 1);
++
++    ok($? == 0, "dpkg-source --$oper-build succeeded");
++    diag($stderr) unless $? == 0;
++
++    for (@$expect_files) {
++        ok(-f, "file $_ exists after --$oper-build");
++    }
++    for (@$nexpect_files) {
++        ok(! -f, "file $_ doesn't exists after --$oper-build");
++    }
++}
++
++sub test_before_build
++{
++    test_xxx_build(shift, 'before', @_);
++}
++
++sub test_after_build
++{
++    test_xxx_build(shift, 'after', @_);
++}
++
++sub test_before_build_fail
++{
++    my $dirname = shift;
++    my ($stdout, $stderr);
++
++    spawn(exec => [ $ENV{PERL}, "$srcdir/dpkg-source.pl", '--before-build', $dirname ],
++          wait_child => 1, nocheck => 1, to_string => \$stdout, error_to_string => \$stderr);
++
++    ok($? != 0, 'dpkg-source --before-build fails');
++}
++
++sub apply_patches
++{
++    my $dirname = shift;
++    my $max_count = shift;
++    my $stderr;
++
++    open my $fh, '<', "$dirname/debian/patches/series" or die;
++    my $i = 0;
++    while(defined (my $line = <$fh>) and (not defined $max_count or $i < $max_count)) {
++        chomp $line;
++        spawn(exec => [ '/usr/bin/patch', '-p1' ],
++              from_file => "debian/patches/$line",
++              chdir => $dirname,
++              error_to_string => \$stderr,
++              wait_child => 1, nocheck => 1);
++        ok($? == 0, 'patch succeeded');
++        diag($stderr) unless $? == 0;
++        $i++;
++    }
++    close $fh;
++}
++
++sub run_quilt
++{
++    my $dirname = shift;
++    my $stderr;
++    spawn(exec => [ 'quilt', @_ ], chdir => $dirname, error_to_string => \$stderr, wait_child => 1, nocheck => 1, env=> {'QUILT_PATCHES' => 'debian/patches'});
++
++    ok($? == 0, "quilt @_ succeeded");
++    diag($stderr) unless $? == 0;
++}
++
+ my $dirname;
+
+ $dirname = gen_source('source-name' => 'testsuite',
+@@ -166,4 +277,83 @@ $dirname = gen_source('source-name' => 'testsuite',
+                       'source-version' => 3);
+ test_build_source($dirname);
+
++$dirname = gen_source('source-name' => 'testsuite',
++                      'source-version' => 3.1,
++                      'debian-version' => '3.1-1',
++                      'patches' => [
++                          "--- /dev/null\n+++ b/a_file\n@@ -0,0 +1,1 @@\n+File A\n",
++                          "--- /dev/null\n+++ b/b_file\n@@ -0,0 +1,1 @@\n+File B\n",
++                      ],
++                      'control-test' => '',
++    );
++my $basename = $dirname =~ tr/-/_/r;
++$basename .= '-1';
++
++diag 'Testing build with 1 patch applied and no .pc';
++apply_patches($dirname, 1);
++ TODO: {
++     local $TODO = 'This should probably fail with unrepresentable changes, but doesn\'t';
++     test_build_source_fail($dirname);
++}
++
++my @files=("$dirname/a_file", "$dirname/b_file");
++unlink(@files);
++remove_tree("$dirname/.pc");
++
++diag 'Testing build with all patches applied and no .pc';
++apply_patches($dirname);
++test_build_source($dirname, $basename);
++
++unlink(@files);
++remove_tree("$dirname/.pc");
++
++diag 'Testing before-build with no patches applied and no .pc';
++test_before_build($dirname, \@files);
++test_after_build($dirname, [], \@files);
++unlink(@files);
++
++diag 'Testing before-build with all patches applied and no .pc';
++apply_patches($dirname);
++test_before_build($dirname, \@files);
++test_after_build($dirname, \@files);
++diag 'Testing before-build with all patches applied and no .pc, 2nd round';
++test_before_build($dirname, \@files);
++test_after_build($dirname, \@files);
++ok(! -e "$dirname/.pc", '.pc directory doesn\'t exist after build');
++
++unlink(@files);
++remove_tree("$dirname/.pc");
++
++diag 'Testing before-build with defective patch and no .pc';
++open my $fh, '>', "$dirname/a_file" or die;
++print { $fh } 'file now exists!';
++close $fh;
++ SKIP: {
++     skip 'this error cannot be detected while supporting package directories without .pc', 1;
++     test_before_build_fail($dirname);
++}
++unlink(@files);
++remove_tree("$dirname/.pc");
++
++ SKIP:{
++     spawn(exec => [ 'which', 'quilt' ], wait_child => 1, nocheck => 1);
++     skip 'quilt is not available', 10 unless $? == 0;
++
++     remove_tree("$dirname/.pc");
++
++     diag 'Testing before-build with 1 patch applied and quilt';
++     run_quilt($dirname,'init');
++     run_quilt($dirname, 'push');
++     test_before_build($dirname, \@files);
++     test_after_build($dirname, [], \@files);
++
++     # after-build removes .pc, bastard
++     run_quilt($dirname, 'init');
++
++     diag 'Testing before-build with a defective patch and quilt';
++     open my $fh, '>', "$dirname/a_file" or die;
++     print { $fh } 'file now exists!';
++     close $fh;
++     test_before_build_fail($dirname);
++}
+ 1;
+diff --git a/scripts/t/dpkg_source/testsuite_3.1-1.dsc b/scripts/t/dpkg_source/testsuite_3.1-1.dsc
+new file mode 100644
+index 000000000..48f7375f6
+--- /dev/null
++++ b/scripts/t/dpkg_source/testsuite_3.1-1.dsc
+@@ -0,0 +1,19 @@
++Format: 3.0 (quilt)
++Source: testsuite
++Binary: test-binary
++Architecture: all
++Version: 3.1-1
++Maintainer: Dpkg Developers <debian-dpkg@lists.debian.org>
++Standards-Version: 1.0
++Testsuite: autopkgtest
++Package-List:
++ test-binary deb test optional arch=all
++Checksums-Sha1:
++ 0000000000000000000000000000000000000000 0 testsuite_3.1.orig.tar.gz
++ 0000000000000000000000000000000000000000 0 testsuite_3.1-1.debian.tar.xz
++Checksums-Sha256:
++ 0000000000000000000000000000000000000000000000000000000000000000 0 testsuite_3.1.orig.tar.gz
++ 0000000000000000000000000000000000000000000000000000000000000000 0 testsuite_3.1-1.debian.tar.xz
++Files:
++ 00000000000000000000000000000000 0 testsuite_3.1.orig.tar.gz
++ 00000000000000000000000000000000 0 testsuite_3.1-1.debian.tar.xz
+--
+2.26.2
+

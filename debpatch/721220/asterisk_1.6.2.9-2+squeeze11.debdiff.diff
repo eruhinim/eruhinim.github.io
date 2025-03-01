@@ -1,0 +1,478 @@
+diff -Nru asterisk-1.6.2.9/debian/changelog asterisk-1.6.2.9/debian/changelog
+--- asterisk-1.6.2.9/debian/changelog	2013-01-14 20:23:12.000000000 +0200
++++ asterisk-1.6.2.9/debian/changelog	2013-08-29 18:47:16.000000000 +0300
+@@ -1,3 +1,14 @@
++asterisk (1:1.6.2.9-2+squeeze11) stable-security; urgency=high
++
++  * Patch AST-2013-003 (CVE-2013-2264): Prevent username disclosure in
++    SIP channel driver (Closes: #704114).
++  * Patch AST-2013-004 (CVE-2013-5641): chan_sip: crash in ACK to SDP
++  * Patch AST-2013-005 (CVE-2013-5642): Fix crash caused by invalid SDP
++    (Closes: #721220).
++  * Update VCS links.
++
++ -- Tzafrir Cohen <tzafrir@debian.org>  Thu, 04 Apr 2013 00:55:43 +0300
++
+ asterisk (1:1.6.2.9-2+squeeze10) stable-security; urgency=high
+ 
+   * Fix typo in patch AST-2012-015 (Closes: #698112, #698118).
+diff -Nru asterisk-1.6.2.9/debian/control asterisk-1.6.2.9/debian/control
+--- asterisk-1.6.2.9/debian/control	2011-12-15 14:52:28.000000000 +0200
++++ asterisk-1.6.2.9/debian/control	2013-08-29 18:46:37.000000000 +0300
+@@ -46,8 +46,8 @@
+  zlib1g-dev
+ Standards-Version: 3.9.0
+ Homepage: http://www.asterisk.org/
+-Vcs-Svn: svn://svn.debian.org/pkg-voip/asterisk/trunk/
+-Vcs-Browser: http://svn.debian.org/wsvn/pkg-voip/asterisk/?op=log
++Vcs-Git: git://anonscm.debian.org/pkg-voip/asterisk.git
++Vcs-Browser: http://anonscm.debian.org/gitweb/?p=pkg-voip/asterisk.git
+ 
+ Package: asterisk
+ Architecture: any
+diff -Nru asterisk-1.6.2.9/debian/patches/AST-2013-003 asterisk-1.6.2.9/debian/patches/AST-2013-003
+--- asterisk-1.6.2.9/debian/patches/AST-2013-003	1970-01-01 02:00:00.000000000 +0200
++++ asterisk-1.6.2.9/debian/patches/AST-2013-003	2013-08-29 18:46:37.000000000 +0300
+@@ -0,0 +1,319 @@
++From: Matthew Jordan <mjordan@digium.com>
++Date: Wed, 27 Mar 2013 14:53:13 +0000
++Subject: AST-2013-003: Prevent username disclosure in SIP channel driver
++Bug: https://issues.asterisk.org/jira/browse/ASTERISK-21013
++Origin: http://svnview.digium.com/svn/asterisk?view=rev&rev=383981
++CVE: CVE-2013-2264
++
++When authenticating a SIP request with alwaysauthreject enabled, allowguest
++disabled, and autocreatepeer disabled, Asterisk discloses whether a user
++exists for INVITE, SUBSCRIBE, and REGISTER transactions in multiple ways. The
++information is disclosed when:
++ * A "407 Proxy Authentication Required" response is sent instead of a
++   "401 Unauthorized" response
++ * The presence or absence of additional tags occurs at the end of "403
++   Forbidden" (such as "(Bad Auth)")
++ * A "401 Unauthorized" response is sent instead of "403 Forbidden" response
++   after a retransmission
++ * Retransmission are sent when a matching peer did not exist, but not when a
++   matching peer did exist.
++
++This patch resolves these various vectors by ensuring that the responses sent
++in all scenarios is the same, regardless of the presence of a matching peer.
++
++This issue was reported by Walter Doekes, OSSO B.V. A substantial portion of
++the testing and the solution to this problem was done by Walter as well - a
++huge thanks to his tireless efforts in finding all the ways in which this
++setting didn't work, providing automated tests, and working with Kinsey on
++getting this fixed.
++
++Patch adapted for branch 1.6.2 .
++
++See Also: http://downloads.asterisk.org/pub/security/AST-2013-003.html
++
++---
++ channels/chan_sip.c        |  128 ++++++++++++++++++++++++++++----------------
++ channels/sip/include/sip.h |    1 -
++ 2 files changed, 83 insertions(+), 46 deletions(-)
++
++--- a/channels/chan_sip.c
+++++ b/channels/chan_sip.c
++@@ -692,7 +692,6 @@ enum check_auth_result {
++ 	AUTH_SECRET_FAILED = -1,
++ 	AUTH_USERNAME_MISMATCH = -2,
++ 	AUTH_NOT_FOUND = -3,	/*!< returned by register_verify */
++-	AUTH_FAKE_AUTH = -4,
++ 	AUTH_UNKNOWN_DOMAIN = -5,
++ 	AUTH_PEER_NOT_DYNAMIC = -6,
++ 	AUTH_ACL_FAILED = -7,
++@@ -2029,6 +2028,11 @@ static struct ao2_container *threadt;
++ struct ao2_container *peers;
++ struct ao2_container *peers_by_ip;
++ 
+++/*! \brief  A bogus peer, to be used when authentication should fail */
+++static struct sip_peer *bogus_peer;
+++/*! \brief  We can recognise the bogus peer by this invalid MD5 hash */
+++#define BOGUS_PEER_MD5SECRET "intentionally_invalid_md5_string"
+++
++ /*! \brief  The register list: Other SIP proxies we register with and place calls to */
++ static struct ast_register_list {
++ 	ASTOBJ_CONTAINER_COMPONENTS(struct sip_registry);
++@@ -2293,7 +2297,7 @@ static int transmit_response_with_unsupp
++ static int transmit_response_with_auth(struct sip_pvt *p, const char *msg, const struct sip_request *req, const char *rand, enum xmittype reliable, const char *header, int stale);
++ static int transmit_provisional_response(struct sip_pvt *p, const char *msg, const struct sip_request *req, int with_sdp);
++ static int transmit_response_with_allow(struct sip_pvt *p, const char *msg, const struct sip_request *req, enum xmittype reliable);
++-static void transmit_fake_auth_response(struct sip_pvt *p, int sipmethod, struct sip_request *req, enum xmittype reliable);
+++static void transmit_fake_auth_response(struct sip_pvt *p, struct sip_request *req, enum xmittype reliable);
++ static int transmit_request(struct sip_pvt *p, int sipmethod, int inc, enum xmittype reliable, int newbranch);
++ static int transmit_request_with_auth(struct sip_pvt *p, int sipmethod, int seqno, enum xmittype reliable, int newbranch);
++ static int transmit_invite(struct sip_pvt *p, int sipmethod, int sdp, int init);
++@@ -12791,6 +12795,7 @@ static enum check_auth_result check_auth
++ 	char a1_hash[256];
++ 	char resp_hash[256]="";
++ 	char *c;
+++	int is_bogus_peer = 0;
++ 	int  wrongnonce = FALSE;
++ 	int  good_response;
++ 	const char *usednonce = p->randdata;
++@@ -12881,8 +12886,14 @@ static enum check_auth_result check_auth
++ 			strsep(&c, " ,");
++ 	}
++ 
+++	/* We cannot rely on the bogus_peer having a bad md5 value. Someone could
+++	 * use it to construct valid auth. */
+++	if (md5secret && strcmp(md5secret, BOGUS_PEER_MD5SECRET) == 0) {
+++		is_bogus_peer = 1;
+++	}
+++
++ 	/* Verify that digest username matches  the username we auth as */
++-	if (strcmp(username, keys[K_USER].s)) {
+++	if (strcmp(username, keys[K_USER].s) && !is_bogus_peer) {
++ 		ast_log(LOG_WARNING, "username mismatch, have <%s>, digest has <%s>\n",
++ 			username, keys[K_USER].s);
++ 		/* Oops, we're trying something here */
++@@ -12920,7 +12931,8 @@ static enum check_auth_result check_auth
++ 	}
++ 
++ 	good_response = keys[K_RESP].s &&
++-			!strncasecmp(keys[K_RESP].s, resp_hash, strlen(resp_hash));
+++			!strncasecmp(keys[K_RESP].s, resp_hash, strlen(resp_hash)) &&
+++			!is_bogus_peer; /* lastly, check that the peer isn't the fake peer */
++ 	if (wrongnonce) {
++ 		if (good_response) {
++ 			if (sipdebug)
++@@ -13031,7 +13043,7 @@ static int cb_extensionstate(char *conte
++ /*! \brief Send a fake 401 Unauthorized response when the administrator
++   wants to hide the names of local devices  from fishers
++  */
++-static void transmit_fake_auth_response(struct sip_pvt *p, int sipmethod, struct sip_request *req, enum xmittype reliable)
+++static void transmit_fake_auth_response(struct sip_pvt *p, struct sip_request *req, enum xmittype reliable)
++ {
++ 	/* We have to emulate EXACTLY what we'd get with a good peer
++ 	 * and a bad password, or else we leak information. */
++@@ -13070,13 +13082,13 @@ static void transmit_fake_auth_response(
++ 	}
++ 
++ 	if (!(buf = ast_str_thread_get(&check_auth_buf, CHECK_AUTH_BUF_INITLEN))) {
++-		transmit_response(p, "403 Forbidden (Bad auth)", &p->initreq);
+++		__transmit_response(p, "403 Forbidden", &p->initreq, reliable);
++ 		return;
++ 	}
++ 
++ 	/* Make a copy of the response and parse it */
++ 	if (ast_str_set(&buf, 0, "%s", authtoken) == AST_DYNSTR_BUILD_FAILED) {
++-		transmit_response(p, "403 Forbidden (Bad auth)", &p->initreq);
+++		__transmit_response(p, "403 Forbidden", &p->initreq, reliable);
++ 		return;
++ 	}
++ 
++@@ -13114,7 +13126,7 @@ static void transmit_fake_auth_response(
++ 		/* Schedule auto destroy in 32 seconds */
++ 		sip_scheddestroy(p, DEFAULT_TRANS_TIMEOUT);
++ 	} else {
++-		transmit_response(p, "403 Forbidden (Bad auth)", &p->initreq);
+++		__transmit_response(p, "403 Forbidden", &p->initreq, reliable);
++ 	}
++ }
++ 
++@@ -13211,6 +13223,14 @@ static enum check_auth_result register_v
++ 		}
++ 	}
++ 	peer = find_peer(name, NULL, TRUE, FINDPEERS, FALSE, 0);
+++
+++	/* If we don't want username disclosure, use the bogus_peer when a user
+++	 * is not found. */
+++	if (!peer && sip_cfg.alwaysauthreject && !sip_cfg.autocreatepeer) {
+++		peer = bogus_peer;
+++		ref_peer(peer, "register_verify: ref the bogus_peer");
+++	}
+++
++ 	if (!(peer && ast_apply_ha(peer->ha, sin))) {
++ 		/* Peer fails ACL check */
++ 		if (peer) {
++@@ -13295,7 +13315,7 @@ static enum check_auth_result register_v
++ 			switch (parse_register_contact(p, peer, req)) {
++ 			case PARSE_REGISTER_DENIED:
++ 				ast_log(LOG_WARNING, "Registration denied because of contact ACL\n");
++-				transmit_response_with_date(p, "403 Forbidden (ACL)", req);
+++				transmit_response_with_date(p, "403 Forbidden", req);
++ 				peer->lastmsgssent = -1;
++ 				res = 0;
++ 				break;
++@@ -13337,7 +13357,7 @@ static enum check_auth_result register_v
++ 		switch (res) {
++ 		case AUTH_SECRET_FAILED:
++ 			/* Wrong password in authentication. Go away, don't try again until you fixed it */
++-			transmit_response(p, "403 Forbidden (Bad auth)", &p->initreq);
+++			transmit_response(p, "403 Forbidden", &p->initreq);
++ 			if (global_authfailureevents)
++ 				manager_event(EVENT_FLAG_SYSTEM, "PeerStatus", "ChannelType: SIP\r\nPeer: SIP/%s\r\nPeerStatus: Rejected\r\nCause: AUTH_SECRET_FAILED\r\nAddress: %s\r\nPort: %d\r\n", 
++ 					name, ast_inet_ntoa(sin->sin_addr), ntohs(sin->sin_port));
++@@ -13351,7 +13371,7 @@ static enum check_auth_result register_v
++ 		case AUTH_PEER_NOT_DYNAMIC:
++ 		case AUTH_ACL_FAILED:
++ 			if (sip_cfg.alwaysauthreject) {
++-				transmit_fake_auth_response(p, SIP_REGISTER, &p->initreq, XMIT_UNRELIABLE);
+++				transmit_fake_auth_response(p, &p->initreq, XMIT_UNRELIABLE);
++ 				if (global_authfailureevents) {
++ 					manager_event(EVENT_FLAG_SYSTEM, "PeerStatus", "ChannelType: SIP\r\nPeer: SIP/%s\r\nPeerStatus: Rejected\r\nCause: %s\r\nAddress: %s\r\nPort: %d\r\n",
++ 						name, res == AUTH_PEER_NOT_DYNAMIC ? "AUTH_PEER_NOT_DYNAMIC" : "URI_NOT_FOUND",
++@@ -14188,14 +14208,26 @@ static enum check_auth_result check_peer
++ 		if (debug)
++ 			ast_verbose("No matching peer for '%s' from '%s:%d'\n",
++ 				of, ast_inet_ntoa(p->recv.sin_addr), ntohs(p->recv.sin_port));
++-		return AUTH_DONT_KNOW;
+++
+++		/* If you don't mind, we can return 404s for devices that do
+++		 * not exist: username disclosure. If we allow guests, there
+++		 * is no way around that. */
+++		if (sip_cfg.allowguest || !sip_cfg.alwaysauthreject) {
+++			return AUTH_DONT_KNOW;
+++		}
+++
+++		/* If you do mind, we use a peer that will never authenticate.
+++		 * This ensures that we follow the same code path as regular
+++		 * auth: less chance for username disclosure. */
+++		peer = bogus_peer;
+++		ref_peer(peer, "ref_peer: check_peer_ok: must ref bogus_peer so unreffing it does not fail");
++ 	}
++ 	if (!ast_apply_ha(peer->ha, sin)) {
++ 		ast_debug(2, "Found peer '%s' for '%s', but fails host access\n", peer->name, of);
++ 		unref_peer(peer, "unref_peer: check_peer_ok: from find_peer call, early return of AUTH_ACL_FAILED");
++ 		return AUTH_ACL_FAILED;
++ 	}
++-	if (debug)
+++	if (debug && peer != bogus_peer)
++ 		ast_verbose("Found peer '%s' for '%s' from %s:%d\n",
++ 			peer->name, of, ast_inet_ntoa(p->recv.sin_addr), ntohs(p->recv.sin_port));
++ 
++@@ -14424,9 +14456,7 @@ static enum check_auth_result check_user
++ 	if (sip_cfg.allowguest) {
++ 		replace_cid(p, rpid_num, calleridname);
++ 		res = AUTH_SUCCESSFUL;
++-	} else if (sip_cfg.alwaysauthreject)
++-		res = AUTH_FAKE_AUTH; /* reject with fake authorization request */
++-	else
+++	} else
++ 		res = AUTH_SECRET_FAILED; /* we don't want any guests, authentication will fail */
++ 
++ 
++@@ -20237,13 +20267,8 @@ static int handle_request_invite(struct
++ 			goto request_invite_cleanup;
++ 		}
++ 		if (res < 0) { /* Something failed in authentication */
++-			if (res == AUTH_FAKE_AUTH) {
++-				ast_log(LOG_NOTICE, "Sending fake auth rejection for device %s\n", get_header(req, "From"));
++-				transmit_fake_auth_response(p, SIP_INVITE, req, XMIT_RELIABLE);
++-			} else {
++-				ast_log(LOG_NOTICE, "Failed to authenticate device %s\n", get_header(req, "From"));
++-				transmit_response_reliable(p, "403 Forbidden", req);
++-			}
+++			ast_log(LOG_NOTICE, "Failed to authenticate device %s\n", get_header(req, "From"));
+++			transmit_response_reliable(p, "403 Forbidden", req);
++ 			p->invitestate = INV_COMPLETED;
++ 			sip_scheddestroy(p, DEFAULT_TRANS_TIMEOUT);
++ 			ast_string_field_set(p, theirtag, NULL);
++@@ -21526,18 +21551,13 @@ static int handle_request_subscribe(stru
++ 		event = (char *) eventheader;		/* XXX is this legal ? */
++ 
++ 	/* Handle authentication */
++-	res = check_user_full(p, req, SIP_SUBSCRIBE, e, 0, sin, &authpeer);
+++	res = check_user_full(p, req, SIP_SUBSCRIBE, e, XMIT_UNRELIABLE, sin, &authpeer);
++ 	/* if an authentication response was sent, we are done here */
++ 	if (res == AUTH_CHALLENGE_SENT)	/* authpeer = NULL here */
++ 		return 0;
++ 	if (res < 0) {
++-		if (res == AUTH_FAKE_AUTH) {
++-			ast_log(LOG_NOTICE, "Sending fake auth rejection for device %s\n", get_header(req, "From"));
++-			transmit_fake_auth_response(p, SIP_SUBSCRIBE, req, XMIT_UNRELIABLE);
++-		} else {
++-			ast_log(LOG_NOTICE, "Failed to authenticate device %s for SUBSCRIBE\n", get_header(req, "From"));
++-			transmit_response_reliable(p, "403 Forbidden", req);
++-		}
+++		ast_log(LOG_NOTICE, "Failed to authenticate device %s\n", get_header(req, "From"));
+++		transmit_response(p, "403 Forbidden", req);
++ 		pvt_set_needdestroy(p, "authentication failed");
++ 		return 0;
++ 	}
++@@ -25998,6 +26018,7 @@ static int sip_do_reload(enum channelrel
++ /*! \brief Force reload of module from cli */
++ static char *sip_reload(struct ast_cli_entry *e, int cmd, struct ast_cli_args *a)
++ {
+++	static struct sip_peer *tmp_peer, *new_peer;
++ 	
++ 	switch (cmd) {
++ 	case CLI_INIT:
++@@ -26020,6 +26041,18 @@ static char *sip_reload(struct ast_cli_e
++ 	ast_mutex_unlock(&sip_reload_lock);
++ 	restart_monitor();
++ 
+++	tmp_peer = bogus_peer;
+++	/* Create new bogus peer possibly with new global settings. */
+++	if ((new_peer = temp_peer("(bogus_peer)"))) {
+++		ast_string_field_set(new_peer, md5secret, BOGUS_PEER_MD5SECRET);
+++		ast_clear_flag(&new_peer->flags[0], SIP_INSECURE);
+++		bogus_peer = new_peer;
+++		ao2_t_ref(tmp_peer, -1, "unref the old bogus_peer during reload");
+++	} else {
+++		ast_log(LOG_ERROR, "Could not update the fake authentication peer.\n");
+++		/* You probably have bigger (memory?) issues to worry about though.. */
+++	}
+++
++ 	return CLI_SUCCESS;
++ }
++ 
++@@ -26088,6 +26121,17 @@ static int load_module(void)
++ 	if(reload_config(sip_reloadreason))	/* Load the configuration from sip.conf */
++ 		return AST_MODULE_LOAD_DECLINE;
++ 
+++	/* Initialize bogus peer. Can be done first after reload_config() */
+++	if (!(bogus_peer = temp_peer("(bogus_peer)"))) {
+++		ast_log(LOG_ERROR, "Unable to create bogus_peer for authentication\n");
+++		io_context_destroy(io);
+++		sched_context_destroy(sched);
+++		return AST_MODULE_LOAD_FAILURE;
+++	}
+++	/* Make sure the auth will always fail. */
+++	ast_string_field_set(bogus_peer, md5secret, BOGUS_PEER_MD5SECRET);
+++	ast_clear_flag(&bogus_peer->flags[0], SIP_INSECURE);
+++
++ 	/* Prepare the version that does not require DTMF BEGIN frames.
++ 	 * We need to use tricks such as memcpy and casts because the variable
++ 	 * has const fields.
++@@ -26098,6 +26142,7 @@ static int load_module(void)
++ 	/* Make sure we can register our sip channel type */
++ 	if (ast_channel_register(&sip_tech)) {
++ 		ast_log(LOG_ERROR, "Unable to register channel type 'SIP'\n");
+++		ao2_t_ref(bogus_peer, -1, "unref the bogus_peer");
++ 		io_context_destroy(io);
++ 		sched_context_destroy(sched);
++ 		return AST_MODULE_LOAD_FAILURE;
++@@ -26259,6 +26304,8 @@ static int unload_module(void)
++ 	ASTOBJ_CONTAINER_DESTROYALL(&submwil, sip_subscribe_mwi_destroy);
++ 	ASTOBJ_CONTAINER_DESTROY(&submwil);
++ 
+++	ao2_t_ref(bogus_peer, -1, "unref the bogus_peer");
+++
++ 	ao2_t_ref(peers, -1, "unref the peers table");
++ 	ao2_t_ref(peers_by_ip, -1, "unref the peers_by_ip table");
++ 	ao2_t_ref(dialogs, -1, "unref the dialogs table");
+diff -Nru asterisk-1.6.2.9/debian/patches/AST-2013-004 asterisk-1.6.2.9/debian/patches/AST-2013-004
+--- asterisk-1.6.2.9/debian/patches/AST-2013-004	1970-01-01 02:00:00.000000000 +0200
++++ asterisk-1.6.2.9/debian/patches/AST-2013-004	2013-08-29 17:53:00.000000000 +0300
+@@ -0,0 +1,39 @@
++From: Matthew Jordan <mjordan@digium.com>
++Date: Tue, 27 Aug 2013 15:49:14 +0000
++Subject: AST-2013-004: Fix crash when handling ACK on dialog that has no channel
++Bug: https://issues.asterisk.org/jira/browse/ASTERISK-21064
++CVE: CVE-2013-5641
++Origin: http://svnview.digium.com/svn/asterisk?view=rev&rev=397710
++
++A remote exploitable crash vulnerability exists in the SIP channel driver if an
++ACK with SDP is received after the channel has been terminated. The handling
++code incorrectly assumed that the channel would always be present.
++
++This patch adds a check such that the SDP will only be parsed and applied if
++Asterisk has a channel present that is associated with the dialog.
++
++Note that the patch being applied was modified only slightly from the patch
++provided by Walter Doekes of OSSO B.V.
++
++Reported by: Colin Cuthbertson
++Tested by: wdoekes, Colin Cutherbertson
++patches:
++  issueA21064_fix.patch uploaded by wdoekes (License 5674)
++
++Backported to 1.8.13.1
++
++---
++ channels/chan_sip.c |    2 +-
++ 1 file changed, 1 insertion(+), 1 deletion(-)
++
++--- a/channels/chan_sip.c
+++++ b/channels/chan_sip.c
++@@ -25292,7 +25292,7 @@ static int handle_incoming(struct sip_pv
++ 			p->invitestate = INV_TERMINATED;
++ 			p->pendinginvite = 0;
++ 			acked = __sip_ack(p, seqno, 1 /* response */, 0);
++-			if (find_sdp(req)) {
+++			if (p->owner && find_sdp(req)) {
++ 				if (process_sdp(p, req, SDP_T38_NONE))
++ 					return -1;
++ 			}
+diff -Nru asterisk-1.6.2.9/debian/patches/AST-2013-005 asterisk-1.6.2.9/debian/patches/AST-2013-005
+--- asterisk-1.6.2.9/debian/patches/AST-2013-005	1970-01-01 02:00:00.000000000 +0200
++++ asterisk-1.6.2.9/debian/patches/AST-2013-005	2013-08-29 18:46:37.000000000 +0300
+@@ -0,0 +1,66 @@
++From: Matthew Jordan <mjordan@digium.com>
++Date: Tue, 27 Aug 2013 17:55:59 +0000
++Subject: AST-2013-005: Fix crash caused by invalid SDP
++Bug: https://issues.asterisk.org/jira/browse/ASTERISK-22007
++CVE: CVE-2013-5642
++Origin: http://svnview.digium.com/svn/asterisk?view=rev&rev=397756
++
++If the SIP channel driver processes an invalid SDP that defines media
++descriptions before connection information, it may attempt to reference
++the socket address information even though that information has not yet
++been set. This will cause a crash.
++
++This patch adds checks when handling the various media descriptions that
++ensures the media descriptions are handled only if we have connection
++information suitable for that media.
++
++Thanks to Walter Doekes, OSSO B.V., for reporting, testing, and providing
++the solution to this problem.
++
++Reported by: wdoekes
++Tested by: wdoekes
++patches:
++  issueA22007_sdp_without_c_death.patch uploaded by wdoekes (License 5674)
++
++---
++ channels/chan_sip.c |    8 ++++----
++ 1 file changed, 4 insertions(+), 4 deletions(-)
++
++--- a/channels/chan_sip.c
+++++ b/channels/chan_sip.c
++@@ -8624,7 +8624,7 @@ static int process_sdp(struct sip_pvt *p
++ 
++ 	/* Setup audio address and port */
++ 	if (p->rtp) {
++-		if (portno > 0) {
+++		if (hp && portno > 0) {
++ 			sin.sin_family = AF_INET;
++ 			sin.sin_port = htons(portno);
++ 			memcpy(&sin.sin_addr, hp->h_addr, sizeof(sin.sin_addr));
++@@ -8663,7 +8663,7 @@ static int process_sdp(struct sip_pvt *p
++ 
++ 	/* Setup video address and port */
++ 	if (p->vrtp) {
++-		if (vportno > 0) {
+++		if (vhp && vportno > 0) {
++ 			vsin.sin_family = AF_INET;
++ 			vsin.sin_port = htons(vportno);
++ 			memcpy(&vsin.sin_addr, vhp->h_addr, sizeof(vsin.sin_addr));
++@@ -8680,7 +8680,7 @@ static int process_sdp(struct sip_pvt *p
++ 
++ 	/* Setup text address and port */
++ 	if (p->trtp) {
++-		if (tportno > 0) {
+++		if (thp && tportno > 0) {
++ 			tsin.sin_family = AF_INET;
++ 			tsin.sin_port = htons(tportno);
++ 			memcpy(&tsin.sin_addr, thp->h_addr, sizeof(tsin.sin_addr));
++@@ -8702,7 +8702,7 @@ static int process_sdp(struct sip_pvt *p
++ 	}
++ 	/* Setup image address and port */
++ 	if (p->udptl) {
++-		if (udptlportno > 0) {
+++		if (ihp && udptlportno > 0) {
++ 			isin.sin_family = AF_INET;
++ 			isin.sin_port = htons(udptlportno);
++ 			if (ast_test_flag(&p->flags[0], SIP_NAT) && ast_test_flag(&p->flags[1], SIP_PAGE2_UDPTL_DESTINATION)) {
+diff -Nru asterisk-1.6.2.9/debian/patches/series asterisk-1.6.2.9/debian/patches/series
+--- asterisk-1.6.2.9/debian/patches/series	2013-01-04 07:54:36.000000000 +0200
++++ asterisk-1.6.2.9/debian/patches/series	2013-08-29 18:46:37.000000000 +0300
+@@ -61,3 +61,6 @@
+ AST-2012-013
+ AST-2012-014
+ AST-2012-015
++AST-2013-003
++AST-2013-004
++AST-2013-005

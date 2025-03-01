@@ -1,0 +1,559 @@
+From 6d3fc48e24cbe9134713b2ec024ab989335c80bb Mon Sep 17 00:00:00 2001
+From: josch <j.schauer@email.de>
+Date: Tue, 11 Feb 2014 12:36:23 +0100
+Subject: [PATCH 2/2] Support for build-profiles through APT::Build-Profiles
+
+ - understand the syntax specified in
+   https://wiki.debian.org/BuildProfileSpec and implemented in dpkg
+   1.17.2
+ - replace default arguments of ParseDepends with manual overloads
+ - add the -P or --build-profiles option to apt-get source and build-dep
+ - understand DEB_BUILD_PROFILES
+ - add test cases for the new syntax
+ - add apt-get and apt.conf documentation
+---
+ apt-pkg/deb/deblistparser.cc     | 98 ++++++++++++++++++++++++++++++++++++++--
+ apt-pkg/deb/deblistparser.h      | 14 ++++--
+ apt-pkg/deb/debsrcrecords.cc     |  2 +-
+ apt-private/private-cmndline.cc  |  2 +
+ cmdline/apt-get.cc               | 39 ++++++++++++++++
+ doc/apt-get.8.xml                | 13 ++++++
+ doc/apt.conf.5.xml               | 11 +++++
+ test/libapt/parsedepends_test.cc | 88 +++++++++++++++++++++++++-----------
+ 8 files changed, 233 insertions(+), 34 deletions(-)
+
+diff --git a/apt-pkg/deb/deblistparser.cc b/apt-pkg/deb/deblistparser.cc
+index 68d544e..a402154 100644
+--- a/apt-pkg/deb/deblistparser.cc
++++ b/apt-pkg/deb/deblistparser.cc
+@@ -475,9 +475,21 @@ const char *debListParser::ConvertRelation(const char *I,unsigned int &Op)
+ /* This parses the dependency elements out of a standard string in place,
+    bit by bit. */
+ const char *debListParser::ParseDepends(const char *Start,const char *Stop,
++               std::string &Package,std::string &Ver,unsigned int &Op)
++   { return ParseDepends(Start, Stop, Package, Ver, Op, false, true, false); }
++const char *debListParser::ParseDepends(const char *Start,const char *Stop,
++               std::string &Package,std::string &Ver,unsigned int &Op,
++               bool const &ParseArchFlags)
++   { return ParseDepends(Start, Stop, Package, Ver, Op, ParseArchFlags, true, false); }
++const char *debListParser::ParseDepends(const char *Start,const char *Stop,
++               std::string &Package,std::string &Ver,unsigned int &Op,
++               bool const &ParseArchFlags, bool const &StripMultiArch)
++   { return ParseDepends(Start, Stop, Package, Ver, Op, ParseArchFlags, StripMultiArch, false); }
++const char *debListParser::ParseDepends(const char *Start,const char *Stop,
+ 					string &Package,string &Ver,
+ 					unsigned int &Op, bool const &ParseArchFlags,
+-					bool const &StripMultiArch)
++					bool const &StripMultiArch,
++					bool const &ParseRestrictionsList)
+ {
+    // Strip off leading space
+    for (;Start != Stop && isspace(*Start) != 0; Start++);
+@@ -485,7 +497,8 @@ const char *debListParser::ParseDepends(const char *Start,const char *Stop,
+    // Parse off the package name
+    const char *I = Start;
+    for (;I != Stop && isspace(*I) == 0 && *I != '(' && *I != ')' &&
+-	*I != ',' && *I != '|' && *I != '[' && *I != ']'; I++);
++	*I != ',' && *I != '|' && *I != '[' && *I != ']' &&
++	*I != '<' && *I != '>'; I++);
+    
+    // Malformed, no '('
+    if (I != Stop && *I == ')')
+@@ -602,6 +615,85 @@ const char *debListParser::ParseDepends(const char *Start,const char *Stop,
+       for (;I != Stop && isspace(*I) != 0; I++);
+    }
+ 
++   if (ParseRestrictionsList == true)
++   {
++       std::vector<string> profiles;
++
++       // accept non-list order as setting
++       string const nonListProfiles = _config->Find("APT::Build-Profiles", "");
++
++       if (nonListProfiles.empty() == false)
++           profiles.push_back(nonListProfiles);
++
++       std::vector<string> p = _config->FindVector("APT::Build-Profiles");
++       profiles.insert(profiles.end(), p.begin(), p.end());
++
++       // Parse a restrictions list
++       if (I != Stop && *I == '<')
++       {
++           ++I;
++           // malformed
++           if (unlikely(I == Stop))
++               return 0;
++
++           const char *End = I;
++           bool Found = false;
++           bool NegRestriction = false;
++           while (I != Stop)
++           {
++               // look for whitespace or ending '>'
++               for (;End != Stop && !isspace(*End) && *End != '>'; ++End);
++
++               if (unlikely(End == Stop))
++                   return 0;
++
++               if (*I == '!')
++               {
++                   NegRestriction = true;
++                   ++I;
++               }
++
++               std::string restriction(I, End);
++
++               std::string prefix = "profile.";
++               // only support for "profile" prefix, ignore others
++               if (restriction.size() > prefix.size() &&
++                       restriction.substr(0, prefix.size()) == prefix)
++               {
++                   // get the name of the profile
++                   restriction = restriction.substr(prefix.size());
++
++                   if (restriction.empty() == false && profiles.empty() == false &&
++                          std::find(profiles.begin(), profiles.end(), restriction) != profiles.end())
++                   {
++                       Found = true;
++                       if (I[-1] != '!')
++                           NegRestriction = false;
++                       // we found a match, so fast-forward to the end of the wildcards
++                       for (; End != Stop && *End != '>'; ++End);
++                   }
++               }
++
++               if (*End++ == '>') {
++                   I = End;
++                   break;
++               }
++
++               I = End;
++               for (;I != Stop && isspace(*I) != 0; I++);
++           }
++
++           if (NegRestriction == true)
++               Found = !Found;
++
++           if (Found == false)
++               Package = ""; /* not for this restriction */
++       }
++
++       // Skip whitespace
++       for (;I != Stop && isspace(*I) != 0; I++);
++   }
++
+    if (I != Stop && *I == '|')
+       Op |= pkgCache::Dep::Or;
+    
+@@ -635,7 +727,7 @@ bool debListParser::ParseDepends(pkgCache::VerIterator &Ver,
+       string Version;
+       unsigned int Op;
+ 
+-      Start = ParseDepends(Start, Stop, Package, Version, Op, false, false);
++      Start = ParseDepends(Start, Stop, Package, Version, Op, false, false, false);
+       if (Start == 0)
+ 	 return _error->Error("Problem parsing dependency %s",Tag);
+       size_t const found = Package.rfind(':');
+diff --git a/apt-pkg/deb/deblistparser.h b/apt-pkg/deb/deblistparser.h
+index 386d291..8e63c86 100644
+--- a/apt-pkg/deb/deblistparser.h
++++ b/apt-pkg/deb/deblistparser.h
+@@ -72,11 +72,19 @@ class debListParser : public pkgCacheGenerator::ListParser
+    
+    bool LoadReleaseInfo(pkgCache::PkgFileIterator &FileI,FileFd &File,
+ 			std::string section);
+-   
++
++   static const char *ParseDepends(const char *Start,const char *Stop,
++                std::string &Package,std::string &Ver,unsigned int &Op);
++   static const char *ParseDepends(const char *Start,const char *Stop,
++                std::string &Package,std::string &Ver,unsigned int &Op,
++                bool const &ParseArchFlags);
++   static const char *ParseDepends(const char *Start,const char *Stop,
++                std::string &Package,std::string &Ver,unsigned int &Op,
++                bool const &ParseArchFlags, bool const &StripMultiArch);
+    static const char *ParseDepends(const char *Start,const char *Stop,
+ 			    std::string &Package,std::string &Ver,unsigned int &Op,
+-			    bool const &ParseArchFlags = false,
+-			    bool const &StripMultiArch = true);
++			    bool const &ParseArchFlags, bool const &StripMultiArch,
++			    bool const &ParseRestrictionsList);
+    static const char *ConvertRelation(const char *I,unsigned int &Op);
+ 
+    debListParser(FileFd *File, std::string const &Arch = "");
+diff --git a/apt-pkg/deb/debsrcrecords.cc b/apt-pkg/deb/debsrcrecords.cc
+index ce55ccd..90182b4 100644
+--- a/apt-pkg/deb/debsrcrecords.cc
++++ b/apt-pkg/deb/debsrcrecords.cc
+@@ -90,7 +90,7 @@ bool debSrcRecordParser::BuildDepends(std::vector<pkgSrcRecords::Parser::BuildDe
+       while (1)
+       {
+          Start = debListParser::ParseDepends(Start, Stop, 
+-		     rec.Package,rec.Version,rec.Op,true, StripMultiArch);
++		     rec.Package,rec.Version,rec.Op,true,StripMultiArch,true);
+ 	 
+          if (Start == 0) 
+             return _error->Error("Problem parsing dependency: %s", fields[I]);
+diff --git a/apt-private/private-cmndline.cc b/apt-private/private-cmndline.cc
+index ef7d65f..de41c81 100644
+--- a/apt-private/private-cmndline.cc
++++ b/apt-private/private-cmndline.cc
+@@ -141,6 +141,7 @@ bool addArgumentsAPTGet(std::vector<CommandLine::Args> &Args, char const * const
+    {
+       addArg('b', "compile", "APT::Get::Compile", 0);
+       addArg('b', "build", "APT::Get::Compile", 0);
++      addArg('P', "build-profiles", "APT::Build-Profiles", CommandLine::Vector);
+       addArg(0, "diff-only", "APT::Get::Diff-Only", 0);
+       addArg(0, "debian-only", "APT::Get::Diff-Only", 0);
+       addArg(0, "tar-only", "APT::Get::Tar-Only", 0);
+@@ -149,6 +150,7 @@ bool addArgumentsAPTGet(std::vector<CommandLine::Args> &Args, char const * const
+    else if (CmdMatches("build-dep"))
+    {
+       addArg('a', "host-architecture", "APT::Get::Host-Architecture", CommandLine::HasArg);
++      addArg('P', "build-profiles", "APT::Build-Profiles", CommandLine::Vector);
+       addArg(0, "purge", "APT::Get::Purge", 0);
+       addArg(0, "solver", "APT::Solver", CommandLine::HasArg);
+       // this has no effect *but* sbuild is using it (see LP: #1255806)
+diff --git a/cmdline/apt-get.cc b/cmdline/apt-get.cc
+index 6bff6e7..2c38513 100644
+--- a/cmdline/apt-get.cc
++++ b/cmdline/apt-get.cc
+@@ -970,6 +970,24 @@ bool DoSource(CommandLine &CmdL)
+ 	    string buildopts = _config->Find("APT::Get::Host-Architecture");
+ 	    if (buildopts.empty() == false)
+ 	       buildopts = "-a" + buildopts + " ";
++
++            // get all active build profiles
++            vector<string> profiles;
++            string const nonListProfiles = _config->Find("APT::Build-Profiles", "");
++            if (nonListProfiles.empty() == false)
++                profiles.push_back(nonListProfiles);
++            std::vector<string> p = _config->FindVector("APT::Build-Profiles");
++            profiles.insert(profiles.end(), p.begin(), p.end());
++            if (profiles.empty() == false) {
++                buildopts.append(" -P");
++                vector<string>::iterator it = profiles.begin();
++                buildopts.append(*it);
++                ++it;
++                for (; it != profiles.end(); ++it)
++                    buildopts = buildopts + "," + *it;
++                buildopts.append(" ");
++            }
++
+ 	    buildopts.append(_config->Find("DPkg::Build-Options","-b -uc"));
+ 
+ 	    // Call dpkg-buildpackage
+@@ -1711,6 +1729,27 @@ int main(int argc,const char *argv[])					/*{{{*/
+    setlocale(LC_ALL,"");
+    textdomain(PACKAGE);
+ 
++   // before reading command line arguments or parsing the config,
++   // check if build profiles are set and if not, check the environment
++   string buildProfileConf = _config->Find("APT::Build-Profiles", "");
++   vector<string> buildProfilesConf = _config->FindVector("APT::Build-Profiles");
++   const char *buildProfilesEnv = getenv("DEB_BUILD_PROFILES");
++   if (buildProfileConf.empty() && buildProfilesConf.empty() && buildProfilesEnv != 0)
++   {
++       const char *next;
++       const char *curr = buildProfilesEnv;
++       while ((next = strchr(curr, ' ')) != NULL) {
++           if (next-curr == 1)
++           {
++               curr = next + 1;
++               continue;
++           }
++           _config->Set("APT::Build-Profiles::", string(curr, next-curr));
++           curr = next + 1;
++       }
++       // process last token
++       _config->Set("APT::Build-Profiles::", string(curr));
++   }
+    // Parse the command line and initialize the package library
+    CommandLine CmdL(Args.data(),_config);
+    if (pkgInitConfig(*_config) == false ||
+diff --git a/doc/apt-get.8.xml b/doc/apt-get.8.xml
+index b97bc26..ea3dab9 100644
+--- a/doc/apt-get.8.xml
++++ b/doc/apt-get.8.xml
+@@ -378,6 +378,19 @@
+      </para></listitem>
+      </varlistentry>
+ 
++     <varlistentry><term><option>-P</option></term>
++                   <term><option>--build-profiles</option></term>
++     <listitem><para>This option controls the activated build profiles for which
++     a source package is built by <command>apt-get source --compile</command> and
++     how build dependencies are satisfied. By default no build profile is active.
++     More than one build profile can be activated at a time by concatenating them
++     with a comma or by giving the option multiple times. This option adds to all
++     build profiles that were already specified by the environment variable
++     <envar>DEB_BUILD_PROFILES</envar>.
++     Configuration Item: <literal>APT::Build-Profiles</literal>
++     </para></listitem>
++     </varlistentry>
++
+      <varlistentry><term><option>-b</option></term><term><option>--compile</option></term>
+                    <term><option>--build</option></term>
+      <listitem><para>Compile source packages after downloading them.
+diff --git a/doc/apt.conf.5.xml b/doc/apt.conf.5.xml
+index bfc43ba..0950388 100644
+--- a/doc/apt.conf.5.xml
++++ b/doc/apt.conf.5.xml
+@@ -177,6 +177,17 @@ DPkg::Pre-Install-Pkgs {"/usr/sbin/dpkg-preconfigure --apt";};
+      </para></listitem>
+      </varlistentry>
+ 
++     <varlistentry><term><option>Build-Profiles</option></term>
++     <listitem><para>
++     All build profiles for which source packages should be built and build
++     dependencies satisfied. By default no build profile is active and this
++     vector is empty. In that case, the content of the
++     <envar>DEB_BUILD_PROFILES</envar> environment variable will be used.
++     Multiple build profile names can be specified in the environment
++     variable by separating them with commas.
++     </para></listitem>
++     </varlistentry>
++
+      <varlistentry><term><option>Default-Release</option></term>
+      <listitem><para>Default release to install packages from if more than one
+      version is available. Contains release name, codename or release version. Examples: 'stable', 'testing',
+diff --git a/test/libapt/parsedepends_test.cc b/test/libapt/parsedepends_test.cc
+index e950162..67dbab8 100644
+--- a/test/libapt/parsedepends_test.cc
++++ b/test/libapt/parsedepends_test.cc
+@@ -10,7 +10,9 @@ int main(int argc,char *argv[]) {
+ 	unsigned int Null = 0;
+ 	bool StripMultiArch = true;
+ 	bool ParseArchFlags = false;
++	bool ParseRestrictionsList = false;
+ 	_config->Set("APT::Architecture","amd64");
++	_config->Set("APT::Build-Profiles","stage1");
+ 
+ 	const char* Depends =
+ 		"debhelper:any (>= 5.0), "
+@@ -27,6 +29,9 @@ int main(int argc,char *argv[]) {
+ 		"os-for-me [ linux-any ], "
+ 		"cpu-not-for-me [ any-armel ], "
+ 		"os-not-for-me [ kfreebsd-any ], "
++		"not-in-stage1 <!profile.stage1>, "
++		"not-in-stage1-or-nodoc <!profile.nodoc !profile.stage1>, "
++		"only-in-stage1 <unknown.unknown profile.stage1>, "
+ 		"overlord-dev:any (= 7.15.3~) | overlord-dev:native (>> 7.15.5), "
+ 	;
+ 
+@@ -39,7 +44,7 @@ test:
+ 	const char* Start = Depends;
+ 	const char* End = Depends + strlen(Depends);
+ 
+-	Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch);
++	Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+ 	if (StripMultiArch == true)
+ 		equals("debhelper", Package);
+ 	else
+@@ -47,7 +52,7 @@ test:
+ 	equals("5.0", Version);
+ 	equals(Null | pkgCache::Dep::GreaterEq, Op);
+ 
+-	Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch);
++	Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+ 	if (StripMultiArch == true)
+ 		equals("libdb-dev", Package);
+ 	else
+@@ -55,7 +60,7 @@ test:
+ 	equals("", Version);
+ 	equals(Null | pkgCache::Dep::NoOp, Op);
+ 
+-	Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch);
++	Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+ 	if (StripMultiArch == true)
+ 		equals("gettext", Package);
+ 	else
+@@ -63,7 +68,7 @@ test:
+ 	equals("0.12", Version);
+ 	equals(Null | pkgCache::Dep::LessEq, Op);
+ 
+-	Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch);
++	Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+ 	if (StripMultiArch == true)
+ 		equals("libcurl4-gnutls-dev", Package);
+ 	else
+@@ -71,104 +76,131 @@ test:
+ 	equals("", Version);
+ 	equals(Null | pkgCache::Dep::Or, Op);
+ 
+-	Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch);
++	Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+ 	equals("libcurl3-gnutls-dev", Package);
+ 	equals("7.15.5", Version);
+ 	equals(Null | pkgCache::Dep::Greater, Op);
+ 
+-	Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch);
++	Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+ 	equals("debiandoc-sgml", Package);
+ 	equals("", Version);
+ 	equals(Null | pkgCache::Dep::NoOp, Op);
+ 
+-	Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch);
++	Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+ 	equals("apt", Package);
+ 	equals("0.7.25", Version);
+ 	equals(Null | pkgCache::Dep::GreaterEq, Op);
+ 
+ 	if (ParseArchFlags == true) {
+-		Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch);
++		Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+ 		equals("", Package); // not-for-me
+ 	} else {
+-		equals(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch));
++		equals(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList));
+ 		Start = strstr(Start, ",");
+ 		Start++;
+ 	}
+ 
+ 	if (ParseArchFlags == true) {
+-		Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch);
++		Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+ 		equals("only-for-me", Package);
+ 		equals("", Version);
+ 		equals(Null | pkgCache::Dep::NoOp, Op);
+ 	} else {
+-		equals(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch));
++		equals(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList));
+ 		Start = strstr(Start, ",");
+ 		Start++;
+ 	}
+ 
+ 	if (ParseArchFlags == true) {
+-		Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch);
++		Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+ 		equals("any-for-me", Package);
+ 		equals("", Version);
+ 		equals(Null | pkgCache::Dep::NoOp, Op);
+ 	} else {
+-		equals(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch));
++		equals(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList));
+ 		Start = strstr(Start, ",");
+ 		Start++;
+ 	}
+ 
+ 	if (ParseArchFlags == true) {
+-		Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch);
++		Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+ 		equals("not-for-darwin", Package);
+ 		equals("", Version);
+ 		equals(Null | pkgCache::Dep::NoOp, Op);
+ 	} else {
+-		equals(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch));
++		equals(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList));
+ 		Start = strstr(Start, ",");
+ 		Start++;
+ 	}
+ 
+ 	if (ParseArchFlags == true) {
+-		Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch);
++		Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+ 		equals("cpu-for-me", Package);
+ 		equals("", Version);
+ 		equals(Null | pkgCache::Dep::NoOp, Op);
+ 	} else {
+-		equals(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch));
++		equals(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList));
+ 		Start = strstr(Start, ",");
+ 		Start++;
+ 	}
+ 
+ 	if (ParseArchFlags == true) {
+-		Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch);
++		Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+ 		equals("os-for-me", Package);
+ 		equals("", Version);
+ 		equals(Null | pkgCache::Dep::NoOp, Op);
+ 	} else {
+-		equals(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch));
++		equals(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList));
+ 		Start = strstr(Start, ",");
+ 		Start++;
+ 	}
+ 
+ 	if (ParseArchFlags == true) {
+-		Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch);
++		Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+ 		equals("", Package); // cpu-not-for-me
+ 	} else {
+-		equals(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch));
++		equals(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList));
+ 		Start = strstr(Start, ",");
+ 		Start++;
+ 	}
+ 
+ 	if (ParseArchFlags == true) {
+-		Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch);
++		Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+ 		equals("", Package); // os-not-for-me
+ 	} else {
+-		equals(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch));
++		equals(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList));
+ 		Start = strstr(Start, ",");
+ 		Start++;
+ 	}
+ 
+-	Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch);
++	if (ParseRestrictionsList == true) {
++		Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
++		equals("", Package); // not-in-stage1
++	} else {
++		equals(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList));
++		Start = strstr(Start, ",");
++		Start++;
++	}
++
++	if (ParseRestrictionsList == true) {
++		Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
++		equals("", Package); // not-in-stage1-or-in-nodoc
++	} else {
++		equals(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList));
++		Start = strstr(Start, ",");
++		Start++;
++	}
++
++	if (ParseRestrictionsList == true) {
++		Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
++		equals("only-in-stage1", Package);
++	} else {
++		equals(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList));
++		Start = strstr(Start, ",");
++		Start++;
++	}
++
++	Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+ 	if (StripMultiArch == true)
+ 		equals("overlord-dev", Package);
+ 	else
+@@ -176,7 +208,7 @@ test:
+ 	equals("7.15.3~", Version);
+ 	equals(Null | pkgCache::Dep::Equals | pkgCache::Dep::Or, Op);
+ 
+-	debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch);
++	debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+ 	if (StripMultiArch == true)
+ 		equals("overlord-dev", Package);
+ 	else
+@@ -185,11 +217,13 @@ test:
+ 	equals(Null | pkgCache::Dep::Greater, Op);
+ 
+ 	if (StripMultiArch == false)
+-		ParseArchFlags = true;
++		if (ParseArchFlags == false)
++			ParseRestrictionsList = !ParseRestrictionsList;
++		ParseArchFlags = !ParseArchFlags;
+ 	StripMultiArch = !StripMultiArch;
+ 
+ 	runner++;
+-	if (runner < 4)
++	if (runner < 8)
+ 		goto test; // this is the prove: tests are really evil ;)
+ 
+ 	return 0;
+-- 
+1.8.5.3
+

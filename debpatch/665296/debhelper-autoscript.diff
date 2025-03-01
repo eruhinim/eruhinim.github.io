@@ -1,0 +1,68 @@
+diff --git a/Debian/Debhelper/Dh_Lib.pm b/Debian/Debhelper/Dh_Lib.pm
+index 10ae69f..5dc3ada 100644
+--- a/Debian/Debhelper/Dh_Lib.pm
++++ b/Debian/Debhelper/Dh_Lib.pm
+@@ -505,11 +505,15 @@ sub pkgfilename {
+ # 2: script to add to
+ # 3: filename of snippet
+ # 4: sed to run on the snippet. Ie, s/#PACKAGE#/$PACKAGE/
++#  or a hashref mapping keys to their replacements.
++#  The key "PACKAGE" will replace "#PACKAGE#" in the snippet
++#  with the value associated with "PACKAGE".
+ sub autoscript {
+ 	my $package=shift;
+ 	my $script=shift;
+ 	my $filename=shift;
+ 	my $sed=shift || "";
++	my $subst;
+ 
+ 	# This is the file we will modify.
+ 	my $outfile="debian/".pkgext($package)."$script.debhelper";
+@@ -528,19 +532,45 @@ sub autoscript {
+ 			error("/usr/share/debhelper/autoscripts/$filename does not exist");
+ 		}
+ 	}
++	if ($sed && ref($sed) eq 'HASH') {
++		if (scalar(keys(%$sed)) == 0) {
++			error("Empty hash passed");
++		}
++		$subst = sub {
++			my ($input, $output) = @_;
++			my $rstr = sprintf("#(%s)#", join("|", keys(%$sed)));
++			my $regex = qr/$rstr/;
++			open(my $in, '<', $input) or error("opening $input: $!");
++			open(my $out, '>>', $output) or error("opening $output: $!");
++			while (my $line = <$in>) {
++				$line =~ s/$regex/$sed->{$1}/eg;
++				print {$out} $line;
++			}
++			close($in);
++			close($out) or error("closing $out: $!");
++		}
++	}
+ 
+ 	if (-e $outfile && ($script eq 'postrm' || $script eq 'prerm')
+ 	   && !compat(5)) {
+ 		# Add fragments to top so they run in reverse order when removing.
+ 		complex_doit("echo \"# Automatically added by ".basename($0)."\"> $outfile.new");
+-		complex_doit("sed \"$sed\" $infile >> $outfile.new");
++		if ($subst) {
++			$subst->($infile, "$outfile.new");
++		} else {
++			complex_doit("sed \"$sed\" $infile >> $outfile.new");
++		}
+ 		complex_doit("echo '# End automatically added section' >> $outfile.new");
+ 		complex_doit("cat $outfile >> $outfile.new");
+ 		complex_doit("mv $outfile.new $outfile");
+ 	}
+ 	else {
+ 		complex_doit("echo \"# Automatically added by ".basename($0)."\">> $outfile");
+-		complex_doit("sed \"$sed\" $infile >> $outfile");
++		if ($subst) {
++			$subst->($infile, $outfile);
++		} else {
++			complex_doit("sed \"$sed\" $infile >> $outfile");
++		}
+ 		complex_doit("echo '# End automatically added section' >> $outfile");
+ 	}
+ }

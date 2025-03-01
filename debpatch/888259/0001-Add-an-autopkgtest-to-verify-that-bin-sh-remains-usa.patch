@@ -1,0 +1,84 @@
+From 392dcca49a8e462cdf377e45ecf906113d943936 Mon Sep 17 00:00:00 2001
+From: Simon McVittie <smcv@debian.org>
+Date: Wed, 24 Jan 2018 11:54:26 +0000
+Subject: [PATCH] Add an autopkgtest to verify that /bin/sh remains usable
+
+Signed-off-by: Simon McVittie <smcv@debian.org>
+---
+ debian/tests/control |  3 +++
+ debian/tests/smoke   | 53 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 56 insertions(+)
+ create mode 100644 debian/tests/control
+ create mode 100755 debian/tests/smoke
+
+diff --git a/debian/tests/control b/debian/tests/control
+new file mode 100644
+index 0000000..dbed742
+--- /dev/null
++++ b/debian/tests/control
+@@ -0,0 +1,3 @@
++Tests: smoke
++Depends: dash, perl
++Restrictions: allow-stderr
+diff --git a/debian/tests/smoke b/debian/tests/smoke
+new file mode 100755
+index 0000000..74f534e
+--- /dev/null
++++ b/debian/tests/smoke
+@@ -0,0 +1,53 @@
++#!/usr/bin/perl
++
++use strict;
++use warnings;
++
++use Cwd qw(getcwd realpath);
++use File::Temp qw();
++use Test::More;
++
++my $srcdir = getcwd;
++
++ok(-x '/bin/sh', '/bin/sh must be executable');
++ok(-x '/bin/sh.distrib', '/bin/sh.distrib should be executable');
++ok(-x '/bin/dash', '/bin/dash must be executable');
++ok(-x '/bin/bash', '/bin/bash must be executable');
++diag(qx(ls -l /bin/sh));
++diag(qx(ls -l /bin/sh.distrib));
++diag(qx(ls -l /bin/dash));
++diag(qx(ls -l /bin/bash));
++
++like(qx(dpkg -L dash),
++     qr{^/bin/sh$}m,
++     'dash must contain a /bin/sh symlink, for debootstrap');
++
++like(realpath('/bin/sh.distrib'), qr{^(?:/usr)?/bin/[bd]ash},
++     '/bin/sh.distrib must be an Essential shell, for debootstrap');
++
++is(qx(echo hello), "hello\n");
++
++my $diverter = qx(dpkg-divert --listpackage /bin/sh);
++
++if ($diverter eq "dash\n") {
++    like(realpath('/bin/sh'), qr{^(?:/usr)?/bin/dash},
++         '/bin/sh diverted by dash');
++}
++elsif ($diverter eq "bash\n") {
++    like(realpath('/bin/sh'), qr{^(?:/usr)?/bin/dash},
++         '/bin/sh diverted by dash pretending to be bash');
++}
++else {
++    is($diverter, "LOCAL\n", '/bin/sh diverted locally');
++}
++
++my $tmpdir = File::Temp->newdir();
++chdir $tmpdir;
++is(system("apt-get download dash"), 0);
++is(system("dpkg-deb -X *.deb ."), 0);
++diag(qx(find . -ls));
++chdir $srcdir;
++like(readlink("$tmpdir/bin/sh"), qr{^(?:/bin/)?[bd]ash$},
++     'dash_*.deb must contain a /bin/sh symlink for debootstrap');
++
++done_testing;
+-- 
+2.15.1
+

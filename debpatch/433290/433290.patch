@@ -1,0 +1,217 @@
+diff --git a/lib/Makefile.am b/lib/Makefile.am
+index 7fd423b..cbe0ca2 100644
+--- a/lib/Makefile.am
++++ b/lib/Makefile.am
+@@ -13,6 +13,7 @@ noinst_LIBRARIES = libdpkg.a
+ libdpkg_a_SOURCES = \
+ 	dpkg.h \
+ 	dpkg-db.h \
++	canonpath.c \
+ 	compat.c \
+ 	compression.c \
+ 	database.c \
+diff --git a/lib/canonpath.c b/lib/canonpath.c
+new file mode 100644
+index 0000000..0d52f3e
+--- /dev/null
++++ b/lib/canonpath.c
+@@ -0,0 +1,107 @@
++/* canonpath.c - function to canonicalize file paths
++ *
++ * Adapted by Raphael Hertzog from pathcanon.c in bash-2.05a.
++ *
++ * Copyright (C) 1993 Free Software Foundation, Inc.
++ * Copyright (C) 2007 Raphael Hertzog.
++ *
++ * This is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2,
++ * or (at your option) any later version.
++ *
++ * This is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public
++ * License along with dpkg; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++/* Canonicalize PATH, and return a new path.  The new path differs from PATH
++ *  in that:
++ *	Multiple `/'s are collapsed to a single `/'.
++ *	Leading `./'s and trailing `/.'s are removed.
++ *	Trailing `/'s are removed.
++ *	Non-leading `../'s and trailing `..'s are handled by removing
++ *	portions of the path.
++ */
++
++#include <config.h>
++
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <stdio.h>
++#include <assert.h>
++
++#define ABSPATH(x)	((x)[0] == '/')
++#define RELPATH(x)	((x)[0] != '/')
++#define DIRSEP		'/'
++#define ISDIRSEP(c)	((c) == '/')
++#define PATHSEP(c)	(ISDIRSEP(c) || (c) == 0)
++
++char *canonpath (char* path) {
++  char stub_char;
++  char *result, *p, *q, *base, *dotdot;
++  int rooted;
++
++  assert(path != NULL);
++
++  /* The result cannot be larger than the input PATH. */
++  result = path;
++
++  if ((rooted = ABSPATH(path))) {
++    stub_char = DIRSEP;
++    base = result + 1;
++  } else {
++    stub_char = '.';
++    base = result;
++  }
++
++  /*
++   * invariants:
++   *	  base points to the portion of the path we want to modify
++   *      p points at beginning of path element we're considering.
++   *      q points just past the last path element we wrote (no slash).
++   *      dotdot points just past the point where .. cannot backtrack
++   *	  any further (no slash).
++   */
++  p = q = dotdot = base;
++
++  while (*p) {
++    if (ISDIRSEP(p[0])) { /* null element */
++      p++;
++    } else if(p[0] == '.' && PATHSEP(p[1])) {	/* . and ./ */
++      p += 1; 	/* don't count the separator in case it is nul */
++    } else if (p[0] == '.' && p[1] == '.' && PATHSEP(p[2])) { /* .. and ../ */
++      p += 2; /* skip `..' */
++      if (q > dotdot) {	/* can backtrack */
++	while (--q > dotdot && ISDIRSEP(*q) == 0)
++	  ;
++      } else if (rooted == 0) {
++	/* /.. is / but ./../ is .. */
++	if (q != base)
++	  *q++ = DIRSEP;
++	*q++ = '.';
++	*q++ = '.';
++	dotdot = q;
++      }
++    } else {	/* real path element */
++      /* add separator if not at start of work portion of result */
++      if (q != base)
++	*q++ = DIRSEP;
++      while (*p && (ISDIRSEP(*p) == 0))
++	*q++ = *p++;
++    }
++  }
++
++  /* Empty string is really ``.'' or `/', depending on what we started with. */
++  if (q == result)
++    *q++ = stub_char;
++  *q = '\0';
++
++  return (result);
++}
+diff --git a/lib/dpkg.h b/lib/dpkg.h
+index ff3ac9a..2030bd7 100644
+--- a/lib/dpkg.h
++++ b/lib/dpkg.h
+@@ -384,6 +384,9 @@ enum compress_type {
+ void decompress_cat(enum compress_type type, int fd_in, int fd_out, char *desc, ...) NONRETURNING;
+ void compress_cat(enum compress_type type, int fd_in, int fd_out, const char *compression, char *desc, ...) NONRETURNING;
+ 
++/*** from canonpath.c ***/
++char *canonpath(char *path);
++
+ /*** from compat.c ***/
+ 
+ #ifndef HAVE_STRERROR
+diff --git a/src/query.c b/src/query.c
+index 1addb08..88c9bd9 100644
+--- a/src/query.c
++++ b/src/query.c
+@@ -35,6 +35,9 @@
+ #include <sys/ioctl.h>
+ #include <sys/termios.h>
+ #include <fcntl.h>
++#include <libgen.h>
++#include <errno.h>
++#include <sys/param.h>
+ 
+ #include <dpkg.h>
+ #include <dpkg-db.h>
+@@ -281,6 +284,8 @@ void searchfiles(const char *const *argv) {
+   while ((thisarg= *argv++) != 0) {
+     found= 0;
+     if (!strchr("*[?/",*thisarg)) {
++      /* If thisarg doesn't start with a character from "*[?/", then
++       * change it in "*<thisarg>*". */
+       varbufreset(&vb);
+       varbufaddc(&vb,'*');
+       varbufaddstr(&vb,thisarg);
+@@ -289,9 +294,44 @@ void searchfiles(const char *const *argv) {
+       thisarg= vb.buf;
+     }
+     if (strcspn(thisarg,"*[?\\") == strlen(thisarg)) {
+-      namenode= findnamenode(thisarg, 0);
+-      found += searchoutput(namenode);
++      /* No special character at the beginning, it should be an
++       * absolute filename. */
++      struct stat stab;
++      int more;
++      do {
++	more= 0;
++        namenode= findnamenode(thisarg, 0);
++        found += searchoutput(namenode);
++        if (!found && !lstat(thisarg, &stab) && S_ISLNK(stab.st_mode)) {
++	  char link_buf[MAXPATHLEN], *temp, *symlink, *link_dir;
++	  ssize_t s = readlink(thisarg, link_buf, MAXPATHLEN - 1);
++	  if (s == -1) { 
++	      fprintf(stderr, _("Failed to read link %s: %s\n"), thisarg, strerror(errno));
++	      more= 0; 
++	      break; 
++	  }
++	  link_buf[s] = '\0';
++	  symlink= strdup(thisarg);
++	  varbufreset(&vb);
++	  if (link_buf[0] == '/') { /* Absolute link */
++	    varbufaddstr(&vb, link_buf);
++	  } else { /* Relative link */
++	    temp= strdup(thisarg);
++	    link_dir= dirname(temp);
++	    varbufaddstr(&vb, link_dir);
++	    free(temp);
++	    varbufaddc(&vb, '/');
++	    varbufaddbuf(&vb, link_buf, s);
++	  }
++	  varbufaddc(&vb, '\0');
++	  thisarg= canonpath(vb.buf);
++	  printf(_("non-packaged symlink to %s: %s\n"), thisarg, symlink);
++	  free(symlink);
++	  more= 1;
++        }
++      } while (more);
+     } else {
++      /* Check all files looking for those matching the pattern */
+       it= iterfilestart();
+       while ((namenode= iterfilenext(it)) != 0) {
+         if (fnmatch(thisarg,namenode->name,0)) continue;
+@@ -307,6 +347,7 @@ void searchfiles(const char *const *argv) {
+       if (ferror(stdout)) werr("stdout");
+     }
+   }
++  varbuffree(&vb);
+   modstatdb_shutdown();
+ }
+ 

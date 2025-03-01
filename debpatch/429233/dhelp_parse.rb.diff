@@ -1,0 +1,61 @@
+--- dhelp_parse_old.rb	2007-10-23 00:39:49.000000000 +0200
++++ dhelp_parse.rb	2007-11-01 11:01:15.000000000 +0100
+@@ -41,7 +41,9 @@
+ class DhelpParseApp < CommandLine::Application
+     DOC_DIR           = '/usr/share/doc'
+     DOC_DIR_REAL      = File.expand_path(DOC_DIR)
++    DOC_DBASE_DIR_REAL = File.expand_path('/var/lib/doc-base/dhelp')
+     DHELP_FILE_REGEXP = Regexp.new("#{DOC_DIR_REAL}/(.+)/\\.dhelp")
++    DHELP_DBASE_FILE_REGEXP = Regexp.new("#{DOC_DBASE_DIR_REAL}/(.+)/\\.dhelp")
+     require 'gettext'
+ 
+     # Exception for invalid dhelp files (wrong path, wrong name, ...)
+@@ -81,7 +83,19 @@
+ 
+ 
+     def get_items(path)
+-        basePath = path.sub(Regexp.new("#{DOC_DIR_REAL}/(.+)/\\.dhelp"), '\1')
++        begin
++           path = Pathname.new(path).realpath.to_s
++        rescue Errno::ENOENT => e
++           raise InvalidDhelpFileError, "#{path}: no such file or directory"
++        end
++        if path =~ DHELP_DBASE_FILE_REGEXP
++        	basePath = path.sub(Regexp.new("#{DHELP_DBASE_FILE_REGEXP}"), '\1')
++        elsif path =~ DHELP_FILE_REGEXP
++        	basePath = path.sub(Regexp.new("#{DHELP_FILE_REGEXP}"), '\1')
++        else
++            raise InvalidDhelpFileError, "Dhelp files must reside in #{DOC_DIR_REAL} and be named .dhelp"
++        end
++
+         begun, descriptionMode = false, false
+         attrs = {}
+         itemList = []
+@@ -139,18 +153,9 @@
+     # Executes the block for each data item in the specified .dhelp file,
+     # passing an ItemData object
+     def each_item(path)
+-        begin
+-           entry = Pathname.new(path).realpath.to_s
+-        rescue Errno::ENOENT => e
+-           raise InvalidDhelpFileError, "#{path}: no such file or directory"
+-        end
+-        if entry =~ DHELP_FILE_REGEXP
+-            get_items(entry).each do |entryData|
++            get_items(path).each do |entryData|
+                 yield entryData
+             end
+-        else
+-            raise InvalidDhelpFileError, "Dhelp files must reside in #{DOC_DIR_REAL} and be named .dhelp"
+-        end
+     end
+ 
+ 
+@@ -268,6 +273,7 @@
+             # Delete and re-create both databases
+             db = Database.open(BDB::CREATE|BDB::TRUNCATE)
+             titleDb = TitleDatabase.open(BDB::CREATE|BDB::TRUNCATE)
++            dhelp_add_rec(DOC_DBASE_DIR_REAL, db, titleDb) if FileTest.directory? DOC_DBASE_DIR_REAL
+             dhelp_add_rec(DOC_DIR_REAL, db, titleDb)
+             titleDb.close
+             db.close

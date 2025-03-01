@@ -1,0 +1,228 @@
+Author: Didier Raboud <odyx@debian.org>
+Date:   Tue Mar 21 21:15:44 2017 +0100
+
+    Use /run instead of /var/run everywhere meaningful:
+    
+    * /run/cups:
+      - in debian/rules; pass --with-rundir=/run/cups
+      - update cups.init
+    * /run/cups/cupsd.pid:
+      - update cups.init
+      - update pidfile.patch
+    * /run/cups/printcap:
+      - in debian/rules; update --with-printcap
+      - update cups-daemon postinst
+    * /run/cups/cups.sock:
+      - update cups postinst and postrm for the lpadmin calls
+      - update the autopkgtest for the lpadmin call
+      - update the libcups2 example script
+      - update the upstart script
+    * /run/cups/certs:
+      - update cups.init
+      - update the upstart script
+    
+    Thanks-To: Russell Coker <russell@coker.com.au>
+    Closes: #858341
+
+diff --git a/debian/client.conf b/debian/client.conf
+index 5081adeaf..b8e1c0149 100644
+--- a/debian/client.conf
++++ b/debian/client.conf
+@@ -34,7 +34,7 @@
+ 
+ #
+ # ServerName: the hostname of your server.  By default CUPS will use the
+-# domain socket /var/run/cups/cups.sock or the value of the CUPS_SERVER
++# domain socket /run/cups/cups.sock or the value of the CUPS_SERVER
+ # environment variable.
+ # ONLY ONE SERVER NAME MAY BE SPECIFIED AT A TIME.  To use
+ # more than one server you must use a local scheduler with browsing
+diff --git a/debian/cups-daemon.cups.init b/debian/cups-daemon.cups.init
+index bfb08d0ad..7b6277524 100644
+--- a/debian/cups-daemon.cups.init
++++ b/debian/cups-daemon.cups.init
+@@ -19,7 +19,7 @@
+ PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+ DAEMON=/usr/sbin/cupsd
+ NAME=cupsd
+-PIDFILE=/var/run/cups/$NAME.pid
++PIDFILE=/run/cups/$NAME.pid
+ DESC="Common Unix Printing System"
+ SCRIPTNAME=/etc/init.d/cups
+ 
+@@ -28,8 +28,8 @@ unset TMPDIR
+ # Exit if the package is not installed
+ test -x $DAEMON || exit 0
+ 
+-mkdir -p /var/run/cups/certs
+-[ -x /sbin/restorecon ] && /sbin/restorecon -R /var/run/cups
++mkdir -p /run/cups/certs
++[ -x /sbin/restorecon ] && /sbin/restorecon -R /run/cups
+ 
+ # Define LSB log_* functions.
+ # Depend on lsb-base (>= 3.2-14) to ensure that this file is present
+diff --git a/debian/cups-daemon.postinst b/debian/cups-daemon.postinst
+index cf09db6bc..e485a7526 100644
+--- a/debian/cups-daemon.postinst
++++ b/debian/cups-daemon.postinst
+@@ -63,7 +63,7 @@ if [ "$1" = configure ]; then
+ 
+ 	printcap_file=`egrep '^Printcap ' /etc/cups/cupsd.conf | awk '{print $2}' | tail -n 1`
+ 	if [ -z "$printcap_file" ]; then
+-	    printcap_file=/var/run/cups/printcap
++	    printcap_file=/run/cups/printcap
+ 	fi
+ 	if [ ! -e /etc/printcap -a -e $printcap_file ]; then
+ 	    ln -s $printcap_file /etc/printcap
+diff --git a/debian/cups-daemon.postrm b/debian/cups-daemon.postrm
+index 42c01b083..25cfca367 100644
+--- a/debian/cups-daemon.postrm
++++ b/debian/cups-daemon.postrm
+@@ -8,7 +8,7 @@ case "$1" in
+     purge)
+ 	rm -rf /var/lib/cups
+ 	rm -rf /var/log/cups
+-	rm -rf /var/run/cups
++	rm -rf /run/cups
+ 	rm -rf /var/cache/cups
+ 	rm -rf /var/spool/cups
+ 	rm -f /etc/cups/ssl/server.crt
+diff --git a/debian/cups.postinst b/debian/cups.postinst
+index 143d2d2c4..093fc2220 100644
+--- a/debian/cups.postinst
++++ b/debian/cups.postinst
+@@ -103,7 +103,7 @@ ppd_updater () {
+ 	for ppd in *.ppd; do
+ 	    [ -r "$ppd" ] || continue
+ 	    queue=${ppd%.ppd}
+-	    lpstat -h /var/run/cups/cups.sock -p "$queue" >/dev/null 2>&1 || continue
++	    lpstat -h /run/cups/cups.sock -p "$queue" >/dev/null 2>&1 || continue
+ 	    nickname=`grep '\*NickName:' "$ppd" | cut -d '"' -f 2 | perl -p -e 's/\n$//' | perl -p -e "$gennicknameregexp" | perl -p -e 's/(\W)/\\\\$1/g'`
+ 	    lang=`grep '\*LanguageVersion:' "$ppd" | cut -d ' ' -f 2 | perl -e 'print lc(<>)' | perl -p -e 's/[\r\n]//gs'`
+ 	    ppdfound="0"
+@@ -112,12 +112,12 @@ ppd_updater () {
+ 	    tempfiles="$tempfiles $tmpfile2"
+ 	    cat $tmpfile1 | perl -p -e "$gennicknameregexp; s/\n*$/\n/s" | grep -E '^\S+\s+.*'"$nickname"'$' | cut -d ' ' -f 1 > $tmpfile2
+ 	    while read newppduri; do
+-		[ "$ppdfound" = "0" ] && lpadmin -h /var/run/cups/cups.sock -p "$queue" -m $newppduri 2>/dev/null || continue
++		[ "$ppdfound" = "0" ] && lpadmin -h /run/cups/cups.sock -p "$queue" -m $newppduri 2>/dev/null || continue
+ 		newlang=`grep '\*LanguageVersion:' "$ppd" | cut -d ' ' -f 2 | perl -e 'print lc(<>)' | perl -p -e 's/[\r\n]//gs'`
+ 		[ "$newlang" = "$lang" ] && ppdfound="1"
+ 		[ "$newlang" = "english" ] && englishppduri="$newppduri"
+ 	    done < $tmpfile2
+-	    [ "$ppdfound" = "0" ] && [ ! -z "$englishppduri" ] && lpadmin -h /var/run/cups/cups.sock -p "$queue" -m $englishppduri 2>/dev/null && ppdfound="1"
++	    [ "$ppdfound" = "0" ] && [ ! -z "$englishppduri" ] && lpadmin -h /run/cups/cups.sock -p "$queue" -m $englishppduri 2>/dev/null && ppdfound="1"
+ 	    [ "$ppdfound" = "1" ] && echo PPD for printer $queue updated >&2
+ 	done
+ 	return 0
+@@ -128,14 +128,14 @@ ppd_updater () {
+ if which lpstat > /dev/null 2>&1 && \
+ 	which lpinfo > /dev/null 2>&1 && \
+ 	which lpadmin > /dev/null 2>&1 && \
+-	LC_ALL=C lpstat -h /var/run/cups/cups.sock -r | grep -v not > /dev/null 2>&1; then
++	LC_ALL=C lpstat -h /run/cups/cups.sock -r | grep -v not > /dev/null 2>&1; then
+ 
+ 	tempfiles=
+ 	trap 'rm -f $tempfiles; exit 0' 0 HUP INT QUIT ILL ABRT PIPE TERM
+ 	tmpfile0=`mktemp -t updateppds.XXXXXX`
+ 	tempfiles="$tempfiles $tmpfile0"
+ 
+-	lpinfo -h /var/run/cups/cups.sock -m > $tmpfile0
++	lpinfo -h /run/cups/cups.sock -m > $tmpfile0
+ 
+ 	if [ "$1" = configure ] ; then
+ 		# Update CUPS included drivers' queues
+diff --git a/debian/local/cups-daemon.cups.upstart b/debian/local/cups-daemon.cups.upstart
+index efdc9b129..31615e4ef 100644
+--- a/debian/local/cups-daemon.cups.upstart
++++ b/debian/local/cups-daemon.cups.upstart
+@@ -24,7 +24,7 @@ pre-start script
+ 	modprobe -q -b parport_pc || true
+     fi
+     
+-    mkdir -p /var/run/cups/certs
++    mkdir -p /run/cups/certs
+     if [ -x /lib/init/apparmor-profile-load ]; then
+ 	/lib/init/apparmor-profile-load usr.sbin.cupsd
+     fi
+@@ -35,11 +35,11 @@ exec /usr/sbin/cupsd -f
+ post-start script
+     # wait until daemon is ready
+     timeout=60
+-    while [ ! -e /var/run/cups/cups.sock ]; do 
++    while [ ! -e /run/cups/cups.sock ]; do
+         sleep 0.5
+ 	timeout=$((timeout-1))
+ 	if [ "$timeout" -eq 0 ]; then
+-	    echo "cupsd failed to create /var/run/cups/cups.sock, skipping automatic printer configuration" >&2
++	    echo "cupsd failed to create /run/cups/cups.sock, skipping automatic printer configuration" >&2
+ 	    exit 0
+ 	fi
+     done
+diff --git a/debian/patches/pidfile.patch b/debian/patches/pidfile.patch
+index fd34952f6..f8cfacb4f 100644
+--- a/debian/patches/pidfile.patch
++++ b/debian/patches/pidfile.patch
+@@ -1,7 +1,7 @@
+-From 8916028ea0deaf149077ddd5c7af34d158701847 Mon Sep 17 00:00:00 2001
++From cf22c260f8c5979db2c21d9a85d4be6b14a59993 Mon Sep 17 00:00:00 2001
+ From: Martin Pitt <mpitt@debian.org>
+ Date: Tue, 9 Aug 2016 18:11:32 +0200
+-Subject: Add support for creating pid files.
++Subject: Add support for creating pid files in /run
+ 
+ Bug: http://www.cups.org/str.php?L2465
+ 
+@@ -16,7 +16,7 @@ Patch-Name: pidfile.patch
+  4 files changed, 45 insertions(+), 1 deletion(-)
+ 
+ diff --git a/scheduler/conf.c b/scheduler/conf.c
+-index 7946980ad..71fb10a91 100644
++index 7946980ad..465f6ded9 100644
+ --- a/scheduler/conf.c
+ +++ b/scheduler/conf.c
+ @@ -163,7 +163,8 @@ static const cupsd_var_t	cupsfiles_vars[] =
+@@ -33,7 +33,7 @@ index 7946980ad..71fb10a91 100644
+    cupsdSetStringf(&ServerHeader, "CUPS/%d.%d IPP/2.1", CUPS_VERSION_MAJOR,
+                    CUPS_VERSION_MINOR);
+    cupsdSetString(&StateDir, CUPS_STATEDIR);
+-+  cupsdSetString(&PidFile, "/var/run/cups/cupsd.pid");
+++  cupsdSetString(&PidFile, "/run/cups/cupsd.pid");
+  
+    if (!strcmp(CUPS_DEFAULT_PRINTCAP, "/etc/printers.conf"))
+      PrintcapFormat = PRINTCAP_SOLARIS;
+diff --git a/debian/rules b/debian/rules
+index f9b37f768..febd2ac15 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -54,7 +54,8 @@ endif
+ 		--disable-launchd \
+ 		--with-cups-group=lp \
+ 		--with-system-groups=lpadmin \
+-		--with-printcap=/var/run/cups/printcap \
++		--with-rundir=/run/cups \
++		--with-printcap=/run/cups/printcap \
+ 		--with-log-file-perm=0640 \
+ 		--with-local_protocols='dnssd' \
+ 		--with-systemd=/lib/systemd/system \
+@@ -96,8 +97,9 @@ ifneq (,$(filter cups-server-common,$(shell dh_listpackages)))
+ 	done
+ endif
+ 
+-	# Ensure that we don't ship anything in /var/run
++	# Ensure that we don't ship anything in /var/run or /run
+ 	rm -rf debian/cups*/var/run
++	rm -rf debian/cups*/run
+ 
+ ifneq (,$(filter cups,$(shell dh_listpackages)))
+ 	# Make the usb backend run as root, since /dev/bus/usb/* are
+diff --git a/debian/tests/cups b/debian/tests/cups
+index 73b22edcc..cade22099 100755
+--- a/debian/tests/cups
++++ b/debian/tests/cups
+@@ -5,4 +5,4 @@ set -e -u
+ /usr/share/cups/test-drivers
+ 
+ echo "Check that the default hostname is the socket"
+-test "`lpstat -H`" = "/var/run/cups/cups.sock"
++test "`lpstat -H`" = "/run/cups/cups.sock"

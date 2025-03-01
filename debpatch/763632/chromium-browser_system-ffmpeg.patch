@@ -1,0 +1,467 @@
+diff --git a/debian/control b/debian/control
+index 41c8c1e..bb5a9ec 100644
+--- a/debian/control
++++ b/debian/control
+@@ -83,6 +83,9 @@ Build-Depends:
+  libjs-excanvas,
+  libjs-jquery-flot | libjs-flot,
+  libgcrypt11-dev | libgcrypt20-dev,
++ libavcodec-ffmpeg-dev,
++ libavformat-ffmpeg-dev,
++ libavutil-ffmpeg-dev,
+ Standards-Version: 3.9.5
+ 
+ Package: chromium
+diff --git a/debian/patches/ffmpeg_2.4.patch b/debian/patches/ffmpeg_2.4.patch
+new file mode 100644
+index 0000000..6449b1c
+--- /dev/null
++++ b/debian/patches/ffmpeg_2.4.patch
+@@ -0,0 +1,45 @@
++Description: Adapt to changes in FFmpeg API
++ * FF_INPUT_BUFFER_PADDING_SIZE was increased to 32.
++ * The first argument of av_dict_get is now const.
++
++Author: Andreas Cadhalpun <Andreas.Cadhalpun@googlemail.com>
++Last-Update: <2014-09-29>
++
++--- a/media/base/decoder_buffer.h
+++++ b/media/base/decoder_buffer.h
++@@ -32,7 +32,7 @@ class MEDIA_EXPORT DecoderBuffer
++     : public base::RefCountedThreadSafe<DecoderBuffer> {
++  public:
++   enum {
++-    kPaddingSize = 16,
+++    kPaddingSize = 32,
++ #if defined(ARCH_CPU_ARM_FAMILY)
++     kAlignmentSize = 16
++ #else
++--- a/third_party/ffmpeg/chromium/ffmpegsumo1.sigs
+++++ b/third_party/ffmpeg/chromium/ffmpegsumo1.sigs
++@@ -2,6 +2,15 @@
++ // Use of this source code is governed by a BSD-style license that can be
++ // found in the LICENSE file.
++ 
+++#ifndef FF_CONST_AVUTIL53
+++#if LIBAVUTIL_VERSION_MAJOR >= 53
+++#define FF_CONST_AVUTIL53 const
+++#else
+++#define FF_CONST_AVUTIL53
+++#endif
+++#endif
+++
+++
++ //------------------------------------------------
++ // Functions from avutil used in chromium code.
++ //------------------------------------------------
++@@ -11,7 +20,7 @@ void *av_malloc(size_t size);
++ void av_free(void *ptr);
++ void av_log_set_level(int level);
++ int av_dict_set(AVDictionary **pm, const char *key, const char *value, int flags);
++-AVDictionaryEntry *av_dict_get(AVDictionary *m, const char *key, const AVDictionaryEntry *prev, int flags);
+++AVDictionaryEntry *av_dict_get(FF_CONST_AVUTIL53 AVDictionary *m, const char *key, const AVDictionaryEntry *prev, int flags);
++ int av_samples_get_buffer_size(int *linesize, int nb_channels, int nb_samples, enum AVSampleFormat sample_fmt, int align);
++ int av_image_check_size(unsigned int w, unsigned int h, int log_offset, void *log_ctx);
++ int av_image_fill_linesizes(int *linesizes, enum PixelFormat pix_fmt, int width);
+diff --git a/debian/patches/fix_for_system_ffmpeg.patch b/debian/patches/fix_for_system_ffmpeg.patch
+new file mode 100644
+index 0000000..b8630d7
+--- /dev/null
++++ b/debian/patches/fix_for_system_ffmpeg.patch
+@@ -0,0 +1,241 @@
++Description: Fix a conceptual bug in chromium to allow using system FFmpeg
++ The embedded FFmpeg copy is used to build one shared library, libffmpegsumo.
++ However, this corresponds to three system FFmpeg libraries, libavutil,
++ libavcodec and libavformat.
++ At runtime, chromium first tries to load libffmpegsumo.
++ If this is not successful, it falls back to the system libraries, but this
++ does not work correctly, because it only loads one library, e.g. libavutil.
++ Since then the functions from libavcodec and libavformat are not available,
++ the initialization of the media library fails.
++ This patch adapts chromium to look separately for the functions in the
++ different system libraries. If libffmpegsumo.so exists, all symbols are
++ loaded from there, but if not, the three system libraries are used.
++ Additionally the functions av_frame_unref, av_frame_free, av_frame_alloc and
++ avcodec_fill_audio_frame were in the list of the wrong library, which is
++ also fixed.
++
++Author: Andreas Cadhalpun <Andreas.Cadhalpun@googlemail.com>
++Last-Update: <2014-09-29>
++
++--- a/media/base/media_posix.cc
+++++ b/media/base/media_posix.cc
++@@ -14,7 +14,9 @@
++ #include "third_party/ffmpeg/ffmpeg_stubs.h"
++ 
++ using third_party_ffmpeg::kNumStubModules;
++-using third_party_ffmpeg::kModuleFfmpegsumo;
+++using third_party_ffmpeg::kModuleFfmpegsumo1;
+++using third_party_ffmpeg::kModuleFfmpegsumo2;
+++using third_party_ffmpeg::kModuleFfmpegsumo3;
++ using third_party_ffmpeg::InitializeStubs;
++ using third_party_ffmpeg::StubPathMap;
++ 
++@@ -48,16 +50,19 @@ static const base::FilePath::CharType kSumoLib[] =
++ bool InitializeMediaLibraryInternal(const base::FilePath& module_dir) {
++   StubPathMap paths;
++ 
+++  DCHECK_EQ(kNumStubModules, 3);
+++
++   // First try to initialize with Chrome's sumo library.
++-  DCHECK_EQ(kNumStubModules, 1);
++-  paths[kModuleFfmpegsumo].push_back(module_dir.Append(kSumoLib).value());
+++  paths[kModuleFfmpegsumo1].push_back(module_dir.Append(kSumoLib).value());
+++  paths[kModuleFfmpegsumo2].push_back(module_dir.Append(kSumoLib).value());
+++  paths[kModuleFfmpegsumo3].push_back(module_dir.Append(kSumoLib).value());
++ 
++   // If that fails, see if any system libraries are available.
++-  paths[kModuleFfmpegsumo].push_back(module_dir.Append(
+++  paths[kModuleFfmpegsumo1].push_back(module_dir.Append(
++       FILE_PATH_LITERAL(DSO_NAME("avutil", AVUTIL_VERSION))).value());
++-  paths[kModuleFfmpegsumo].push_back(module_dir.Append(
+++  paths[kModuleFfmpegsumo2].push_back(module_dir.Append(
++       FILE_PATH_LITERAL(DSO_NAME("avcodec", AVCODEC_VERSION))).value());
++-  paths[kModuleFfmpegsumo].push_back(module_dir.Append(
+++  paths[kModuleFfmpegsumo3].push_back(module_dir.Append(
++       FILE_PATH_LITERAL(DSO_NAME("avformat", AVFORMAT_VERSION))).value());
++ 
++   return InitializeStubs(paths);
++--- a/third_party/ffmpeg/BUILD.gn
+++++ b/third_party/ffmpeg/BUILD.gn
++@@ -12,7 +12,7 @@ platform_config_root =
++ generate_stubs_script = "//tools/generate_stubs/generate_stubs.py"
++ 
++ # Used by ffmpeg_generate_stubs and ffmpeg_generate_def
++-sig_files = [ "chromium/ffmpegsumo.sigs" ]
+++sig_files = [ "chromium/ffmpegsumo1.sigs", "chromium/ffmpegsumo2.sigs", "chromium/ffmpegsumo3.sigs" ]
++ 
++ # TODO(ajwong): Should be in ffmpeg_generate_stubs if we could grab the
++ # outputs of an action via a function.
++--- a/third_party/ffmpeg/chromium/ffmpegsumo.sigs
+++++ /dev/null
++@@ -1,72 +0,0 @@
++-// Copyright (c) 2011 The Chromium Authors. All rights reserved.
++-// Use of this source code is governed by a BSD-style license that can be
++-// found in the LICENSE file.
++-
++-//------------------------------------------------
++-// Functions from avcodec used in chromium code.
++-//------------------------------------------------
++-AVCodecContext *avcodec_alloc_context3(const AVCodec *codec);
++-AVCodec *avcodec_find_decoder(enum AVCodecID id);
++-int av_new_packet(AVPacket *pkt, int size);
++-int avcodec_decode_audio4(AVCodecContext *avctx, AVFrame *frame, int *got_frame_ptr, const AVPacket *avpkt);
++-int avcodec_decode_video2(AVCodecContext *avctx, AVFrame *picture, int *got_picture_ptr, const AVPacket *avpkt);
++-int avcodec_open2(AVCodecContext *avctx, const AVCodec *codec, AVDictionary **options);
++-int avcodec_close(AVCodecContext *avctx);
++-const char *avcodec_get_name(enum AVCodecID id);
++-void av_free_packet(AVPacket *pkt);
++-void av_init_packet(AVPacket *pkt);
++-int av_dup_packet(AVPacket *pkt);
++-void avcodec_flush_buffers(AVCodecContext *avctx);
++-void av_register_bitstream_filter(AVBitStreamFilter *bsf);
++-AVBitStreamFilterContext *av_bitstream_filter_init(const char *name);
++-int av_bitstream_filter_filter(AVBitStreamFilterContext *bsfc, AVCodecContext *avctx, const char *args, uint8_t **poutbuf, int *poutbuf_size, const uint8_t *buf, int buf_size, int keyframe);
++-void av_bitstream_filter_close(AVBitStreamFilterContext *bsf);
++-int av_lockmgr_register(AVLockMgrOperation cb);
++-void avcodec_get_frame_defaults(AVFrame *pic);
++-void avcodec_align_dimensions(AVCodecContext *s, int *width, int *height);
++-int av_packet_split_side_data(AVPacket *pkt);
++-uint8_t *av_packet_get_side_data(AVPacket *pkt, enum AVPacketSideDataType type, int *size);
++-void av_frame_unref(AVFrame *frame);
++-void av_frame_free(AVFrame **frame);
++-void avcodec_free_frame(AVFrame **frame);
++-AVFrame* av_frame_alloc();
++-int av_packet_copy_props(AVPacket *dst, const AVPacket *src);
++-
++-// RDFT functions.
++-RDFTContext *av_rdft_init(int nbits, enum RDFTransformType trans);
++-void av_rdft_calc(RDFTContext *s, FFTSample *data);
++-void av_rdft_end(RDFTContext *s);
++-
++-
++-//------------------------------------------------
++-// Functions from avformat used in chromium code.
++-//------------------------------------------------
++-void avformat_close_input(AVFormatContext **s);
++-int avformat_find_stream_info(AVFormatContext *ic, AVDictionary **options);
++-int av_index_search_timestamp(AVStream *st, int64_t wanted_timestamp, int flags);
++-int avformat_open_input(AVFormatContext **ps, const char *filename, AVInputFormat *fmt, AVDictionary **options);
++-int av_read_frame(AVFormatContext *s, AVPacket *pkt);
++-void av_register_all(void);
++-int av_seek_frame(AVFormatContext *s, int stream_index, int64_t timestamp, int flags);
++-AVFormatContext *avformat_alloc_context(void);
++-void avformat_free_context(AVFormatContext *s);
++-AVIOContext *avio_alloc_context(unsigned char *buffer, int buffer_size, int write_flag, void *opaque, AVIOReadWriteOperation read_packet, AVIOReadWriteOperation write_packet, AVIOSeekOperation seek);
++-int avio_close(AVIOContext *s);
++-
++-
++-//------------------------------------------------
++-// Functions from avutil used in chromium code.
++-//------------------------------------------------
++-int av_get_bytes_per_sample(enum AVSampleFormat sample_fmt);
++-int64_t av_rescale_q(int64_t a, AVRational bq, AVRational cq);
++-void *av_malloc(size_t size);
++-void av_free(void *ptr);
++-void av_log_set_level(int level);
++-int av_dict_set(AVDictionary **pm, const char *key, const char *value, int flags);
++-AVDictionaryEntry *av_dict_get(AVDictionary *m, const char *key, const AVDictionaryEntry *prev, int flags);
++-int av_samples_get_buffer_size(int *linesize, int nb_channels, int nb_samples, enum AVSampleFormat sample_fmt, int align);
++-int av_image_check_size(unsigned int w, unsigned int h, int log_offset, void *log_ctx);
++-int av_image_fill_linesizes(int *linesizes, enum PixelFormat pix_fmt, int width);
++-AVBufferRef *av_buffer_create(uint8_t *data, int size, AVFreeOperation free, void *opaque, int flags);
++-int avcodec_fill_audio_frame(AVFrame *frame, int nb_channels, enum AVSampleFormat sample_fmt, const uint8_t *buf, int buf_size, int align);
++-void *av_buffer_get_opaque(const AVBufferRef *buf);
++--- /dev/null
+++++ b/third_party/ffmpeg/chromium/ffmpegsumo1.sigs
++@@ -0,0 +1,22 @@
+++// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+++// Use of this source code is governed by a BSD-style license that can be
+++// found in the LICENSE file.
+++
+++//------------------------------------------------
+++// Functions from avutil used in chromium code.
+++//------------------------------------------------
+++int av_get_bytes_per_sample(enum AVSampleFormat sample_fmt);
+++int64_t av_rescale_q(int64_t a, AVRational bq, AVRational cq);
+++void *av_malloc(size_t size);
+++void av_free(void *ptr);
+++void av_log_set_level(int level);
+++int av_dict_set(AVDictionary **pm, const char *key, const char *value, int flags);
+++AVDictionaryEntry *av_dict_get(AVDictionary *m, const char *key, const AVDictionaryEntry *prev, int flags);
+++int av_samples_get_buffer_size(int *linesize, int nb_channels, int nb_samples, enum AVSampleFormat sample_fmt, int align);
+++int av_image_check_size(unsigned int w, unsigned int h, int log_offset, void *log_ctx);
+++int av_image_fill_linesizes(int *linesizes, enum PixelFormat pix_fmt, int width);
+++AVBufferRef *av_buffer_create(uint8_t *data, int size, AVFreeOperation free, void *opaque, int flags);
+++void *av_buffer_get_opaque(const AVBufferRef *buf);
+++void av_frame_unref(AVFrame *frame);
+++void av_frame_free(AVFrame **frame);
+++AVFrame* av_frame_alloc();
++--- /dev/null
+++++ b/third_party/ffmpeg/chromium/ffmpegsumo2.sigs
++@@ -0,0 +1,37 @@
+++// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+++// Use of this source code is governed by a BSD-style license that can be
+++// found in the LICENSE file.
+++
+++
+++//------------------------------------------------
+++// Functions from avcodec used in chromium code.
+++//------------------------------------------------
+++AVCodecContext *avcodec_alloc_context3(const AVCodec *codec);
+++AVCodec *avcodec_find_decoder(enum AVCodecID id);
+++int av_new_packet(AVPacket *pkt, int size);
+++int avcodec_decode_audio4(AVCodecContext *avctx, AVFrame *frame, int *got_frame_ptr, const AVPacket *avpkt);
+++int avcodec_decode_video2(AVCodecContext *avctx, AVFrame *picture, int *got_picture_ptr, const AVPacket *avpkt);
+++int avcodec_open2(AVCodecContext *avctx, const AVCodec *codec, AVDictionary **options);
+++int avcodec_close(AVCodecContext *avctx);
+++const char *avcodec_get_name(enum AVCodecID id);
+++void av_free_packet(AVPacket *pkt);
+++void av_init_packet(AVPacket *pkt);
+++int av_dup_packet(AVPacket *pkt);
+++void avcodec_flush_buffers(AVCodecContext *avctx);
+++void av_register_bitstream_filter(AVBitStreamFilter *bsf);
+++AVBitStreamFilterContext *av_bitstream_filter_init(const char *name);
+++int av_bitstream_filter_filter(AVBitStreamFilterContext *bsfc, AVCodecContext *avctx, const char *args, uint8_t **poutbuf, int *poutbuf_size, const uint8_t *buf, int buf_size, int keyframe);
+++void av_bitstream_filter_close(AVBitStreamFilterContext *bsf);
+++int av_lockmgr_register(AVLockMgrOperation cb);
+++void avcodec_get_frame_defaults(AVFrame *pic);
+++void avcodec_align_dimensions(AVCodecContext *s, int *width, int *height);
+++int av_packet_split_side_data(AVPacket *pkt);
+++uint8_t *av_packet_get_side_data(AVPacket *pkt, enum AVPacketSideDataType type, int *size);
+++void avcodec_free_frame(AVFrame **frame);
+++int av_packet_copy_props(AVPacket *dst, const AVPacket *src);
+++int avcodec_fill_audio_frame(AVFrame *frame, int nb_channels, enum AVSampleFormat sample_fmt, const uint8_t *buf, int buf_size, int align);
+++
+++// RDFT functions.
+++RDFTContext *av_rdft_init(int nbits, enum RDFTransformType trans);
+++void av_rdft_calc(RDFTContext *s, FFTSample *data);
+++void av_rdft_end(RDFTContext *s);
++--- /dev/null
+++++ b/third_party/ffmpeg/chromium/ffmpegsumo3.sigs
++@@ -0,0 +1,19 @@
+++// Copyright (c) 2011 The Chromium Authors. All rights reserved.
+++// Use of this source code is governed by a BSD-style license that can be
+++// found in the LICENSE file.
+++
+++
+++//------------------------------------------------
+++// Functions from avformat used in chromium code.
+++//------------------------------------------------
+++void avformat_close_input(AVFormatContext **s);
+++int avformat_find_stream_info(AVFormatContext *ic, AVDictionary **options);
+++int av_index_search_timestamp(AVStream *st, int64_t wanted_timestamp, int flags);
+++int avformat_open_input(AVFormatContext **ps, const char *filename, AVInputFormat *fmt, AVDictionary **options);
+++int av_read_frame(AVFormatContext *s, AVPacket *pkt);
+++void av_register_all(void);
+++int av_seek_frame(AVFormatContext *s, int stream_index, int64_t timestamp, int flags);
+++AVFormatContext *avformat_alloc_context(void);
+++void avformat_free_context(AVFormatContext *s);
+++AVIOContext *avio_alloc_context(unsigned char *buffer, int buffer_size, int write_flag, void *opaque, AVIOReadWriteOperation read_packet, AVIOReadWriteOperation write_packet, AVIOSeekOperation seek);
+++int avio_close(AVIOContext *s);
++--- a/third_party/ffmpeg/ffmpeg.gyp
+++++ b/third_party/ffmpeg/ffmpeg.gyp
++@@ -81,7 +81,7 @@
++ 
++     # Stub generator script and signatures of all functions used by Chrome.
++     'generate_stubs_script': '../../tools/generate_stubs/generate_stubs.py',
++-    'sig_files': ['chromium/ffmpegsumo.sigs'],
+++    'sig_files': ['chromium/ffmpegsumo1.sigs', 'chromium/ffmpegsumo2.sigs', 'chromium/ffmpegsumo3.sigs'],
++     'extra_header': 'chromium/ffmpeg_stub_headers.fragment',
++   },
++   'conditions': [
+diff --git a/debian/patches/fix_for_system_ffmpeg_ABI.patch b/debian/patches/fix_for_system_ffmpeg_ABI.patch
+new file mode 100644
+index 0000000..88f1a18
+--- /dev/null
++++ b/debian/patches/fix_for_system_ffmpeg_ABI.patch
+@@ -0,0 +1,36 @@
++Description: Don't change the FFmpeg ABI in chromium ...
++ ... because it breaks ABI compatibility with the system FFmpeg.
++
++Author: Andreas Cadhalpun <Andreas.Cadhalpun@googlemail.com>
++Last-Update: <2014-10-01>
++
++--- a/media/ffmpeg/ffmpeg_common.h
+++++ b/media/ffmpeg/ffmpeg_common.h
++@@ -19,13 +19,6 @@
++ 
++ // Include FFmpeg header files.
++ extern "C" {
++-// Disable deprecated features which result in spammy compile warnings.  This
++-// list of defines must mirror those in the 'defines' section of the ffmpeg.gyp
++-// file or the headers below will generate different structures.
++-#define FF_API_PIX_FMT_DESC 0
++-#define FF_API_OLD_DECODE_AUDIO 0
++-#define FF_API_DESTRUCT_PACKET 0
++-#define FF_API_GET_BUFFER 0
++ 
++ // Temporarily disable possible loss of data warning.
++ // TODO(scherkus): fix and upstream the compiler warnings.
++--- a/third_party/ffmpeg/ffmpeg.gyp
+++++ b/third_party/ffmpeg/ffmpeg.gyp
++@@ -165,11 +165,6 @@
++             '_POSIX_C_SOURCE=200112',
++             '_XOPEN_SOURCE=600',
++             'PIC',
++-            # Disable deprecated features which generate spammy warnings.
++-            'FF_API_PIX_FMT_DESC=0',
++-            'FF_API_OLD_DECODE_AUDIO=0',
++-            'FF_API_DESTRUCT_PACKET=0',
++-            'FF_API_GET_BUFFER=0',
++           ],
++           'cflags': [
++             '-fPIC',
+diff --git a/debian/patches/series b/debian/patches/series
+index ac55c7f..d7419d2 100644
+--- a/debian/patches/series
++++ b/debian/patches/series
+@@ -15,3 +15,7 @@ make-support/gyp.patch
+ make-support/opus.patch
+ make-support/mojo.patch
+ clang.patch
++
++fix_for_system_ffmpeg.patch
++ffmpeg_2.4.patch
++fix_for_system_ffmpeg_ABI.patch
+diff --git a/debian/rules b/debian/rules
+index 121fcf8..524f77d 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -11,11 +11,20 @@ DEBIAN_DIST_NAME	:= $(shell lsb_release -si)
+ DEBIAN_DIST_VERSION	:= $(shell cat /etc/debian_version)
+ MULTIARCH		:= $(shell dpkg-architecture -qDEB_BUILD_MULTIARCH)
+ 
+-USE_SYSTEM_FFMPEG	:= 0
++USE_SYSTEM_FFMPEG   := 1
+ ifeq (1,$(USE_SYSTEM_FFMPEG))
+-LIBAVCODEC_BASENAME	:= $(shell basename $$(ls -x /usr/lib/$(MULTIARCH)/libavcodec.so.* | cut -d ' ' -f 1))
+-LIBAVFORMAT_BASENAME	:= $(shell basename $$(ls -x /usr/lib/$(MULTIARCH)/libavformat.so.* | cut -d ' ' -f 1))
+-LIBAVUTIL_BASENAME	:= $(shell basename $$(ls -x /usr/lib/$(MULTIARCH)/libavutil.so.* | cut -d ' ' -f 1))
++LIBAVCODEC_SONAME   := $(shell basename $(realpath /usr/lib/$(MULTIARCH)/libavcodec.so) | sed 's/\([^.]*\.so\.[^.]*\)\..*/\1/')
++LIBAVCODEC_LINK     := $(shell echo $(LIBAVCODEC_SONAME) | sed 's/.*.so.\([0-9]*\)/libavcodec.so.\1/')
++LIBAVCODEC_PKGNAME  := $(shell echo $(LIBAVCODEC_SONAME) | sed 's/.so.//')
++LIBAVCODEC_DEPENDS  := $(shell cat /var/lib/dpkg/info/$(LIBAVCODEC_PKGNAME):*.shlibs | sed 's/^[^ ]* [^ ]* \(.*\)$$/\1/')
++LIBAVFORMAT_SONAME  := $(shell basename $(realpath /usr/lib/$(MULTIARCH)/libavformat.so) | sed 's/\([^.]*\.so\.[^.]*\)\..*/\1/')
++LIBAVFORMAT_LINK    := $(shell echo $(LIBAVFORMAT_SONAME) | sed 's/.*.so.\([0-9]*\)/libavformat.so.\1/')
++LIBAVFORMAT_PKGNAME := $(shell echo $(LIBAVFORMAT_SONAME) | sed 's/.so.//')
++LIBAVFORMAT_DEPENDS := $(shell cat /var/lib/dpkg/info/$(LIBAVFORMAT_PKGNAME):*.shlibs | sed 's/^[^ ]* [^ ]* \(.*\)$$/\1/')
++LIBAVUTIL_SONAME    := $(shell basename $(realpath /usr/lib/$(MULTIARCH)/libavutil.so) | sed 's/\([^.]*\.so\.[^.]*\)\..*/\1/')
++LIBAVUTIL_LINK      := $(shell echo $(LIBAVUTIL_SONAME) | sed 's/.*.so.\([0-9]*\)/libavutil.so.\1/')
++LIBAVUTIL_PKGNAME   := $(shell echo $(LIBAVUTIL_SONAME) | sed 's/.so.//')
++LIBAVUTIL_DEPENDS   := $(shell cat /var/lib/dpkg/info/$(LIBAVUTIL_PKGNAME):*.shlibs | sed 's/^[^ ]* [^ ]* \(.*\)$$/\1/')
+ endif
+ 
+ # DEB_TAR_SRCDIR has to be 'src' as this is what gyp expects :(
+@@ -453,6 +462,9 @@ clean::
+ 	rm -f third_party/yasm/source/patched-yasm/config/config.guess
+ 	rm -f third_party/yasm/source/patched-yasm/config/config.sub
+ 	rm -f third_party/flot/*.js
++ifeq (1,$(USE_SYSTEM_FFMPEG))
++	rm -rf third_party/ffmpeg/lib*
++endif
+ 
+ # Install: there's no install rules in scons yet, do it manually
+ common-install-prehook-impl::
+@@ -516,12 +528,12 @@ ifneq (i386,$(DEB_HOST_ARCH_CPU))
+ endif
+ ifeq (1,$(USE_SYSTEM_FFMPEG))
+ 	# Install symlinks to system ffmpeg libs
+-	ln -sf "../$(MULTIARCH)/$(LIBAVCODEC_BASENAME)" \
+-		"$(CURDIR)/debian/$(DEBIAN_NAME)/$(LIB_DIR)/$(LIBAVCODEC_BASENAME)"
+-	ln -sf "../$(MULTIARCH)/$(LIBAVFORMAT_BASENAME)" \
+-		"$(CURDIR)/debian/$(DEBIAN_NAME)/$(LIB_DIR)/$(LIBAVFORMAT_BASENAME)"
+-	ln -sf "../$(MULTIARCH)/$(LIBAVUTIL_BASENAME)" \
+-		"$(CURDIR)/debian/$(DEBIAN_NAME)/$(LIB_DIR)/$(LIBAVUTIL_BASENAME)"
++	ln -sf "../$(MULTIARCH)/$(LIBAVCODEC_SONAME)" \
++		"$(CURDIR)/debian/$(DEBIAN_NAME)/$(LIB_DIR)/$(LIBAVCODEC_LINK)"
++	ln -sf "../$(MULTIARCH)/$(LIBAVFORMAT_SONAME)" \
++		"$(CURDIR)/debian/$(DEBIAN_NAME)/$(LIB_DIR)/$(LIBAVFORMAT_LINK)"
++	ln -sf "../$(MULTIARCH)/$(LIBAVUTIL_SONAME)" \
++		"$(CURDIR)/debian/$(DEBIAN_NAME)/$(LIB_DIR)/$(LIBAVUTIL_LINK)"
+ endif
+ 
+ binary-install/$(DEBIAN_NAME)-l10n::
+@@ -588,11 +600,7 @@ binary-makedeb-IMPL/$(DEBIAN_NAME)::
+ ifeq (1,$(USE_SYSTEM_FFMPEG))
+ 	# Manually insert ffmpeg libs shlib deps for chromium since the
+ 	# libs are dlopened.
+-	sed "s/^Depends:.*$$/&, $$(sh debian/var_info LIBAVCODEC_DEPENDS)/" \
+-		-i "debian/$(DEBIAN_NAME)/DEBIAN/control"
+-	sed "s/^Depends:.*$$/&, $$(sh debian/var_info LIBAVFORMAT_DEPENDS)/" \
+-		-i "debian/$(DEBIAN_NAME)/DEBIAN/control"
+-	sed "s/^Depends:.*$$/&, $$(sh debian/var_info LIBAVUTIL_DEPENDS)/" \
++	sed "s/^Depends:.*$$/&, $(LIBAVCODEC_DEPENDS), $(LIBAVFORMAT_DEPENDS), $(LIBAVUTIL_DEPENDS)/" \
+ 		-i "debian/$(DEBIAN_NAME)/DEBIAN/control"
+ endif
+ 	dh_md5sums -p$(DEBIAN_NAME)
+diff --git a/debian/var_info b/debian/var_info
+deleted file mode 100644
+index dea7d13..0000000
+--- a/debian/var_info
++++ /dev/null
+@@ -1,24 +0,0 @@
+-# -*- sh -*-
+-# This file is used as a way to replace text in certain files. Main reason is
+-# to get shlib information for the different ffmpeg libraries used by
+-# chromium.
+-
+-case "$1" in
+-    LIBAVCODEC_DEPENDS)
+-        LIBAVCODEC_DEPENDS=$(cat /var/lib/dpkg/info/libavcodec*.shlibs | \
+-          sed 's/^[^[:space:]]\+\?[[:space:]]\+\?[^[:space:]]\+\?[[:space:]]\+\?\(.*\)$/\1/')
+-        printf "$LIBAVCODEC_DEPENDS"
+-        ;;
+-    LIBAVFORMAT_DEPENDS)
+-        LIBAVFORMAT_DEPENDS=$(cat /var/lib/dpkg/info/libavformat*.shlibs | \
+-          sed 's/^[^[:space:]]\+\?[[:space:]]\+\?[^[:space:]]\+\?[[:space:]]\+\?\(.*\)$/\1/')
+-        printf "$LIBAVFORMAT_DEPENDS"
+-        ;;
+-    LIBAVUTIL_DEPENDS)
+-        LIBAVUTIL_DEPENDS=$(cat /var/lib/dpkg/info/libavutil*.shlibs | \
+-          sed 's/^[^[:space:]]\+\?[[:space:]]\+\?[^[:space:]]\+\?[[:space:]]\+\?\(.*\)$/\1/')
+-        printf "$LIBAVUTIL_DEPENDS"
+-        ;;
+-esac
+-
+-exit 0

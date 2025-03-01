@@ -1,0 +1,291 @@
+Index: chrony-1.23/client.c
+===================================================================
+--- chrony-1.23.orig/client.c	2008-05-04 22:06:30.000000000 +0200
++++ chrony-1.23/client.c	2008-05-05 11:41:34.000000000 +0200
+@@ -45,6 +45,8 @@
+ #include <readline/history.h>
+ #endif
+ 
++#define DEFAULT_CONF_FILE "/etc/chrony/chrony.conf"
++
+ /* ================================================== */
+ 
+ static int sock_fd;
+@@ -2302,6 +2304,64 @@
+ 
+ /* ================================================== */
+ 
++static void
++print_status(const CMD_Reply *rx_message, int reply_auth_ok)
++{
++      switch(ntohs(rx_message->status)) {
++        case STT_SUCCESS:
++          printf("200 OK");
++          break;
++        case STT_FAILED:
++          printf("500 Failure");
++          break;
++        case STT_UNAUTH:
++          printf("501 Not authorised");
++          break;
++        case STT_INVALID:
++          printf("502 Invalid command");
++          break;
++        case STT_NOSUCHSOURCE:
++          printf("503 No such source");
++          break;
++        case STT_INVALIDTS:
++          printf("504 Duplicate or stale logon detected");
++          break;
++        case STT_NOTENABLED:
++          printf("505 Facility not enabled in daemon");
++          break;
++        case STT_BADSUBNET:
++          printf("507 Bad subnet");
++          break;
++        case STT_ACCESSALLOWED:
++          printf("208 Access allowed");
++          break;
++        case STT_ACCESSDENIED:
++          printf("209 Access denied");
++          break;
++        case STT_NOHOSTACCESS:
++          printf("510 No command access from this host");
++          break;
++        case STT_SOURCEALREADYKNOWN:
++          printf("511 Source already present");
++          break;
++        case STT_TOOMANYSOURCES:
++          printf("512 Too many sources present");
++          break;
++        case STT_NORTC:
++          printf("513 RTC driver not running");
++          break;
++        case STT_BADRTCFILE:
++          printf("514 Can't write RTC parameters");
++          break;
++      }
++
++      if (reply_auth_ok) {
++        printf("\n");
++      } else {
++        printf(" --- Reply not authenticated\n");
++      }
++}
++
+ static int
+ process_line(char *line)
+ {
+@@ -2429,59 +2489,7 @@
+     request_submitted_ok = submit_request(&tx_message, &rx_message, &reply_auth_ok);
+ 
+     if (request_submitted_ok) {
+-      switch(ntohs(rx_message.status)) {
+-        case STT_SUCCESS:
+-          printf("200 OK");
+-          break;
+-        case STT_FAILED:
+-          printf("500 Failure");
+-          break;
+-        case STT_UNAUTH:
+-          printf("501 Not authorised");
+-          break;
+-        case STT_INVALID:
+-          printf("502 Invalid command");
+-          break;
+-        case STT_NOSUCHSOURCE:
+-          printf("503 No such source");
+-          break;
+-        case STT_INVALIDTS:
+-          printf("504 Duplicate or stale logon detected");
+-          break;
+-        case STT_NOTENABLED:
+-          printf("505 Facility not enabled in daemon");
+-          break;
+-        case STT_BADSUBNET:
+-          printf("507 Bad subnet");
+-          break;
+-        case STT_ACCESSALLOWED:
+-          printf("208 Access allowed");
+-          break;
+-        case STT_ACCESSDENIED:
+-          printf("209 Access denied");
+-          break;
+-        case STT_NOHOSTACCESS:
+-          printf("510 No command access from this host");
+-          break;
+-        case STT_SOURCEALREADYKNOWN:
+-          printf("511 Source already present");
+-          break;
+-        case STT_TOOMANYSOURCES:
+-          printf("512 Too many sources present");
+-          break;
+-        case STT_NORTC:
+-          printf("513 RTC driver not running");
+-          break;
+-        case STT_BADRTCFILE:
+-          printf("514 Can't write RTC parameters");
+-          break;
+-      }
+-      
+-      if (reply_auth_ok) {
+-        printf("\n");
+-      } else {
+-        printf(" --- Reply not authenticated\n");
+-      }
++      print_status(&rx_message, reply_auth_ok);
+     }
+   }
+   fflush(stderr);
+@@ -2531,6 +2539,78 @@
+ 
+ /* ================================================== */
+ 
++static void
++send_password(const char *conf_file, const char *key_file, unsigned long key_id)
++{
++  FILE *in;
++  int len1;
++#define KEYLEN 2047
++#define SKEYLEN "2047"
++  unsigned long keyid;
++  char line[KEYLEN+1], keyval[KEYLEN+1], *p;
++  CMD_Request msg;
++  CMD_Reply reply;
++  int auth_ok;
++
++  if (key_file == NULL) {
++    in = fopen(conf_file, "r");
++    if (in == NULL) {
++      fprintf(stderr, "Could not open configuration file '%s'\n",
++	      conf_file);
++      return;
++    }
++    while (fgets(line, sizeof(line), in)) {
++      len1 = strlen(line) - 1;
++
++      while (len1 >= 0 && (line[len1] == '\n' || isspace((unsigned char)line[len1]))) {
++	line[len1--] = '\0';
++      }
++      /* Discard comment lines, blank lines etc */
++      p = line;
++      while(*p && (isspace((unsigned char)*p)))
++	p++;
++
++      if (!*p || (strchr("!;#%", *p) != NULL))
++	continue;
++
++      if (!strncasecmp("keyfile", p, strlen("keyfile"))) {
++	p += strlen("keyfile");
++	while(*p && (isspace((unsigned char)*p)))
++	  p++;
++	if (*p)
++	  key_file = p;
++	break;
++      }
++    }
++    fclose(in);
++  }
++
++  in = fopen(key_file, "r");
++  if (in) {
++    while (fgets(line, sizeof(line), in)) {
++      len1 = strlen(line) - 1;
++
++      if (line[len1] == '\n') {
++	line[len1] = '\0';
++      }
++
++      if (sscanf(line, "%lu%" SKEYLEN "s", &keyid, keyval) == 2) {
++	if (keyid != key_id)
++	  continue;
++	if (!process_cmd_password(&msg, keyval))
++	  break;
++	if (!submit_request(&msg, &reply, &auth_ok))
++	  break;
++	print_status(&reply, auth_ok);
++	break;
++      }
++    }
++    fclose(in);
++  }
++}
++
++/* ================================================== */
++
+ int
+ main(int argc, char **argv)
+ {
+@@ -2539,6 +2619,9 @@
+   const char *hostname = "localhost";
+   int quit = 0;
+   int port = DEFAULT_CANDM_PORT;
++  long keyid = -1;
++  const char *key_file = NULL;
++  const char *conf_file = DEFAULT_CONF_FILE;
+ 
+   /* Parse command line options */
+   while (++argv, --argc) {
+@@ -2547,11 +2630,26 @@
+       if (*argv) {
+         hostname = *argv;
+       }
++    } else if (!strcmp(*argv, "-f")) {
++      ++argv, --argc;
++      if (*argv) {
++        conf_file = *argv;
++      }
++    } else if (!strcmp(*argv, "-K")) {
++      ++argv, --argc;
++      if (*argv) {
++        key_file = *argv;
++      }
+     } else if (!strcmp(*argv, "-p")) {
+       ++argv, --argc;
+       if (*argv) {
+         port = atoi(*argv);
+       }
++    } else if (!strcmp(*argv, "-k")) {
++      ++argv, --argc;
++      if (*argv) {
++        keyid = atol(*argv);
++      }
+     } else if (!strcmp(*argv, "-n")) {
+       no_dns = 1;
+     } else if (!strcmp("-v", *argv) || !strcmp("--version",*argv)) {
+@@ -2575,6 +2673,11 @@
+   
+   open_io(hostname, port);
+ 
++  if (keyid >= 0) {
++    send_password(conf_file, key_file, keyid);
++  }
++
++
+   if (argc > 0) {
+     process_args(argc, argv);
+   } else {
+Index: chrony-1.23/chronyc.1
+===================================================================
+--- chrony-1.23.orig/chronyc.1	2008-05-04 22:06:18.000000000 +0200
++++ chrony-1.23/chronyc.1	2008-05-05 11:27:37.000000000 +0200
+@@ -29,6 +29,19 @@
+ \fB\-p\fR \fIport-number\fR
+ specify port-number
+ .TP
++\fB\-f\fR \fIconf-file\fR
++This option can be used to specify an alternate location for the
++configuration file (default \fI/etc/chrony/chrony.conf\fR).
++This file is only used to look for the keys-file.
++.TP
++\fB\-K\fR \fIkeys-file\fR
++This option can be used to specify an alternate location for the
++keys file. (default look in the conf-file).
++.TP
++\fB\-k\fR \fIkeyid\fR
++Look for the specified key in the keys file and set it as password
++before processing any other commands.
++.TP
+ \fB\-n\fR
+ display raw IP addresses (don't attempt to look up hostnames)
+ .TP \fIcommand\fR

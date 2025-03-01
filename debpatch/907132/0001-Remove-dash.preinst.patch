@@ -1,0 +1,351 @@
+From 4fd330b62c1ab8d1674e0478bdce83bc285f5859 Mon Sep 17 00:00:00 2001
+From: Sven Joachim <svenjoac@gmx.de>
+Date: Thu, 6 Sep 2018 19:34:26 +0200
+Subject: [PATCH] Remove dash.preinst
+
+The preinst had been necessary to unpack dash when /bin/sh was also
+included in the bash package, but bash stopped shipping /bin/sh over
+six years ago.  Nowadays the preinst seems entirely superfluous and
+prevents crossgrades, as well as spitting out noise on upgrades.
+
+Closes: #907132, #890073
+
+Signed-off-by: Sven Joachim <svenjoac@gmx.de>
+---
+ debian/clean              |   3 -
+ debian/dash.preinst-lib.c | 131 --------------------------------------
+ debian/dash.preinst.c     | 107 -------------------------------
+ debian/dash.preinst.h     |  37 -----------
+ debian/rules              |  11 +---
+ 5 files changed, 1 insertion(+), 288 deletions(-)
+ delete mode 100644 debian/dash.preinst-lib.c
+ delete mode 100644 debian/dash.preinst.c
+ delete mode 100644 debian/dash.preinst.h
+
+diff --git a/debian/clean b/debian/clean
+index 13ac127..4586283 100644
+--- a/debian/clean
++++ b/debian/clean
+@@ -1,4 +1 @@
+ debian/dash.templates
+-debian/dash.preinst
+-debian/dash.preinst-lib.o
+-debian/dash.preinst.o
+diff --git a/debian/dash.preinst-lib.c b/debian/dash.preinst-lib.c
+deleted file mode 100644
+index ef87e18..0000000
+--- a/debian/dash.preinst-lib.c
++++ /dev/null
+@@ -1,131 +0,0 @@
+-/*
+- * This file is in the public domain.
+- * You may freely use, modify, distribute, and relicense it.
+- */
+-
+-#include "dash.preinst.h"
+-#include <stdio.h>
+-#include <stdlib.h>
+-#include <stdarg.h>
+-#include <string.h>
+-#include <errno.h>
+-#include <sys/types.h>
+-#include <sys/stat.h>
+-#include <sys/wait.h>
+-#include <unistd.h>
+-#include <fcntl.h>
+-#include <spawn.h>
+-
+-extern char **environ;
+-
+-__attribute__((format(printf, 1, 0)))
+-static void vreportf(const char *err, va_list params, int errnum)
+-{
+-	fprintf(stderr, "dash.preinst: ");
+-	vfprintf(stderr, err, params);
+-	if (errnum)
+-		fprintf(stderr, ": %s", strerror(errnum));
+-	fprintf(stderr, "\n");
+-}
+-
+-__attribute__((format(printf, 1, 2)))
+-NORETURN void die_errno(const char *fmt, ...)
+-{
+-	va_list params;
+-	va_start(params, fmt);
+-	vreportf(fmt, params, errno);
+-	va_end(params);
+-	exit(1);
+-}
+-
+-__attribute__((format(printf, 1, 2)))
+-NORETURN void die(const char *fmt, ...)
+-{
+-	va_list params;
+-	va_start(params, fmt);
+-	vreportf(fmt, params, 0);
+-	va_end(params);
+-	exit(1);
+-}
+-
+-int exists(const char *file)
+-{
+-	struct stat sb;
+-	if (!lstat(file, &sb))
+-		return 1;
+-	if (errno == ENOENT)
+-		return 0;
+-	die_errno("cannot get status of %s", file);
+-}
+-
+-void set_cloexec(int fd)
+-{
+-	int flags = fcntl(fd, F_GETFL);
+-	if (flags < 0 || fcntl(fd, F_SETFL, flags | FD_CLOEXEC))
+-		die_errno("cannot set close-on-exec flag");
+-}
+-
+-void xpipe(int pipefd[2])
+-{
+-	if (pipe(pipefd))
+-		die_errno("cannot create pipe");
+-	set_cloexec(pipefd[0]);
+-	set_cloexec(pipefd[1]);
+-}
+-
+-void wait_or_die(pid_t child, const char *name, int flags)
+-{
+-	int status;
+-	if (waitpid(child, &status, 0) != child)
+-		die_errno("cannot wait for %s", name);
+-	if ((WIFEXITED(status) && WEXITSTATUS(status) == 0) ||
+-	    ((flags & ERROR_OK) && WIFEXITED(status)) ||
+-	    ((flags & SIGPIPE_OK) &&
+-	     WIFSIGNALED(status) && WTERMSIG(status) == SIGPIPE))
+-		return;
+-
+-	if (WIFEXITED(status))
+-		die("%s exited with status %d", name, WEXITSTATUS(status));
+-	if (WIFSIGNALED(status))
+-		die("%s killed by signal %d", name, WTERMSIG(status));
+-	if (WIFSTOPPED(status))
+-		die("%s stopped by signal %d", name, WSTOPSIG(status));
+-	die("waitpid is confused (status=%d)", status);
+-}
+-
+-pid_t spawn(const char * const cmd[], int out, int err)
+-{
+-	pid_t child;
+-	posix_spawn_file_actions_t redir;
+-
+-	if (posix_spawn_file_actions_init(&redir) ||
+-	    (out >= 0 && posix_spawn_file_actions_adddup2(&redir, out, 1)) ||
+-	    (err >= 0 && posix_spawn_file_actions_adddup2(&redir, err, 2)) ||
+-	    posix_spawnp(&child, cmd[0], &redir, NULL,
+-						(char **) cmd, environ) ||
+-	    posix_spawn_file_actions_destroy(&redir))
+-		die_errno("cannot run %s", cmd[0]);
+-	return child;
+-}
+-
+-void run(const char * const cmd[])
+-{
+-	pid_t child = spawn(cmd, -1, -1);
+-	wait_or_die(child, cmd[0], 0);
+-}
+-
+-FILE *spawn_pipe(pid_t *pid, const char * const cmd[], int errfd)
+-{
+-	int pipefd[2];
+-	FILE *f;
+-
+-	xpipe(pipefd);
+-	*pid = spawn(cmd, pipefd[1], errfd);
+-	if (close(pipefd[1]) || (errfd != -1 && close(errfd)))
+-		die_errno("cannot close unneeded fd");
+-
+-	f = fdopen(pipefd[0], "r");
+-	if (!f)
+-		die_errno("cannot stream read end of pipe");
+-	return f;
+-}
+diff --git a/debian/dash.preinst.c b/debian/dash.preinst.c
+deleted file mode 100644
+index 966b65d..0000000
+--- a/debian/dash.preinst.c
++++ /dev/null
+@@ -1,107 +0,0 @@
+-/*
+- * This file is in the public domain.
+- * You may freely use, modify, distribute, and relicense it.
+- */
+-
+-#include "dash.preinst.h"
+-#include <stdio.h>
+-#include <string.h>
+-#include <errno.h>
+-#include <sys/types.h>
+-#include <sys/stat.h>
+-#include <unistd.h>
+-#include <fcntl.h>
+-
+-static void copy(const char *file, const char *dest)
+-{
+-	const char * const cmd[] = {"cp", "-dp", file, dest, NULL};
+-
+-	if (exists(file))
+-		run(cmd);
+-	else if (unlink(dest))
+-		die_errno("cannot remove %s", dest);
+-}
+-
+-static void force_symlink(const char *target, const char *link,
+-						const char *temp)
+-{
+-	/*
+-	 * Forcibly create a symlink to "target" from "link".
+-	 * This is performed in two stages with an
+-	 * intermediate temporary file because symlink(2) cannot
+-	 * atomically replace an existing file.
+-	 */
+-	if ((unlink(temp) && errno != ENOENT) ||
+-	    symlink(target, temp) ||
+-	    rename(temp, link))
+-		die_errno("cannot create symlink %s -> %s", link, target);
+-}
+-
+-static void reset_diversion(const char *package, const char *file,
+-						const char *distrib)
+-{
+-	const char * const remove_old_diversion[] =
+-		{"dpkg-divert", "--package", "dash", "--remove", file, NULL};
+-	const char * const new_diversion[] =
+-		{"dpkg-divert", "--package", package,
+-		"--divert", distrib, "--add", file, NULL};
+-	run(remove_old_diversion);
+-	run(new_diversion);
+-	copy(file, distrib);
+-}
+-
+-static int undiverted(const char *path)
+-{
+-	const char * const cmd[] =
+-		{"dpkg-divert", "--listpackage", path, NULL};
+-	pid_t child;
+-	char packagename[sizeof("dash\n")];
+-	size_t len;
+-	FILE *in = spawn_pipe(&child, cmd, -1);
+-	int diverted = 1;
+-
+-	/* Is $path diverted by someone other than dash? */
+-
+-	len = fread(packagename, 1, sizeof(packagename), in);
+-	if (ferror(in))
+-		die_errno("cannot read from dpkg-divert");
+-	if (len == 0)
+-		diverted = 0;	/* No diversion. */
+-	if (len == strlen("dash\n") && !memcmp(packagename, "dash\n", len))
+-		diverted = 0;	/* Diverted by dash. */
+-
+-	if (fclose(in))
+-		die_errno("cannot close read end of pipe");
+-	wait_or_die(child, "dpkg-divert", ERROR_OK | SIGPIPE_OK);
+-	return !diverted;
+-}
+-
+-int main(int argc, char *argv[])
+-{
+-	/*
+-	 * To help with bootstrapping Debian, the dash package includes
+-	 * symlinks for /bin/sh and the sh(1) manpage in its data.tar.
+-	 *
+-	 * Unless we are careful, unpacking the new version of dash
+-	 * can overwrite them.  So we tell dpkg that the files from dash
+-	 * are elsewhere, using a diversion on behalf of another package.
+-	 *
+-	 * Based on an idea by Michael Stone.
+-	 * “You're one sick individual.” -- Anthony Towns
+-	 * http://bugs.debian.org/cgi-bin/bugreport.cgi?msg=85;bug=34717
+-	 */
+-	if (undiverted("/bin/sh"))
+-		reset_diversion("bash", "/bin/sh", "/bin/sh.distrib");
+-	if (undiverted("/usr/share/man/man1/sh.1.gz"))
+-		reset_diversion("bash", "/usr/share/man/man1/sh.1.gz",
+-				"/usr/share/man/man1/sh.distrib.1.gz");
+-
+-	/* /bin/sh needs to point to a valid target. */
+-	if (access("/bin/sh", X_OK)) {
+-		force_symlink("dash", "/bin/sh", "/bin/sh.temp");
+-		force_symlink("dash.1.gz", "/usr/share/man/man1/sh.1.gz",
+-			"/usr/share/man/man1/sh.1.gz.temp");
+-	}
+-
+-	return 0;
+-}
+diff --git a/debian/dash.preinst.h b/debian/dash.preinst.h
+deleted file mode 100644
+index 066c4b4..0000000
+--- a/debian/dash.preinst.h
++++ /dev/null
+@@ -1,37 +0,0 @@
+-#ifndef DASH_PREINST_H
+-#define DASH_PREINST_H
+-
+-/*
+- * This file is in the public domain.
+- * You may freely use, modify, distribute, and relicense it.
+- */
+-
+-#define _XOPEN_SOURCE 700
+-#include <stdio.h>
+-#include <stdarg.h>
+-#include <sys/types.h>
+-
+-#if !defined(__GNUC__) && !defined(__attribute__)
+-# define __attribute__(x)
+-#endif
+-#define NORETURN __attribute__((__noreturn__))
+-#define PRINTFLIKE __attribute__((format(printf, 1, 2)))
+-
+-enum wait_or_die_flags {
+-	ERROR_OK = 1,
+-	SIGPIPE_OK = 2
+-};
+-
+-extern NORETURN PRINTFLIKE void die_errno(const char *fmt, ...);
+-extern NORETURN PRINTFLIKE void die(const char *fmt, ...);
+-
+-extern int exists(const char *path);
+-extern void set_cloexec(int fd);
+-extern void xpipe(int pipefd[2]);
+-
+-extern void wait_or_die(pid_t child, const char *desc, int flags);
+-extern pid_t spawn(const char * const cmd[], int outfd, int errfd);
+-extern void run(const char * const cmd[]);	/* spawn and wait */
+-extern FILE *spawn_pipe(pid_t *pid, const char * const cmd[], int errfd);
+-
+-#endif
+diff --git a/debian/rules b/debian/rules
+index 251f31f..4f9d9d4 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -38,16 +38,7 @@ DIRA =$(shell pwd)/debian/ash
+ override_dh_auto_configure:
+ 	dh_auto_configure -- --enable-fnmatch --disable-lineno
+ 
+-PREINST_OBJECTS = debian/dash.preinst.o debian/dash.preinst-lib.o
+-
+-$(PREINST_OBJECTS): %.o: %.c debian/dash.preinst.h
+-	$(CC) -c -o $@ $(CFLAGS) $<
+-
+-debian/dash.preinst: $(PREINST_OBJECTS)
+-	$(CC) -o debian/dash.preinst $(CFLAGS) $(PREINST_OBJECTS)
+-	$(STRIP) -R .comment -R .note debian/dash.preinst
+-
+-override_dh_auto_build: debian/dash.preinst po-templates
++override_dh_auto_build: po-templates
+ 	dh_auto_build
+ 
+ po-templates:
+-- 
+2.19.0.rc2
+

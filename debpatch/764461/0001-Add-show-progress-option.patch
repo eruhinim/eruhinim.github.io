@@ -1,0 +1,178 @@
+From c25e8750c4b1fc9335376063efcbf0b3dc6797a8 Mon Sep 17 00:00:00 2001
+From: James Hunt <james.hunt@ubuntu.com>
+Date: Wed, 8 Oct 2014 11:30:42 +0100
+Subject: [PATCH] Add '--show-progress' option.
+
+Signed-off-by: James Hunt <james.hunt@ubuntu.com>
+---
+ Debian/Debhelper/Dh_Getopt.pm |  2 ++
+ Debian/Debhelper/Dh_Lib.pm    |  4 +++
+ debhelper.pod                 |  4 +++
+ dh                            | 63 +++++++++++++++++++++++++++++++++++++++----
+ 4 files changed, 68 insertions(+), 5 deletions(-)
+
+diff --git a/Debian/Debhelper/Dh_Getopt.pm b/Debian/Debhelper/Dh_Getopt.pm
+index e4f3e47..c236ce9 100644
+--- a/Debian/Debhelper/Dh_Getopt.pm
++++ b/Debian/Debhelper/Dh_Getopt.pm
+@@ -80,6 +80,8 @@ sub getoptions {
+ 		"verbose" => \$dh{VERBOSE},
+ 
+ 		"no-act" => \$dh{NO_ACT},
++
++		"show-progress" => \$dh{SHOW_PROGRESS},
+ 	
+ 		"i" => \&AddPackage,
+ 		"indep" => \&AddPackage,
+diff --git a/Debian/Debhelper/Dh_Lib.pm b/Debian/Debhelper/Dh_Lib.pm
+index 6a79c9c..8b9607e 100644
+--- a/Debian/Debhelper/Dh_Lib.pm
++++ b/Debian/Debhelper/Dh_Lib.pm
+@@ -70,6 +70,10 @@ sub init {
+ 		$dh{NO_ACT}=1;
+ 	}
+ 
++	if (defined $ENV{SHOW_PROGRESS} && $ENV{SHOW_PROGRESS} ne "") {
++		$dh{SHOW_PROGRESS}=1;
++	}
++
+ 	# Get the name of the main binary package (first one listed in
+ 	# debian/control). Only if the main package was not set on the
+ 	# command line.
+diff --git a/debhelper.pod b/debhelper.pod
+index 659c4a3..e23de14 100644
+--- a/debhelper.pod
++++ b/debhelper.pod
+@@ -663,6 +663,10 @@ overriding any value in F<debian/compat>.
+ 
+ Set to B<1> to enable no-act mode.
+ 
++=item B<DH_SHOW_PROGRESS>
++
++Set to B<1> to enable show-progress mode.
++
+ =item B<DH_OPTIONS>
+ 
+ Anything in this variable will be prepended to the command line arguments
+diff --git a/dh b/dh
+index f3bd321..f11f64e 100755
+--- a/dh
++++ b/dh
+@@ -68,6 +68,15 @@ Prints commands that would run for a given sequence, but does not run them.
+ Note that dh normally skips running commands that it knows will do nothing.
+ With --no-act, the full list of commands in a sequence is printed.
+ 
++=item B<--show-progress>
++
++Displays commands that are about to be run ("the plan", same output as B<--no-act>)
++and then proceeds to run the commands as usual, printing a start and end tag for
++every command run.
++
++This can be useful for scripts that parse the output to determine more easily which
++step failed, and how far through the build process the failing step was.
++
+ =back
+ 
+ Other options passed to B<dh> are passed on to each command it runs. This
+@@ -440,6 +449,9 @@ else {
+ # Additional command options
+ my %command_opts;
+ 
++# array of commands to run
++my @commands;
++
+ # sequence addon interface
+ sub _insert {
+ 	my $offset=shift;
+@@ -524,6 +536,26 @@ sub list_addons {
+ 	exit 0;
+ }
+ 
++# If show_plan is set, show commands that would be run (NO_ACT),
++# else run the commands.
++sub run_commands {
++	my $commands=shift;
++	my $show_plan=shift;
++
++	foreach (@{$commands}) {
++
++		my $command = @{$_}{command};
++		my $options = @{$_}{options};
++
++		if ($show_plan) {
++			print "dh plan: ".escape_shell($command, @{$options})."\n";
++			next;
++		}
++
++		run($command, @{$options});
++	}
++}
++
+ # Load addons, which can modify sequences.
+ foreach my $addon (@{$dh{WITH}}) {
+ 	my $mod="Debian::Debhelper::Sequence::$addon";
+@@ -570,7 +602,7 @@ while (@ARGV_orig) {
+ 		shift @ARGV_orig;
+ 		next;
+ 	}
+-	elsif ($opt =~ /^--?(no-act|remaining|(after|until|before|with|without)=)/) {
++	elsif ($opt =~ /^--?(no-act|show-progress|remaining|(after|until|before|with|without)=)/) {
+ 		next;
+ 	}
+ 	elsif ($opt=~/^-/) {
+@@ -700,9 +732,17 @@ foreach my $i (0..$stoppoint) {
+ 		}
+ 	}
+ 
+-	run($command, @opts);
++	# Save commands to run
++	push @commands, {command => $command, options => \@opts};
++}
++
++if ($dh{SHOW_PROGRESS}) {
++	# show the commands before we actually start
++	run_commands (\@commands, 1);
+ }
+ 
++run_commands (\@commands, 0);
++
+ sub run {
+ 	my $command=shift;
+ 	my @options=@_;
+@@ -713,10 +753,19 @@ sub run {
+ 
+ 	# 3 space indent lines the command being run up under the
+ 	# sequence name after "dh ".
+-	print "   ".escape_shell($command, @options)."\n";
++	if ($dh{SHOW_PROGRESS}) {
++		print "dh -> ".escape_shell($command, @options)."\n";
++	} else {
++		print "   ".escape_shell($command, @options)."\n";
++	}
++
++	if ($dh{NO_ACT}) {
++		print "dh <- ".escape_shell($command, @options)."\n"
++			if $dh{SHOW_PROGRESS};
++
++		return;
++	}
+ 
+-	return if $dh{NO_ACT};
+-			
+ 	my $ret=system($command, @options);
+ 	if ($ret >> 8 != 0) {
+ 		exit $ret >> 8;
+@@ -724,6 +773,10 @@ sub run {
+ 	elsif ($ret) {
+ 		exit 1;
+ 	}
++
++	if ($dh{SHOW_PROGRESS}) {
++		print "dh <- ".escape_shell($command, @options)."\n";
++	}
+ }
+ 
+ # Tries to run an override target for a command. Returns the list of
+-- 
+2.1.0
+

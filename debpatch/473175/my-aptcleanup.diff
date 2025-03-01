@@ -1,0 +1,87 @@
+diff -ruN c/aptcleanup d/aptcleanup
+--- c/aptcleanup	2008-05-13 00:00:19.000000000 +0200
++++ d/aptcleanup	2008-06-14 15:45:31.000000000 +0200
+@@ -1,29 +1,68 @@
+ #!/usr/bin/ruby -I/usr/share/apt-listbugs
++#
++# aptcleanup: filters /etc/apt/preferences to unpin packages when bugs are fixed
++#
++# Copyright (C) 2004-2005  Masato Taruishi <taru@debian.org>
++# Copyright (C) 2006-2008  Junichi Uekawa <dancer@debian.org>
++# Copyright (C) 2008  Francesco Poli <frx@firenze.linux.it>
++#
++#  This program is free software; you can redistribute it and/or modify
++#  it under the terms of the GNU General Public License as published by
++#  the Free Software Foundation; either version 2 of the License, or
++#  (at your option) any later version.
++#
++#  This program is distributed in the hope that it will be useful,
++#  but WITHOUT ANY WARRANTY; without even the implied warranty of
++#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++#  GNU General Public License for more details.
++#
++#  You should have received a copy of the GNU General Public License with
++#  the Debian GNU/Linux distribution in file /usr/share/common-licenses/GPL;
++#  if not, write to the Free Software Foundation, Inc., 51 Franklin St,
++#  Fifth Floor, Boston, MA 02110-1301, USA.
++#
++# 
+ 
+ require 'debian/apt_preferences'
++APTCACHE = "/usr/bin/apt-cache"
++AWK = "/usr/bin/awk"
++LISTBUGS = "/usr/sbin/apt-listbugs"
+ 
+ p = Debian::AptPreferences.new
+-buf = ""
+-p.pins.each do |pin|
+-  buf << " " + pin["Package"] if pin.listbugs?
+-end
+-pinnedpkgs = buf.split(' ')
+-$stderr.puts "Pinned: #{pinnedpkgs.sort.join(' ')}" if $DEBUG
++pinnedpkgs = []
+ bugpkgs = []
+-open("|/usr/sbin/apt-listbugs -y -q list #{buf}") { |io|
+-  array = io.readlines()
+-  if array.size != 0
+-    buf = array[array.size-1].delete(' ').gsub(/\([^\)]+\)/,'').chomp
+-    bugpkgs = buf.split(',')
++p.pins.each do |pin|
++  if pin.listbugs?
++    pinned_package = pin["Package"]
++    pinnedpkgs << pinned_package
++
++    # which version would get installed, if the pinning were removed ?
++    unpinned_candidate_version = `#{APTCACHE} -o Dir::Etc::Preferences=/dev/null policy #{pinned_package} | #{AWK} '/Candidate:/ { printf "/%s", $2; }'`
++    buf = pinned_package + unpinned_candidate_version.chomp + ' '
++
++    # read which bugs caused the pinning ("bugs that the user fears")
++    feared_bugs = pin["Explanation"].scan /#(\d+):/
++    buf << feared_bugs.join(' ')
++
++    # are bugs that the user fears still affecting unpinned_candidate_version ?
++    open("|#{LISTBUGS} -y -q query #{buf}") { |io|
++      array = io.readlines()
++      bugpkgs << pinned_package if array.size != 0
++    }
++    if $?.exitstatus != 0
++      $stderr.puts "Error... exiting!" if $DEBUG
++      exit 1
++    end
+   end
+-}
+-if $?.exitstatus != 0
+-  $stderr.puts "Error... exiting!" if $DEBUG
+-  exit 1
+ end
++
++$stderr.puts "Pinned: #{pinnedpkgs.sort.join(' ')}" if $DEBUG
+ $stderr.puts "Bugs: #{bugpkgs.sort.join(' ')}" if $DEBUG
++
+ if (pinnedpkgs - bugpkgs).size > 0
+   $stderr.puts "#{(pinnedpkgs - bugpkgs).join(', ')} has been fixed"
+ end
++
++# write out filtered preferences file
+ p.filter( bugpkgs )
+ 

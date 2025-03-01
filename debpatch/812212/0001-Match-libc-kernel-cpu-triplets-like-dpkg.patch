@@ -1,0 +1,112 @@
+From 8c2ae82356b76eea84e008a1df30c60555747ef3 Mon Sep 17 00:00:00 2001
+From: Balint Reczey <balint@balintreczey.hu>
+Date: Thu, 21 Jan 2016 15:17:01 +0100
+Subject: [PATCH] Match <libc>-<kernel>-<cpu> triplets like dpkg
+
+---
+ apt-pkg/cachefilter.cc           | 32 +++++++++++++++++++++-----------
+ apt-pkg/cachefilter.h            |  2 +-
+ test/libapt/parsedepends_test.cc | 22 ++++++++++++++++++++++
+ 3 files changed, 44 insertions(+), 12 deletions(-)
+
+diff --git a/apt-pkg/cachefilter.cc b/apt-pkg/cachefilter.cc
+index 4362f43..ef39b3c 100644
+--- a/apt-pkg/cachefilter.cc
++++ b/apt-pkg/cachefilter.cc
+@@ -68,19 +68,29 @@ bool PackageNameMatchesFnmatch::operator() (pkgCache::GrpIterator const &Grp) {
+    return fnmatch(Pattern.c_str(), Grp.Name(), FNM_CASEFOLD) == 0;
+ }
+ 									/*}}}*/
+-// Architecture matches <kernel>-<cpu> specification			/*{{{*/
++// Architecture matches <libc>-<kernel>-<cpu> specification		/*{{{*/
+ //----------------------------------------------------------------------
+-/* The complete architecture, consisting of <kernel>-<cpu>. */
++/* The complete architecture, consisting of <libc>-<kernel>-<cpu>. */
+ static std::string CompleteArch(std::string const &arch) {
+-	if (arch.find('-') != std::string::npos) {
+-		// ensure that only -any- is replaced and not something like company-
+-		std::string complete = std::string("-").append(arch).append("-");
+-		complete = SubstVar(complete, "-any-", "-*-");
+-		complete = complete.substr(1, complete.size()-2);
+-		return complete;
+-	}
+-	else if (arch == "any")			return "*-*";
+-	else					return "linux-" + arch;
++  std::size_t found = arch.find('-');
++  if (found != std::string::npos) {
++    std::string complete = std::string("-").append(arch).append("-");
++    complete = SubstVar(complete, "-any-", "-*-");
++    // ensure that only -any- is replaced and not something like company-
++    complete = complete.substr(1, complete.size()-2);
++    if (arch.find('-', found+1) != std::string::npos) {
++      // <libc>-<kernel>-<cpu> format
++      return complete;
++    } else {
++      // <kernel>-<cpu> format
++      return "*-" + complete;
++    }
++  }
++  else
++    if (arch == "any")
++      return "*-*-*";
++    else
++      return "gnu-linux-" + arch;
+ }
+ PackageArchitectureMatchesSpecification::PackageArchitectureMatchesSpecification(std::string const &pattern, bool const isPattern) :
+ 					literal(pattern), complete(CompleteArch(pattern)), isPattern(isPattern) {
+diff --git a/apt-pkg/cachefilter.h b/apt-pkg/cachefilter.h
+index 9970b5b..6646f6c 100644
+--- a/apt-pkg/cachefilter.h
++++ b/apt-pkg/cachefilter.h
+@@ -119,7 +119,7 @@ class PackageArchitectureMatchesSpecification : public PackageMatcher {	/*{{{*/
+    or the whole string, can be the wildcard "any" as defined in
+    debian-policy §11.1 "Architecture specification strings".
+ 
+-   Examples: i386, mipsel, linux-any, any-amd64, any */
++   Examples: i386, mipsel, musl-linux-amd64, linux-any, any-amd64, any */
+ 	std::string literal;
+ 	std::string complete;
+ 	bool isPattern;
+diff --git a/test/libapt/parsedepends_test.cc b/test/libapt/parsedepends_test.cc
+index f644599..1d62b33 100644
+--- a/test/libapt/parsedepends_test.cc
++++ b/test/libapt/parsedepends_test.cc
+@@ -31,6 +31,8 @@ static void parseDependency(bool const StripMultiArch,  bool const ParseArchFlag
+       "not-for-darwin [ !darwin-any ], "
+       "cpu-for-me [ any-amd64 ], "
+       "os-for-me [ linux-any ], "
++      "libc-for-me [ gnu-linux-any ], "
++      "libc-not-for-me [ musl-linux-any ], "
+       "cpu-not-for-me [ any-armel ], "
+       "os-not-for-me [ kfreebsd-any ], "
+       "not-in-stage1 <!stage1>, "
+@@ -147,6 +149,26 @@ static void parseDependency(bool const StripMultiArch,  bool const ParseArchFlag
+ 
+    if (ParseArchFlags == true) {
+       Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
++      EXPECT_EQ("libc-for-me", Package);
++      EXPECT_EQ("", Version);
++      EXPECT_EQ(Null | pkgCache::Dep::NoOp, Op);
++   } else {
++      EXPECT_EQ(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList));
++      Start = strstr(Start, ",");
++      Start++;
++   }
++
++   if (ParseArchFlags == true) {
++      Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
++      EXPECT_EQ("", Package); // libc-not-for-me
++   } else {
++      EXPECT_EQ(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList));
++      Start = strstr(Start, ",");
++      Start++;
++   }
++
++   if (ParseArchFlags == true) {
++      Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+       EXPECT_EQ("os-for-me", Package);
+       EXPECT_EQ("", Version);
+       EXPECT_EQ(Null | pkgCache::Dep::NoOp, Op);
+-- 
+2.1.4
+

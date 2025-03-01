@@ -1,0 +1,86 @@
+From 73e52cbc6b6506774b2d29e6ffc54b0707d3d012 Mon Sep 17 00:00:00 2001
+From: Anders Kaseorg <andersk@mit.edu>
+Date: Thu, 7 Jul 2011 21:04:03 -0400
+Subject: [PATCH 2/6] Use dpkg-query instead of reading /var/lib/dpkg/status
+
+Signed-off-by: Anders Kaseorg <andersk@mit.edu>
+---
+ debsums |   41 ++++++++++++++++++++++++++++-------------
+ 1 files changed, 28 insertions(+), 13 deletions(-)
+
+diff --git a/debsums b/debsums
+index 5693287..a17541e 100755
+--- a/debsums
++++ b/debsums
+@@ -116,6 +116,29 @@ sub warn_or_die {
+   }
+ }
+ 
++sub parse_dpkg {
++    my ($command_cb, $field_names) = @_;
++
++    local $/ = "\n\n";  # Separator that cannot appear in dpkg status format
++    my @command = &$command_cb('--showformat=' .
++			       (join '', map {"\${$_}$/"} @$field_names));
++    open DPKG, '-|', @command
++	or die "$self: can't run dpkg-query ($!)\n";
++
++    my @ret;
++    while (!eof DPKG)
++    {
++	my %field = map {$_, scalar <DPKG>} @$field_names;
++	chomp @field{@$field_names};
++	push @ret, \%field;
++    }
++
++    close DPKG or die "$self: @command failed (",
++      $! ? $! : $? >> 8 ? "exit status " . ($? >> 8) : "signal " . ($? & 127),
++      ")\n";
++    return @ret;
++}
++
+ $root ||= '';
+ $admindir ||= '/var/lib/dpkg';
+ my $DPKG = $root . $admindir;
+@@ -181,16 +204,11 @@ if ($gen_opt)
+ my %installed;
+ my %replaced;
+ {
+-    open STATUS, "$DPKG/status" or die "$self: can't open $DPKG/status ($!)\n";
+-    local $/ = '';
+-
+-    while (<STATUS>)
+-    {
+-	chomp;
+-	my %field = map /^(\S+):\s+(.*)/ms, split /\n(?!\s)/;
+-	next unless exists $field{Package}
+-		and exists $field{Version}
+-		and exists $field{Status}
++    for my $fields (parse_dpkg(sub {'dpkg-query', "--admindir=$DPKG", @_, '--show'},
++			       [qw(Package Version Status Conffiles Replaces)])) {
++	my %field = %$fields;
++	next unless $field{Package} ne ''
++		and $field{Version} ne ''
+ 		and $field{Status} =~ /\sinstalled$/;
+ 
+ 	$installed{$field{Package}}{Version} = $field{Version};
+@@ -198,7 +216,6 @@ my %replaced;
+ 	    map m!^\s*/(\S+)\s+([\da-f]+)!, split /\n/, $field{Conffiles}
+ 	} if $field{Conffiles};
+ 
+-	next unless exists $field{Replaces};
+ 	for (split /,\s*/, $field{Replaces})
+ 	{
+ 	    my ($pack, $ver) = /^(\S+)(?:\s+\(([^)]+)\))?$/;
+@@ -211,8 +228,6 @@ my %replaced;
+ 	    push @{$replaced{$pack}{$ver || 'all'}}, $field{Package};
+ 	}
+     }
+-
+-    close STATUS;
+ }
+ 
+ my %diversion;
+-- 
+1.7.6
+

@@ -1,0 +1,116 @@
+From 003375a00bbfd65c3ad325856581a2489e6437b7 Mon Sep 17 00:00:00 2001
+From: Josh Triplett <josh@joshtriplett.org>
+Date: Sun, 22 Apr 2012 20:04:51 -0700
+Subject: [PATCH 2/4] Add a new log level to log cron job output when not
+ mailing that output.
+
+---
+ cron.8              |    6 ++++--
+ cron.h              |    1 +
+ debian/changelog    |    3 ++-
+ debian/cron.default |    3 ++-
+ do_command.c        |   13 +++++--------
+ 5 files changed, 14 insertions(+), 12 deletions(-)
+
+diff --git a/cron.8 b/cron.8
+index 5985700..76d699b 100644
+--- a/cron.8
++++ b/cron.8
+@@ -55,11 +55,13 @@ will log all failed jobs (exit status != 0)
+ .IP \fB8\fR
+ will log the process number of all cron jobs
+ .IP \fB16\fR
+-will log the full output of all cron jobs
++will log the full output of all cron jobs, even when also mailing that output
++.IP \fB32\fR
++will log the full output of all cron jobs when not mailing that output
+ .RE
+ .IP
+ The default is to log the start of all jobs (1). Logging will be disabled
+-if \fIlevels\fR is set to zero (0). A value of 31 will select all options.
++if \fIlevels\fR is set to zero (0). A value of 63 will select all options.
+ .SH NOTES
+ .PP
+ .I cron
+diff --git a/cron.h b/cron.h
+index d0cf070..8ceb90d 100644
+--- a/cron.h
++++ b/cron.h
+@@ -140,6 +140,7 @@ typedef int time_min;
+ #define	CRON_LOG_JOBFAILED	0x04
+ #define	CRON_LOG_JOBPID		0x08
+ #define	CRON_LOG_JOBOUTPUT	0x10
++#define	CRON_LOG_JOBOUTPUT_IF_NO_MAIL	0x20
+ 
+ #define SECONDS_PER_MINUTE 60
+ 
+diff --git a/debian/changelog b/debian/changelog
+index 99891b5..6f82878 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -8,7 +8,8 @@ cron (3.0pl1-122) UNRELEASED; urgency=low
+     cron (Closes: #666892)
+ 
+   [ Josh Triplett ]
+-  * Add a new log level to log all cron job output.
++  * Add two new log levels: -L 16 logs all cron job output, and -L 32 logs all
++    cron job output when not already mailing that output.
+ 
+  -- Javier Fernández-Sanguino Peña <jfs@debian.org>  Mon, 09 Apr 2012 17:23:01 +0200
+ 
+diff --git a/debian/cron.default b/debian/cron.default
+index ed4383d..92845f9 100644
+--- a/debian/cron.default
++++ b/debian/cron.default
+@@ -23,7 +23,8 @@ READ_ENV="yes"
+ #   2   log end of jobs
+ #   4   log jobs with exit status != 0
+ #   8   log the process identifier of child process (in all logs)
+-#   16  log the full output of all cron jobs
++#   16  log the full output of all cron jobs even when also mailing that output
++#   32  log the full output of all cron jobs when not mailing that output
+ #
+ #EXTRA_OPTS=""
+ 
+diff --git a/do_command.c b/do_command.c
+index c2fc9f7..d356955 100644
+--- a/do_command.c
++++ b/do_command.c
+@@ -534,8 +534,9 @@ child_process(e, u)
+ 	/* Don't send mail if MAILCMD is not available */
+ 	if ((statret = stat(MAILCMD, &mcsb)) != 0) {
+ 		Debug(DPROC|DEXT, ("%s not found, not sending mail\n", MAILCMD))
+-		if (pos > 0) {
+-			log_it("CRON", getpid(), "info", "No MTA installed, not mailing output");
++		if (pos > 0 && !(log_level & CRON_LOG_JOBOUTPUT) && !(log_level & CRON_LOG_JOBOUTPUT_IF_NO_MAIL)) {
++			log_it("CRON", getpid(), "info", "No MTA installed and not configured to log output; discarding output");
++                        goto output_finished;
+ 		}
+ 		goto mail_headers_finished;
+ 	} else {
+@@ -601,12 +602,8 @@ child_process(e, u)
+ 				*env);
+ 	fputc('\n', mail);
+ 
+-mail_headers_finished:
++mail_headers_finished: ;
+ // Append the actual output of the child to the mail
+-	
+-	if (!mail && !(log_level & CRON_LOG_JOBOUTPUT))
+-		goto output_finished;
+-
+ 	char buf[4096];
+ 
+ 	while(fgets(buf, sizeof(buf), tmpout) != NULL) {
+@@ -616,7 +613,7 @@ mail_headers_finished:
+ 			buf[len-1] = '\0';
+ 		if (mail)
+ 			fprintf(mail, "%s\n", buf);
+-		if (log_level & CRON_LOG_JOBOUTPUT)
++		if ((log_level & CRON_LOG_JOBOUTPUT) || (!mail && (log_level & CRON_LOG_JOBOUTPUT_IF_NO_MAIL)))
+ 			log_it(usernm, job_pid, "CMD OUTPUT", buf);
+ 	}
+ 
+-- 
+1.7.10
+

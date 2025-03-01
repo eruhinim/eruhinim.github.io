@@ -1,0 +1,230 @@
+diff -Nurp dpkg/configure.ac dpkg.new/configure.ac
+--- dpkg/configure.ac	2009-01-23 19:43:17.000000000 +0000
++++ dpkg.new/configure.ac	2009-01-23 18:31:35.000000000 +0000
+@@ -73,7 +73,7 @@ fi
+ 
+ # Checks for header files.
+ AC_HEADER_STDC
+-AC_CHECK_HEADERS([stddef.h error.h locale.h libintl.h sys/cdefs.h kvm.h])
++AC_CHECK_HEADERS([stddef.h error.h locale.h libintl.h sys/cdefs.h kvm.h sys/syscall.h])
+ DPKG_CHECK_DEFINE(TIOCNOTTY, [sys/ioctl.h])
+ 
+ # Checks for typedefs, structures, and compiler characteristics.
+diff -Nurp dpkg/man/start-stop-daemon.8 dpkg.new/man/start-stop-daemon.8
+--- dpkg/man/start-stop-daemon.8	2009-01-23 19:43:19.000000000 +0000
++++ dpkg.new/man/start-stop-daemon.8	2009-01-23 21:21:47.000000000 +0000
+@@ -219,6 +219,13 @@ code for them to do this themselves.
+ .BR \-N ", " \-\-nicelevel " \fIint\fP"
+ This alters the priority of the process before starting it.
+ .TP
++.BR \-I ", " \-\-iosched " \fIclass\fP\fB:\fP\fIdata\fP"
++This alters the IO scheduler class and data of the process before starting
++it. The data can be optionally specified by appending a \fB:\fP followed
++by the value. The default \fIdata\fP is 4, unless \fIclass\fP is \fBidle\fP,
++when \fIdata\fP will always be 7. The currently supported values for
++\fIclass\fP are \fBidle\fP, \fBbest-effort\fP and \fBreal-time\fP.
++.TP
+ .BR \-P ", " \-\-procsched " \fIpolicy\fP\fB:\fP\fIpriority\fP"
+ This alters the process scheduler policy and priority of the process before
+ starting it. The priority can be optionally specified by appending a \fB:\fP
+diff -Nurp dpkg/utils/start-stop-daemon.c dpkg.new/utils/start-stop-daemon.c
+--- dpkg/utils/start-stop-daemon.c	2009-01-23 19:43:20.000000000 +0000
++++ dpkg.new/utils/start-stop-daemon.c	2009-01-23 21:28:19.000000000 +0000
+@@ -111,6 +111,27 @@
+ #include <error.h>
+ #endif
+ 
++#ifdef HAVE_SYS_SYSCALL_H
++#include <sys/syscall.h>
++#endif
++
++#if defined(SYS_ioprio_set) && defined(linux)
++	#define SUPPORT_IOPRIO_SET
++#endif
++
++enum {
++	IOPRIO_WHO_PROCESS = 1,
++	IOPRIO_WHO_PGRP,
++	IOPRIO_WHO_USER,
++};
++
++enum {
++	IOPRIO_CLASS_NONE,
++	IOPRIO_CLASS_RT,
++	IOPRIO_CLASS_BE,
++	IOPRIO_CLASS_IDLE,
++};
++
+ static int testmode = 0;
+ static int quietmode = 0;
+ static int exitnodo = 1;
+@@ -136,6 +157,11 @@ static const char *progname = "";
+ static int nicelevel = 0;
+ static int umask_value = -1;
+ 
++#define IOPRIO_CLASS_SHIFT	13
++#define IOPRIO_PRIO_VALUE(class, data)	(((class) << IOPRIO_CLASS_SHIFT) | data)
++#define IO_SCHED_DATA_MIN 0
++#define IO_SCHED_DATA_MAX 7
++
+ static struct stat exec_stat;
+ #if defined(OSHURD)
+ static struct proc_stat_list *procset = NULL;
+@@ -168,6 +194,7 @@ struct schedule_item {
+ };
+ 
+ static struct res_schedule *proc_sched = NULL;
++static struct res_schedule *io_sched = NULL;
+ 
+ static int schedule_length;
+ static struct schedule_item *schedule = NULL;
+@@ -336,6 +363,9 @@ do_help(void)
+ "  -r|--chroot <directory>       chroot to <directory> before starting\n"
+ "  -d|--chdir <directory>        change to <directory> (default is /)\n"
+ "  -N|--nicelevel <incr>         add incr to the process's nice level\n"
++"  -I|--iosched <class>:<data>\n"
++"                                use <class> with <data> to set the IO\n"
++"                                 scheduler (default data is 4)\n"
+ "  -P|--procsched <policy[:prio]>\n"
+ "                                use <policy> with <prio> for the kernel\n"
+ "                                  process scheduler (default prio is 0)\n"
+@@ -493,6 +523,58 @@ parse_proc_schedule(const char *string)
+ }
+ 
+ static void
++parse_iosched(const char *string)
++{
++	char *class_str, *data_str;
++	int data = 0;
++
++	class_str = xstrdup(string);
++	class_str = strtok(class_str, ":");
++	data_str = strtok(NULL, ":");
++	
++	if (data_str && parse_integer(data_str, &data) != 0)
++		fatal("Invalid IO scheduler data string");
++		
++	io_sched = xmalloc(sizeof(*io_sched));
++	io_sched->policy_name = class_str;
++	
++	if (strcmp(class_str, "real-time") == 0) {
++		io_sched->policy = IOPRIO_CLASS_RT;
++	} else if (strcmp(class_str, "best-effort") == 0) {
++		io_sched->policy = IOPRIO_CLASS_BE;
++	} else if (strcmp(class_str, "idle") == 0) {
++		io_sched->policy = IOPRIO_CLASS_IDLE;
++	} else {
++		badusage("Unrecognized IO scheduler class");
++	}
++	
++	switch (io_sched->policy) {
++	case (IOPRIO_CLASS_IDLE):
++		io_sched->priority = 7;
++		break;
++	default:
++		if (data_str != NULL) {
++			io_sched->priority = data;
++		} else {
++			io_sched->priority = 4;
++		}
++	}
++	
++	if (io_sched->priority < IO_SCHED_DATA_MIN)
++		badusage("IO scheduler data less than min");
++	if (io_sched->priority > IO_SCHED_DATA_MAX)
++		badusage("IO scheduler data greater than max");
++}
++
++#ifdef SUPPORT_IOPRIO_SET
++static inline int
++ioprio_set (int which, int who, int ioprio)
++{
++	return syscall(SYS_ioprio_set, which, who, ioprio);
++}
++#endif
++
++static void
+ set_proc_schedule(struct res_schedule *sched)
+ {
+ #ifdef _POSIX_PRIORITY_SCHEDULING
+@@ -506,6 +588,19 @@ set_proc_schedule(struct res_schedule *s
+ }
+ 
+ static void
++set_io_sched(struct res_schedule *sched)
++{
++#ifdef SUPPORT_IOPRIO_SET
++	int io_sched_mask;
++	
++	io_sched_mask = IOPRIO_PRIO_VALUE(sched->policy, sched->priority);
++	if (ioprio_set(IOPRIO_WHO_PROCESS, getpid(), io_sched_mask) == -1)
++		fatal("Unable to alter IO priority to mask %i",
++			  io_sched_mask);
++#endif
++}
++
++static void
+ parse_schedule_item(const char *string, struct schedule_item *item)
+ {
+ 	const char *after_hyph;
+@@ -606,6 +701,7 @@ parse_options(int argc, char * const *ar
+ 		{ "exec",	  1, NULL, 'x'},
+ 		{ "chuid",	  1, NULL, 'c'},
+ 		{ "nicelevel",	  1, NULL, 'N'},
++		{ "iosched",	1, NULL, 'I'},
+ 		{ "procsched",	  1, NULL, 'P'},
+ 		{ "umask",	  1, NULL, 'k'},
+ 		{ "background",	  0, NULL, 'b'},
+@@ -618,11 +714,12 @@ parse_options(int argc, char * const *ar
+ 	const char *signal_str = NULL;
+ 	const char *schedule_str = NULL;
+ 	const char *proc_schedule_str = NULL;
++	const char *io_sched_str = NULL;
+ 	int c;
+ 
+ 	for (;;) {
+ 		c = getopt_long(argc, argv,
+-		                "HKSVa:n:op:qr:s:tu:vx:c:N:P:k:bmR:g:d:",
++		                "HKSVa:n:op:qr:s:tu:vx:c:N:I:P:k:bmR:g:d:",
+ 		                longopts, NULL);
+ 		if (c == -1)
+ 			break;
+@@ -685,6 +782,9 @@ parse_options(int argc, char * const *ar
+ 		case 'N':  /* --nice */
+ 			nicelevel = atoi(optarg);
+ 			break;
++		case 'I':  /* --iosched */
++			io_sched_str = optarg;
++			break;
+ 		case 'P':  /* --procsched */
+ 			proc_schedule_str = optarg;
+ 			break;
+@@ -720,6 +820,9 @@ parse_options(int argc, char * const *ar
+ 
+ 	if (proc_schedule_str != NULL)
+ 		parse_proc_schedule(proc_schedule_str);
++	
++	if (io_sched_str != NULL)
++		parse_iosched(io_sched_str);
+ 
+ 	if (umask_str != NULL) {
+ 		if (parse_umask(umask_str, &umask_value) != 0)
+@@ -1410,6 +1513,9 @@ main(int argc, char **argv)
+ 		if (proc_sched)
+ 			printf(", with scheduling policy %s with priority %i",
+ 			       proc_sched->policy_name, proc_sched->priority);
++		if (io_sched)
++			printf(", and with IO scheduling class %s and data %i",
++				   io_sched->policy_name, io_sched->priority);
+ 		printf(".\n");
+ 	}
+ 	if (testmode)
+@@ -1431,6 +1537,8 @@ main(int argc, char **argv)
+ 			fatal("Unable to alter nice level by %i: %s",
+ 			      nicelevel, strerror(errno));
+ 	}
++	if (io_sched)
++		set_io_sched(io_sched);
+ 	if (proc_sched)
+ 		set_proc_schedule(proc_sched);
+ 	if (umask_value >= 0)

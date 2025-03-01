@@ -1,0 +1,477 @@
+>From 8440fe8b2bef5f99bddf3deb141a8c4b4b0354f9 Mon Sep 17 00:00:00 2001
+From: Stefano Zacchiroli <zack@debian.org>
+Date: Sun, 5 Oct 2014 23:41:40 +0200
+Subject: [PATCH 1/2] autopkgtest: new specification for autopkgtest/DEP-8
+ tests
+
+---
+ .gitignore                 |   4 +
+ autopkgtest.desc           |  13 ++
+ autopkgtest/Makefile       |  13 ++
+ autopkgtest/autopkgtest.md | 305 +++++++++++++++++++++++++++++++++++++++++++++
+ debian/control             |   4 +-
+ debian/rules               |  14 ++-
+ 6 files changed, 351 insertions(+), 2 deletions(-)
+ create mode 100644 autopkgtest.desc
+ create mode 100644 autopkgtest/Makefile
+ create mode 100644 autopkgtest/autopkgtest.md
+
+diff --git a/.gitignore b/.gitignore
+index 5c80ed5..66b5940 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,5 +1,9 @@
+ /Process.html
+ /README.html
++/autopkgtest/version.txt
++/autopkgtest/*.expanded
++/autopkgtest/*.html
++/autopkgtest/*.txt.gz
+ /copyright-format/copyright-format-1.0.html
+ /copyright-format/version.xml
+ /debconf_spec/debconf_specification.html
+diff --git a/autopkgtest.desc b/autopkgtest.desc
+new file mode 100644
+index 0000000..dc7ea40
+--- /dev/null
++++ b/autopkgtest.desc
+@@ -0,0 +1,13 @@
++Document: autopkgtest
++Title: automatic as-installed package test specification
++Author: The Debian Project
++Abstract: Specification for automatic as-installed (AKA "autopkgtest",
++  or DEP-8) tests for Debian packages
++Section: Debian
++
++Format: text
++Files: /usr/share/doc/debian-policy/package-tests.txt.gz
++
++Format: HTML
++Index: /usr/share/doc/debian-policy/package-tests.html
++Files: /usr/share/doc/debian-policy/package-tests.html
+diff --git a/autopkgtest/Makefile b/autopkgtest/Makefile
+new file mode 100644
+index 0000000..9552f38
+--- /dev/null
++++ b/autopkgtest/Makefile
+@@ -0,0 +1,13 @@
++all: autopkgtest.html autopkgtest.txt.gz
++
++autopkgtest.html: autopkgtest.md.expanded
++	markdown $< > $@
++
++autopkgtest.txt.gz: autopkgtest.md.expanded
++	gzip -cf9 $< > $@
++
++autopkgtest.md.expanded: autopkgtest.md version.txt
++	cat $^ > $@
++
++clean:
++	rm -f autopkgtest.html autopkgtest.txt.gz $(wildcard *.expanded)
+diff --git a/autopkgtest/autopkgtest.md b/autopkgtest/autopkgtest.md
+new file mode 100644
+index 0000000..c9f6d77
+--- /dev/null
++++ b/autopkgtest/autopkgtest.md
+@@ -0,0 +1,305 @@
++Autopkgtest - Defining tests for Debian packages
++================================================
++
++This document describes how the autopkgtest tester core (the program
++`adt-run`) interprets and executes tests found in Debian source
++packages.
++
++Overview
++--------
++
++The source package provides a test metadata file `debian/tests/control`.
++This is a file containing zero or more RFC822-style stanzas, along these
++lines:
++
++    Tests: fred bill bongo
++    Restrictions: needs-root breaks-testbed
++
++This example defines three tests, called `fred`, `bill` and `bongo`. The
++tests will be performed by executing `debian/tests/fred`,
++`debian/tests/bill`, etc. Each test program should, on success, exit
++with status 0 and print nothing to stderr; if a test exits nonzero, or
++prints to stderr, it is considered to have failed.
++
++The cwd of each test is guaranteed to be the root of the source package,
++which will have been unpacked but not built. *However* note that the
++tests must test the *installed* version of the program. Tests may not
++modify the source tree (and may not have write access to it).
++
++If the file to be executed has no execute bits set, `chmod a+x` is
++applied to it (this means that tests can be added in patches without the
++need for additional chmod; contrast this with debian/rules).
++
++During execution of the test, the environment variable `$ADTTMP` will
++point to a directory for the execution of this particular test, which
++starts empty and will be deleted afterwards (so there is no need for the
++test to clean up files left there).
++
++If tests want to create artifacts which are useful to attach to test
++results, such as additional log files or screenshots, they can put them
++into the directory specified by the `$ADT_ARTIFACTS` environment
++variable. When using the `--output-dir` option, they will be copied into
++`outputdir/artifacts/`.
++
++Tests must declare all applicable Restrictions - see below.
++
++Control fields
++--------------
++
++The fields which may appear in debian/tests/control stanzas are:
++
++- **Tests:** *name-of-test [name-of-another-test ...]*
++
++  This field names the tests which are defined by this stanza, and map to
++  executables/scripts in the test directory. All of the other fields in the
++  same stanza apply to all of the named tests. Either this field or
++  `Test-Command:` must be present.
++
++  Test names are separated by whitespace and should contain only characters
++  which are legal in package names. It is permitted, but not encouraged, to use
++  upper-case characters as well.
++
++- **Test-Command:** *shell command*
++
++  If your test only contains a shell command or two, or you want to re-use an
++  existing upstream test executable and just need to wrap it with some command
++  like `dbus-launch` or `env`, you can use this field to specify the shell
++  command directly. It will be run under `bash -e`. This is mutually exclusive
++  with the `Tests:` field.
++
++- **Restrictions:** *restriction-name [another-restriction-name ...]*
++
++  Declares some restrictions or problems with the tests defined in this
++  stanza. Depending on the test environment capabilities, user requests, and so
++  on, restrictions can cause tests to be skipped or can cause the test to be
++  run in a different manner. Tests which declare unknown restrictions will be
++  skipped. See below for the defined restrictions.
++
++- **Features:** *feature-name [another-feature-name ...]*
++
++  Declares some additional capabilities or good properties of the tests defined
++  in this stanza. Any unknown features declared will be completely ignored. See
++  below for the defined features.
++
++- **Depends:** *dpkg dependency field syntax*
++
++  Declares that the specified packages must be installed for the test to go
++  ahead. This supports all features of dpkg dependencies (see
++  <https://www.debian.org/doc/debian-policy/ch-relationships.html>), plus the
++  following extensions:
++
++  `@` stands for the package(s) generated by the source package containing the
++  tests; each dependency (strictly, or-clause, which may contain `|`s but not
++  commas) containing `@` is replicated once for each such binary package, with
++  the binary package name substituted for each `@` (but normally `@` should
++  occur only once and without a version restriction).
++
++  `@builddeps@` will be replaced by the package's `Build-Depends:`,
++  `Build-Depends-Indep:`, and `build-essential`. This is useful if you have
++  many build dependencies which are only necessary for running the test suite
++  and you don't want to replicate them in the test `Depends:`. However, please
++  use this sparingly, as this can easily lead to missing binary package
++  dependencies being overlooked if they get pulled in via build dependencies.
++
++  If no Depends field is present, `Depends: @` is assumed. Note that the source
++  tree's Build-Dependencies are *not* necessarily installed, and if you specify
++  any Depends, no binary packages from the source are installed unless
++  explicitly requested.
++
++- **Tests-Directory:** *path*
++
++  Replaces the path segment `debian/tests` in the filenames of the test
++  programs with `path`. I. e., the tests are run by executing
++  `built/source/tree/path/testname`. `path` must be a relative path and is
++  interpreted starting from the root of the built source tree.
++
++  This allows tests to live outside the debian/ metadata area, so that they can
++  more palatably be shared with non-Debian distributions.
++
++- **Classes:** *class-1, class-2, ...*
++
++  Most package tests should work in a minimal environment and are usually not
++  hardware specific. However, some packages like the kernel, X.org, or graphics
++  drivers should be tested on particular hardware, and also run on a set of
++  different platforms rather than just a single virtual testbeds.
++
++  This field can specify a list of abstract class names such as "desktop" or
++  "graphics-driver". Consumers of autopkgtest can then map these class names to
++  particular machines/platforms/policies.  Unknown class names should be
++  ignored.
++
++  This is purely an informational field for autopkgtest itself and will be
++  ignored.
++
++Any unknown fields will cause the whole stanza to be skipped.
++
++Defined restrictions
++--------------------
++
++- **rw-build-tree**
++
++  The test(s) needs write access to the built source tree (so it may need to be
++  copied first). Even with this restriction, the test is not allowed to make
++  any change to the built source tree which (i) isn't cleaned up by
++  debian/rules clean, (ii) affects the future results of any test, or (iii)
++  affects binary packages produced by the build tree in the future.
++
++- **breaks-testbed**
++
++  The test, when run, is liable to break the testbed system. This includes
++  causing data loss, causing services that the machine is running to
++  malfunction, or permanently disabling services; it does not include causing
++  services on the machine to temporarily fail.
++
++  When this restriction is present the test will usually be skipped unless the
++  testbed's virtualisation arrangements are sufficiently powerful, or
++  alternatively if the user explicitly requests.
++
++- **needs-root**
++
++  The test script must be run as root.
++
++- **build-needed**
++
++  The tests need to be run from a built source tree. The test runner will build
++  the source tree (honouring the source package's build dependencies), before
++  running the tests. However, the tests are *not* entitled to assume that the
++  source package's build dependencies will be installed when the test is run.
++
++  Please use this considerately, as for large builds it unnecessarily builds
++  the entire project when you only need a tiny subset (like the tests/
++  subdirectory). It is often possible to run `make -C tests` instead, or copy
++  the test code to `$ADTTMP` and build it there with some custom commands. This
++  cuts down the load on the Continuous Integration servers and also makes tests
++  more robust as it prevents accidentally running them against the built source
++  tree instead of the installed packages.
++
++- **allow-stderr**
++
++  Output to stderr is not considered a failure. This is useful for tests which
++  write e. g. lots of logging to stderr.
++
++- **isolation-container**
++
++  The test wants to start services or open network TCP ports. This commonly
++  fails in a simple chroot/schroot, so tests need to be run in their own
++  container (e. g. adt-virt-lxc) or their own machine/VM (e. g. adt-virt-qemu
++  or adt-virt-null). When running the test in a virtualization server which
++  does not provide this (like adt-virt-schroot) it will be skipped.
++
++- **isolation-machine**
++
++  The test wants to interact with the kernel, reboot the machine, or other
++  things which fail in a simple schroot and even a container.  Those tests need
++  to be run in their own machine/VM (e. g.  adt-virt-qemu or
++  adt-virt-null). When running the test in a virtualization server which does
++  not provide this it will be skipped.
++
++- **needs-recommends**
++
++  Enable installation of recommended packages in apt for the test
++  dependencies. This does not affect build dependencies.
++
++Defined features
++----------------
++
++There are no currently defined Features.
++
++Source package header
++---------------------
++
++To allow test execution environments to discover packages which provide
++tests, their source packages should have a `Testsuite:` header
++containing `autopkgtest` (which is currently the only defined value).
++Multiple values get comma separated, as usual in control files.
++
++This tag is added automatically by dpkg-source version 1.17.11 or later.
++For earlier Debian/Ubuntu releases you need to set it manually in
++debian/control by adding
++
++    XS-Testsuite: autopkgtest
++
++in the `Source:` paragraph.
++
++Implicit test control file for known package types
++--------------------------------------------------
++
++There are groups of similarly-structured packages for which the contents
++of `debian/tests/control` would be mostly identical. For those packages,
++if `debian/tests/control` is absent, an implicit control file is
++assumed. Those packages do not have to provide anything else, although
++they should still include an appropriate source package header
++(`XS-Testsuite`) so that they can be discovered in the archive.
++
++### Ruby packages
++
++The source package must contain at least one of the following files:
++
++-   `debian/ruby-test-files.yaml`
++-   `debian/ruby-tests.rb`
++-   `debian/ruby-tests.rake`
++
++Implied control file: :
++
++    Test-Command: gem2deb-test-runner --autopkgtest 2>&1
++    Depends: @, @builddeps@, gem2deb-test-runner
++
++*Note:* `gem2deb` will be filtered out of the `Depends:` field, as it is
++not needed to run the tests for installed packages.
++
++Packages should declare `Testsuite: autopkgtest-pkg-ruby` in
++`debian/control`.
++
++### Perl packages
++
++The source package must contain a `t/` directory and at least one of the
++following files:
++
++-   `Makefile.PL`
++-   `Build.PL`
++
++Implied control file: :
++
++    Test-Command: /usr/share/pkg-perl-autopkgtest/runner build-deps
++    Depends: @, @builddeps@, pkg-perl-autopkgtest
++
++    Test-Command: /usr/share/pkg-perl-autopkgtest/runner runtime-deps
++    Depends: @, pkg-perl-autopkgtest
++
++Packages should declare `Testsuite: autopkgtest-pkg-perl` in
++`debian/control`.
++
++Reboot during a test
++--------------------
++
++Some testbeds support rebooting; for those, the testbed will have an
++`autopkgtest-reboot` command which tests can call to cause a reboot.
++**Do not** use `reboot` and similar commands directly! They will cause
++testbeds like `null` or `schroot` to reboot the entire host, and even
++for `qemu` it will just cause the test to fail as there is no state
++keeping to resume a test at the right position after reboot.
++
++The particular steps for a rebooting tests are:
++
++-   The test calls `autopkgtest-reboot my_mark` with a "mark"
++    identifier. `autopkgtest-reboot` will cause the test to terminate
++    (with `SIGKILL`).
++-   `adt-run` backs up the current state of the test source tree and any
++    `$ADT_ARTIFACTS` that were created so far, reboots the testbed, and
++    restores the test source tree and artifacts.
++-   The test gets run again, this time with a new environment variable
++    `$ADT_REBOOT_MARK` containing the argument to `autopkgtest-reboot`,
++    e. g. `my_mark`.
++-   The test needs to check `$ADT_REBOOT_MARK` and jump to the
++    appropriate point. A nonexisting variable means "start from the
++    beginning".
++
++This example test will reboot the testbed two times in between:
++
++    #!/bin/sh -e
++    case "$ADT_REBOOT_MARK" in
++      "") echo "test beginning"; autopkgtest-reboot mark1 ;;
++      mark1) echo "test in mark1"; autopkgtest-reboot mark2 ;;
++      mark2) echo "test in mark2" ;;
++    esac
++    echo "test end"
+diff --git a/debian/control b/debian/control
+index 662f98b..d3b5b67 100644
+--- a/debian/control
++++ b/debian/control
+@@ -18,7 +18,8 @@ Build-Depends: bsdmainutils,
+                sgml-data,
+                texlive,
+                texlive-latex-extra,
+-               tidy
++               tidy,
++	       markdown
+ Standards-Version: 3.9.6
+ Vcs-Browser: http://anonscm.debian.org/gitweb/?p=dbnpolicy/policy.git
+ Vcs-Git: git://anonscm.debian.org/dbnpolicy/policy.git
+@@ -34,6 +35,7 @@ Description: Debian Policy Manual and related documents
+     - Debian Perl sub-policy
+     - Debian configuration management specification
+     - Machine-readable debian/copyright specification
++    - Autopkgtest - automatic as-installed package testing
+     - Authoritative list of virtual package names
+     - Policy checklist for upgrading your packages
+     - Paper about libc6 migration
+diff --git a/debian/rules b/debian/rules
+index 3fcbf96..d482533 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -25,7 +25,7 @@ ORG_FILES   := Process README
+ 
+ # doc-base description files for the documents we include.
+ DESC_FILES  := copyright-format-1.0 debian-policy debian-menu-policy \
+-	       debian-perl-policy debconf-spec fhs
++	       debian-perl-policy debconf-spec fhs autopkgtest
+ 
+ # Our local copy of the File Hierarchy Standard.  We don't build this from
+ # source, but we do have a copy of the source in FHS_ARCHIVE.
+@@ -40,6 +40,8 @@ POLICY_FILES := $(SGML_FILES:=.sgml) $(SGML_FILES:=.txt.gz)		\
+ 		virtual-package-names-list.txt libc6-migration.txt	\
+ 		copyright-format/copyright-format-1.0.html		\
+ 		copyright-format/copyright-format-1.0.txt.gz		\
++		autopkgtest/autopkgtest.html				\
++		autopkgtest/autopkgtest.txt.gz				\
+ 		debconf_spec/debconf_specification.html			\
+ 		debconf_spec/debconf_specification.txt.gz		\
+ 		policy.ps.gz policy.pdf.gz README.txt README.html	\
+@@ -57,6 +59,7 @@ FILES_TO_CLEAN	:= $(SGML_FILES:=.txt) $(SGML_FILES:=.txt.gz)		\
+ 		   policy.pdf.gz policy.ps.gz				\
+ 		   policy.pdf policy.ps policy.tpt policy.txt		\
+ 		   copyright-format/version.xml				\
++		   autopkgtest/version.txt				\
+ 		   debconf_spec/include/version.xml version.ent		\
+ 		   copyright-format.xml.tar.gz				\
+ 		   debconf_specification.xml.tar.gz			\
+@@ -70,6 +73,7 @@ mkdir   := install -d -o root -g root -m 755
+ all build build-indep: stamp-build
+ build-arch:
+ stamp-build: version.ent copyright-format/version.xml \
++	     autopkgtest/version.txt \
+ 	     debconf_spec/include/version.xml
+ 	$(MAKE) $(SGML_FILES:=.sgml.validate) \
+ 		$(SGML_FILES:=.html.tar.gz) \
+@@ -79,6 +83,7 @@ stamp-build: version.ent copyright-format/version.xml \
+ 	$(MAKE) $(ORG_FILES:=.html) \
+ 		$(ORG_FILES:=.txt)
+ 	$(MAKE) -C copyright-format all
++	$(MAKE) -C autopkgtest all
+ 	$(MAKE) -C debconf_spec all
+ 	GZIP=-9 cd copyright-format && \
+ 		tar -zcf ../copyright-format.xml.tar.gz *
+@@ -90,6 +95,7 @@ stamp-build: version.ent copyright-format/version.xml \
+ # to put the Policy version and date in each document, even if they
+ # separately have their own versions.
+ configure: version.ent copyright-format/version.xml \
++	   autopkgtest/version.txt \
+ 	   debconf_spec/include/version.xml
+ version.ent: debian/changelog
+ 	rm -f $@
+@@ -105,10 +111,16 @@ debconf_spec/include/version.xml: debian/changelog
+ 	echo '<?xml version="1.0" standalone="no"?>' >  $@
+ 	echo '<!ENTITY version "$(version)">'        >> $@
+ 	echo '<!ENTITY date    "$(date)">'           >> $@
++autopkgtest/version.txt: debian/changelog
++	rm -f $@
++	echo                                     > $@
++	echo '---'                               >> $@
++	echo 'Debian Policy $(version), $(date)' >> $@
+ 
+ clean:
+ 	rm -f $(STAMPS_TO_CLEAN)
+ 	$(MAKE) -C copyright-format clean
++	$(MAKE) -C autopkgtest clean
+ 	$(MAKE) -C debconf_spec clean
+ 	rm -f $(FILES_TO_CLEAN)
+ 	rm -rf $(DIRS_TO_CLEAN)
+-- 
+2.1.1
+

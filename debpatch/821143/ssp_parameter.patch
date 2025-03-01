@@ -1,0 +1,439 @@
+Description: ssp parameter fix
+   * Add ssp parameter fix, add a missing parameter entered in agent dbus API.
+     Fixed Logitech Bluetooth Keyboard K760, Logitech Bluetooth Keyboard K810,
+     HP Bluetooth Keyboard K4000 secure simple pairing failed issue.
+     (LP: #1035431, #1291756)
+
+     backported bluez5 commits:
+     upstream commit 546fee067daedc2b7860481aeaebd1771d192dfb
+     mgmt: Implement support for Passkey Notify event
+     upstream commit 97b930870dcd016b9cdd612e47b832736b4d0c5d
+     core: Refactor authentication handling
+     upstream commit e86fe268c77017731b792296eea16206918f1852
+     agent: Add missing parameter to DisplayPasskey
+     upstream commit 6a394b2c7f19b53b630bef2e865f9bc289d4b75c
+     agent-api: DisplayPasskey: D-Bus doesn't have a uint8 type
+Author: Jian-Ding Chen (timchen119) <tim.chen119@canonical.com>
+Bug-Ubuntu: https://bugs.launchpad.net/bugs/1035431
+Bug-Ubuntu: https://bugs.launchpad.net/bugs/1291756
+Last-Update: 2014-05-02
+
+--- bluez-4.101.orig/doc/agent-api.txt
++++ bluez-4.101/doc/agent-api.txt
+@@ -42,7 +42,8 @@ Methods		void Release()
+ 			Possible errors: org.bluez.Error.Rejected
+ 			                 org.bluez.Error.Canceled
+ 
+-		void DisplayPasskey(object device, uint32 passkey, uint8 entered)
++		void DisplayPasskey(object device, uint32 passkey,
++								uint16 entered)
+ 
+ 			This method gets called when the service daemon
+ 			needs to display a passkey for an authentication.
+--- bluez-4.101.orig/lib/hci.h
++++ bluez-4.101/lib/hci.h
+@@ -2075,8 +2075,9 @@ typedef struct {
+ typedef struct {
+ 	bdaddr_t	bdaddr;
+ 	uint32_t	passkey;
++	uint8_t 	entered;
+ } __attribute__ ((packed)) evt_user_passkey_notify;
+-#define EVT_USER_PASSKEY_NOTIFY_SIZE 10
++#define EVT_USER_PASSKEY_NOTIFY_SIZE 11
+ 
+ #define EVT_KEYPRESS_NOTIFY		0x3C
+ typedef struct {
+--- bluez-4.101.orig/lib/mgmt.h
++++ bluez-4.101/lib/mgmt.h
+@@ -437,6 +437,13 @@ struct mgmt_ev_device_unpaired {
+ 	struct mgmt_addr_info addr;
+ } __packed;
+ 
++#define MGMT_EV_PASSKEY_NOTIFY         0x0017
++struct mgmt_ev_passkey_notify {
++       struct mgmt_addr_info addr;
++       uint32_t passkey;
++       uint8_t entered;
++} __packed;
++
+ static const char *mgmt_op[] = {
+ 	"<0x0000>",
+ 	"Read Version",
+--- bluez-4.101.orig/plugins/hciops.c
++++ bluez-4.101/plugins/hciops.c
+@@ -1340,7 +1340,7 @@ static void user_passkey_notify(int inde
+ 	DBG("hci%d", index);
+ 
+ 	btd_event_user_notify(&dev->bdaddr, &req->bdaddr,
+-						btohl(req->passkey));
++						btohl(req->passkey), req->entered);
+ }
+ 
+ static gint oob_bdaddr_cmp(gconstpointer a, gconstpointer b)
+--- bluez-4.101.orig/plugins/mgmtops.c
++++ bluez-4.101/plugins/mgmtops.c
+@@ -749,6 +749,40 @@ static void mgmt_passkey_request(int sk,
+ 	}
+ }
+ 
++static void mgmt_passkey_notify(int sk, uint16_t index, void *buf, size_t len)
++{
++	struct mgmt_ev_passkey_notify *ev = buf;
++	struct controller_info *info;
++	uint32_t passkey;
++	char addr[18];
++	int err;
++  
++	if (len < sizeof(*ev)) {
++		error("Too small passkey_notify event");
++		return;
++	}
++  
++	ba2str(&ev->addr.bdaddr, addr);
++	
++	DBG("hci%u %s", index, addr);
++  
++	if (index > max_index) {
++		error("Unexpected index %u in passkey_notify event", index);
++		return;
++	}
++  
++	info = &controllers[index];
++	
++	passkey = bt_get_le32(&ev->passkey);
++	
++	DBG("passkey %06u entered %u", passkey, ev->entered);
++	
++	err = btd_event_user_notify(&info->bdaddr, &ev->addr.bdaddr,
++				    passkey, ev->entered);
++	if (err < 0)
++		error("btd_event_user_notify: %s", strerror(-err));
++}
++
+ struct confirm_data {
+ 	int index;
+ 	bdaddr_t bdaddr;
+@@ -1860,6 +1894,9 @@ static gboolean mgmt_event(GIOChannel *i
+ 	case MGMT_EV_USER_PASSKEY_REQUEST:
+ 		mgmt_passkey_request(sk, index, buf + MGMT_HDR_SIZE, len);
+ 		break;
++	case MGMT_EV_PASSKEY_NOTIFY:
++		mgmt_passkey_notify(sk, index, buf + MGMT_HDR_SIZE, len);
++		break;
+ 	case MGMT_EV_NEW_LONG_TERM_KEY:
+ 		mgmt_new_ltk(sk, index, buf + MGMT_HDR_SIZE, len);
+ 		break;
+--- bluez-4.101.orig/src/agent.c
++++ bluez-4.101/src/agent.c
+@@ -675,7 +675,7 @@ failed:
+ }
+ 
+ int agent_display_passkey(struct agent *agent, struct btd_device *device,
+-				uint32_t passkey)
++				uint32_t passkey, uint16_t entered)
+ {
+ 	DBusMessage *message;
+ 	const gchar *dev_path = device_get_path(device);
+@@ -686,10 +686,13 @@ int agent_display_passkey(struct agent *
+ 		error("Couldn't allocate D-Bus message");
+ 		return -1;
+ 	}
++	
++	DBG("agent_display_passkey: %d,%d",passkey,entered);
+ 
+ 	dbus_message_append_args(message,
+ 				DBUS_TYPE_OBJECT_PATH, &dev_path,
+ 				DBUS_TYPE_UINT32, &passkey,
++				DBUS_TYPE_UINT16, &entered,
+ 				DBUS_TYPE_INVALID);
+ 
+ 	if (!g_dbus_send_message(connection, message)) {
+--- bluez-4.101.orig/src/agent.h
++++ bluez-4.101/src/agent.h
+@@ -62,7 +62,7 @@ int agent_request_confirmation(struct ag
+ 				void *user_data, GDestroyNotify destroy);
+ 
+ int agent_display_passkey(struct agent *agent, struct btd_device *device,
+-				uint32_t passkey);
++				uint32_t passkey, uint16_t entered);
+ 
+ int agent_display_pincode(struct agent *agent, struct btd_device *device,
+ 				const char *pincode, agent_cb cb,
+--- bluez-4.101.orig/src/device.c
++++ bluez-4.101/src/device.c
+@@ -2821,26 +2821,26 @@ done:
+ }
+ 
+ 
+-int device_request_authentication(struct btd_device *device, auth_type_t type,
+-					void *data, gboolean secure, void *cb)
++static struct authentication_req *new_auth(struct btd_device *device,
++					   auth_type_t type, gboolean secure,
++					   void *cb)
+ {
+ 	struct authentication_req *auth;
+ 	struct agent *agent;
+ 	char addr[18];
+-	int err;
+ 
+ 	ba2str(&device->bdaddr, addr);
+ 	DBG("Requesting agent authentication for %s", addr);
+ 
+ 	if (device->authr) {
+ 		error("Authentication already requested for %s", addr);
+-		return -EALREADY;
++		return NULL;
+ 	}
+ 
+ 	agent = device_get_agent(device);
+ 	if (!agent) {
+ 		error("No agent available for request type %d", type);
+-		return -EPERM;
++		return NULL;
+ 	}
+ 
+ 	auth = g_new0(struct authentication_req, 1);
+@@ -2851,33 +2851,87 @@ int device_request_authentication(struct
+ 	auth->secure = secure;
+ 	device->authr = auth;
+ 
+-	switch (type) {
+-	case AUTH_TYPE_PINCODE:
+-		err = agent_request_pincode(agent, device, pincode_cb, secure,
+-								auth, NULL);
+-		break;
+-	case AUTH_TYPE_PASSKEY:
+-		err = agent_request_passkey(agent, device, passkey_cb,
+-								auth, NULL);
+-		break;
+-	case AUTH_TYPE_CONFIRM:
+-		auth->passkey = *((uint32_t *) data);
+-		err = agent_request_confirmation(agent, device, auth->passkey,
+-						confirm_cb, auth, NULL);
+-		break;
+-	case AUTH_TYPE_NOTIFY_PASSKEY:
+-		auth->passkey = *((uint32_t *) data);
+-		err = agent_display_passkey(agent, device, auth->passkey);
+-		break;
+-	case AUTH_TYPE_NOTIFY_PINCODE:
+-		auth->pincode = g_strdup((const char *) data);
+-		err = agent_display_pincode(agent, device, auth->pincode,
+-						display_pincode_cb, auth, NULL);
+-		break;
+-	default:
+-		err = -EINVAL;
++	return auth;
++}
++
++int device_request_pincode(struct btd_device *device, gboolean secure,
++			   void *cb)
++{
++	struct authentication_req *auth;
++	int err;
++
++	auth = new_auth(device, AUTH_TYPE_PINCODE, secure, cb);
++	if (!auth)
++		return -EPERM;
++
++	err = agent_request_pincode(auth->agent, device, pincode_cb, secure,
++				    auth, NULL);
++	if (err < 0) {
++		error("Failed requesting authentication");
++		device_auth_req_free(device);
++	}
++
++	return err;
++}
++
++int device_request_passkey(struct btd_device *device, void *cb)
++{
++	struct authentication_req *auth;
++	int err;
++
++	auth = new_auth(device, AUTH_TYPE_PASSKEY, FALSE, cb);
++	if (!auth)
++		return -EPERM;
++
++	err = agent_request_passkey(auth->agent, device, passkey_cb, auth,
++                                    NULL);
++	if (err < 0) {
++		error("Failed requesting authentication");
++		device_auth_req_free(device);
++	}
++
++	return err;
++}
++
++int device_confirm_passkey(struct btd_device *device, uint32_t passkey,
++			   void *cb)
++{
++	struct authentication_req *auth;
++	int err;
++
++	auth = new_auth(device, AUTH_TYPE_CONFIRM, FALSE, cb);
++	if (!auth)
++		return -EPERM;
++
++	auth->passkey = passkey;
++
++	err = agent_request_confirmation(auth->agent, device, passkey,
++					 confirm_cb, auth, NULL);
++	if (err < 0) {
++		error("Failed requesting authentication");
++		device_auth_req_free(device);
+ 	}
+ 
++	return err;
++}
++
++int device_notify_passkey(struct btd_device *device, uint32_t passkey,
++			  uint8_t entered)
++{
++	struct authentication_req *auth;
++	int err;
++
++	if (device->authr) {
++		auth = device->authr;
++		if (auth->type != AUTH_TYPE_NOTIFY_PASSKEY)
++			return -EPERM;
++	} else {
++		auth = new_auth(device, AUTH_TYPE_NOTIFY_PASSKEY, FALSE, NULL);
++		if (!auth)
++			return -EPERM;
++	}
++
++	err = agent_display_passkey(auth->agent, device, passkey, entered);
+ 	if (err < 0) {
+ 		error("Failed requesting authentication");
+ 		device_auth_req_free(device);
+@@ -2886,6 +2940,28 @@ int device_request_authentication(struct
+ 	return err;
+ }
+ 
++int device_notify_pincode(struct btd_device *device, gboolean secure,
++			  const char *pincode, void *cb)
++{
++	struct authentication_req *auth;
++	int err;
++
++	auth = new_auth(device, AUTH_TYPE_NOTIFY_PINCODE, secure, cb);
++	if (!auth)
++		return -EPERM;
++
++	auth->pincode = g_strdup(pincode);
++
++	err = agent_display_pincode(auth->agent, device, pincode,
++				    display_pincode_cb, auth, NULL);
++	if (err < 0) {
++		error("Failed requesting authentication");
++		device_auth_req_free(device);
++	}
++
++	return err;
++}
++ 
+ static void cancel_authentication(struct authentication_req *auth)
+ {
+ 	struct btd_device *device;
+--- bluez-4.101.orig/src/device.h
++++ bluez-4.101/src/device.h
+@@ -85,8 +85,15 @@ void device_simple_pairing_complete(stru
+ gboolean device_is_creating(struct btd_device *device, const char *sender);
+ gboolean device_is_bonding(struct btd_device *device, const char *sender);
+ void device_cancel_bonding(struct btd_device *device, uint8_t status);
+-int device_request_authentication(struct btd_device *device, auth_type_t type,
+-					void *data, gboolean secure, void *cb);
++int device_request_pincode(struct btd_device *device, gboolean secure,
++			   void *cb);
++int device_request_passkey(struct btd_device *device, void *cb);
++int device_confirm_passkey(struct btd_device *device, uint32_t passkey,
++			   void *cb);
++int device_notify_passkey(struct btd_device *device, uint32_t passkey,
++			  uint8_t entered);
++int device_notify_pincode(struct btd_device *device, gboolean secure, 
++			  const char *pincode, void *cb);
+ void device_cancel_authentication(struct btd_device *device, gboolean aborted);
+ gboolean device_is_authenticating(struct btd_device *device);
+ gboolean device_is_authorizing(struct btd_device *device);
+--- bluez-4.101.orig/src/event.c
++++ bluez-4.101/src/event.c
+@@ -128,16 +128,14 @@ int btd_event_request_pin(bdaddr_t *sba,
+ 	pinlen = btd_adapter_get_pin(adapter, device, pin, &display);
+ 	if (pinlen > 0 && (!secure || pinlen == 16)) {
+ 		if (display && device_is_bonding(device, NULL))
+-			return device_request_authentication(device,
+-						AUTH_TYPE_NOTIFY_PINCODE, pin,
+-						secure, pincode_cb);
++			return device_notify_pincode(device, secure, pin,
++						     pincode_cb);
+ 
+ 		btd_adapter_pincode_reply(adapter, dba, pin, pinlen);
+ 		return 0;
+ 	}
+ 
+-	return device_request_authentication(device, AUTH_TYPE_PINCODE, NULL,
+-							secure, pincode_cb);
++	return device_request_pincode(device, secure, pincode_cb);
+ }
+ 
+ static int confirm_reply(struct btd_adapter *adapter,
+@@ -185,8 +183,7 @@ int btd_event_user_confirm(bdaddr_t *sba
+ 	if (!get_adapter_and_device(sba, dba, &adapter, &device, TRUE))
+ 		return -ENODEV;
+ 
+-	return device_request_authentication(device, AUTH_TYPE_CONFIRM,
+-						&passkey, FALSE, confirm_cb);
++	return device_confirm_passkey(device, passkey, confirm_cb);
+ }
+ 
+ int btd_event_user_passkey(bdaddr_t *sba, bdaddr_t *dba)
+@@ -197,11 +194,10 @@ int btd_event_user_passkey(bdaddr_t *sba
+ 	if (!get_adapter_and_device(sba, dba, &adapter, &device, TRUE))
+ 		return -ENODEV;
+ 
+-	return device_request_authentication(device, AUTH_TYPE_PASSKEY, NULL,
+-							FALSE, passkey_cb);
++	return device_request_passkey(device, passkey_cb);
+ }
+ 
+-int btd_event_user_notify(bdaddr_t *sba, bdaddr_t *dba, uint32_t passkey)
++int btd_event_user_notify(bdaddr_t *sba, bdaddr_t *dba, uint32_t passkey, uint8_t entered)
+ {
+ 	struct btd_adapter *adapter;
+ 	struct btd_device *device;
+@@ -209,8 +205,7 @@ int btd_event_user_notify(bdaddr_t *sba,
+ 	if (!get_adapter_and_device(sba, dba, &adapter, &device, TRUE))
+ 		return -ENODEV;
+ 
+-	return device_request_authentication(device, AUTH_TYPE_NOTIFY_PASSKEY,
+-							&passkey, FALSE, NULL);
++	return device_notify_passkey(device, passkey, entered);
+ }
+ 
+ void btd_event_simple_pairing_complete(bdaddr_t *local, bdaddr_t *peer,
+--- bluez-4.101.orig/src/event.h
++++ bluez-4.101/src/event.h
+@@ -37,7 +37,7 @@ void btd_event_simple_pairing_complete(b
+ void btd_event_returned_link_key(bdaddr_t *local, bdaddr_t *peer);
+ int btd_event_user_confirm(bdaddr_t *sba, bdaddr_t *dba, uint32_t passkey);
+ int btd_event_user_passkey(bdaddr_t *sba, bdaddr_t *dba);
+-int btd_event_user_notify(bdaddr_t *sba, bdaddr_t *dba, uint32_t passkey);
++int btd_event_user_notify(bdaddr_t *sba, bdaddr_t *dba, uint32_t passkey, uint8_t entered);
+ void btd_event_device_blocked(bdaddr_t *local, bdaddr_t *peer);
+ void btd_event_device_unblocked(bdaddr_t *local, bdaddr_t *peer);
+ void btd_event_device_unpaired(bdaddr_t *local, bdaddr_t *peer);
+--- bluez-4.101.orig/test/simple-agent
++++ bluez-4.101/test/simple-agent
+@@ -55,9 +55,9 @@ class Agent(dbus.service.Object):
+ 		return dbus.UInt32(passkey)
+ 
+ 	@dbus.service.method("org.bluez.Agent",
+-					in_signature="ou", out_signature="")
+-	def DisplayPasskey(self, device, passkey):
+-		print("DisplayPasskey (%s, %06d)" % (device, passkey))
++					in_signature="ouq", out_signature="")
++	def DisplayPasskey(self, device, passkey, entered):
++		print("DisplayPasskey (%s, %06u entered %u)" % (device, passkey, entered))
+ 
+ 	@dbus.service.method("org.bluez.Agent",
+ 					in_signature="os", out_signature="")

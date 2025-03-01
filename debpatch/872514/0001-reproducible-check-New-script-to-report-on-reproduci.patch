@@ -1,0 +1,301 @@
+From 07ee158e84dc41c567e6727adc488d01f8a70989 Mon Sep 17 00:00:00 2001
+From: Chris Lamb <lamby@debian.org>
+Date: Mon, 28 Aug 2017 08:43:58 +0100
+Subject: [PATCH] reproducible-check: New script to report on reproducibility
+ status of installed packages.
+
+Signed-off-by: Chris Lamb <lamby@debian.org>
+---
+ .gitignore                 |   1 +
+ debian/control             |   7 ++
+ debian/copyright           |   3 +
+ scripts/Makefile           |   7 +-
+ scripts/reproducible-check | 170 +++++++++++++++++++++++++++++++++++++++++++++
+ scripts/setup.py           |   2 +-
+ 6 files changed, 187 insertions(+), 3 deletions(-)
+ create mode 100755 scripts/reproducible-check
+
+diff --git a/.gitignore b/.gitignore
+index e96730cd..248fd399 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -98,6 +98,7 @@ scripts/origtargz.1
+ scripts/plotchangelog
+ scripts/pts-subscribe
+ scripts/rc-alert
++scripts/reproducible-check.1
+ scripts/rmadison
+ scripts/rmadison.1
+ scripts/sadt.1
+diff --git a/debian/control b/debian/control
+index 82165b80..6eac2ce5 100644
+--- a/debian/control
++++ b/debian/control
+@@ -13,6 +13,7 @@ Build-Depends: bash-completion,
+                dpkg-dev (>= 1.17.6),
+                file,
+                gnupg | gnupg2,
++               help2man,
+                libdistro-info-perl,
+                libdpkg-perl,
+                libfile-desktopentry-perl,
+@@ -29,11 +30,14 @@ Build-Depends: bash-completion,
+                po4a (>= 0.40),
+                pylint,
+                python3-all,
++               python3-apt,
+                python3-debian (>= 0.1.15),
+                python3-flake8,
+                python3-magic,
++               python3-requests,
+                python3-setuptools,
+                python3-unidiff <!nocheck>,
++               python3-xdg,
+                shunit2 (>= 2.1.6),
+                unzip,
+                wdiff,
+@@ -72,9 +76,12 @@ Recommends: apt,
+             man-db,
+             patch,
+             patchutils,
++            python3-apt,
+             python3-debian (>= 0.1.15),
+             python3-magic,
++            python3-requests,
+             python3-unidiff,
++            python3-xdg,
+             sensible-utils,
+             strace,
+             unzip,
+diff --git a/debian/copyright b/debian/copyright
+index c22addad..1e731d3a 100644
+--- a/debian/copyright
++++ b/debian/copyright
+@@ -68,6 +68,9 @@ Copyright: 2009,      Jonathan Patrick Davies <jpds@ubuntu.com>
+            2006-2008, Kees Cook <kees@ubuntu.com>
+            2007-2008, Siegfried-Angel Gevatter Pujals <rainct@ubuntu.com>
+            2013,      Rafael Laboissiere <rafael@laboissiere.net>
++           2017       Chris Lamb <lamby@debian.org>
++License: GPL-3+
++
+ License: GPL-3+
+  This program is free software; you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+diff --git a/scripts/Makefile b/scripts/Makefile
+index ece5455a..21ed11a6 100644
+--- a/scripts/Makefile
++++ b/scripts/Makefile
+@@ -24,9 +24,9 @@ COMPLETION = $(patsubst %.bash_completion,$(BC_BUILD_DIR)/%,$(COMPL_FILES))
+ COMPL_DIR := $(shell pkg-config --variable=completionsdir bash-completion)
+ PKGNAMES:=wnpp-alert wnpp-check mk-build-deps rmadison mass-bug debsnap dd-list build-rdeps who-uploads transition-check getbuildlog dcontrol grep-excuses rc-alert whodepends dget pts-subscribe pts-unsubscribe debcheckout
+ # also update the list in setup.py
+-PYTHON3_SCRIPTS:=debdiff-apply sadt suspicious-source wrap-and-sort
++PYTHON3_SCRIPTS:=debdiff-apply sadt suspicious-source wrap-and-sort reproducible-check
+ 
+-GEN_MAN1S += debrepro.1 devscripts.1 mk-origtargz.1 uscan.1
++GEN_MAN1S += debrepro.1 devscripts.1 mk-origtargz.1 uscan.1 reproducible-check.1
+ 
+ all: $(SCRIPTS) $(GEN_MAN1S) $(CWRAPPERS) $(COMPLETION)
+ 
+@@ -74,6 +74,9 @@ devscripts.1: devscripts.1.in
+ 	perl ../debian/genmanpage.pl >> $@.$(PID)
+ 	mv $@.$(PID) $@
+ 
++reproducible-check.1: reproducible-check
++	help2man --no-info --no-discard-stderr ./reproducible-check >$@
++
+ $(BC_BUILD_DIR):
+ 	mkdir $(BC_BUILD_DIR)
+ 
+diff --git a/scripts/reproducible-check b/scripts/reproducible-check
+new file mode 100755
+index 00000000..518214ce
+--- /dev/null
++++ b/scripts/reproducible-check
+@@ -0,0 +1,170 @@
++#!/usr/bin/env python3
++#
++# Copyright (C) 2017 Chris Lamb <lamby@debian.org>
++#
++# This program is free software: you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation, either version 3 of the License, or (at
++# your option) any later version.
++#
++# This program is distributed in the hope that it will be useful, but
++# WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++# General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++import os
++import bz2
++import apt
++import sys
++import json
++import logging
++import requests
++import argparse
++import collections
++
++from xdg.BaseDirectory import xdg_cache_home
++
++
++class ReproducibleCheck(object):
++    HELP = """
++        Reports on the reproducible status of installed packages.
++        For more details please see <https://reproducible-builds.org>.
++    """
++
++    NAME = os.path.basename(__file__)
++    CACHE = os.path.join(xdg_cache_home, NAME, 'reproducible.json.bz')
++    VERSION = 1
++    STATUS_URL = 'https://tests.reproducible-builds.org/reproducible.json.bz2'
++
++    @classmethod
++    def parse(cls):
++        parser = argparse.ArgumentParser(description=cls.HELP)
++
++        parser.add_argument(
++            '-d',
++            '--debug',
++            help="show debugging messages",
++            default=False,
++            action='store_true',
++        )
++
++        parser.add_argument(
++            '-r',
++            '--raw',
++            help="print unreproducible binary packages only (for dd-list -i)",
++            default=False,
++            action='store_true',
++        )
++
++        parser.add_argument(
++            '--version',
++            help="print version and exit",
++            default=False,
++            action='store_true',
++        )
++
++        return cls(parser.parse_args())
++
++    def __init__(self, args):
++        self.args = args
++
++        logging.basicConfig(
++            format='%(asctime).19s %(levelname).1s: %(message)s',
++            level=logging.DEBUG if args.debug else logging.INFO,
++        )
++
++        self.log = logging.getLogger()
++
++    def main(self):
++        if self.args.version:
++            print("{} version {}".format(self.NAME, self.VERSION))
++            return 0
++
++        self.update_cache()
++
++        data = self.get_data()
++        installed = self.get_installed_packages()
++        unreproducible = {x: y for x, y in installed.items() if x in data}
++
++        if self.args.raw:
++            self.output_raw(unreproducible, installed)
++        else:
++            self.output_by_source(unreproducible, installed)
++
++        return 0
++
++    def update_cache(self):
++        self.log.debug("Checking cache file %s ...", self.CACHE)
++
++        if os.path.exists(self.CACHE):
++            self.log.debug("Cache is up to date")
++            return
++
++        self.log.info("Updating cache...")
++
++        response = requests.get(self.STATUS_URL)
++
++        os.makedirs(os.path.dirname(self.CACHE), exist_ok=True)
++
++        with open(self.CACHE, 'wb+') as f:
++            f.write(response.content)
++
++    def get_data(self):
++        self.log.debug("Loading data from cache %s", self.CACHE)
++
++        with bz2.open(self.CACHE) as f:
++            return {
++                (x['package'], x['architecture'], x['version'])
++                for x in json.loads(f.read().decode('utf-8'))
++                if x['status'] == 'unreproducible'
++            }
++
++    def get_installed_packages(self):
++        result = collections.defaultdict(list)
++
++        for x in apt.Cache():
++            for y in x.versions:
++                if not y.is_installed:
++                    continue
++
++                key = (y.source_name, y.architecture, y.version)
++                result[key].append(x.shortname)
++
++        return result
++
++    def output_by_source(self, unreproducible, installed):
++        num_installed = sum(len(x) for x in installed.keys())
++        num_unreproducible = sum(len(x) for x in unreproducible.keys())
++
++        for key, binaries in sorted(unreproducible.items()):
++            source, architecture, version = key
++
++            binaries_fmt = '({}) '.format(', '.join(binaries)) \
++                if binaries != [source] else ''
++
++            print("{} ({}) is unreproducible {}".format(
++                source,
++                version,
++                binaries_fmt,
++            ), end='')
++            print("<https://tests.reproducible-builds.org/debian/{}>".format(source))
++
++        print("{}/{} ({:.2f}%) of installed binary packages are unreproducible.".format(
++            num_unreproducible,
++            num_installed,
++            100. * num_unreproducible / num_installed,
++        ))
++
++    def output_raw(self, unreproducible, installed):
++        for x in sorted(x for xs in unreproducible.values() for x in xs):
++            print(x)
++
++
++if __name__ == '__main__':
++    try:
++        sys.exit(ReproducibleCheck.parse().main())
++    except (KeyboardInterrupt, BrokenPipeError):
++        sys.exit(1)
+diff --git a/scripts/setup.py b/scripts/setup.py
+index 69884a5c..091e4d32 100755
+--- a/scripts/setup.py
++++ b/scripts/setup.py
+@@ -12,7 +12,7 @@ if os.path.exists(changelog):
+     if match:
+         version = match.group(1)
+ 
+-scripts = "debdiff-apply sadt suspicious-source wrap-and-sort".split()
++scripts = "debdiff-apply sadt suspicious-source wrap-and-sort reproducible-check".split()
+ 
+ if __name__ == '__main__':
+     setup(
+-- 
+2.14.1
+

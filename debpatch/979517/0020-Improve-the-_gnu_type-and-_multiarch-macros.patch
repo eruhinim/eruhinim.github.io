@@ -1,0 +1,62 @@
+From 7edb5ea81ebce4240e69e4d6d5604dd58bef411f Mon Sep 17 00:00:00 2001
+From: Nicolas Boulenguez <nicolas@debian.org>
+Date: Thu, 7 Jan 2021 09:42:40 +0100
+Subject: [PATCH 20/21] Improve the _gnu_type and _multiarch macros
+
+Ignore the environment for such conversions.
+Report failures. None is expected here.
+Query at most once per architecture.
+
+This is an opportunity to improve the handling of TARGET (each time a
+% recipe was using _gnu_type, dpkg-architecture was executed on a
+DEB_TARGET_ARCH extracted from an initial dpkg-architecture run).
+---
+ debian/rules | 24 ++++++++++++------------
+ 1 file changed, 12 insertions(+), 12 deletions(-)
+
+diff --git a/debian/rules b/debian/rules
+index d59d9af..10f2a00 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -218,9 +218,14 @@ HOST_ARCHS_kfreebsd-amd64 = amd64 i386 x32
+ HOST_ARCHS_kfreebsd-i386 = amd64 i386 x32
+ HOST_ARCHS_hurd-i386 = amd64 i386 x32
+ 
++# Map a Debian architecture alias to a GNU type or a multiarch path component.
++run_dpkg_arch = $(or $(dpkg_arch_$1),$(eval \
++  dpkg_arch_$1 := $(shell dpkg-architecture -f -a$1))$(dpkg_arch_$1))
++_gnu_type  = $(call vafilt,$(run_dpkg_arch),DEB_HOST_GNU_TYPE)
++_multiarch = $(call vafilt,$(run_dpkg_arch),DEB_HOST_MULTIARCH)
++
++# Convenient shortcuts for {configure,build,install,binary}.%: generic recipes.
+ CROSS_ARCH	= $*
+-_gnu_type	= $(shell dpkg-architecture -a$(1) -qDEB_HOST_GNU_TYPE -f 2>/dev/null)
+-_multiarch	= $(shell dpkg-architecture -a$(1) -qDEB_HOST_MULTIARCH -f 2>/dev/null)
+ CROSS_GNU_TYPE	= $(subst i586,i686,$(call _gnu_type,$(CROSS_ARCH)))
+ P_CROSS		= binutils-$(subst _,-,$(CROSS_GNU_TYPE))
+ D_CROSS		= debian/$(P_CROSS)
+@@ -238,16 +243,11 @@ ifneq (,$(TARGET))
+   same_source	=
+   # Support TARGET both as Debian architecture specification (e.g. arm),
+   # and as the target name (e.g. arm-linux-gnu).
+-  try_convert := $(shell dpkg-architecture -f -a$(TARGET) -qDEB_HOST_GNU_TYPE 2>/dev/null)
+-  ifneq ($(try_convert),)
+-    DEB_TARGET_GNU_TYPE := $(try_convert)
+-  else
+-    DEB_TARGET_GNU_TYPE = $(TARGET)
+-  endif
+-  DPKG_TARGET_VARS := $(shell dpkg-architecture -f -t$(DEB_TARGET_GNU_TYPE))
+-  DEB_TARGET_MULTIARCH = $(call vafilt,$(DPKG_TARGET_VARS),DEB_HOST_MULTIARCH)
+-  DEB_TARGET_ARCH      = $(call vafilt,$(DPKG_TARGET_VARS),DEB_HOST_ARCH)
+-  for_target           = dpkg-architecture -f -t$(DEB_TARGET_GNU_TYPE) -c
++  DEB_TARGET_ARCH := $(or $(shell dpkg-architecture -f -t$(TARGET) -qDEB_HOST_ARCH 2>/dev/null),\
++                          $(TARGET))
++  DEB_TARGET_GNU_TYPE  = $(call _gnu_type,$(DEB_TARGET_ARCH))
++  DEB_TARGET_MULTIARCH = $(call _multiarch,$(DEB_TARGET_ARCH))
++  for_target           = $(call run_dpkg_arch,$(DEB_TARGET_ARCH))
+ else
+   for_target           =
+ endif
+-- 
+2.30.1
+

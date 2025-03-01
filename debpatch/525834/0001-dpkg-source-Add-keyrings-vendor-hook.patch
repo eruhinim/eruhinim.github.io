@@ -1,0 +1,98 @@
+From b1e6c85ddb12b56e4923cb0b87fbd69ae3e112e8 Mon Sep 17 00:00:00 2001
+From: Colin Watson <cjwatson@canonical.com>
+Date: Mon, 27 Apr 2009 11:56:22 +0100
+Subject: [PATCH] dpkg-source: Add "keyrings" vendor hook
+
+Add "keyrings" vendor hook, used by dpkg-source to allow vendors to
+supply additional keyrings against which source package signatures will
+be verified. Implement this for Ubuntu.
+---
+ debian/changelog               |    5 +++++
+ scripts/Dpkg/Source/Package.pm |    6 ++++++
+ scripts/Dpkg/Vendor/Default.pm |    8 ++++++++
+ scripts/Dpkg/Vendor/Ubuntu.pm  |    3 +++
+ 4 files changed, 22 insertions(+), 0 deletions(-)
+
+diff --git a/debian/changelog b/debian/changelog
+index 85fef5b..8b0f2f5 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -77,6 +77,11 @@ dpkg (1.15.1) UNRELEASED; urgency=low
+   * Dpkg::Version: Remove unnecessary function next_elem which just
+     replicates the standard shift behaviour.
+ 
++  [ Colin Watson ]
++  * Add "keyrings" vendor hook, used by dpkg-source to allow vendors to
++    supply additional keyrings against which source package signatures will
++    be verified. Implement this for Ubuntu.
++
+   [ Updated dselect translations ]
+   * German (Sven Joachim).
+   * Swedish (Peter Krefting).
+diff --git a/scripts/Dpkg/Source/Package.pm b/scripts/Dpkg/Source/Package.pm
+index c109403..1362a9c 100644
+--- a/scripts/Dpkg/Source/Package.pm
++++ b/scripts/Dpkg/Source/Package.pm
+@@ -30,6 +30,7 @@ use Dpkg::Compression;
+ use Dpkg::Exit;
+ use Dpkg::Path qw(check_files_are_the_same);
+ use Dpkg::IPC;
++use Dpkg::Vendor qw(run_vendor_hook);
+ 
+ use POSIX;
+ use File::Basename;
+@@ -281,6 +282,11 @@ sub check_signature {
+         push @exec, "gpg", "--no-default-keyring", "-q", "--verify";
+     }
+     if (scalar(@exec)) {
++        for my $vendor_keyring (run_vendor_hook('keyrings')) {
++            if (-r $vendor_keyring) {
++                push @exec, "--keyring", $vendor_keyring;
++            }
++        }
+         if (-r '/usr/share/keyrings/debian-keyring.gpg') {
+             push @exec, "--keyring", "/usr/share/keyrings/debian-keyring.gpg";
+         }
+diff --git a/scripts/Dpkg/Vendor/Default.pm b/scripts/Dpkg/Vendor/Default.pm
+index c1d2aad..0295aeb 100644
+--- a/scripts/Dpkg/Vendor/Default.pm
++++ b/scripts/Dpkg/Vendor/Default.pm
+@@ -78,6 +78,12 @@ The hook is called just before the content of .changes file is output
+ by dpkg-genchanges. The first parameter is a Dpkg::Fields::Object
+ representing all the fields that are going to be output.
+ 
++=item keyrings ()
++
++The hook is called when dpkg-source is checking a signature on a source
++package. It takes no parameters, but returns a (possibly empty) list of
++vendor-specific keyrings.
++
+ =back
+ 
+ =cut
+@@ -88,6 +94,8 @@ sub run_hook {
+         my $srcpkg = shift @params;
+     } elsif ($hook eq "before-changes-creation") {
+         my $fields = shift @params;
++    } elsif ($hook eq "keyrings") {
++        return ();
+     }
+ }
+ 
+diff --git a/scripts/Dpkg/Vendor/Ubuntu.pm b/scripts/Dpkg/Vendor/Ubuntu.pm
+index 6cb692f..91928d1 100644
+--- a/scripts/Dpkg/Vendor/Ubuntu.pm
++++ b/scripts/Dpkg/Vendor/Ubuntu.pm
+@@ -68,6 +68,9 @@ sub run_hook {
+         if (scalar(@{$bugs})) {
+             $fields->{"Launchpad-Bugs-Fixed"} = join(" ", @{$bugs});
+         }
++
++    } elsif ($hook eq "keyrings") {
++        return '/usr/share/keyrings/ubuntu-archive-keyring.gpg';
+     }
+ }
+ 
+-- 
+1.6.0.4
+

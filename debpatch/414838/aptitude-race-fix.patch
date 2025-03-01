@@ -1,0 +1,332 @@
+Sat Jun 16 09:42:58 PDT 2007  Daniel Burrows <Daniel_Burrows@alumni.brown.edu>
+  * Rewrite the input thread to eliminate a race condition. (Closes: #414838, #406193)
+  The problem here is that get_wch() and its friend getch() both implicitly
+  invoke refresh().  So instead of calling get_wch() from the background
+  thread, I select() on fd 0, then spawn an event that causes the foreground
+  thread to run get_wch() and dispatch the result.  The tricky bit is that
+  obviously I don't want to keep selecting and posting events, so I have
+  synchronization to block the background thread until the event completes.
+Sat Jun 16 09:42:32 PDT 2007  Daniel Burrows <Daniel_Burrows@alumni.brown.edu>
+  * Use the new bootstrap proxy code to simplify the timeout thread.
+Sat Jun 16 09:41:53 PDT 2007  Daniel Burrows <Daniel_Burrows@alumni.brown.edu>
+  * Add utility code in threads:: to make it easier to create proxies for uncopyable thread bootstrap functions.
+diff -rN -u old-head/src/generic/util/threads.h new-head/src/generic/util/threads.h
+--- old-head/src/generic/util/threads.h	2007-06-16 10:35:46.000000000 -0700
++++ new-head/src/generic/util/threads.h	2007-06-16 10:35:47.000000000 -0700
+@@ -1,6 +1,6 @@
+ // threads.h                                              -*-c++-*-
+ //
+-//   Copyright (C) 2005-2006 Daniel Burrows
++//   Copyright (C) 2005-2007 Daniel Burrows
+ //
+ //   This program is free software; you can redistribute it and/or
+ //   modify it under the terms of the GNU General Public License as
+@@ -912,6 +912,32 @@
+       return b.timed_put(in, until);
+     }
+   };
++
++  // A utility that proxies for noncopyable thread bootstrap
++  // objects.  The only requirement is that the pointer passed
++  // to the constructor must not be destroyed until the thread
++  // completes.
++  template<typename F>
++  class bootstrap_proxy
++  {
++    F *f;
++  public:
++    bootstrap_proxy(F *_f)
++      : f(_f)
++    {
++    }
++
++    void operator()() const
++    {
++      (*f)();
++    }
++  };
++
++  template<typename F>
++  bootstrap_proxy<F> make_bootstrap_proxy(F *f)
++  {
++    return bootstrap_proxy<F>(f);
++  }
+ }
+ 
+ #endif // THREADS_H
+diff -rN -u old-head/src/vscreen/vscreen.cc new-head/src/vscreen/vscreen.cc
+--- old-head/src/vscreen/vscreen.cc	2007-06-16 10:35:46.000000000 -0700
++++ new-head/src/vscreen/vscreen.cc	2007-06-16 10:35:46.000000000 -0700
+@@ -43,6 +43,7 @@
+ #include "config/style.h"
+ 
+ #include <generic/util/event_queue.h>
++#include <generic/util/util.h>
+ #include <generic/util/threads.h>
+ 
+ // For _()
+@@ -201,55 +202,135 @@
+ //////////////////////////////////////////////////////////////////////
+ // Event management threads
+ 
+-/** This thread is responsible for posting wget_wch() calls. */
++/** This thread is responsible for posting wget_wch() calls.
++ *
++ *  Note that the actual call to wget_wch must take place in the
++ *  foreground thread, because wget_wch will invoke wrefresh().
++ *  So instead of calling it in the background thread, I post
++ *  input events to the foreground thread.
++ *
++ *  To prevent the background thread from spamming the foreground
++ *  thread with events, I suspend it until the event actually
++ *  triggers.
++ */
+ class input_thread
+ {
+-  class key_input_event : public vscreen_event
++  class get_input_event : public vscreen_event
+   {
+-    key k;
++    // A reference to the parent's condition mutex;
++    // should be held while we signal the condition.
++    threads::mutex &m;
++    // A reference to the parent's variable indicating
++    // whether the event has triggered.  Will be set
++    // to "true" after we try to read all available
++    // keystrokes.
++    bool &b;
++    // A reference to the parent's condition variable.
++    threads::condition &c;
++
+   public:
+-    key_input_event (const key &_k)
+-      :k(_k)
++    get_input_event(threads::mutex &_m, bool &_b, threads::condition &_c)
++      : m(_m), b(_b), c(_c)
+     {
+     }
+ 
+     void dispatch()
+     {
+-      if(global_bindings.key_matches(k, "Refresh"))
+-	vscreen_redraw();
+-      else
+-	toplevel->dispatch_key(k);
++      // NB: use the GLOBAL getch function to avoid weirdness
++      // referencing the state of toplevel.
++      wint_t wch = 0;
++      int status;
++
++      bool done = false;
++
++      while(!done)
++	{
++	  // I assume here that vscreen_init() set nodelay.
++	  do
++	    {
++	      status = get_wch(&wch);
++	    } while(status == KEY_CODE_YES && wch == KEY_RESIZE);
++
++	  if(status == ERR) // No more to read.
++	    {
++	      threads::mutex::lock l(m);
++	      b = true;
++	      c.wake_all();
++	      done = true;
++	    }
++	  else
++	    {
++	      key k(wch, status == KEY_CODE_YES);
++
++	      if(wch == KEY_MOUSE)
++		{
++		  if(toplevel.valid())
++		    {
++		      MEVENT ev;
++		      getmouse(&ev);
++
++		      toplevel->dispatch_mouse(ev.id, ev.x, ev.y, ev.z, ev.bstate);
++		    }
++		}
++	      else
++		{
++		  if(global_bindings.key_matches(k, "Refresh"))
++		    vscreen_redraw();
++		  else
++		    toplevel->dispatch_key(k);
++		}
++	    }
++	}
+     }
+   };
+ 
+-  class mouse_input_event : public vscreen_event
++  class fatal_input_exception : public Exception
+   {
+-    MEVENT ev;
++    int err;
++  public:
++    fatal_input_exception(int _err)
++      : err(_err)
++    {
++    }
+ 
++    std::string errmsg() const
++    {
++      return "Unable to read from stdin: " + sstrerror(err);
++    }
++  };
++
++  class fatal_input_error : public vscreen_event
++  {
++    int err;
+   public:
+-    mouse_input_event(const MEVENT &_ev)
+-      :ev(_ev)
++    fatal_input_error(int _err)
++      : err(_err)
+     {
+     }
+ 
+     void dispatch()
+     {
+-      if(toplevel.valid())
+-	toplevel->dispatch_mouse(ev.id, ev.x, ev.y, ev.z, ev.bstate);
++      throw new fatal_input_exception(err);
+     }
+   };
+ 
++  threads::mutex input_event_mutex;
++  // Used to block this thread until an event to read input fires.
++  bool input_event_fired;
++  threads::condition input_event_condition;
++
+   static input_thread instance;
+ 
+   static threads::mutex instance_mutex;
+   static threads::thread *instancet;
++
+ public:
+   static void start()
+   {
+     threads::mutex::lock l(instance_mutex);
+ 
+     if(instancet == NULL)
+-      instancet = new threads::thread(instance);
++      instancet = new threads::thread(threads::make_bootstrap_proxy(&instance));
+   }
+ 
+   static void stop()
+@@ -265,34 +346,48 @@
+       }
+   }
+ 
+-  void operator()() const
++  void operator()()
+   {
+-    // NB: use the GLOBAL getch function to avoid weirdness
+-    // referencing the state of toplevel.
+-    while(1)
+-      {
+-	wint_t wch = 0;
+-	int status;
++    threads::mutex::lock l(input_event_mutex);
++    input_event_fired = false;
+ 
+-	do
+-	  {
+-	    status = get_wch(&wch);
+-	  } while(status == KEY_CODE_YES && wch == KEY_RESIZE);
++    // Important note: this routine only blocks indefinitely in
++    // select() and pthread_cond_wait(), assuming no bugs in
++    // vscreen_post_event().  pthread_cond_wait() is a cancellation
++    // point.  select() should be but isn't, but there is a
++    // workaround below.
+ 
+-	key k(wch, status == KEY_CODE_YES);
+-
+-	if(status == ERR)
+-	  return; // ???
++    while(1)
++      {
++	// Select on stdin; when we see that input is available, spawn
++	// an input event.
++	fd_set selectfds;
++	FD_ZERO(&selectfds);
++	FD_SET(0, &selectfds);
++
++	pthread_testcancel();
++	int result = select(1, &selectfds, NULL, NULL, NULL);
++	pthread_testcancel();	// Workaround for Linux threads suckage.
++                                // See pthread_cancel(3).
+ 
+-	if(wch == KEY_MOUSE)
++	if(result != 1)
+ 	  {
+-	    MEVENT ev;
+-	    getmouse(&ev);
+-
+-	    vscreen_post_event(new mouse_input_event(ev));
++	    if(errno != EINTR)
++	      // Probably means that there was an error reading
++	      // standard input.  (could also be ENOMEM)
++	      vscreen_post_event(new fatal_input_error(errno));
++	    break;
+ 	  }
+ 	else
+-	  vscreen_post_event(new key_input_event(k));
++	  {
++	    vscreen_post_event(new get_input_event(input_event_mutex,
++						   input_event_fired,
++						   input_event_condition));
++
++	    while(!input_event_fired)
++	      input_event_condition.wait(l);
++	    input_event_fired = false;
++	  }
+       }
+   }
+ };
+@@ -497,23 +592,6 @@
+   // The global instance; this is a Singleton.
+   static timeout_thread instance;
+ 
+-  // Unfortunately, technical considerations in the threading code
+-  // mean that the actual thread object is expected to be copyable.
+-  // Hence this proxy:
+-  class timeout_proxy
+-  {
+-    timeout_thread &real_thread;
+-  public:
+-    timeout_proxy(timeout_thread &_real_thread)
+-      : real_thread(_real_thread)
+-    {
+-    }
+-
+-    void operator()() const
+-    {
+-      real_thread();
+-    }
+-  };
+ public:
+   static timeout_thread &get_instance()
+   {
+@@ -531,7 +609,8 @@
+ 	throw SingletonViolationException();
+       }
+ 
+-    instance.running_thread.put(new threads::thread(timeout_proxy(instance)));
++    threads::thread *t = new threads::thread(threads::make_bootstrap_proxy(&instance));
++    instance.running_thread.put(t);
+   }
+ 
+   static void stop()
+@@ -689,6 +768,7 @@
+ 
+   curses_avail=true;
+   cbreak();
++  rootwin.nodelay(true);
+   rootwin.keypad(true);
+ 
+   global_bindings.set("Quit", quitkey);
+

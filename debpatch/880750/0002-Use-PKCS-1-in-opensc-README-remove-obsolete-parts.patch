@@ -1,0 +1,112 @@
+From 4ed9daa5ba5d9c877a5caacdb0b66e01d4019779 Mon Sep 17 00:00:00 2001
+From: Martijn van de Streek <martijn@vandestreek.net>
+Date: Sat, 4 Nov 2017 18:55:03 +0100
+Subject: [PATCH 2/2] Use PKCS#1 in opensc README, remove obsolete parts
+
+The instructions in README.opensc showed how to encrypt 256 bytes in
+"raw" mode, but the decryption script in the initramfs actualy uses
+PKCS#1. By using "-pkcs" instead of "-raw" when encrypting the key file,
+the instructions now lead to a working system again.
+
+The block related to libhal and manual recompilation of pcscd is no
+longer necessary, as these days libudev is used and everything works
+out of the box (now the required libraries have been added to the
+initramfs).
+---
+ debian/README.opensc | 66 +++-------------------------------------------------
+ 1 file changed, 3 insertions(+), 63 deletions(-)
+
+diff --git a/debian/README.opensc b/debian/README.opensc
+index 894b0a3..dfa95f8 100644
+--- a/debian/README.opensc
++++ b/debian/README.opensc
+@@ -20,7 +20,8 @@ partition with the private key on your smartcard. Therefore you have to
+ create a key for the partition that is to be decrypted using the
+ smartcard. As pkcs15-crypt does not seem to support PKCS1 padding, the
+ key is required to have the same size as your RSA key. For a 2048 bit
+-key use the following (the byte count is 256 as 2048/8 is 256):
++key use the following (the byte count is 245 as 2048/8 is 256, and
++PKCS#1 padding is 11 bytes).
+ 
+ 	# dd if=/dev/random of=/boot/keys/key bs=1 count=256
+ 
+@@ -40,7 +41,7 @@ plain text one and remove your public key from the hard drive (it isn't
+ necessary to shred it as a potential attacker can't use your public key
+ for anything).
+ 
+-	# openssl rsautl -in /boot/keys/key -inkey pubkey -pubin -raw \
++	# openssl rsautl -in /boot/keys/key -inkey pubkey -pubin -pkcs \
+ 		-encrypt -out /boot/keys/root
+ 	# shred -u /boot/keys/key
+ 	# rm -rf pubkey
+@@ -55,67 +56,6 @@ The modules needed by the reader should now be added to
+ example yenta_socket, pcmcia, pcmcia_core, serial_cs, rsrc_nonstatic for
+ PCMCIA card readers.
+ 
+-In a perfect world you would just rebuild the initramfs now and it would
+-work. Unfortunately there are some additional issues to address. The
+-most important one is pcscd. Newer versions of pcscd use HAL and dbus to
+-detect readers. As most people (including me) aren't too enthusiastic
+-about adding these two daemons to the initramfs, we will rebuild the
+-daemon to use the traditional polling method with libusb. Again, this
+-step is only necessary if your reader uses pcscd (for example the
+-Gemalto PC Card readers).
+-
+-To do this, download the ccid and pcsc-lite packages from
+-
+-	<pcsc-lite.alioth.debian.org>
+-
+-Install the libusb header files, extract the tarballs and build pcscd
+-with the following commands:
+-
+-	# apt-get install libusb-dev
+-	# ./configure --disable-libhal --enable-libusb
+-	# make
+-	# make install
+-
+-Now go to the ccid directory and execute these commands (the option is
+-only need if you use the libccidtwin.so to access your reader:
+-
+-	# ./configure [--enable-twinserial]
+-	# make
+-	# make install
+-
+-This installs the new pcscd and it's libraries in /usr/local/. To
+-reflect the new situation we have to change the initramfs scripts.
+-Edit /etc/reader.conf to instruct pcscd to use the new libraries (they
+-should be in /usr/local/pcsc/drivers/) instead of the ones from the Debian
+-package. Replace everything after line 45 in
+-/usr/share/initramfs-tools/hooks/cryptopensc with the following chunk:
+-
+-	for dir in etc/opensc usr/local/pcsc var/run tmp ; do
+-		if [ ! -d ${DESTDIR}/${dir} ] ; then mkdir -p ${DESTDIR}/${dir} ; fi
+-	done
+-
+-	# Install pcscd daemon, drivers, conf file, and include libgcc as
+-	# well since
+-	# pcscd utilizes pthread_cancel
+-	copy_exec /usr/local/sbin/pcscd
+-	cp -r /usr/local/pcsc ${DESTDIR}/usr/local
+-	cp /etc/reader.conf ${DESTDIR}/etc
+-	cp -r /usr/local/lib ${DESTDIR}/usr/local
+-	# Install opensc commands and conf file
+-	copy_exec /usr/bin/opensc-tool
+-	copy_exec /usr/bin/pkcs15-crypt
+-	cp /lib/libgcc_s.so.1 ${DESTDIR}/lib
+-	cp /etc/opensc/opensc.conf ${DESTDIR}/etc/opensc
+-
+-Edit /usr/share/initramfs-tools/scripts/local-bottom/cryptopensc and
+-/usr/share/initramfs-tools/scripts/local-top/cryptopensc to use the new
+-binary in /usr/local/sbin/pcscd instead of /usr/sbin/pcscd and change
+-the path in the existence test to:
+-
+-	if [ ! -e /usr/local/sbin/pcscd ]; then
+-		exit 0
+-	fi
+-
+ If you have completed all the steps up to now, you can update your
+ initramfs image with:
+ 
+-- 
+2.13.1
+

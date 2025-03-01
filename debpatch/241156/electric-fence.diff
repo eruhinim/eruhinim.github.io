@@ -1,0 +1,1037 @@
+diff -ruN electric-fence-2.1.14.1/CHANGES electric-fence-debian/CHANGES
+--- electric-fence-2.1.14.1/CHANGES	1998-03-12 20:48:59.000000000 +0100
++++ electric-fence-debian/CHANGES	1999-04-13 19:27:29.000000000 +0200
+@@ -1,5 +1,8 @@
+-2.1	Remove work-arounds, most operating systems and C libraries have
+-	been fixed now.
++2.2.2	Oops. Shared library must be position-independent code.
++
++2.2.0
++	Merge in bug-fixes, multi-thread patch, shared library patch,
++	debian/ subdirectory used for building the Debian package
+ 
+ 2.0.1
+ 	Add work-arounds for kernel and library bugs under HP-UX.	
+diff -ruN electric-fence-2.1.14.1/COPYING electric-fence-debian/COPYING
+--- electric-fence-2.1.14.1/COPYING	1998-03-12 20:50:45.000000000 +0100
++++ electric-fence-debian/COPYING	1995-01-20 06:21:35.000000000 +0100
+@@ -279,7 +279,7 @@
+ 
+ 		     END OF TERMS AND CONDITIONS
+ 
+-	    How to Apply These Terms to Your New Programs
++	Appendix: How to Apply These Terms to Your New Programs
+ 
+   If you develop a new program, and you want it to be of the greatest
+ possible use to the public, the best way to achieve this is to make it
+diff -ruN electric-fence-2.1.14.1/debian/changelog electric-fence-debian/debian/changelog
+--- electric-fence-2.1.14.1/debian/changelog	2006-01-10 07:12:09.000000000 +0100
++++ electric-fence-debian/debian/changelog	2006-04-29 23:44:22.000000000 +0200
+@@ -1,3 +1,10 @@
++electric-fence (2.2.2) unstable; urgency=low
++
++  * New upstream release with patches from Fedora
++    Closes: #241156, #365382
++
++ -- Botond Botyanszki <debian@siliconium.net>  Sun, 29 Apr 2006 23:41:42 +0200
++
+ electric-fence (2.1.14.1) unstable; urgency=low
+ 
+   * Non-maintainer upload.
+diff -ruN electric-fence-2.1.14.1/debian/rules electric-fence-debian/debian/rules
+--- electric-fence-2.1.14.1/debian/rules	2003-12-07 16:51:54.000000000 +0100
++++ electric-fence-debian/debian/rules	2006-04-29 22:56:54.000000000 +0200
+@@ -18,11 +18,7 @@
+ build: build-stamp
+ build-stamp:
+ 	dh_testdir
+-	#if [ -x configure ]; then ./configure --prefix=/usr; fi
+-	make CFLAGS="-O2 -g -Wall -fPIC"
+-	gcc -g -shared -Wl,-soname,libefence.so.0 -o libefence.so.0.0 efence.o page.o print.o -lc -lpthread
+-	rm *.o
+-	make CFLAGS="-O2 -g -Wall"
++	make
+ 	touch build-stamp
+ 
+ clean:
+diff -ruN electric-fence-2.1.14.1/efence.c electric-fence-debian/efence.c
+--- electric-fence-2.1.14.1/efence.c	2005-01-15 20:18:20.000000000 +0100
++++ electric-fence-debian/efence.c	2006-04-29 22:28:22.000000000 +0200
+@@ -34,7 +34,10 @@
+ #include <unistd.h>
+ #include <memory.h>
+ #include <string.h>
+-#include <pthread.h>
++#ifdef USE_SEMAPHORE
++# include <pthread.h>
++# include <semaphore.h>
++#endif
+ 
+ #ifdef	malloc
+ #undef	malloc
+@@ -44,8 +47,8 @@
+ #undef	calloc
+ #endif
+ 
+-static const char	version[] = "\n  Electric Fence 2.1"
+- " Copyright (C) 1987-1998 Bruce Perens.\n";
++static const char	version[] = "\n  Electric Fence 2.2.0"
++ " Copyright (C) 1987-1999 Bruce Perens <bruce@perens.com>\n";
+ 
+ /*
+  * MEMORY_CREATION_SIZE is the amount of memory to get from the operating
+@@ -129,11 +132,10 @@
+ int		EF_ALLOW_MALLOC_0 = -1;
+ 
+ /*
+- * EF_FREE_WIPES is set if Electric Fence is to wipe the memory content
+- * of freed blocks.  This makes it easier to check if memory is freed or
+- * not
++ * EF_FILL is set to 0-255 if Electric Fence should fill all new allocated
++ * memory with the specified value.
+  */
+-int            EF_FREE_WIPES = -1;
++int		EF_FILL = -1;
+ 
+ /*
+  * allocationList points to the array of slot structures used to manage the
+@@ -179,49 +181,99 @@
+  */
+ static int		noAllocationListProtection = 0;
+ 
++#ifdef USE_SEMAPHORE
++
++#include <stdbool.h>
++
++#pragma weak sem_init
++#pragma weak sem_post
++#pragma weak sem_wait
++
++static int		pthread_initialization = 0;
++
++/*
++ * EF_sem is a semaphore used to allow one thread at a time into
++ * these routines.
++ * Also, we use semEnabled as a boolean to see if we should be
++ * using the semaphore.
++ * semThread is set to the thread id of the thread that currently
++ * has the semaphore so that when/if it tries to get the semaphore
++ * again (realloc calling malloc/free) - nothing will happen to the
++ * semaphore.
++ * semDepth is used to keep track of how many times the same thread
++ * gets the semaphore - so we know when it is actually freed.
++ */
++static sem_t      EF_sem = { 0 };
++static int        semEnabled = 0;
++static pthread_t  semThread = (pthread_t) 0;
++static int        semDepth = 0;
++#endif
++
+ /*
+  * bytesPerPage is set at run-time to the number of bytes per virtual-memory
+  * page, as returned by Page_Size().
+  */
+ static size_t		bytesPerPage = 0;
+ 
+- /*
+- * mutex to enable multithreaded operation
+- */
+-static pthread_mutex_t mutex ;
+-static pid_t mutexpid=0;
+-static int locknr=0;
+-
+-
+-static void lock() {
+-    if (pthread_mutex_trylock(&mutex)) {
+-       if (mutexpid==getpid()) {
+-           locknr++;
+-           return;
+-       } else {
+-           pthread_mutex_lock(&mutex);
+-       }
+-    } 
+-    mutexpid=getpid();
+-    locknr=1;
+-}
+-
+-static void unlock() {
+-    locknr--;
+-    if (!locknr) {
+-       mutexpid=0;
+-       pthread_mutex_unlock(&mutex);
+-    }
++static void
++lock()
++{
++#ifdef USE_SEMAPHORE
++	/* Are we using a semaphore? */
++	if (!semEnabled)
++		return;
++
++	/* Do we already have the semaphore? */
++	if (semThread == pthread_self()) {
++		/* Increment semDepth - push one stack level */
++		semDepth++;
++		return;
++	}
++
++	/* Wait for the semaphore. */
++	while (sem_wait(&EF_sem) < 0)
++		/* try again */;
++
++	/* Let everyone know who has the semaphore. */
++	semThread = pthread_self();
++	semDepth++;
++#endif	/* USE_SEMAPHORE */
+ }
+ 
+-/*
+- * internalError is called for those "shouldn't happen" errors in the
+- * allocator.
+- */
+ static void
+-internalError(void)
++release()
+ {
+-	EF_Abort("Internal error in allocator.");
++#ifdef	USE_SEMAPHORE
++	/* Are we using a semaphore? */
++	if (!semEnabled)
++		return;
++
++	/* Do we have the semaphore?  Cannot free it if we don't. */
++	if (semThread != pthread_self()) {
++		if ( semThread == 0 )
++			EF_InternalError(
++			 "Releasing semaphore that wasn't locked.");
++
++		else
++			EF_InternalError(
++			 "Semaphore doesn't belong to thread.");
++	}
++
++	/* Make sure this is positive as well. */
++	if (semDepth <= 0)
++		EF_InternalError("Semaphore depth");
++	/* Decrement semDepth - popping one stack level */
++	semDepth--;
++
++	/* Only actually free the semaphore when we've reached the top */
++	/* of our call stack. */
++	if (semDepth == 0) {
++		/* Zero this before actually free'ing the semaphore. */
++		semThread = (pthread_t) 0;
++		if (sem_post(&EF_sem) < 0)
++			EF_InternalError("Failed to post the semaphore.");
++	}
++#endif /* USE_SEMAPHORE */
+ }
+ 
+ /*
+@@ -246,6 +298,14 @@
+        if ( EF_DISABLE_BANNER == 0 )
+                EF_Print(version);
+ 
++
++#ifdef USE_SEMAPHORE
++	if (sem_init != NULL && !pthread_initialization && sem_init(&EF_sem, 0, 1) >= 0) {
++		semEnabled = 1;
++	}
++#endif
++	lock();
++
+ 	/*
+ 	 * Import the user's environment specification of the default
+ 	 * alignment for malloc(). We want that alignment to be under
+@@ -304,14 +364,13 @@
+ 			EF_ALLOW_MALLOC_0 = 0;
+ 	}
+ 
++	
+ 	/*
+-	 * See if the user wants us to wipe out freed memory.
++	 * Check if we should be filling new memory with a value.
+ 	 */
+-	if ( EF_FREE_WIPES == -1 ) {
+-	        if ( (string = getenv("EF_FREE_WIPES")) != 0 )
+-	                EF_FREE_WIPES = (atoi(string) != 0);
+-	        else
+-	                EF_FREE_WIPES = 0;
++	if ( EF_FILL == -1 ) {
++		if ( (string = getenv("EF_FILL")) != 0)
++			EF_FILL = (unsigned char) atoi(string);
+ 	}
+ 
+ 	/*
+@@ -360,8 +419,25 @@
+ 	 * Account for the two slot structures that we've used.
+ 	 */
+ 	unUsedSlots = slotCount - 2;
++
++	release();
+ }
+ 
++#ifdef USE_SEMAPHORE
++void
++__libc_malloc_pthread_startup (bool first_time)
++{
++	if (first_time) {
++		pthread_initialization = 1;
++		initialize ();
++	} else {
++		pthread_initialization = 0;
++		if (!semEnabled && sem_init != NULL && sem_init(&EF_sem, 0, 1) >= 0)
++			semEnabled = 1;
++	}
++}
++#endif
++
+ /*
+  * allocateMoreSlots is called when there are only enough slot structures
+  * left to support the allocation of a single malloc buffer.
+@@ -432,6 +508,8 @@
+ 	if ( allocationList == 0 )
+ 		initialize();
+ 
++	lock();
++
+ 	if ( userSize == 0 && !EF_ALLOW_MALLOC_0 )
+ 		EF_Abort("Allocating 0 bytes, probably a bug.");
+ 
+@@ -511,7 +589,7 @@
+ 		slot++;
+ 	}
+ 	if ( !emptySlots[0] )
+-		internalError();
++		EF_InternalError("No empty slot 0.");
+ 
+ 	if ( !fullSlot ) {
+ 		/*
+@@ -523,7 +601,7 @@
+ 		size_t	chunkSize = MEMORY_CREATION_SIZE;
+ 
+ 		if ( !emptySlots[1] )
+-			internalError();
++			EF_InternalError("No empty slot 1.");
+ 
+ 		if ( chunkSize < internalSize )
+ 			chunkSize = internalSize;
+@@ -538,6 +616,13 @@
+ 		fullSlot->internalSize = chunkSize;
+ 		fullSlot->mode = FREE;
+ 		unUsedSlots--;
++		
++		/* Fill the slot if it was specified to do so. */
++		if ( EF_FILL != -1 )
++			memset(
++			 (char *)fullSlot->internalAddress
++			,EF_FILL
++			,chunkSize);
+ 	}
+ 
+ 	/*
+@@ -582,7 +667,7 @@
+ 		address += internalSize - bytesPerPage;
+ 
+ 		/* Set up the "dead" page. */
+-		Page_DenyAccess(address, bytesPerPage);
++		Page_Delete(address, bytesPerPage);
+ 
+ 		/* Figure out what address to give the user. */
+ 		address -= userSize;
+@@ -596,8 +681,8 @@
+ 		address = (char *)fullSlot->internalAddress;
+ 
+ 		/* Set up the "dead" page. */
+-		Page_DenyAccess(address, bytesPerPage);
+-			
++		Page_Delete(address, bytesPerPage);
++
+ 		address += bytesPerPage;
+ 
+ 		/* Set up the "live" page. */
+@@ -615,6 +700,8 @@
+ 	if ( !internalUse )
+ 		Page_DenyAccess(allocationList, allocationListSize);
+ 
++	release();
++
+ 	return address;
+ }
+ 
+@@ -680,16 +767,14 @@
+ 	Slot *	previousSlot = 0;
+ 	Slot *	nextSlot = 0;
+ 
+-        lock();
+-
+-        if ( address == 0 ) {
+-                unlock();
+-                return;
+-        }
++	if ( address == 0 )
++		return;
+ 
+ 	if ( allocationList == 0 )
+ 		EF_Abort("free() called before first malloc().");
+ 
++	lock();
++
+ 	if ( !noAllocationListProtection )
+ 		Page_AllowAccess(allocationList, allocationListSize);
+ 
+@@ -713,28 +798,36 @@
+ 	else
+ 		slot->mode = FREE;
+ 
+-       if ( EF_FREE_WIPES )
+-               memset(slot->userAddress, 0xbd, slot->userSize);
++	/*
++	 * Free memory is _always_ set to deny access. When EF_PROTECT_FREE
++	 * is true, free memory is never reallocated, so it remains access
++	 * denied for the life of the process. When EF_PROTECT_FREE is false, 
++	 * the memory may be re-allocated, at which time access to it will be
++	 * allowed again.
++	 *
++	 * Some operating systems allow munmap() with single-page resolution,
++	 * and allow you to un-map portions of a region, rather than the
++	 * entire region that was mapped with mmap(). On those operating
++	 * systems, we can release protected free pages with Page_Delete(),
++	 * in the hope that the swap space attached to those pages will be
++	 * released as well.
++	 */
++	Page_Delete(slot->internalAddress, slot->internalSize);
+ 
+ 	previousSlot = slotForInternalAddressPreviousTo(slot->internalAddress);
+ 	nextSlot = slotForInternalAddress(
+ 	 ((char *)slot->internalAddress) + slot->internalSize);
+ 
+-	if ( previousSlot
+-	 && (previousSlot->mode == FREE || previousSlot->mode == PROTECTED) ) {
++	if ( previousSlot && previousSlot->mode == slot->mode ) {
+ 		/* Coalesce previous slot with this one. */
+ 		previousSlot->internalSize += slot->internalSize;
+-		if ( EF_PROTECT_FREE )
+-			previousSlot->mode = PROTECTED;
+-
+ 		slot->internalAddress = slot->userAddress = 0;
+ 		slot->internalSize = slot->userSize = 0;
+ 		slot->mode = NOT_IN_USE;
+ 		slot = previousSlot;
+ 		unUsedSlots++;
+ 	}
+-	if ( nextSlot
+-	 && (nextSlot->mode == FREE || nextSlot->mode == PROTECTED) ) {
++	if ( nextSlot && nextSlot->mode == slot->mode ) {
+ 		/* Coalesce next slot with this one. */
+ 		slot->internalSize += nextSlot->internalSize;
+ 		nextSlot->internalAddress = nextSlot->userAddress = 0;
+@@ -746,38 +839,29 @@
+ 	slot->userAddress = slot->internalAddress;
+ 	slot->userSize = slot->internalSize;
+ 
+-	/*
+-	 * Free memory is _always_ set to deny access. When EF_PROTECT_FREE
+-	 * is true, free memory is never reallocated, so it remains access
+-	 * denied for the life of the process. When EF_PROTECT_FREE is false, 
+-	 * the memory may be re-allocated, at which time access to it will be
+-	 * allowed again.
+-	 */
+-	Page_DenyAccess(slot->internalAddress, slot->internalSize);
+-
+ 	if ( !noAllocationListProtection )
+ 		Page_DenyAccess(allocationList, allocationListSize);
+ 
+-        unlock();
++	release();
+ }
+ 
+ extern C_LINKAGE void *
+ realloc(void * oldBuffer, size_t newSize)
+ {
+- 	void *	newBuffer;
+- 	
+- 	if (oldBuffer && newSize==0) {
+- 		free(oldBuffer);
+- 		return NULL;
+- 	}
+- 	newBuffer = malloc(newSize);
++	void *	newBuffer = 0;
++
++	if ( allocationList == 0 )
++		initialize();	/* This sets EF_ALIGNMENT */
+ 
+-        lock();
++	lock();
++
++	newBuffer = malloc(newSize);
+ 
+ 	if ( oldBuffer ) {
+ 		size_t	size;
+ 		Slot *	slot;
+ 
++
+ 		Page_AllowAccess(allocationList, allocationListSize);
+ 		noAllocationListProtection = 1;
+ 		
+@@ -804,7 +888,8 @@
+ 		
+ 		/* Internal memory was re-protected in free() */
+ 	}
+-	unlock();
++
++	release();
+ 
+ 	return newBuffer;
+ }
+@@ -812,32 +897,19 @@
+ extern C_LINKAGE void *
+ malloc(size_t size)
+ {
+-        void  *allocation;   
+- 
+-        if ( allocationList == 0 ) {
+-                pthread_mutex_init(&mutex, NULL); 
+-                initialize();   /* This sets EF_ALIGNMENT */
+-        }       
+-        lock();
+-        allocation=memalign(EF_ALIGNMENT, size); 
+-
+-        unlock();
++	if ( allocationList == 0 )
++		initialize();	/* This sets EF_ALIGNMENT */
+ 
+-	return allocation;
++	return memalign(EF_ALIGNMENT, size);
+ }
+ 
+ extern C_LINKAGE void *
+ calloc(size_t nelem, size_t elsize)
+ {
+ 	size_t	size = nelem * elsize;
+-        void * allocation;
+-        
+-        lock();
+-       
+-        allocation = malloc(size);
+-        memset(allocation, 0, size);
+-        unlock();
++	void *	allocation = malloc(size);
+ 
++	memset(allocation, 0, size);
+ 	return allocation;
+ }
+ 
+@@ -848,11 +920,17 @@
+ extern C_LINKAGE void *
+ valloc (size_t size)
+ {
+-        void * allocation;
+-       
+-        lock();
+-        allocation= memalign(bytesPerPage, size);
+-        unlock();
+-       
+-        return allocation;
++	return memalign(bytesPerPage, size);
++}
++
++#ifdef __hpux
++/*
++ * HP-UX 8/9.01 strcat reads a word past source when doing unaligned copies!
++ * Work around it here. The bug report has been filed with HP.
++ */
++char *strcat(char *d, const char *s)
++{
++	strcpy(d+strlen(d), s);
++	return d;
+ }
++#endif
+diff -ruN electric-fence-2.1.14.1/efence.h electric-fence-debian/efence.h
+--- electric-fence-2.1.14.1/efence.h	1995-01-20 05:54:06.000000000 +0100
++++ electric-fence-debian/efence.h	1999-04-12 01:11:21.000000000 +0200
+@@ -1,5 +1,6 @@
+ #include <sys/types.h>
+ #include <sys/param.h>
++#include <stdarg.h>
+ 
+ /*
+  * ef_number is the largest unsigned integer we'll need. On systems that
+@@ -36,7 +37,9 @@
+ size_t			Page_Size(void);
+ 
+ void			EF_Abort(const char * message, ...);
++void			EF_Abortv(const char * message, va_list args);
+ void			EF_Exit(const char * message, ...);
++void			EF_Exitv(const char * message, va_list args);
+ void			EF_Print(const char * message, ...);
+-void			EF_Lock();
+-void			EF_UnLock();
++void			EF_Printv(const char * message, va_list args);
++void			EF_InternalError(const char * message, ...);
+diff -ruN electric-fence-2.1.14.1/eftest.c electric-fence-debian/eftest.c
+--- electric-fence-2.1.14.1/eftest.c	2006-01-10 07:07:40.000000000 +0100
++++ electric-fence-debian/eftest.c	2006-04-29 22:29:32.000000000 +0200
+@@ -50,7 +50,7 @@
+ static int
+ gotSegmentationFault(int (*test)(void))
+ {
+-	if ( sigsetjmp(env,1) == 0 ) {
++	if ( sigsetjmp(env, 1) == 0 ) {
+ 		int			status;
+ 
+ 		signal(PAGE_PROTECTION_VIOLATED_SIGNAL
+diff -ruN electric-fence-2.1.14.1/libefence.3 electric-fence-debian/libefence.3
+--- electric-fence-2.1.14.1/libefence.3	2006-01-10 07:09:10.000000000 +0100
++++ electric-fence-debian/libefence.3	2006-04-29 22:40:27.000000000 +0200
+@@ -76,7 +76,7 @@
+ .LP
+ .nf
+ .ft B
+-extern int EF_FREE_WIPES;
++extern int EF_FILL;
+ .ft
+ .fi
+ .SH DESCRIPTION
+@@ -123,16 +123,17 @@
+ argument to the linker, otherwise you'll have to put the path-name for
+ .B libefence.a
+ in the linker's command line.
++You can also use dynamic linking. If you're using a Bourne shell, the
++statement 
++.B export LD_PRELOAD=libefence.so.0.0
++will cause Electric Fence to be loaded to run all dynamic executables.
++The command
++.B ef
++.I command
++runs a single command under Electric Fence.
++.LP
+ Some systems will require special arguments to the linker to assure that
+ you are using the Electric Fence malloc() and not the one from your C library.
+-On AIX systems, you may have to use the flags
+-.br
+-.B -bnso
+-.B -bnodelcsect
+-.B -bI:/lib/syscalls.exp
+-.br
+-On Sun systems running SunOS 4.X, you'll probably have to use
+-.B -Bstatic.
+ .LP
+ Run your program
+ .I using a debugger. 
+@@ -222,12 +223,12 @@
+ integer value, or assign to the global integer variable EF_ALLOW_MALLOC_0 using
+ a debugger.
+ .TP
+-EF_FREE_WIPES
+-By default, Electric Fence releases memory without changing the content
+-of the released memory block.  IF EF_FREE_WIPES is non-zero, the software
+-will fill the memory block with 0xbd values before it is released.
+-This makes it easier to trigger illegal use of released memory, and eaiser
+-to understand why a memory access failed during gdb runs.
++EF_FILL
++When set to a value between 0 and 255, every byte of allocated memory is
++initialized to that value. This can help detect reads of uninitialized memory.
++When set to -1, some memory is filled with zeroes
++(the operating system default on most systems) and some memory will retain
++the values written to it during its last use.
+ .SH WORD-ALIGNMENT AND OVERRUN DETECTION
+ There is a conflict between the alignment restrictions that malloc() operates
+ under and the debugging strategy used by Electric Fence. When detecting
+@@ -321,25 +322,10 @@
+ .LP
+ Don't leave libefence.a linked into production software! Use it only
+ for debugging.
+-.SH PORTING
+-Electric Fence is written for ANSI C. You should be able to port it with
+-simple changes to the Makefile and to page.c,
+-which contains the memory management primitives .
+-Many POSIX platforms will require only a re-compile.
+-The operating system facilities required to port Electric Fence are:
+-.IP
+-A way to allocate memory pages
+-.br
+-A way to make selected pages inaccessible.
+-.br
+-A way to make the pages accessible again.
+-.br
+-A way to detect when a program touches an inaccessible page.
+-.br
+-A way to print messages.
+-.LP
+-Please e-mail me a copy of any changes you have to make, so that I can
+-merge them into the distribution.
++.SH MAILING LIST
++There is a mailing list to support Electric Fence. You can subscribe using the
++mail form at
++http://lists.perens.com/mailman/listinfo/electric-fence .
+ .SH AUTHOR
+ Bruce Perens
+ .SH WARNINGS
+@@ -347,16 +333,8 @@
+ that it is even theoretically possible to make it bug-free.
+ This software has no warranty. It will not detect some bugs that you might
+ expect it to detect, and will indicate that some non-bugs are bugs.
+-Bruce Perens and/or Pixar will not be liable to any claims resulting
+-from the use of this software or the ideas within it.
+-The entire responsibility for its use must
+-be assumed by the user. If you use it and it results in loss of life
+-and/or property, tough. If it leads you on a wild goose chase and you waste
+-two weeks debugging something, too bad.
+-If you can't deal with the above, please don't use the software! I've written
+-this in an attempt to help other people, not to get myself sued or prosecuted.
+ .SH LICENSE
+-Copyright 1987-1995 Bruce Perens. All rights reserved.
++Copyright 1987-1999 Bruce Perens. All rights reserved.
+ .br
+ This program is free software; you can redistribute it and/or modify
+ it under the terms of the GNU General Public License, Version 2,
+@@ -370,13 +348,10 @@
+ .SH CONTACTING THE AUTHOR
+ .nf
+ Bruce Perens
+-c/o Pixar
+-1001 West Cutting Blvd., Suite 200
+-Richmond, CA 94804
+-
+-Telephone: 510-215-3502
+-Fax: 510-236-0388
+-Internet: Bruce@Pixar.com
++1563 Solano Ave. #349
++Berkeley, CA 94707
++Telephone: 510-526-1165
++Internet: bruce@perens.com
+ .fi
+ .ft
+ .SH FILES
+@@ -393,7 +368,7 @@
+ .SH BUGS
+ My explanation of the alignment issue could be improved.
+ .LP
+-Some Sun systems running SunOS 4.1 are reported to signal an access to a
++Some Sun systems running SunOS 4.1 were reported to signal an access to a
+ protected page with
+ .B  SIGBUS
+ rather than
+@@ -409,7 +384,11 @@
+ There are, without doubt, other bugs and porting issues. Please contact me via
+ e-mail if you have any bug reports, ideas, etc.
+ .SH WHAT'S BETTER
+-PURIFY, from Purify Systems, does a much better job than Electric Fence, and
+-does much more. It's available at this writing on SPARC and HP.
+-I'm not affiliated with Purify, I just think it's a wonderful product
+-and you should check it out.
++.I Purify
++does a much more thorough job than Electric Fence, and does not have
++the huge memory overhead.
++.I Checkergcc,
++a modified version of the GNU C Compiler that instruments all memory
++references,
++is available on Linux systems and where GCC is used. It performs some of the
++same tasks as Purify, but only on code that it has compiled.
+diff -ruN electric-fence-2.1.14.1/Makefile electric-fence-debian/Makefile
+--- electric-fence-2.1.14.1/Makefile	2002-02-19 22:51:44.000000000 +0100
++++ electric-fence-debian/Makefile	2006-04-29 23:19:55.000000000 +0200
+@@ -1,34 +1,22 @@
+-ASFLAGS= -mips2
++PIC= -fPIC
++CFLAGS= -g -O2 -DUSE_SEMAPHORE $(PIC)
++LIBS= -lpthread
++
++prefix=/usr
++BIN_INSTALL_DIR= $(prefix)/bin
++LIB_INSTALL_DIR= $(prefix)/lib
++MAN_INSTALL_DIR= $(prefix)/man/man3
++
+ CC= cc
+ AR= ar
+ INSTALL= install
+-MV= mv
+-CHMOD= chmod
+-CFLAGS= -g
+-LIB_INSTALL_DIR= /usr/lib
+-MAN_INSTALL_DIR= /usr/man/man3
+-
+-PACKAGE_SOURCE= README libefence.3 Makefile efence.h \
+-	efence.c page.c print.c eftest.c tstheap.c CHANGES COPYING
+-
+-# Un-comment the following if you are running HP/UX.
+-# CFLAGS= -Aa -g -D_HPUX_SOURCE -DPAGE_PROTECTION_VIOLATED_SIGNAL=SIGBUS
+-
+-# Un-comment the following if you are running AIX. This makes sure you won't
+-# get the shared-library malloc() rather than the Electric Fence malloc().
+-# COMPILE THE PROGRAMS YOU ARE DEBUGGING WITH THESE FLAGS, TOO.
+-# CFLAGS= -g -bnso -bnodelcsect -bI:/lib/syscalls.exp
+-
+-# Un-comment the following if you are running SunOS 4.X
+-# Note the definition of PAGE_PROTECTION_VIOLATED_SIGNAL. This may vary
+-# depend on what version of Sun hardware you have.
+-# You'll probably have to link the program you are debugging with -Bstatic
+-# as well if using Sun's compiler, -static if using GCC.
+-# CFLAGS= -g -Bstatic -DPAGE_PROTECTION_VIOLATED_SIGNAL=SIGBUS
++
++PACKAGE_SOURCE= README efence.3 Makefile efence.h \
++	efence.c page.c print.c eftest.c tstheap.c CHANGES
+ 
+ OBJECTS= efence.o page.o print.o
+ 
+-all:	libefence.a tstheap eftest
++all:	libefence.a libefence.so.0.0 tstheap eftest
+ 	@ echo
+ 	@ echo "Testing Electric Fence."
+ 	@ echo "After the last test, it should print that the test has PASSED."
+@@ -38,15 +26,19 @@
+ 	@ echo "Electric Fence confidence test PASSED." 
+ 	@ echo
+ 
+-install: libefence.a libefence.3
+-	$(MV) libefence.a $(LIB_INSTALL_DIR)
+-	$(CHMOD) 644 $(LIB_INSTALL_DIR)/libefence.a
+-	$(INSTALL) libefence.3 $(MAN_INSTALL_DIR)/libefence.3
+-	$(CHMOD) 644 $(MAN_INSTALL_DIR)/libefence.3
++install: libefence.a libefence.3 libefence.so.0.0
++	$(INSTALL) -m 755 ef.sh $(BIN_INSTALL_DIR)/ef
++	$(INSTALL) -m 644 libefence.a $(LIB_INSTALL_DIR)
++	$(INSTALL) -m 755 libefence.so.0.0 $(LIB_INSTALL_DIR)
++	- rm -f $(LIB_INSTALL_DIR)/libefence.so.0
++	ln -s libefence.so.0.0 $(LIB_INSTALL_DIR)/libefence.so.0
++	- rm -f $(LIB_INSTALL_DIR)/libefence.so
++	ln -s libefence.so.0.0 $(LIB_INSTALL_DIR)/libefence.so
++	$(INSTALL) -m 644 efence.3 $(MAN_INSTALL_DIR)/libefence.3
+ 
+ clean:
+-	- rm -f $(OBJECTS) tstheap.o eftest.o tstheap eftest libefence.a \
+-	 libefence.cat ElectricFence.shar
++	- rm -f $(OBJECTS) tstheap.o eftest.o tstheap eftest \
++	 libefence.a libefence.so.0.0 libefence.cat ElectricFence.shar
+ 
+ roff:
+ 	nroff -man < libefence.3 > libefence.cat
+@@ -61,12 +53,19 @@
+ 	- rm -f libefence.a
+ 	$(AR) crv libefence.a $(OBJECTS)
+ 
++libefence.so.0.0: $(OBJECTS)
++	$(CC) -shared -Wl,-soname,libefence.so.0 -o libefence.so.0.0 \
++		$(CFLAGS) $(OBJECTS) -lpthread -lc 
++
+ tstheap: libefence.a tstheap.o
+ 	- rm -f tstheap
+-	$(CC) $(CFLAGS) tstheap.o libefence.a -o tstheap -lpthread
++	$(CC) $(CFLAGS) tstheap.o libefence.a -o tstheap $(LIBS)
+ 
+ eftest: libefence.a eftest.o
+ 	- rm -f eftest
+-	$(CC) $(CFLAGS) eftest.o libefence.a -o eftest -lpthread
++	$(CC) $(CFLAGS) eftest.o libefence.a -o eftest $(LIBS)
+ 
+ $(OBJECTS) tstheap.o eftest.o: efence.h
++
++.c.o:
++	$(CC) $(CFLAGS) $(CPPFLAGS) -c $< -o $@
+diff -ruN electric-fence-2.1.14.1/page.c electric-fence-debian/page.c
+--- electric-fence-2.1.14.1/page.c	2005-01-15 21:00:11.000000000 +0100
++++ electric-fence-debian/page.c	2006-04-29 22:31:42.000000000 +0200
+@@ -68,7 +68,7 @@
+ 	 */
+ 	allocation = (caddr_t) mmap(
+ 	 startAddr
+-	,size
++	,(int)size
+ 	,PROT_READ|PROT_WRITE
+ 	,MAP_PRIVATE|MAP_ANONYMOUS
+ 	,-1
+@@ -120,7 +120,7 @@
+ 	 */
+ 	allocation = (caddr_t) mmap(
+ 	 startAddr
+-	,size
++	,(int)size
+ 	,PROT_READ|PROT_WRITE
+ 	,MAP_PRIVATE
+ 	,devZeroFd
+@@ -159,6 +159,8 @@
+ Page_Delete(void * address, size_t size)
+ {
+ 	Page_DenyAccess(address, size);
++	/* Tell the kernel we will never need it again.  */
++	madvise(address, size, MADV_DONTNEED);
+ }
+ 
+ #if defined(_SC_PAGESIZE)
+diff -ruN electric-fence-2.1.14.1/print.c electric-fence-debian/print.c
+--- electric-fence-2.1.14.1/print.c	2001-07-15 14:00:10.000000000 +0200
++++ electric-fence-debian/print.c	2006-04-29 22:34:11.000000000 +0200
+@@ -18,6 +18,19 @@
+ #define	NUMBER_BUFFER_SIZE	(sizeof(ef_number) * NBBY)
+ 
+ static void
++do_abort()
++{
++	/*
++	 * I use kill(getpid(), SIGILL) instead of abort() because some
++	 * mis-guided implementations of abort() flush stdio, which can
++	 * cause malloc() or free() to be called.
++	 */
++	kill(getpid(), SIGILL);
++	/* Just in case something handles SIGILL and returns, exit here. */
++	_exit(-1);
++}
++
++static void
+ printNumber(ef_number number, ef_number base)
+ {
+ 	char		buffer[NUMBER_BUFFER_SIZE];
+@@ -45,8 +58,8 @@
+ 		write(2, s, size);
+ }
+ 
+-static void
+-vprint(const char * pattern, va_list args)
++void
++EF_Printv(const char * pattern, va_list args)
+ {
+ 	static const char	bad_pattern[] =
+ 	 "\nBad pattern specifier %%%c in EF_Print().\n";
+@@ -117,25 +130,35 @@
+ }
+ 
+ void
++EF_Abortv(const char * pattern, va_list args)
++{
++	EF_Print("\nElectricFence Aborting: ");
++	EF_Printv(pattern, args);
++	EF_Print("\n");
++	do_abort();
++}
++
++void
+ EF_Abort(const char * pattern, ...)
+ {
+ 	va_list	args;
+ 
+ 	va_start(args, pattern);
++	EF_Abortv(pattern, args);
++	/* Not reached: va_end(args); */
++}
+ 
+-	EF_Print("\nElectricFence Aborting: ");
+-	vprint(pattern, args);
++void
++EF_Exitv(const char * pattern, va_list args)
++{
++	EF_Print("\nElectricFence Exiting: ");
++	EF_Printv(pattern, args);
+ 	EF_Print("\n");
+ 
+-	va_end(args);
+-
+ 	/*
+-	 * I use kill(getpid(), SIGILL) instead of abort() because some
+-	 * mis-guided implementations of abort() flush stdio, which can
+-	 * cause malloc() or free() to be called.
++	 * I use _exit() because the regular exit() flushes stdio,
++	 * which may cause malloc() or free() to be called.
+ 	 */
+-	kill(getpid(), SIGILL);
+-	/* Just in case something handles SIGILL and returns, exit here. */
+ 	_exit(-1);
+ }
+ 
+@@ -146,17 +169,9 @@
+ 
+ 	va_start(args, pattern);
+ 
+-	EF_Print("\nElectricFence Exiting: ");
+-	vprint(pattern, args);
+-	EF_Print("\n");
+-
+-	va_end(args);
++	EF_Exitv(pattern, args);
+ 
+-	/*
+-	 * I use _exit() because the regular exit() flushes stdio,
+-	 * which may cause malloc() or free() to be called.
+-	 */
+-	_exit(-1);
++	/* Not reached: va_end(args); */
+ }
+ 
+ void
+@@ -165,6 +180,19 @@
+ 	va_list	args;
+ 
+ 	va_start(args, pattern);
+-	vprint(pattern, args);
++	EF_Printv(pattern, args);
++	va_end(args);
++}
++
++void
++EF_InternalError(const char * pattern, ...)
++{
++	va_list	args;
++
++	EF_Print("\nInternal error in allocator: ");
++	va_start(args, pattern);
++	EF_Printv(pattern, args);
++	EF_Print("\n");
+ 	va_end(args);
++	do_abort();
+ }
+diff -ruN electric-fence-2.1.14.1/README electric-fence-debian/README
+--- electric-fence-2.1.14.1/README	1998-03-12 20:48:22.000000000 +0100
++++ electric-fence-debian/README	1999-04-12 04:12:03.000000000 +0200
+@@ -1,4 +1,4 @@
+-This is Electric Fence 2.1
++This is Electric Fence 2.2
+ 
+ Electric Fence is a different kind of malloc() debugger. It uses the virtual
+ memory hardware of your system to detect when software overruns the boundaries
+@@ -8,39 +8,16 @@
+ a bounds violation. It's then trivial to use a debugger to display the
+ offending statement.
+ 
+-This version will run on:
+-	Linux kernel version 1.1.83 and above. Earlier kernels have problems
+-	with the memory protection implementation.
+-
+-	All System V Revision 4 platforms (and possibly earlier revisions)
+-	including:
+-		Every 386 System V I've heard of.
+-		Solaris 2.x
+-		SGI IRIX 5.0 (but not 4.x)
+-
+-	IBM AIX on the RS/6000.
+-
+-	SunOS 4.X (using an ANSI C compiler and probably static linking).
+-
+-	HP/UX 9.01, and possibly earlier versions.
+-
+-	OSF 1.3 (and possibly earlier versions) on a DECalpha.
+-
+-On some of these platforms, you'll have to uncomment lines in the Makefile
+-that apply to your particular system.
+-
+-If you test Electric Fence on a platform not mentioned here, please send me a
+-report.
+-
+-It will probably port to any ANSI/POSIX system that provides mmap(), and
+-mprotect(), as long as mprotect() has the capability to turn off all access
+-to a memory page, and mmap() can use /dev/zero or the MAP_ANONYMOUS flag
+-to create virtual memory pages.
++This version should run on all systems that support POSIX mmap() and
++mprotect(). This includes Linux, Unix, and I think even BeOS.
+ 
+ Complete information on the use of Electric Fence is in the manual page
+-libefence.3 .
++efence.3 .
++
++There is a mailing list to support Electric Fence. You can subscribe to it
++using the web form at http://lists.perens.com/mailman/listinfo/electric-fence.
+ 
+ 	Thanks
+ 
+ 	Bruce Perens
+-	Bruce@Pixar.com
++	bruce@perens.com

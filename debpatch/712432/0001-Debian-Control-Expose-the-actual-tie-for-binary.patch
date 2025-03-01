@@ -1,0 +1,100 @@
+From 1d4f8315a190a19704e1269b9c1a886061f5c150 Mon Sep 17 00:00:00 2001
+From: Olof Johansson <olof@ethup.se>
+Date: Sat, 15 Jun 2013 23:56:38 +0200
+Subject: [PATCH] Debian::Control: Expose the actual tie for binary
+
+The ->binary method returns a Tie::IxHash (not a tie itself).
+This makes treating the tie as a hashref impossible (contrary to
+what the documentation says). Instead, we add a binary_tie method
+to expose the actual tied hashref.
+---
+ lib/Debian/Control.pm |   17 ++++++++++++-----
+ t/Control.t           |    8 +++++++-
+ 2 files changed, 19 insertions(+), 6 deletions(-)
+
+diff --git a/lib/Debian/Control.pm b/lib/Debian/Control.pm
+index 6acd164..7cf6cac 100644
+--- a/lib/Debian/Control.pm
++++ b/lib/Debian/Control.pm
+@@ -10,7 +10,7 @@ Debian::Control - manage Debian source package control files
+     $c->write($file);                       # write to file
+     print $c->source->Source;
+     print $c->source->Build_Depends;        # Debian::Dependencies object
+-    $c->binary->{'libfoo-perl'}->Description(
++    $c->binary_tie->{'libfoo-perl'}->Description(
+         "Foo Perl module\n" .
+         " Foo makes this and that"
+     );
+@@ -31,13 +31,18 @@ packages.
+ An instance of L<Debian::Control::Stanza::Source> class. Contains the source
+ stanza of the Debian source package control file.
+ 
+-=item binary
++=item binary_tie
+ 
+ A hash reference (actually L<Tie::IxHash> instance) with keys being binary
+ package names and values instances of L<Debian::Control::Stanza::Binary> class.
+ Contains the information of the binary package stanzas of Debian source package
+ control file.
+ 
++=item binary
++
++The actual Tie::IxHash object, corresponding to the binary_tie(). See
++L<Tie::IxHash> for documentation on how to interact with it.
++
+ =back
+ 
+ =cut
+@@ -47,7 +52,7 @@ package Debian::Control;
+ use base 'Class::Accessor';
+ use strict;
+ 
+-__PACKAGE__->mk_accessors(qw( source binary _parser ));
++__PACKAGE__->mk_accessors(qw( source binary binary_tie _parser ));
+ 
+ use Parse::DebControl;
+ use Debian::Control::Stanza::Source;
+@@ -75,10 +80,12 @@ sub new {
+     my $self = $class->SUPER::new();
+ 
+     $self->_parser( Parse::DebControl->new );
+-
+-    $self->binary( Tie::IxHash->new );
+     $self->source( Debian::Control::Stanza::Source->new );
+ 
++    my $tie = tie my %binary, 'Tie::IxHash';
++    $self->binary( $tie );
++    $self->binary_tie( \%binary );
++
+     return $self;
+ }
+ 
+diff --git a/t/Control.t b/t/Control.t
+index c1974c3..b375919 100644
+--- a/t/Control.t
++++ b/t/Control.t
+@@ -3,7 +3,7 @@
+ use strict;
+ use warnings;
+ 
+-use Test::More tests => 22;
++use Test::More tests => 23;
+ use Test::Exception;
+ use Test::Differences;
+ 
+@@ -74,6 +74,12 @@ my $written = "";
+ lives_ok { $c->write(\$written) } 'Control writes can write to a scalar ref';
+ eq_or_diff( $written, $control, 'Control writes what it have read' );
+ 
++is(
++    $c->binary->FETCH('libtest-compile-perl')->Depends,
++    $c->binary_tie->{'libtest-compile-perl'}->Depends,
++    'Binary tie interface matches the Tie::IxHash interface'
++);
++
+ use_ok('Debian::Control::FromCPAN');
+ bless $c, 'Debian::Control::FromCPAN';
+ $c->binary->FETCH('libtest-compile-perl')->Depends->add('perl-modules');
+-- 
+1.7.10.4
+

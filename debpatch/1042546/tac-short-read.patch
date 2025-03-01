@@ -1,0 +1,66 @@
+From ef60e3727ee4e4e5c3232a2f44a4f8ef9681aaba Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?P=C3=A1draig=20Brady?= <P@draigBrady.com>
+Date: Mon, 31 Jul 2023 12:41:26 +0100
+Subject: [PATCH] tac: handle short reads on input
+
+This can be reproduced by getting the read() above 2G,
+which induces a short read, thus triggering the erroneous failure.
+
+  $ truncate -s 5G 5G
+
+  $ cat 5G | TMPDIR=$PWD tac | wc -c
+  tac: /tmp/tacFt7txA: read error: Illegal seek
+  0
+
+With the fix in place we now get:
+
+  $ cat 5G | TMPDIR=$PWD src/tac | wc -c
+  5368709120
+
+* src/tac.c (tac_seekable): Use full_read() to handle short reads.
+* NEWS: Mention the bug fix.
+Reported at https://bugs.debian.org/1042546
+---
+ NEWS      | 4 ++++
+ src/tac.c | 3 ++-
+ 2 files changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/NEWS b/NEWS
+index 92e591ee2..011058299 100644
+--- a/NEWS
++++ b/NEWS
+@@ -46,6 +46,10 @@ GNU coreutils NEWS                                    -*- outline -*-
+   'pr --length=1 --double-space' no longer enters an infinite loop.
+   [This bug was present in "the beginning".]
+ 
++  tac now handles short reads on its input.  Previously it may have exited
++  erroneously, especially with large input files with no separators.
++  [This bug was present in "the beginning".]
++
+   'wc -l' and 'cksum' no longer crash with an "Illegal instruction" error
+   on x86 Linux kernels that disable XSAVE YMM.  This was seen on Xen VMs.
+   [bug introduced in coreutils-9.0]
+diff --git a/src/tac.c b/src/tac.c
+index 285f99a74..4c3655895 100644
+--- a/src/tac.c
++++ b/src/tac.c
+@@ -44,6 +44,7 @@ tac -r -s '.\|
+ #include <regex.h>
+ 
+ #include "filenamecat.h"
++#include "full-read.h"
+ #include "safe-read.h"
+ #include "temp-stream.h"
+ #include "xbinary-io.h"
+@@ -336,7 +337,7 @@ tac_seekable (int input_fd, char const *file, off_t file_pos)
+           else
+             match_start = past_end;
+ 
+-          if (safe_read (input_fd, G_buffer, read_size) != read_size)
++          if (full_read (input_fd, G_buffer, read_size) != read_size)
+             {
+               error (0, errno, _("%s: read error"), quotef (file));
+               return false;
+-- 
+2.41.0
+

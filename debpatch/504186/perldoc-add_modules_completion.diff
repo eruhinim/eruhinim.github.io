@@ -1,0 +1,74 @@
+--- /usr/share/emacs/site-lisp/emacs-goodies-el/perldoc.el	2008-09-10 03:29:26.000000000 +0200
++++ /home/intrigeri/.elisp/perldoc.el	2008-11-01 15:06:46.000000000 +0100
+@@ -115,14 +115,60 @@
+        (t
+         (error "`perldoc' program not available"))))))
+ 
++(defvar perldoc-modules-alist nil
++  "Alist holding the list of perl modules.")
++
++(defun perldoc-modules-alist ()
++  "Return the alist of perl modules found in @INC."
++  (if perldoc-modules-alist
++      perldoc-modules-alist
++    (setq perldoc-modules-alist nil)
++    (let ((tmp-buffer (get-buffer-create " *perldoc*"))
++	  (case-fold-search nil)
++	  (perldoc-inc nil))
++      (set-buffer tmp-buffer)
++      (erase-buffer)
++      (shell-command "perl -e 'print \"@INC\"'" t)
++      (goto-char (point-min))
++      (while (re-search-forward "\\(/[^ ]*\\)" nil t)
++	(let ((libdir (match-string 1)))
++	  (when (not (member libdir perldoc-inc))
++	    (push libdir perldoc-inc))))
++      (dolist (dir perldoc-inc)
++	(let (modules (list))
++	  (when (file-readable-p dir)
++	    (erase-buffer)
++	    (shell-command (concat "find -L " dir " -name '[A-Z]*.pm'") t)
++	    (goto-char (point-min))
++	    (while (re-search-forward (concat "^" (regexp-quote dir) "/\\(.*\\).pm$") nil t)
++	      (let ((entry (list (replace-regexp-in-string "/" "::" (match-string 1)))))
++		(when (not (member entry perldoc-modules-alist))
++		  (push entry perldoc-modules-alist)))))))
++      perldoc-modules-alist)))
++
++(defvar perldoc-all-completions-alist nil
++  "Alist holding the list of perl functions and modules.")
++
++(defun perldoc-all-completions-alist ()
++  "Return the alist of perl functions and modules."
++  (if perldoc-all-completions-alist
++      perldoc-all-completions-alist
++    (setq perldoc-all-completions-alist nil)
++    (perldoc-functions-alist)
++    (perldoc-modules-alist)
++    (append perldoc-functions-alist
++	    perldoc-modules-alist
++	    perldoc-all-completions-alist)))
++
+ ;;;###autoload
+ (defun perldoc (string)
+   "Run perldoc on the given STRING.
+ If the string is a recognised function then we can call `perldoc-function',
+ otherwise we call `perldoc-module'."
+   (interactive (list (completing-read "Perl function or module: "
+-                                      (perldoc-functions-alist) nil nil)))
++                                      (perldoc-all-completions-alist) nil nil)))
+   (perldoc-functions-alist)
++  (perldoc-modules-alist)
+   (cond
+    ((assoc string perldoc-functions-alist)
+     (perldoc-function string))
+@@ -162,7 +208,8 @@
+ 
+ (defun perldoc-module (module)
+  "Show the help text for the given Perl MODULE."
+- (interactive "sPerl module : ")
++ (interactive (list (completing-read "Perl module: "
++                                     (perldoc-modules-alist) nil t)))
+    (perldoc-start-process "perldol" nil "perldoc" module))
+ 
+ (defun perldoc-process-filter (proc string)

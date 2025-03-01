@@ -1,0 +1,643 @@
+From 0b9309d85f9515d5773fef69ee20313f94c834ec Mon Sep 17 00:00:00 2001
+From: Jonathan Nieder <jrnieder@gmail.com>
+Date: Sat, 17 Oct 2009 05:58:22 -0500
+Subject: [PATCH 11/15] Add tuklib_physmem() from XZ Utils
+
+Future versions of liblzma should include this function in the
+library, but until then, if we want to know how much RAM is
+installed on a system, we must include some function like this
+ourselves.
+
+This commit only adds the code; it does not hook it into the dpkg
+build infrastructure.
+
+Signed-off-by: Jonathan Nieder <jrnieder@gmail.com>
+---
+ debian/copyright            |    3 +
+ lib/tuklib/sysdefs.h        |  165 +++++++++++++++++++++++++++++++++++++++++++
+ lib/tuklib/tuklib_common.h  |   71 ++++++++++++++++++
+ lib/tuklib/tuklib_config.h  |    1 +
+ lib/tuklib/tuklib_physmem.c |  146 ++++++++++++++++++++++++++++++++++++++
+ lib/tuklib/tuklib_physmem.h |   28 +++++++
+ m4/tuklib_common.m4         |   22 ++++++
+ m4/tuklib_physmem.m4        |  119 +++++++++++++++++++++++++++++++
+ 8 files changed, 555 insertions(+), 0 deletions(-)
+ create mode 100644 lib/tuklib/sysdefs.h
+ create mode 100644 lib/tuklib/tuklib_common.h
+ create mode 100644 lib/tuklib/tuklib_config.h
+ create mode 100644 lib/tuklib/tuklib_physmem.c
+ create mode 100644 lib/tuklib/tuklib_physmem.h
+ create mode 100644 m4/tuklib_common.m4
+ create mode 100644 m4/tuklib_physmem.m4
+
+diff --git a/debian/copyright b/debian/copyright
+index 6f39403..d03ff1f 100644
+--- a/debian/copyright
++++ b/debian/copyright
+@@ -34,6 +34,9 @@ Copyright © 1994 Ian Murdock <imurdock@debian.org>
+ Includes public domain MD5 code:
+ 	lib/dpkg/md5.c and lib/dpkg/md5.h originally written by Colin Plumb,
+ 
++Includes public domain code from XZ Utils:
++	lib/tuklib/* and m4/tuklib_* originally written by Lasse Collin.
++
+ Includes code from ‘getopt’ and ‘gettext’:
+ 	Copyright © 1984-2002 Free Software Foundation, Inc.
+ 
+diff --git a/lib/tuklib/sysdefs.h b/lib/tuklib/sysdefs.h
+new file mode 100644
+index 0000000..aa8ddcc
+--- /dev/null
++++ b/lib/tuklib/sysdefs.h
+@@ -0,0 +1,165 @@
++///////////////////////////////////////////////////////////////////////////////
++//
++/// \file       sysdefs.h
++/// \brief      Common includes, definitions, system-specific things etc.
++///
++/// This file is used also by the lzma command line tool, that's why this
++/// file is separate from common.h.
++//
++//  Author:     Lasse Collin
++//
++//  This file has been put into the public domain.
++//  You can do whatever you want with this file.
++//
++///////////////////////////////////////////////////////////////////////////////
++
++#ifndef LZMA_SYSDEFS_H
++#define LZMA_SYSDEFS_H
++
++//////////////
++// Includes //
++//////////////
++
++#ifdef HAVE_CONFIG_H
++#	include <config.h>
++#endif
++
++// size_t and NULL
++#include <stddef.h>
++
++#ifdef HAVE_INTTYPES_H
++#	include <inttypes.h>
++#endif
++
++// C99 says that inttypes.h always includes stdint.h, but some systems
++// don't do that, and require including stdint.h separately.
++#ifdef HAVE_STDINT_H
++#	include <stdint.h>
++#endif
++
++// Some pre-C99 systems have SIZE_MAX in limits.h instead of stdint.h. The
++// limits are also used to figure out some macros missing from pre-C99 systems.
++#ifdef HAVE_LIMITS_H
++#	include <limits.h>
++#endif
++
++// Be more compatible with systems that have non-conforming inttypes.h.
++// We assume that int is 32-bit and that long is either 32-bit or 64-bit.
++// Full Autoconf test could be more correct, but this should work well enough.
++// Note that this duplicates some code from lzma.h, but this is better since
++// we can work without inttypes.h thanks to Autoconf tests.
++#ifndef UINT32_C
++#	if UINT_MAX != 4294967295U
++#		error UINT32_C is not defined and unsiged int is not 32-bit.
++#	endif
++#	define UINT32_C(n) n ## U
++#endif
++#ifndef UINT32_MAX
++#	define UINT32_MAX UINT32_C(4294967295)
++#endif
++#ifndef PRIu32
++#	define PRIu32 "u"
++#endif
++#ifndef PRIX32
++#	define PRIX32 "X"
++#endif
++
++#if ULONG_MAX == 4294967295UL
++#	ifndef UINT64_C
++#		define UINT64_C(n) n ## ULL
++#	endif
++#	ifndef PRIu64
++#		define PRIu64 "llu"
++#	endif
++#	ifndef PRIX64
++#		define PRIX64 "llX"
++#	endif
++#else
++#	ifndef UINT64_C
++#		define UINT64_C(n) n ## UL
++#	endif
++#	ifndef PRIu64
++#		define PRIu64 "lu"
++#	endif
++#	ifndef PRIX64
++#		define PRIX64 "lX"
++#	endif
++#endif
++#ifndef UINT64_MAX
++#	define UINT64_MAX UINT64_C(18446744073709551615)
++#endif
++
++// The code currently assumes that size_t is either 32-bit or 64-bit.
++#ifndef SIZE_MAX
++#	if SIZEOF_SIZE_T == 4
++#		define SIZE_MAX UINT32_MAX
++#	elif SIZEOF_SIZE_T == 8
++#		define SIZE_MAX UINT64_MAX
++#	else
++#		error sizeof(size_t) is not 32-bit or 64-bit
++#	endif
++#endif
++#if SIZE_MAX != UINT32_MAX && SIZE_MAX != UINT64_MAX
++#	error sizeof(size_t) is not 32-bit or 64-bit
++#endif
++
++#include <stdlib.h>
++#include <assert.h>
++
++// Pre-C99 systems lack stdbool.h. All the code in LZMA Utils must be written
++// so that it works with fake bool type, for example:
++//
++//    bool foo = (flags & 0x100) != 0;
++//    bool bar = !!(flags & 0x100);
++//
++// This works with the real C99 bool but breaks with fake bool:
++//
++//    bool baz = (flags & 0x100);
++//
++#ifdef HAVE_STDBOOL_H
++#	include <stdbool.h>
++#else
++#	if ! HAVE__BOOL
++typedef unsigned char _Bool;
++#	endif
++#	define bool _Bool
++#	define false 0
++#	define true 1
++#	define __bool_true_false_are_defined 1
++#endif
++
++// string.h should be enough but let's include strings.h and memory.h too if
++// they exists, since that shouldn't do any harm, but may improve portability.
++#ifdef HAVE_STRING_H
++#	include <string.h>
++#endif
++
++#ifdef HAVE_STRINGS_H
++#	include <strings.h>
++#endif
++
++#ifdef HAVE_MEMORY_H
++#	include <memory.h>
++#endif
++
++
++////////////
++// Macros //
++////////////
++
++#undef memzero
++#define memzero(s, n) memset(s, 0, n)
++
++#ifndef MIN
++#	define MIN(x, y) ((x) < (y) ? (x) : (y))
++#endif
++
++#ifndef MAX
++#	define MAX(x, y) ((x) > (y) ? (x) : (y))
++#endif
++
++#ifndef ARRAY_SIZE
++#	define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
++#endif
++
++#endif
+diff --git a/lib/tuklib/tuklib_common.h b/lib/tuklib/tuklib_common.h
+new file mode 100644
+index 0000000..31fbab5
+--- /dev/null
++++ b/lib/tuklib/tuklib_common.h
+@@ -0,0 +1,71 @@
++///////////////////////////////////////////////////////////////////////////////
++//
++/// \file       tuklib_common.h
++/// \brief      Common definitions for tuklib modules
++//
++//  Author:     Lasse Collin
++//
++//  This file has been put into the public domain.
++//  You can do whatever you want with this file.
++//
++///////////////////////////////////////////////////////////////////////////////
++
++#ifndef TUKLIB_COMMON_H
++#define TUKLIB_COMMON_H
++
++// The config file may be replaced by a package-specific file.
++// It should include at least stddef.h, inttypes.h, and limits.h.
++#include "tuklib_config.h"
++
++// TUKLIB_SYMBOL_PREFIX is prefixed to all symbols exported by
++// the tuklib modules. If you use a tuklib module in a library,
++// you should use TUKLIB_SYMBOL_PREFIX to make sure that there
++// are no symbol conflicts in case someone links your library
++// into application that also uses the same tuklib module.
++#ifndef TUKLIB_SYMBOL_PREFIX
++#	define TUKLIB_SYMBOL_PREFIX
++#endif
++
++#define TUKLIB_CAT_X(a, b) a ## b
++#define TUKLIB_CAT(a, b) TUKLIB_CAT_X(a, b)
++
++#ifndef TUKLIB_SYMBOL
++#	define TUKLIB_SYMBOL(sym) TUKLIB_CAT(TUKLIB_SYMBOL_PREFIX, sym)
++#endif
++
++#ifndef TUKLIB_DECLS_BEGIN
++#	ifdef __cplusplus
++#		define TUKLIB_DECLS_BEGIN extern "C" {
++#	else
++#		define TUKLIB_DECLS_BEGIN
++#	endif
++#endif
++
++#ifndef TUKLIB_DECLS_END
++#	ifdef __cplusplus
++#		define TUKLIB_DECLS_END }
++#	else
++#		define TUKLIB_DECLS_END
++#	endif
++#endif
++
++#if defined(__GNUC__) && defined(__GNUC_MINOR__)
++#	define TUKLIB_GNUC_REQ(major, minor) \
++		((__GNUC__ == (major) && __GNUC_MINOR__ >= (minor)) \
++			|| __GNUC__ > (major))
++#else
++#	define TUKLIB_GNUC_REQ(major, minor) 0
++#endif
++
++#if TUKLIB_GNUC_REQ(2, 5)
++#	define tuklib_attr_noreturn __attribute__((__noreturn__))
++#else
++#	define tuklib_attr_noreturn
++#endif
++
++#if (defined(_WIN32) && !defined(__CYGWIN__)) \
++		|| defined(__OS2__) || defined(__MSDOS__)
++#	define TUKLIB_DOSLIKE 1
++#endif
++
++#endif
+diff --git a/lib/tuklib/tuklib_config.h b/lib/tuklib/tuklib_config.h
+new file mode 100644
+index 0000000..3fe2145
+--- /dev/null
++++ b/lib/tuklib/tuklib_config.h
+@@ -0,0 +1 @@
++#include "sysdefs.h"
+diff --git a/lib/tuklib/tuklib_physmem.c b/lib/tuklib/tuklib_physmem.c
+new file mode 100644
+index 0000000..b2d2128
+--- /dev/null
++++ b/lib/tuklib/tuklib_physmem.c
+@@ -0,0 +1,146 @@
++///////////////////////////////////////////////////////////////////////////////
++//
++/// \file       tuklib_physmem.c
++/// \brief      Get the amount of physical memory
++//
++//  Author:     Lasse Collin
++//
++//  This file has been put into the public domain.
++//  You can do whatever you want with this file.
++//
++///////////////////////////////////////////////////////////////////////////////
++
++#include "tuklib_physmem.h"
++
++// We want to use Windows-specific code on Cygwin, which also has memory
++// information available via sysconf(), but on Cygwin 1.5 and older it
++// gives wrong results (from our point of view).
++#if defined(_WIN32) || defined(__CYGWIN__)
++#	ifndef _WIN32_WINNT
++#		define _WIN32_WINNT 0x0500
++#	endif
++#	include <windows.h>
++
++#elif defined(__OS2__)
++#	define INCL_DOSMISC
++#	include <os2.h>
++
++#elif defined(__DJGPP__)
++#	include <dpmi.h>
++
++#elif defined(__VMS)
++#	include <lib$routines.h>
++#	include <syidef.h>
++#	include <ssdef.h>
++
++#elif defined(TUKLIB_PHYSMEM_SYSCONF)
++#	include <unistd.h>
++
++#elif defined(TUKLIB_PHYSMEM_SYSCTL)
++#	ifdef HAVE_SYS_PARAM_H
++#		include <sys/param.h>
++#	endif
++#	include <sys/sysctl.h>
++
++// This sysinfo() is Linux-specific.
++#elif defined(TUKLIB_PHYSMEM_SYSINFO)
++#	include <sys/sysinfo.h>
++#endif
++
++
++extern uint64_t
++tuklib_physmem(void)
++{
++	uint64_t ret = 0;
++
++#if defined(_WIN32) || defined(__CYGWIN__)
++	if ((GetVersion() & 0xFF) >= 5) {
++		// Windows 2000 and later have GlobalMemoryStatusEx() which
++		// supports reporting values greater than 4 GiB. To keep the
++		// code working also on older Windows versions, use
++		// GlobalMemoryStatusEx() conditionally.
++		HMODULE kernel32 = GetModuleHandle("kernel32.dll");
++		if (kernel32 != NULL) {
++			BOOL (WINAPI *gmse)(LPMEMORYSTATUSEX) = GetProcAddress(
++					kernel32, "GlobalMemoryStatusEx");
++			if (gmse != NULL) {
++				MEMORYSTATUSEX meminfo;
++				meminfo.dwLength = sizeof(meminfo);
++				if (gmse(&meminfo))
++					ret = meminfo.ullTotalPhys;
++			}
++		}
++	}
++
++	if (ret == 0) {
++		// GlobalMemoryStatus() is supported by Windows 95 and later,
++		// so it is fine to link against it unconditionally. Note that
++		// GlobalMemoryStatus() has no return value.
++		MEMORYSTATUS meminfo;
++		meminfo.dwLength = sizeof(meminfo);
++		GlobalMemoryStatus(&meminfo);
++		ret = meminfo.dwTotalPhys;
++	}
++
++#elif defined(__OS2__)
++	unsigned long mem;
++	if (DosQuerySysInfo(QSV_TOTPHYSMEM, QSV_TOTPHYSMEM,
++			&mem, sizeof(mem)) == 0)
++		ret = mem;
++
++#elif defined(__DJGPP__)
++	__dpmi_free_mem_info meminfo;
++	if (__dpmi_get_free_memory_information(&meminfo) == 0
++			&& meminfo.total_number_of_physical_pages
++				!= (unsigned long)-1)
++		ret = (uint64_t)meminfo.total_number_of_physical_pages * 4096;
++
++#elif defined(__VMS)
++	int vms_mem;
++	int val = SYI$_MEMSIZE;
++	if (LIB$GETSYI(&val, &vms_mem, 0, 0, 0, 0) == SS$_NORMAL)
++		ret = (uint64_t)vms_mem * 8192;
++
++#elif defined(TUKLIB_PHYSMEM_SYSCONF)
++	const long pagesize = sysconf(_SC_PAGESIZE);
++	const long pages = sysconf(_SC_PHYS_PAGES);
++	if (pagesize != -1 || pages != -1)
++		// According to docs, pagesize * pages can overflow.
++		// Simple case is 32-bit box with 4 GiB or more RAM,
++		// which may report exactly 4 GiB of RAM, and "long"
++		// being 32-bit will overflow. Casting to uint64_t
++		// hopefully avoids overflows in the near future.
++		ret = (uint64_t)pagesize * (uint64_t)pages;
++
++#elif defined(TUKLIB_PHYSMEM_SYSCTL)
++	int name[2] = {
++		CTL_HW,
++#ifdef HW_PHYSMEM64
++		HW_PHYSMEM64
++#else
++		HW_PHYSMEM
++#endif
++	};
++	union {
++		uint32_t u32;
++		uint64_t u64;
++	} mem;
++	size_t mem_ptr_size = sizeof(mem.u64);
++	if (sysctl(name, 2, &mem.u64, &mem_ptr_size, NULL, 0) != -1) {
++		// IIRC, 64-bit "return value" is possible on some 64-bit
++		// BSD systems even with HW_PHYSMEM (instead of HW_PHYSMEM64),
++		// so support both.
++		if (mem_ptr_size == sizeof(mem.u64))
++			ret = mem.u64;
++		else if (mem_ptr_size == sizeof(mem.u32))
++			ret = mem.u32;
++	}
++
++#elif defined(TUKLIB_PHYSMEM_SYSINFO)
++	struct sysinfo si;
++	if (sysinfo(&si) == 0)
++		ret = (uint64_t)si.totalram * si.mem_unit;
++#endif
++
++	return ret;
++}
+diff --git a/lib/tuklib/tuklib_physmem.h b/lib/tuklib/tuklib_physmem.h
+new file mode 100644
+index 0000000..09e2a51
+--- /dev/null
++++ b/lib/tuklib/tuklib_physmem.h
+@@ -0,0 +1,28 @@
++///////////////////////////////////////////////////////////////////////////////
++//
++/// \file       tuklib_physmem.h
++/// \brief      Get the amount of physical memory
++//
++//  Author:     Lasse Collin
++//
++//  This file has been put into the public domain.
++//  You can do whatever you want with this file.
++//
++///////////////////////////////////////////////////////////////////////////////
++
++#ifndef TUKLIB_PHYSMEM_H
++#define TUKLIB_PHYSMEM_H
++
++#include "tuklib_common.h"
++TUKLIB_DECLS_BEGIN
++
++#define tuklib_physmem TUKLIB_SYMBOL(tuklib_physmem)
++extern uint64_t tuklib_physmem(void);
++///<
++/// \brief      Get the amount of physical memory in bytes
++///
++/// \return     Amount of physical memory in bytes. On error, zero is
++///             returned.
++
++TUKLIB_DECLS_END
++#endif
+diff --git a/m4/tuklib_common.m4 b/m4/tuklib_common.m4
+new file mode 100644
+index 0000000..d942a25
+--- /dev/null
++++ b/m4/tuklib_common.m4
+@@ -0,0 +1,22 @@
++#
++# SYNOPSIS
++#
++#   TUKLIB_COMMON
++#
++# DESCRIPTION
++#
++#   Common checks for tuklib.
++#
++# COPYING
++#
++#   Author: Lasse Collin
++#
++#   This file has been put into the public domain.
++#   You can do whatever you want with this file.
++#
++
++AC_DEFUN_ONCE([TUKLIB_COMMON], [
++AC_REQUIRE([AC_CANONICAL_HOST])
++AC_REQUIRE([AC_PROG_CC_C99])
++AC_REQUIRE([AC_USE_SYSTEM_EXTENSIONS])
++])dnl
+diff --git a/m4/tuklib_physmem.m4 b/m4/tuklib_physmem.m4
+new file mode 100644
+index 0000000..91e3dc5
+--- /dev/null
++++ b/m4/tuklib_physmem.m4
+@@ -0,0 +1,119 @@
++#
++# SYNOPSIS
++#
++#   TUKLIB_PHYSMEM
++#
++# DESCRIPTION
++#
++#   Check how to get the amount of physical memory.
++#   This information is used in tuklib_physmem.c.
++#
++#   Supported methods:
++#
++#     - Windows (including Cygwin), OS/2, DJGPP (DOS), and OpenVMS have
++#       operating-system specific functions.
++#
++#     - sysconf() works on GNU/Linux and Solaris, and possibly on
++#       some BSDs.
++#
++#     - BSDs use sysctl().
++#
++#     - sysinfo() works on Linux/dietlibc and probably on other Linux
++#       systems whose libc may lack sysconf().
++#
++# COPYING
++#
++#   Author: Lasse Collin
++#
++#   This file has been put into the public domain.
++#   You can do whatever you want with this file.
++#
++
++AC_DEFUN_ONCE([TUKLIB_PHYSMEM], [
++AC_REQUIRE([TUKLIB_COMMON])
++
++# sys/param.h might be needed by sys/sysctl.h.
++AC_CHECK_HEADERS([sys/param.h])
++
++AC_MSG_CHECKING([how to detect the amount of physical memory])
++
++# Maybe checking $host_os would be enough but this matches what
++# tuklib_physmem.c does.
++AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
++#if defined(_WIN32) || defined(__CYGWIN__) || defined(__OS2__) \
++		|| defined(__DJGPP__) || defined(__VMS)
++int main(void) { return 0; }
++#else
++#error
++#endif
++]])], [
++	AC_MSG_RESULT([special])
++], [
++
++AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
++#include <unistd.h>
++int
++main(void)
++{
++	long i;
++	i = sysconf(_SC_PAGESIZE);
++	i = sysconf(_SC_PHYS_PAGES);
++	return 0;
++}
++]])], [
++	AC_DEFINE([TUKLIB_PHYSMEM_SYSCONF], [1],
++		[Define to 1 if the amount of physical memory can be detected
++		with sysconf(_SC_PAGESIZE) and sysconf(_SC_PHYS_PAGES).])
++	AC_MSG_RESULT([sysconf])
++], [
++
++AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
++#include <sys/types.h>
++#ifdef HAVE_SYS_PARAM_H
++#	include <sys/param.h>
++#endif
++#include <sys/sysctl.h>
++int
++main(void)
++{
++	int name[2] = { CTL_HW, HW_PHYSMEM };
++	unsigned long mem;
++	size_t mem_ptr_size = sizeof(mem);
++	sysctl(name, 2, &mem, &mem_ptr_size, NULL, 0);
++	return 0;
++}
++]])], [
++	AC_DEFINE([TUKLIB_PHYSMEM_SYSCTL], [1],
++		[Define to 1 if the amount of physical memory can be detected
++		with sysctl().])
++	AC_MSG_RESULT([sysctl])
++], [
++
++# This version of sysinfo() is Linux-specific. Some non-Linux systems have
++# different sysinfo() so we must check $host_os.
++case $host_os in
++	linux*)
++		AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
++#include <sys/sysinfo.h>
++int
++main(void)
++{
++	struct sysinfo si;
++	sysinfo(&si);
++	return 0;
++}
++		]])], [
++			AC_DEFINE([TUKLIB_PHYSMEM_SYSINFO], [1],
++				[Define to 1 if the amount of physical memory
++				can be detected with Linux sysinfo().])
++			AC_MSG_RESULT([sysinfo])
++		], [
++			AC_MSG_RESULT([unknown])
++		])
++		;;
++	*)
++		AC_MSG_RESULT([unknown])
++		;;
++esac
++])])])
++])dnl
+-- 
+1.6.5.rc1.199.g596ec
+

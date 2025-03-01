@@ -1,0 +1,336 @@
+# DP: Fix handling of UTF-16, UCS-2, UCS-4 encoded eMails
+
+--- a/imap/src/c-client/utf8.c
++++ b/imap/src/c-client/utf8.c
+@@ -333,11 +333,23 @@ static const CHARSET utf8_csvalid[] = {
+   {"UNICODE-1-1-UTF-7",CT_UTF7,CF_UNSUPRT,
+      NIL,SC_UNICODE,"UTF-8"},
+ 				/* these should never appear in email */
+-  {"UCS-2",CT_UCS2,CF_PRIMARY | CF_DISPLAY | CF_NOEMAIL,
++  {"UCS-2",CT_UCS2,CF_PRIMARY | CF_NOEMAIL,
+      NIL,SC_UNICODE,"UTF-8"},
+-  {"UCS-4",CT_UCS4,CF_PRIMARY | CF_DISPLAY | CF_NOEMAIL,
++  {"UCS-2BE",CT_UCS2BE,CF_PRIMARY | CF_DISPLAY | CF_NOEMAIL,
+      NIL,SC_UNICODE,"UTF-8"},
+-  {"UTF-16",CT_UTF16,CF_PRIMARY | CF_DISPLAY | CF_NOEMAIL,
++  {"UCS-2LE",CT_UCS2LE,CF_PRIMARY | CF_DISPLAY | CF_NOEMAIL,
++     NIL,SC_UNICODE,"UTF-8"},
++  {"UCS-4",CT_UCS4,CF_PRIMARY | CF_NOEMAIL,
++     NIL,SC_UNICODE,"UTF-8"},
++  {"UCS-4BE",CT_UCS4BE,CF_PRIMARY | CF_DISPLAY | CF_NOEMAIL,
++     NIL,SC_UNICODE,"UTF-8"},
++  {"UCS-4LE",CT_UCS4LE,CF_PRIMARY | CF_DISPLAY | CF_NOEMAIL,
++     NIL,SC_UNICODE,"UTF-8"},
++  {"UTF-16",CT_UTF16,CF_PRIMARY | CF_NOEMAIL,
++     NIL,SC_UNICODE,"UTF-8"},
++  {"UTF-16BE",CT_UTF16BE,CF_PRIMARY | CF_DISPLAY | CF_NOEMAIL,
++     NIL,SC_UNICODE,"UTF-8"},
++  {"UTF-16LE",CT_UTF16LE,CF_PRIMARY | CF_DISPLAY | CF_NOEMAIL,
+      NIL,SC_UNICODE,"UTF-8"},
+   NIL
+ };
+@@ -536,13 +548,34 @@ long utf8_text_cs (SIZEDTEXT *text,const
+     utf8_text_utf7 (text,ret,cv,de);
+     break;
+   case CT_UCS2:			/* 2 byte 16-bit Unicode no table */
+-    utf8_text_ucs2 (text,ret,cv,de);
++    if (text->data[0] == 0xFF && text->data[1] == 0xFE) {
++  case CT_UCS2LE:
++      utf8_text_ucs2le (text,ret,cv,de);
++      break;
++    }
++    /* FALLTHROUGH */
++  case CT_UCS2BE:
++    utf8_text_ucs2be (text,ret,cv,de);
+     break;
+   case CT_UCS4:			/* 4 byte 32-bit Unicode no table */
+-    utf8_text_ucs4 (text,ret,cv,de);
++    if (text->data[0] == 0xFF && text->data[1] == 0xFE && !text->data[2] && !text->data[3]) {
++  case CT_UCS4LE:
++      utf8_text_ucs4le (text,ret,cv,de);
++      break;
++    }
++    /* FALLTHROUGH */
++  case CT_UCS4BE:
++    utf8_text_ucs4be (text,ret,cv,de);
+     break;
+   case CT_UTF16:		/* variable UTF-16 encoded Unicode no table */
+-    utf8_text_utf16 (text,ret,cv,de);
++    if (text->data[0] == 0xFF && text->data[1] == 0xFE) {
++  case CT_UTF16LE:
++      utf8_text_utf16le (text,ret,cv,de);
++      break;
++    }
++    /* FALLTHROUGH */
++  case CT_UTF16BE:
++    utf8_text_utf16be (text,ret,cv,de);
+     break;
+   case CT_2022:			/* variable ISO-2022 encoded no table*/
+     utf8_text_2022 (text,ret,cv,de);
+@@ -1191,12 +1224,22 @@ unsigned long ucs4_cs_get (CHARSET *cs,u
+     break;
+ 
+   case CT_UCS2:			/* 2 byte 16-bit Unicode no table */
++    /* no endianness specified, user is an idiot but we cannot return error here */
++  case CT_UCS2BE:
+     ret = c << 8;
+     if (j--) c = *t++;		/* get second octet */
+     else return U8G_ENDSTRI;	/* empty string */
+     ret |= c;
+     break;
++  case CT_UCS2LE:
++    ret = c;
++    if (j--) c = *t++;		/* get second octet */
++    else return U8G_ENDSTRI;	/* empty string */
++    ret |= c << 8;
++    break;
+   case CT_UCS4:			/* 4 byte 32-bit Unicode no table */
++    /* no endianness specified, user is an idiot but we cannot return error here */
++  case CT_UCS4BE:
+     if (c & 0x80) return U8G_NOTUTF8;
+     if (j < 3) return U8G_ENDSTRI;
+     j -= 3;			/* count three octets */
+@@ -1205,7 +1248,18 @@ unsigned long ucs4_cs_get (CHARSET *cs,u
+     ret |= (*t++) << 8;
+     ret |= (*t++);
+     break;
++  case CT_UCS4LE:
++    if (c & 0x80) return U8G_NOTUTF8;
++    if (j < 3) return U8G_ENDSTRI;
++    j -= 3;			/* count three octets */
++    ret = c;
++    ret |= (*t++) << 8;
++    ret |= (*t++) << 16;
++    ret |= (*t++) << 24;
++    break;
+   case CT_UTF16:		/* variable UTF-16 encoded Unicode no table */
++    /* no endianness specified, user is an idiot but we cannot return error here */
++  case CT_UTF16BE:
+     ret = c << 8;
+     if (j--) c = *t++;		/* get second octet */
+     else return U8G_ENDSTRI;	/* empty string */
+@@ -1222,6 +1276,23 @@ unsigned long ucs4_cs_get (CHARSET *cs,u
+ 	(d & UTF16_MASK);
+     }
+     break;
++  case CT_UTF16LE:
++    ret = c;
++    if (j--) c = *t++;		/* get second octet */
++    else return U8G_ENDSTRI;	/* empty string */
++    ret |= c << 8;
++				/* surrogate? */
++    if ((ret >= UTF16_SURR) && (ret <= UTF16_MAXSURR)) {
++				/* invalid first surrogate */
++      if ((ret > UTF16_SURRHEND) || (j < 2)) return U8G_NOTUTF8;
++      j -= 2;			/* count two octets */
++      d = *t++;			/* first octet of second surrogate */
++      d |= (*t++) << 8;		/* second octet of second surrogate */
++      if ((d < UTF16_SURRL) || (d > UTF16_SURRLEND)) return U8G_NOTUTF8;
++      ret = UTF16_BASE + ((ret & UTF16_MASK) << UTF16_SHIFT) +
++	(d & UTF16_MASK);
++    }
++    break;
+   default:			/* unknown/unsupported character set type */
+     return U8G_NOTUTF8;
+   }
+@@ -1408,6 +1479,13 @@ const CHARSET *utf8_infercharset (SIZEDT
+ 	return NIL;		/* definitely invalid */
+       }
+     }
++
++    else if (src->data[2] == 0xFE && src->data[3] == 0xFF && !src->data[0] && !src->data[1])
++      return utf8_charset ("UCS-4BE");
++    else if (src->data[0] == 0xFE && src->data[1] == 0xFF)
++      return utf8_charset ("UTF-16BE");
++    else if (src->data[0] == 0xFF && src->data[1] == 0xFE)
++      return (!src->data[2] && !src->data[3]) ? utf8_charset ("UCS-4LE") : utf8_charset ("UTF-16LE");
+ 				/* if possible UTF-8 and not ISO-2022-JP */
+     else if (!iso2022jp && (eightbit >= 0) && (src->data[i] & BIT8) &&
+ 	     (eightbit = utf8_validate (src->data + i,src->size - i)) > 0)
+@@ -2109,7 +2187,7 @@ void utf8_text_utf8 (SIZEDTEXT *text,SIZ
+  *	    canonicalization function
+  */
+ 
+-void utf8_text_ucs2 (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de)
++void utf8_text_ucs2be (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de)
+ {
+   unsigned long i;
+   unsigned char *s,*t;
+@@ -2128,6 +2206,25 @@ void utf8_text_ucs2 (SIZEDTEXT *text,SIZ
+   if (((unsigned long) (s - ret->data)) != ret->size)
+     fatal ("UCS-2 to UTF-8 botch");
+ }
++void utf8_text_ucs2le (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de)
++{
++  unsigned long i;
++  unsigned char *s,*t;
++  unsigned int c;
++  for (ret->size = 0, t = text->data, i = text->size / 2; i; --i) {
++    c = *t++;
++    c |= *t++ << 8;
++    UTF8_COUNT_BMP (ret->size,c,cv,de);
++  }
++  (s = ret->data = (unsigned char *) fs_get (ret->size + 1))[ret->size] = NIL;
++  for (t = text->data, i = text->size / 2; i; --i) {
++    c = *t++;
++    c |= *t++ << 8;
++    UTF8_WRITE_BMP (s,c,cv,de)	/* convert UCS-2 to UTF-8 */
++  }
++  if (((unsigned long) (s - ret->data)) != ret->size)
++    fatal ("UCS-2 to UTF-8 botch");
++}
+ 
+ 
+ /* Convert UCS-4 sized text to UTF-8
+@@ -2136,7 +2233,7 @@ void utf8_text_ucs2 (SIZEDTEXT *text,SIZ
+  *	    canonicalization function
+  */
+ 
+-void utf8_text_ucs4 (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de)
++void utf8_text_ucs4be (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de)
+ {
+   unsigned long i;
+   unsigned char *s,*t;
+@@ -2153,6 +2250,23 @@ void utf8_text_ucs4 (SIZEDTEXT *text,SIZ
+   if (((unsigned long) (s - ret->data)) != ret->size)
+     fatal ("UCS-4 to UTF-8 botch");
+ }
++void utf8_text_ucs4le (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de)
++{
++  unsigned long i;
++  unsigned char *s,*t;
++  unsigned long c;
++  for (ret->size = 0, t = text->data, i = text->size / 4; i; --i) {
++    c = *t++; c |= *t++ << 8; c |= *t++ << 16; c |= *t++ << 24;
++    UTF8_COUNT (ret->size,c,cv,de);
++  }
++  (s = ret->data = (unsigned char *) fs_get (ret->size + 1))[ret->size] = NIL;
++  for (t = text->data, i = text->size / 2; i; --i) {
++    c = *t++; c |= *t++ << 8; c |= *t++ << 16; c |= *t++ << 24;
++    UTF8_WRITE (s,c,cv,de)	/* convert UCS-4 to UTF-8 */
++  }
++  if (((unsigned long) (s - ret->data)) != ret->size)
++    fatal ("UCS-4 to UTF-8 botch");
++}
+ 
+ /* Convert UTF-16 sized text to UTF-8
+  * Accepts: source sized text
+@@ -2160,7 +2274,7 @@ void utf8_text_ucs4 (SIZEDTEXT *text,SIZ
+  *	    canonicalization function
+  */
+ 
+-void utf8_text_utf16 (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de)
++void utf8_text_utf16be (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de)
+ {
+   unsigned long i;
+   unsigned char *s,*t;
+@@ -2198,6 +2312,53 @@ void utf8_text_utf16 (SIZEDTEXT *text,SI
+ 	--i;			/* swallowed another 16-bits */
+ 				/* invalid second surrogate */
+ 	if ((d < UTF16_SURRL) || (d > UTF16_SURRLEND)) c = UBOGON;
++	else c = UTF16_BASE + ((c & UTF16_MASK) << UTF16_SHIFT) +
++	       (d & UTF16_MASK);
++      }
++    }
++    UTF8_WRITE (s,c,cv,de)	/* convert UCS-4 to UTF-8 */
++  }
++  if (((unsigned long) (s - ret->data)) != ret->size)
++    fatal ("UTF-16 to UTF-8 botch");
++}
++void utf8_text_utf16le (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de)
++{
++  unsigned long i;
++  unsigned char *s,*t;
++  unsigned long c,d;
++  for (ret->size = 0, t = text->data, i = text->size / 2; i; --i) {
++    c = *t++;
++    c |= *t++ << 8;
++				/* possible surrogate? */
++    if ((c >= UTF16_SURR) && (c <= UTF16_MAXSURR)) {
++				/* invalid first surrogate */
++      if ((c > UTF16_SURRHEND) || !i) c = UBOGON;
++      else {			/* get second surrogate */
++	d = *t++;
++	d |= *t++ << 8;
++	--i;			/* swallowed another 16-bits */
++				/* invalid second surrogate */
++	if ((d < UTF16_SURRL) || (d > UTF16_SURRLEND)) c = UBOGON;
++	else c = UTF16_BASE + ((c & UTF16_MASK) << UTF16_SHIFT) +
++	       (d & UTF16_MASK);
++      }
++    }
++    UTF8_COUNT (ret->size,c,cv,de);
++  }
++  (s = ret->data = (unsigned char *) fs_get (ret->size + 1))[ret->size] = NIL;
++  for (t = text->data, i = text->size / 2; i; --i) {
++    c = *t++;
++    c |= *t++ << 8;
++				/* possible surrogate? */
++    if ((c >= UTF16_SURR) && (c <= UTF16_MAXSURR)) {
++				/* invalid first surrogate */
++      if ((c > UTF16_SURRHEND) || !i) c = UBOGON;
++      else {			/* get second surrogate */
++	d = *t++;
++	d |= *t++ << 8;
++	--i;			/* swallowed another 16-bits */
++				/* invalid second surrogate */
++	if ((d < UTF16_SURRL) || (d > UTF16_SURRLEND)) c = UBOGON;
+ 	else c = UTF16_BASE + ((c & UTF16_MASK) << UTF16_SHIFT) +
+ 	       (d & UTF16_MASK);
+       }
+--- a/imap/src/c-client/utf8.h
++++ b/imap/src/c-client/utf8.h
+@@ -491,20 +491,34 @@ struct utf8_eucparam {
+ 
+ #define CT_UNKNOWN 0		/* unknown 8-bit */
+ #define CT_ASCII 1		/* 7-bit ASCII no table */
+-#define CT_UCS2 2		/* 2 byte 16-bit Unicode no table */
+-#define CT_UCS4 3		/* 4 byte 32-bit Unicode no table */
+ #define CT_1BYTE0 10		/* 1 byte ISO 8859-1 no table */
+ #define CT_1BYTE 11		/* 1 byte ASCII + table 0x80-0xff */
+ #define CT_1BYTE8 12		/* 1 byte table 0x00 - 0xff */
+ #define CT_EUC 100		/* 2 byte ASCII + utf8_eucparam base/CS2/CS3 */
+ #define CT_DBYTE 101		/* 2 byte ASCII + utf8_eucparam */
+ #define CT_DBYTE2 102		/* 2 byte ASCII + utf8_eucparam plane1/2 */
+-#define CT_UTF16 1000		/* variable UTF-16 encoded Unicode no table */
+ #define CT_UTF8 1001		/* variable UTF-8 encoded Unicode no table */
+ #define CT_UTF7 1002		/* variable UTF-7 encoded Unicode no table */
+ #define CT_2022 10000		/* variable ISO-2022 encoded no table */
+ #define CT_SJIS 10001		/* 2 byte Shift-JIS encoded JIS no table */
+ 
++/*
++ * no endianness specified: RFC2781 §4.3 says to check BOM and
++ * interpret as BE if no LE BOM found; Unix says these are host
++ * endianness, but since we don't know that we !CF_DISPLAY these
++ */
++#define CT_UCS2    1010		/* 2 byte 16-bit Unicode no table */
++#define CT_UCS4    1020		/* 4 byte 32-bit Unicode no table */
++#define CT_UTF16   1030		/* variable UTF-16 encoded Unicode no table */
++/* big endian explicit */
++#define CT_UCS2BE  1011		/* 2 byte 16-bit Unicode no table */
++#define CT_UCS4BE  1021		/* 4 byte 32-bit Unicode no table */
++#define CT_UTF16BE 1031		/* variable UTF-16 encoded Unicode no table */
++/* little endian explicit */
++#define CT_UCS2LE  1012		/* 2 byte 16-bit Unicode no table */
++#define CT_UCS4LE  1022		/* 4 byte 32-bit Unicode no table */
++#define CT_UTF16LE 1032		/* variable UTF-16 encoded Unicode no table */
++
+ 
+ /* Character set flags */
+ 
+@@ -571,9 +585,12 @@ void utf8_text_sjis (SIZEDTEXT *text,SIZ
+ void utf8_text_2022 (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de);
+ void utf8_text_utf7 (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de);
+ void utf8_text_utf8 (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de);
+-void utf8_text_ucs2 (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de);
+-void utf8_text_ucs4 (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de);
+-void utf8_text_utf16 (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de);
++void utf8_text_ucs2be (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de);
++void utf8_text_ucs4be (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de);
++void utf8_text_utf16be (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de);
++void utf8_text_ucs2le (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de);
++void utf8_text_ucs4le (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de);
++void utf8_text_utf16le (SIZEDTEXT *text,SIZEDTEXT *ret,ucs4cn_t cv,ucs4de_t de);
+ unsigned long utf8_size (unsigned long c);
+ unsigned char *utf8_put (unsigned char *s,unsigned long c);
+ unsigned long ucs4_titlecase (unsigned long c);

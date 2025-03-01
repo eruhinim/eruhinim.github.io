@@ -1,0 +1,95 @@
+diff -Nru clisp-2.49/debian/changelog clisp-2.49/debian/changelog
+--- clisp-2.49/debian/changelog	2011-07-14 23:35:39.000000000 +0200
++++ clisp-2.49/debian/changelog	2012-02-17 14:34:55.000000000 +0100
+@@ -1,3 +1,12 @@
++clisp (1:2.49-8.1) unstable; urgency=low
++
++  * Non-maintainer upload.
++  * Build depend on libdb-dev instead of libdb4.8-dev. Add new patch to
++    reflect the fact that Berkeley DB 5.1 no longer supports RPC.
++    (Closes: #621377)
++
++ -- Sébastien Villemot <sebastien.villemot@ens.fr>  Fri, 17 Feb 2012 14:23:49 +0100
++
+ clisp (1:2.49-8) unstable; urgency=low
+ 
+   * Replace dependency on libreadline5-dev with libreadline-gplv2-dev to
+diff -Nru clisp-2.49/debian/control clisp-2.49/debian/control
+--- clisp-2.49/debian/control	2011-07-14 23:34:26.000000000 +0200
++++ clisp-2.49/debian/control	2012-02-17 11:55:26.000000000 +0100
+@@ -3,7 +3,7 @@
+ Priority: optional
+ Maintainer: Debian Common Lisp Team <pkg-common-lisp-devel@lists.alioth.debian.org>
+ Uploaders: Peter Van Eynde <pvaneynd@debian.org>, Christoph Egger <christoph@debian.org>
+-Build-Depends: debhelper (>> 7), gettext, bison, libncurses5-dev, groff, libx11-dev, libxext-dev, libxpm-dev, libsigsegv-dev (>= 2.8), libreadline-gplv2-dev, dh-lisp (>= 0.7.1), libdb4.8-dev, libffcall1-dev , libgdbm-dev , libpq-dev [ !armel !hppa !ia64 !m68k !s390 !mipsel !powerpc], libpcre3-dev, libdbus-1-dev [ !armel !hppa !ia64 !m68k !s390 !mipsel !powerpc], zlib1g-dev [ !armel !hppa !ia64 !m68k !s390 !mipsel !powerpc]
++Build-Depends: debhelper (>> 7), gettext, bison, libncurses5-dev, groff, libx11-dev, libxext-dev, libxpm-dev, libsigsegv-dev (>= 2.8), libreadline-gplv2-dev, dh-lisp (>= 0.7.1), libdb-dev, libffcall1-dev , libgdbm-dev , libpq-dev [ !armel !hppa !ia64 !m68k !s390 !mipsel !powerpc], libpcre3-dev, libdbus-1-dev [ !armel !hppa !ia64 !m68k !s390 !mipsel !powerpc], zlib1g-dev [ !armel !hppa !ia64 !m68k !s390 !mipsel !powerpc]
+ Build-Conflicts: libsigsegv-dev (<= 2.8), libreadline6-dev
+ Standards-Version: 3.9.1.0
+ Homepage: http://www.clisp.org/
+diff -Nru clisp-2.49/debian/patches/bdb-5.1.patch clisp-2.49/debian/patches/bdb-5.1.patch
+--- clisp-2.49/debian/patches/bdb-5.1.patch	1970-01-01 01:00:00.000000000 +0100
++++ clisp-2.49/debian/patches/bdb-5.1.patch	2012-02-17 14:44:57.000000000 +0100
+@@ -0,0 +1,55 @@
++Description: Reflect the fact that Berkeley DB 5.1 no longer supports RPC
++ See docs/installation/changelog_4_8.html in src:db package.
++ .
++ This patch removes RPC support in BDB:DBE-CREATE. The function now fails with
++ an error message if a remote host is given.
++Bug-Debian: http://bugs.debian.org/621377
++Forwarded: no
++Author: Sébastien Villemot <sebastien.villemot@ens.fr>
++Last-Update: 2012-02-17
++--- a/modules/berkeley-db/bdb.c
+++++ b/modules/berkeley-db/bdb.c
++@@ -351,40 +351,10 @@
++ DEFUN(BDB:DBE-CREATE,&key PASSWORD ENCRYPT :HOST CLIENT-TIMEOUT SERVER-TIMEOUT)
++ { /* Create an environment handle */
++   DB_ENV *dbe, *dbe_cl;
++-  bool remote_p = boundp(STACK_2); /* host ==> remote */
+++  if (boundp(STACK_2))       /* :HOST */
+++    error(error_condition, GETTEXT("RPC support has been dropped in Berkeley DB 5.1"));
++   int cl_timeout = 0, sv_timeout = 0;
++-# if defined(DB_RPCCLIENT)      /* 4.2 and later */
++-  SYSCALL(db_env_create,(&dbe,remote_p ? DB_RPCCLIENT : 0));
++-# elif defined(DB_CLIENT)       /* 4.1 and before */
++-  SYSCALL(db_env_create,(&dbe,remote_p ? DB_CLIENT : 0));
++-# else
++-#  error how does your Berkeley DB create a remote client?
++-# endif
++-  if (remote_p) {
++-    if (uint_p(STACK_0)) sv_timeout = I_to_uint(STACK_0);
++-    if (uint_p(STACK_1)) cl_timeout = I_to_uint(STACK_1);
++-   host_restart:
++-    if (stringp(STACK_2)) {     /* string host */
++-      with_string_0(STACK_2,GLO(misc_encoding),hostz, {
++-          SYSCALL(dbe->set_rpc_server,(dbe,NULL,hostz,cl_timeout,sv_timeout,0));
++-        });
++-    } else if ((dbe_cl = (DB_ENV*)bdb_handle(STACK_2,`BDB::DBE`,
++-                                             BH_NIL_IS_NULL))) {
++-      /* reuse client */
++-      SYSCALL(dbe->set_rpc_server,(dbe,dbe_cl->cl_handle,NULL,
++-                                   cl_timeout,sv_timeout,0));
++-    } else {                    /* bad host */
++-      pushSTACK(NIL);           /* no PLACE */
++-      pushSTACK(STACK_(2+1));   /* TYPE-ERROR slot DATUM */
++-      pushSTACK(`(OR STRING BDB::DBE)`); /* TYPE-ERROR slot EXPECTED-TYPE */
++-      pushSTACK(STACK_2);                /* host */
++-      pushSTACK(`BDB::DBE`); pushSTACK(S(string)); pushSTACK(S(Khost));
++-      pushSTACK(TheSubr(subr_self)->name);
++-      check_value(type_error,GETTEXT("~S: ~S should be a ~S or a ~S, not ~S"));
++-      STACK_2 = value1;
++-      goto host_restart;
++-    }
++-  }
+++  SYSCALL(db_env_create,(&dbe,0));
++   if (!missingp(STACK_4))       /* :PASSWD */
++     dbe_set_encryption(dbe,&STACK_3,&STACK_4);
++   skipSTACK(5);
+diff -Nru clisp-2.49/debian/patches/series clisp-2.49/debian/patches/series
+--- clisp-2.49/debian/patches/series	2011-07-14 23:34:26.000000000 +0200
++++ clisp-2.49/debian/patches/series	2012-02-17 12:28:14.000000000 +0100
+@@ -3,3 +3,4 @@
+ clx-spelling.patch
+ s390x-workaround.patch
+ kfreebsd-amd64.diff
++bdb-5.1.patch

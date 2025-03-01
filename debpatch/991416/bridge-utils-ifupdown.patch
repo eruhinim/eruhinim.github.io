@@ -1,0 +1,53 @@
+--- /usr/lib/bridge-utils/ifupdown.sh-orig
++++ /usr/lib/bridge-utils/ifupdown.sh
+@@ -13,6 +13,12 @@
+ 
+ . /lib/bridge-utils/bridge-utils.sh
+ 
++# hardware address assignment types (from linux/include/uapi/linux/netdevice.h)
++NET_ADDR_PERM=0
++NET_ADDR_RANDOM=1
++NET_ADDR_STOLEN=2
++NET_ADDR_SET=3
++
+ case "$IF_BRIDGE_PORTS" in
+     "")
+ 	exit 0
+@@ -117,6 +123,37 @@
+ # We finish setting up the bridge
+ if [ "$MODE" = "start" ] ; then
+ 
++  # If bridge_hw is not set then mimic the old "lowest MAC wins"
++  # selection algorithm.  Doing this after attaching the ports lets us
++  # conveniently grep for "master $IFACE".  To mimic the v3.15
++  # behaviour closely we only set the MAC address if the assignment
++  # type of $IFACE is still NET_ADDR_RANDOM (on systemd systems this
++  # needs /lib/systemd/network/80-bridge-utils.link).
++  if [ -z "$IF_BRIDGE_HW" -a -e "/sys/class/net/$IFACE/addr_assign_type" ]
++  then
++    IF_BRIDGE_HW="$(ip -oneline link show |grep -F " master $IFACE "|sed 's@^.*link/ether @@'|cut -d' ' -f1|sort|head -n1)"
++    if [ -n "$IF_BRIDGE_HW" -a "$(cat /sys/class/net/$IFACE/addr_assign_type)" -eq "$NET_ADDR_RANDOM" ]
++    then
++      ip link set dev "$IFACE" address "$IF_BRIDGE_HW"
++      printf "\nWarning: The old lowest-MAC-wins compatibility mode is deprecated and will be removed in future releases of bridge-utils." >&2
++      printf "\nSee /usr/share/doc/bridge-utils/NEWS.Debian.gz for details." >&2
++      SENDMAIL="$(command -v sendmail)"
++      if [ -n "$SENDMAIL" -a -x "$SENDMAIL" ]
++      then
++	printf "Subject: bridge-utils: deprecation warning\n\nWarning: The old lowest-MAC-wins compatibility mode is deprecated and will be removed in future releases of bridge-utils.\nSee /usr/share/doc/bridge-utils/NEWS.Debian.gz for details.\n.\n" | "$SENDMAIL" -bm root
++      fi
++    elif [ -n "$IF_BRIDGE_HW" -a "$(cat /sys/class/net/$IFACE/addr_assign_type)" -eq "$NET_ADDR_SET" ]
++    then
++      # issue a diagnostic warning if someone set the MAC already, but
++      # it's not the lowest address of its ports
++      IF_BRIDGE_HW_CUR="$(ip link show dev $IFACE|grep 'link/ether'|cut -d/ -f2-|cut -d' ' -f2)"
++      if [ "$IF_BRIDGE_HW" != "$IF_BRIDGE_HW_CUR" ]
++      then
++	printf "\nWarning: userspace-assigned MAC address for bridge %s is %s, but should be %s." "$IFACE" "$IF_BRIDGE_HW_CUR" "$IF_BRIDGE_HW" >&2
++      fi
++    fi
++  fi
++
+   if [ "$IF_BRIDGE_AGEING" ]
+   then
+     brctl setageing $IFACE $IF_BRIDGE_AGEING

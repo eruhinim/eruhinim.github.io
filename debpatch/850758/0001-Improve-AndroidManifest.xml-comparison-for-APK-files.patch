@@ -1,0 +1,135 @@
+From 5dab5dbc8763a11416aa6af4269cd56892dcca89 Mon Sep 17 00:00:00 2001
+From: Maria Glukhova <siamezzze@gmail.com>
+Date: Mon, 6 Mar 2017 05:54:08 +0200
+Subject: [PATCH 1/2] Improve AndroidManifest.xml comparison for APK files.
+
+Instead of comparing both decoded and undecoded AndroidManifest.xml file,
+try to first compare decoded one and resort to comparing undecoded ones
+only if no difference found in the former.
+---
+ diffoscope/comparators/apk.py | 53 +++++++++++++++++++++++++++++++++++++++++++
+ tests/comparators/test_apk.py | 15 ++++++++----
+ 2 files changed, 63 insertions(+), 5 deletions(-)
+
+diff --git a/diffoscope/comparators/apk.py b/diffoscope/comparators/apk.py
+index 65e9773..fc0b5f1 100644
+--- a/diffoscope/comparators/apk.py
++++ b/diffoscope/comparators/apk.py
+@@ -28,7 +28,9 @@ from diffoscope.difference import Difference
+ 
+ from .utils.file import File
+ from .utils.archive import Archive
++from .utils.compare import compare_files
+ from .zip import Zipinfo, ZipinfoVerbose
++from .missing_file import MissingFile
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -45,6 +47,8 @@ class ApkContainer(Archive):
+             get_temporary_directory().name,
+             os.path.basename(self.source.name),
+         )
++        self._andmanifest = None
++        self._andmanifest_orig = None
+ 
+         logger.debug("Extracting %s to %s", self.source.name, self._unpacked)
+ 
+@@ -72,12 +76,30 @@ class ApkContainer(Archive):
+                     continue
+ 
+                 relpath = abspath[len(self._unpacked)+1:]
++
++                if filename == 'AndroidManifest.xml':
++                    containing_dir = root[len(self._unpacked)+1:]
++                    if containing_dir == 'original':
++                        self._andmanifest_orig = relpath
++                    if containing_dir == '':
++                        self._andmanifest = relpath
++                    continue
++
+                 current_dir.append(relpath)
+ 
+             self._members.extend(current_dir)
+ 
+         return self
+ 
++    def get_android_manifest(self):
++        return self.get_member(self._andmanifest) \
++            if self._andmanifest else None
++
++    def get_original_android_manifest(self):
++        if self._andmanifest_orig:
++            return self.get_member(self._andmanifest_orig)
++        return MissingFile('/dev/null', self._andmanifest_orig)
++
+     def close_archive(self):
+         pass
+ 
+@@ -88,6 +110,37 @@ class ApkContainer(Archive):
+         src_path = os.path.join(self._unpacked, member_name)
+         return src_path
+ 
++    def compare_manifests(self, other):
++        my_android_manifest = self.get_android_manifest()
++        other_android_manifest = other.get_android_manifest()
++        comment = None
++        diff_manifests = None
++        if my_android_manifest and other_android_manifest:
++            diff_manifests = compare_files(my_android_manifest,
++                                           other_android_manifest)
++            if diff_manifests is None:
++                comment = 'No difference found for decoded AndroidManifest.xml'
++        else:
++            comment = 'No decoded AndroidManifest.xml found ' + \
++                      'for one of the APK files.'
++        if diff_manifests:
++            return diff_manifests
++
++        diff_manifests = compare_files(self.get_original_android_manifest(),
++                                       other.get_original_android_manifest())
++        if diff_manifests is not None:
++            diff_manifests.add_comment(comment)
++        return diff_manifests
++
++    def compare(self, other, source=None):
++        differences = []
++        try:
++            differences.append(self.compare_manifests(other))
++        except AttributeError:  # no apk-specific methods, e.g. MissingArchive
++            pass
++        differences.extend(super().compare(other, source=source))
++        return differences
++
+ class ApkFile(File):
+     RE_FILE_TYPE = re.compile(r'^(Java|Zip) archive data.*\b')
+     RE_FILE_EXTENSION = re.compile(r'\.apk$')
+diff --git a/tests/comparators/test_apk.py b/tests/comparators/test_apk.py
+index 77b3648..27c46e8 100644
+--- a/tests/comparators/test_apk.py
++++ b/tests/comparators/test_apk.py
+@@ -52,12 +52,17 @@ def test_zipinfo(differences):
+ 
+ @skip_unless_tools_exist('apktool', 'zipinfo')
+ def test_android_manifest(differences):
+-    assert differences[2].source1 == 'AndroidManifest.xml'
+-    assert differences[2].source2 == 'AndroidManifest.xml'
++    assert differences[1].source1 == 'AndroidManifest.xml'
++    assert differences[1].source2 == 'AndroidManifest.xml'
+     expected_diff = get_data('apk_manifest_expected_diff')
+-    assert differences[2].unified_diff == expected_diff
++    assert differences[1].unified_diff == expected_diff
+ 
+ @skip_unless_tools_exist('apktool', 'zipinfo')
+ def test_apk_metadata_source(differences):
+-    assert differences[1].source1 == 'APK metadata'
+-    assert differences[1].source2 == 'APK metadata'
++    assert differences[2].source1 == 'APK metadata'
++    assert differences[2].source2 == 'APK metadata'
++
++@skip_unless_tools_exist('apktool', 'zipinfo')
++def test_skip_undecoded_android_manifest(differences):
++    assert not any(difference.source1 == 'original/AndroidManifest.xml' for difference in differences)
++    assert not any(difference.source2 == 'original/AndroidManifest.xml' for difference in differences)
+-- 
+2.11.0
+

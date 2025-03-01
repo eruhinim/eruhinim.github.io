@@ -1,0 +1,170 @@
+From ba8a2e5c4e78c082e4edea66c87c7cb1bc673ba7 Mon Sep 17 00:00:00 2001
+Message-Id: <ba8a2e5c4e78c082e4edea66c87c7cb1bc673ba7.1595744217.git.simon@ruderich.org>
+From: Simon Ruderich <simon@ruderich.org>
+Date: Sun, 26 Jul 2020 08:16:33 +0200
+Subject: [PATCH] Support ignore lines by embedding a string in the build log
+
+---
+ MANIFEST                   |  2 ++
+ NEWS                       |  7 +++++++
+ bin/blhc                   | 26 ++++++++++++++++++++++++++
+ t/logs/ignore-line-inline  | 12 ++++++++++++
+ t/logs/ignore-line-inline2 | 13 +++++++++++++
+ t/tests.t                  | 13 ++++++++++++-
+ 6 files changed, 72 insertions(+), 1 deletion(-)
+ create mode 100644 t/logs/ignore-line-inline
+ create mode 100644 t/logs/ignore-line-inline2
+
+diff --git a/MANIFEST b/MANIFEST
+index b4b05d3..a453de4 100644
+--- a/MANIFEST
++++ b/MANIFEST
+@@ -62,6 +62,8 @@ t/logs/good-pie
+ t/logs/ignore-flag
+ t/logs/ignore-flag-ldflags
+ t/logs/ignore-line
++t/logs/ignore-line-inline
++t/logs/ignore-line-inline2
+ t/logs/libtool
+ t/logs/make
+ t/logs/parallel
+diff --git a/NEWS b/NEWS
+index 1620fc8..2a586e8 100644
+--- a/NEWS
++++ b/NEWS
+@@ -1,6 +1,13 @@
+ NEWS
+ ====
+ 
++Version 0.XX
++------------
++
++- Add support to dynamically ignore lines from within the build log by
++  embedding the string "blhc: ignore-line-regexp:" (Debian Bug #725484).
++
++
+ Version 0.11
+ ------------
+ 
+diff --git a/bin/blhc b/bin/blhc
+index 8c1d1fb..0d7276d 100755
+--- a/bin/blhc
++++ b/bin/blhc
+@@ -750,6 +750,7 @@ foreach my $flags (@flag_refs_all) {
+ }
+ 
+ # Precompile ignore line regexps, also anchor at beginning and end of line.
++# Additional entries are also extracted from the build log, see below.
+ foreach my $ignore (@option_ignore_line) {
+     $ignore = qr/^$ignore$/;
+ }
+@@ -954,6 +955,15 @@ foreach my $file (@ARGV) {
+             }
+         }
+ 
++        # Permit dynamic excludes from within the build log to ignore false
++        # positives. Cannot use a separate config file as we often only have
++        # the build log itself.
++        if (index($line, 'blhc: ignore-line-regexp: ') == 0) {
++            my $ignore = substr $line, 26, -1; # -1 to ignore '\n' at the end
++            push @option_ignore_line, qr/^$ignore$/;
++            next;
++        }
++
+         next if $line =~ /^\s*#/;
+         # Ignore compiler warnings for now.
+         next if $line =~ /$warning_regex/o;
+@@ -1514,6 +1524,22 @@ If there's no output, no flags are missing and the build log is fine.
+ See F<README> for details about performed checks, auto-detection and
+ limitations.
+ 
++=head1 FALSE POSITIVES
++
++To suppress false positives you can embed the following string in the build
++log:
++
++    blhc: ignore-line-regexp: REGEXP
++
++All lines fully matching REGEXP (see B<--ignore-line> for details) will be
++ignored.
++
++Please use this feature sparingly so that missing flags are not overlooked. If
++you find false positives which affect more packages please report a bug.
++
++To generate this string simply use echo in C<debian/rules>; make sure to use @
++to suppress the echo command itself as it could also trigger a false positive.
++
+ =head1 OPTIONS
+ 
+ =over 8
+diff --git a/t/logs/ignore-line-inline b/t/logs/ignore-line-inline
+new file mode 100644
+index 0000000..fea3fa1
+--- /dev/null
++++ b/t/logs/ignore-line-inline
+@@ -0,0 +1,12 @@
++dpkg-buildpackage: source package test
++
++blhc: ignore-line-regexp: \./prepare-script gcc test-[a-z]\.c
++
++    ./prepare-script gcc test-a.c test-b.c test-c.c
++
++./prepare-script gcc test-a.c
++gcc -g -O2 -fstack-protector-strong -Wformat -Wformat-security -Werror=format-security -D_FORTIFY_SOURCE=2 -c test-a.c
++./prepare-script gcc test-b.c
++gcc -g -O2 -fstack-protector-strong -Wformat -Wformat-security -Werror=format-security -D_FORTIFY_SOURCE=2 -c test-b.c
++./prepare-script gcc test-c.c
++gcc -g -O2 -fstack-protector-strong -Wformat -Wformat-security -Werror=format-security -D_FORTIFY_SOURCE=2 -c test-c.c
+diff --git a/t/logs/ignore-line-inline2 b/t/logs/ignore-line-inline2
+new file mode 100644
+index 0000000..8432a16
+--- /dev/null
++++ b/t/logs/ignore-line-inline2
+@@ -0,0 +1,13 @@
++dpkg-buildpackage: source package test
++
++blhc: ignore-line-regexp: \./prepare-script gcc test-[a-z]\.c
++blhc: ignore-line-regexp: \s*\./prepare-script gcc test-[a-z]\.c .+
++
++    ./prepare-script gcc test-a.c test-b.c test-c.c
++
++./prepare-script gcc test-a.c
++gcc -g -O2 -fstack-protector-strong -Wformat -Wformat-security -Werror=format-security -D_FORTIFY_SOURCE=2 -c test-a.c
++./prepare-script gcc test-b.c
++gcc -g -O2 -fstack-protector-strong -Wformat -Wformat-security -Werror=format-security -D_FORTIFY_SOURCE=2 -c test-b.c
++./prepare-script gcc test-c.c
++gcc -g -O2 -fstack-protector-strong -Wformat -Wformat-security -Werror=format-security -D_FORTIFY_SOURCE=2 -c test-c.c
+diff --git a/t/tests.t b/t/tests.t
+index 77b8f2a..57ab3fb 100644
+--- a/t/tests.t
++++ b/t/tests.t
+@@ -19,7 +19,7 @@
+ use strict;
+ use warnings;
+ 
+-use Test::More tests => 240;
++use Test::More tests => 244;
+ 
+ 
+ sub is_blhc {
+@@ -162,6 +162,17 @@ is_blhc 'arch-i386', '--ignore-arch-flag amd64:-fstack-protector-strong --ignore
+ LDFLAGS missing (-pie): gcc -fPIE -Wl,-z,relro -Wl,-z,now -o test test.o
+ ';
+ 
++# Ignore certain lines (through inline command).
++
++is_blhc 'ignore-line-inline', '', 8,
++        'CFLAGS missing (-g -O2 -fstack-protector-strong -Wformat -Werror=format-security):     ./prepare-script gcc test-a.c test-b.c test-c.c
++CPPFLAGS missing (-D_FORTIFY_SOURCE=2):     ./prepare-script gcc test-a.c test-b.c test-c.c
++LDFLAGS missing (-Wl,-z,relro):     ./prepare-script gcc test-a.c test-b.c test-c.c
++';
++
++is_blhc 'ignore-line-inline2', '', 0,
++        '';
++
+ 
+ # Ignore certain lines.
+ 
+-- 
+2.28.0.rc2
+

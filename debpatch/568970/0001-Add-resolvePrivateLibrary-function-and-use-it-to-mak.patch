@@ -1,0 +1,113 @@
+From 1b56f72feb6dc3b69643aa83921a1935d94f3c7d Mon Sep 17 00:00:00 2001
+From: Christopher James Halse Rogers <raof@ubuntu.com>
+Date: Tue, 9 Feb 2010 15:33:38 +1100
+Subject: [PATCH 1/2] Add resolvePrivateLibrary function and use it to make dh_clideps error rather than warn when shlib refs can't be resolved
+
+---
+ dh_clideps |   66 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++---
+ 1 files changed, 62 insertions(+), 4 deletions(-)
+
+diff --git a/dh_clideps b/dh_clideps
+index e349f2f..d748f96 100755
+--- a/dh_clideps
++++ b/dh_clideps
+@@ -576,14 +576,24 @@ sub resolveShlibRefs {
+        next;
+      }
+      my $target = $dllmapdata{$name};
++     my $fullTarget = $target;
+      
+      if (defined($target)) {
+        $target = basename($target);
+        verbose_print("Resolved moduleref via DLL map: $name to: $target");
+      } elsif (defined($shlibdata{$name})) {
+        verbose_print("Resolved moduleref via direct match in shlibs");
++     } elsif (resolvePrivateLibrary($package, $name, $package)) {
++       # There is no DllMap, but the package ships the private library alongside the assembly
++       verbose_print("Resolved moduleref to private library $name");
++       next;
++     } elsif (resolvePrivateLibrary($package, "lib" . $name . ".so", $package)) {
++       # There is no DllMap, the assembly is relying on Mono's "foo" -> "libfoo.so"
++       # translation, and is shipping libfoo.so alongside the assembly
++       verbose_print("Resolved moduleref to private library lib" . $name . ".so");
++       next;
+      } else {
+-       warning("Warning: Could not resolve moduleref: $name for: $assembly_filename!");
++       error("Could not resolve moduleref: $name for: $assembly_filename!");
+        next;
+      }
+  
+@@ -596,8 +606,24 @@ sub resolveShlibRefs {
+        # for DLL maps that have an unversioned library as target
+        $pkgref = $shlibdata{$target.".0"};
+      } else {
+-       warning("Warning: Missing shlibs entry: $target or $name for: $assembly_filename!");
+-       next;
++	 if(!resolvePrivateLibrary($package, $fullTarget, $package)) {
++	     # Private library can't be found in the current package.  Try to resolve it
++	     # in the other binary packages, and add a strong dependency if we find it.
++	     foreach my $binary_package (@{$dh{DOPACKAGES}}) {
++		 if(resolvePrivateLibrary($package, $fullTarget, $binary_package)) {
++		     verbose_print("Found private library in $binary_package");
++		     $pkgref = $binary_package . " (= \${binary:Version})";
++		     verbose_print("pkgref is $pkgref");
++		     last;
++		 }
++	     }
++	     if (!defined($pkgref)) {
++		 error("Missing shlibs entry: $target or $name for: $assembly_filename!");
++	     }
++	 } else {
++	     verbose_print("Found private library $target for $name");
++	     next;
++	 }
+      }
+ 
+      my %overriddenRef = resolveOverride($package, $pkgref);
+@@ -606,10 +632,42 @@ sub resolveShlibRefs {
+      push(@{$ret{suggests}},   $overriddenRef{suggests});
+    } 
+    close(F);
+-   
++
+    return %ret;
+ }
+ 
++sub resolvePrivateLibrary {
++    my $package = shift;
++    my $target = shift;
++    my $resolveIn = shift;
++    my $library_file;
++
++    use File::Spec;
++    if (File::Spec->file_name_is_absolute($target)) {
++	# If the DLLMap target is absolute, we should check that the target
++	# exists in that location.  Since we're currently in the directory
++	# with the assembly, we need to back out first.
++	my @targetDirs = File::Spec->splitdir($target);
++	my @cwdComponents = File::Spec->splitdir(File::Spec->rel2abs(File::Spec->curdir()));
++	my @upDirs = ("../", "../");
++
++	# Find where the last occurance of tmpdir is in $curdir, and add enough
++	# updirs to get there from cwd.
++	while(join("/", ($cwdComponents[-2], $cwdComponents[-1])) ne tmpdir($package)) {
++	    pop(@cwdComponents);
++	    push(@upDirs, "../");
++	}
++
++	$library_file = File::Spec->rel2abs(File::Spec->catdir((File::Spec->curdir(), @upDirs, tmpdir($resolveIn), @targetDirs)));
++    } else {
++	# If the DLLMap target is not absolute, look in the same directory
++	# as the assembly.
++	$library_file = basename($target);
++    }
++    verbose_print("Looking for $target at $library_file");
++    return 1 if -f $library_file || -s $library_file;
++}
++
+ =head1 SEE ALSO
+ 
+ L<debhelper(7)>
+-- 
+1.6.6.1
+

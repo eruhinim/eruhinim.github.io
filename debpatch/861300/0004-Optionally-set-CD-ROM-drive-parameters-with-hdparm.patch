@@ -1,0 +1,145 @@
+From 5f509c6af43f90f8800490ae87287d69678c5445 Mon Sep 17 00:00:00 2001
+From: Colin Watson <colin.watson@canonical.com>
+Date: Wed, 26 Apr 2017 20:02:14 +0200
+Subject: [PATCH 4/7] Optionally set CD-ROM drive parameters with hdparm
+
+---
+ debian/cdrom-detect.postinst  | 16 ++++++++++
+ debian/cdrom-detect.templates |  7 +++++
+ debian/control                |  2 +-
+ finish-install                | 68 +++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 92 insertions(+), 1 deletion(-)
+
+diff --git a/debian/cdrom-detect.postinst b/debian/cdrom-detect.postinst
+index db678e0..0fbba9c 100755
+--- a/debian/cdrom-detect.postinst
++++ b/debian/cdrom-detect.postinst
+@@ -228,6 +228,22 @@ while true; do
+ 	fi
+ done
+ 
++db_get cdrom-detect/cdrom_device
++device="$RET"
++
++ARCH="`udpkg --print-architecture`"
++if [ "$ARCH" = i386 ]; then
++	db_input low cdrom-detect/cdrom_hdparm || [ $? -eq 30 ]
++	db_go
++	db_get cdrom-detect/cdrom_hdparm
++	params="`printf '%s' "$RET" | sed 's/^ *//'`"
++
++	if [ "$device" ] && [ "$params" ]; then
++		hdparm $params "$device"
++		apt-install hdparm || true
++	fi
++fi
++
+ # Check for unetbootin files
+ UNETBOOTIN_FILES="ubnfilel.txt ubninit ubnkern ubnpathl.txt"
+ UNETBOOTIN_DETECTED=0
+diff --git a/debian/cdrom-detect.templates b/debian/cdrom-detect.templates
+index 5bed26e..8da25d3 100644
+--- a/debian/cdrom-detect.templates
++++ b/debian/cdrom-detect.templates
+@@ -154,3 +154,10 @@ Type: text
+ #  Item in the main menu to select this package
+ # :sl2:
+ _Description: Detect and mount CD-ROM
++
++Template: cdrom-detect/cdrom_hdparm
++Type: string
++_Description: Tune CD-ROM drive parameters with hdparm?
++ The installer can use hdparm to tune some CD-ROM drive parameters, which
++ may significantly speed up reading packages from the CD. You can change the
++ parameters to be used. To disable hdparm, enter an empty parameter list.
+diff --git a/debian/control b/debian/control
+index 5894107..d976102 100644
+--- a/debian/control
++++ b/debian/control
+@@ -11,6 +11,6 @@ Vcs-Git: https://anonscm.debian.org/git/d-i/cdrom-detect.git
+ Package: cdrom-detect
+ Package-Type: udeb
+ Architecture: all
+-Depends: ${misc:Depends}, hw-detect, di-utils (>= 1.72)
++Depends: ${misc:Depends}, hw-detect, di-utils (>= 1.72), hdparm-udeb
+ XB-Installer-Menu-Item: 1300
+ Description: Detect CDROM devices and mount the CD
+diff --git a/finish-install b/finish-install
+index 028d4b0..266c76c 100755
+--- a/finish-install
++++ b/finish-install
+@@ -23,3 +23,71 @@ if [ -n "$CDDEV" ]; then
+ else
+ 	log "Not ejecting CD, as nothing is mounted."
+ fi
++
++ARCH="`udpkg --print-architecture`"
++if [ "$ARCH" = i386 ]; then
++	# Set CD-ROM drive parameters for post-reboot.
++
++	db_get cdrom-detect/cdrom_device
++	device="$RET"
++
++	db_get cdrom-detect/cdrom_hdparm
++	params="$RET"
++
++	if [ "$device" ] && [ "$params" ]; then
++		mappeddevice="`mapdevfs "$device"`"
++		cat >>/target/etc/hdparm.conf <<EOF
++
++# Added by debian-installer
++
++$mappeddevice {
++EOF
++		set -- $params
++		while [ "$1" ]; do
++			name="$1"
++			shift
++			case "$name" in
++			    -??*)
++				value="${name#-?}"
++				name="`printf '%s' "$name" | sed 's/^\(-.\).*/\1/'`"
++				;;
++			    -?*)
++				value="$1"
++				shift
++				;;
++			    *)
++				continue
++				;;
++			esac
++			boolvalue=no
++			case "$name" in
++			    -a) mappedname=read_ahead_sect ;;
++			    -A) mappedname=lookahead;		boolvalue=yes ;;
++			    -b) mappedname=bus;			boolvalue=yes ;;
++			    -B) mappedname=apm ;;
++			    -c) mappedname=io32_support ;;
++			    -d) mappedname=dma;			boolvalue=yes ;;
++			    -D) mappedname=defect_mana;		boolvalue=yes ;;
++			    -E) mappedname=cd_speed ;;
++			    -m) mappedname=mult_sect_io ;;
++			    -P) mappedname=prefetch_sect ;;
++			    -S) mappedname=spindown_time ;;
++			    -u) mappedname=interrupt_unmask;	boolvalue=yes ;;
++			    -X) mappedname=transfer_mode ;;
++			    *)  continue ;;
++			esac
++			if [ "$boolvalue" = yes ]; then
++				case "$value" in
++				    0) mappedvalue=off ;;
++				    1) mappedvalue=on ;;
++				    *) continue ;;
++				esac
++			else
++				mappedvalue="$value"
++			fi
++			printf '\t%s = %s\n' "$mappedname" "$mappedvalue" \
++				>>/target/etc/hdparm.conf
++		done
++		echo '}' >>/target/etc/hdparm.conf
++	fi
++fi
+-- 
+2.7.4
+

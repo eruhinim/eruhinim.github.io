@@ -1,0 +1,764 @@
+diff --git a/Makefile.am b/Makefile.am
+index df77bbf92..fef9554f0 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -121,7 +121,7 @@ EXTRA_DIST = \
+ 
+ if COM_ERR
+ COMPILE_ET_DEP = com_err/et/compile_et
+-BUILT_SOURCES += com_err/et/compile_et
++BUILT_SOURCES += com_err/et/compile_et com_err/et/libcyrus_com_err.la
+ lib_LTLIBRARIES += com_err/et/libcyrus_com_err.la
+ endif # COM_ERR
+ 
+@@ -879,6 +879,7 @@ imap_cyr_sphinxmgr_SOURCES = imap/cli_fatal.c imap/cyr_sphinxmgr.c imap/mutex_fa
+ imap_cyr_sphinxmgr_LDADD = $(LD_UTILITY_ADD)
+ 
+ imap_cyr_virusscan_SOURCES = imap/cli_fatal.c imap/cyr_virusscan.c imap/mutex_fake.c
++imap_cyr_virusscan_CFLAGS = $(AM_CFLAGS) $(CLAMAV_CFLAGS) $(CFLAG_VISIBILITY)
+ imap_cyr_virusscan_LDADD = $(LD_UTILITY_ADD) $(CLAMAV_LIBS)
+ 
+ imap_ctl_zoneinfo_SOURCES = imap/cli_fatal.c imap/ctl_zoneinfo.c imap/mutex_fake.c imap/zoneinfo_db.c
+diff --git a/backup/ctl_backups.c b/backup/ctl_backups.c
+index cbc37e5b7..77607ca34 100644
+--- a/backup/ctl_backups.c
++++ b/backup/ctl_backups.c
+@@ -898,6 +898,7 @@ static int lock_run_pipe(const char *userid, const char *fname,
+ 
+     if (r) {
+         printf("NO failed (%s)\n", error_message(r));
++        r = backup_close(&backup);
+         return EC_SOFTWARE; // FIXME would something else be more appropriate?
+     }
+ 
+@@ -934,6 +935,7 @@ static int lock_run_sqlite(const char *userid, const char *fname,
+         fprintf(stderr, "unable to lock %s: %s\n",
+                 userid ? userid : fname,
+                 error_message(r));
++        r = backup_close(&backup);
+         return EC_SOFTWARE;
+     }
+ 
+@@ -994,6 +996,7 @@ static int lock_run_exec(const char *userid, const char *fname,
+         fprintf(stderr, "unable to lock %s: %s\n",
+                 userid ? userid : fname,
+                 error_message(r));
++        r = backup_close(&backup);
+         return EC_SOFTWARE;
+     }
+ 
+diff --git a/backup/lcb.c b/backup/lcb.c
+index f01371283..354d25d21 100644
+--- a/backup/lcb.c
++++ b/backup/lcb.c
+@@ -182,6 +182,7 @@ HIDDEN int backup_real_open(struct backup **backupp,
+         if (r) {
+             syslog(LOG_ERR, "IOERROR: (f)stat %s: %m", backup->data_fname);
+             r = IMAP_IOERROR;
++            close(fd);
+             goto error;
+         }
+ 
+diff --git a/configure.ac b/configure.ac
+index 965b2594f..18049eca5 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -112,10 +112,6 @@ AC_ARG_WITH(cyrus-user,
+         cyrus_user="$withval",cyrus_user="cyrus")
+ AC_SUBST(cyrus_user)
+ AC_DEFINE_UNQUOTED(CYRUS_USER, "$cyrus_user",[What user will we run as?])
+-AC_ARG_WITH(cyrus-group,
+-        [AS_HELP_STRING([--with-cyrus-group=GROUPID], [use GROUPID cyrus group])],
+-        cyrus_group="$withval",cyrus_group="mail")
+-AC_SUBST(cyrus_group)
+ 
+ dnl allow users to override $sysconfdir, but retain old default (/etc)
+ dnl if not specified
+@@ -2254,6 +2250,7 @@ Cyrus Server configured components
+    calalarmd:          $enable_calalarmd
+    objectstore:        $enable_objectstore
+    backup:             $enable_backup
++   com_err:            $with_com_err
+ 
+ External dependencies:
+    ldap:               $have_ldap
+diff --git a/imap/conversations.c b/imap/conversations.c
+index 56eccff63..46042e3cb 100644
+--- a/imap/conversations.c
++++ b/imap/conversations.c
+@@ -1842,7 +1842,6 @@ EXPORTED int conversations_update_record(struct conversations_state *cstate,
+     int *delta_counts = NULL;
+     int i;
+     modseq_t modseq = 0;
+-    const struct index_record *record = NULL;
+     int r = 0;
+ 
+     if (old && new) {
+@@ -1864,21 +1863,15 @@ EXPORTED int conversations_update_record(struct conversations_state *cstate,
+         }
+     }
+ 
++    const struct index_record *record = new ? new : old;
+     if (new && !old) {
+         /* add the conversation */
+         r = mailbox_cacherecord(mailbox, new); /* make sure it's loaded */
+         if (r) return r;
+         r = message_update_conversations(cstate, new, &conv);
+         if (r) return r;
+-        record = new;
+-        /* possible if silent (i.e. replica) */
+-        if (!record->cid) return 0;
+     }
+-    else {
+-        record = new ? new : old;
+-        /* skip out on non-CIDed records */
+-        if (!record->cid) return 0;
+-
++    else if (record->cid) {
+         r = conversation_load(cstate, record->cid, &conv);
+         if (r) return r;
+         if (!conv) {
+@@ -1893,6 +1886,24 @@ EXPORTED int conversations_update_record(struct conversations_state *cstate,
+         }
+     }
+ 
++    // always update the GUID information first, as it's used for search
++    // even if conversations have not been set on this email
++    if (new) {
++        if (!old) {
++            r = conversations_set_guid(cstate, mailbox, new, /*add*/1);
++            if (r) return r;
++        }
++    }
++    else {
++        if (old) {
++            r = conversations_set_guid(cstate, mailbox, old, /*add*/0);
++            if (r) return r;
++        }
++    }
++
++    // the rest is bookkeeping for CIDs only
++    if (!record->cid) return 0;
++
+     if (cstate->counted_flags)
+         delta_counts = xzmalloc(sizeof(int) * cstate->counted_flags->count);
+ 
+@@ -1928,10 +1939,6 @@ EXPORTED int conversations_update_record(struct conversations_state *cstate,
+         }
+         delta_num_records--;
+         modseq = MAX(modseq, old->modseq);
+-        if (!new) {
+-            r = conversations_set_guid(cstate, mailbox, old, /*add*/0);
+-            if (r) return r;
+-        }
+     }
+ 
+     if (new) {
+@@ -1953,10 +1960,6 @@ EXPORTED int conversations_update_record(struct conversations_state *cstate,
+         }
+         delta_num_records++;
+         modseq = MAX(modseq, new->modseq);
+-        if (!old) {
+-            r = conversations_set_guid(cstate, mailbox, new, /*add*/1);
+-            if (r) return r;
+-        }
+     }
+ 
+     /* XXX - combine this with the earlier cache parsing */
+diff --git a/imap/cyr_virusscan.c b/imap/cyr_virusscan.c
+index 863a85870..8f578855e 100644
+--- a/imap/cyr_virusscan.c
++++ b/imap/cyr_virusscan.c
+@@ -193,8 +193,17 @@ int clamav_scanfile(void *state, const char *fname,
+     int r;
+ 
+     /* scan file */
++#if LIBCLAMAV_MAJORVER < 9
+     r = cl_scanfile(fname, virname, NULL, st->av_engine,
+                     CL_SCAN_STDOPT);
++#else
++    static struct cl_scan_options options;
++
++    memset(&options, 0, sizeof(struct cl_scan_options));
++    options.parse |= ~0; /* enable all parsers */
++
++    r = cl_scanfile(fname, virname, NULL, st->av_engine, &options);
++#endif
+ 
+     switch (r) {
+     case CL_CLEAN:
+diff --git a/imap/idle.c b/imap/idle.c
+index e1239cea0..bf1bf0ac4 100644
+--- a/imap/idle.c
++++ b/imap/idle.c
+@@ -116,11 +116,14 @@ EXPORTED void idle_init(void)
+     struct sockaddr_un local;
+     int fdflags;
+     int s;
++    int r;
+ 
+     if (!idle_enabled()) return;
+ 
+-    assert(idle_make_client_address(&local));
+-    assert(idle_make_server_address(&idle_remote));
++    r = idle_make_client_address(&local);
++    assert(r);
++    r = idle_make_server_address(&idle_remote);
++    assert(r);
+ 
+     idle_method_desc = "poll";
+ 
+diff --git a/imap/ipurge.c b/imap/ipurge.c
+index 4b1a49b69..80c51716b 100644
+--- a/imap/ipurge.c
++++ b/imap/ipurge.c
+@@ -233,7 +233,7 @@ static int usage(const char *name)
+ /* we don't check what comes in on matchlen and category, should we? */
+ static int purge_me(struct findall_data *data, void *rock __attribute__((unused)))
+ {
+-    if (!data) return 0;
++    if (!data || !data->mbname) return 0;
+     struct mailbox *mailbox = NULL;
+     int r;
+     mbox_stats_t stats;
+diff --git a/imap/lmtp_sieve.c b/imap/lmtp_sieve.c
+index 4c3bbc3b7..9ba030f38 100644
+--- a/imap/lmtp_sieve.c
++++ b/imap/lmtp_sieve.c
+@@ -414,7 +414,7 @@ static int sieve_redirect(void *ac,
+     /* if we have a msgid, we can track our redirects */
+     if (m->id) {
+         snprintf(buf, sizeof(buf), "%s-%s", m->id, rc->addr);
+-        sievedb = make_sieve_db(mbname_userid(sd->mbname));
++        sievedb = make_sieve_db(mbname_recipient(sd->mbname, ((deliver_data_t *) mc)->ns));
+ 
+         dkey.id = buf;
+         dkey.to = sievedb;
+@@ -496,7 +496,7 @@ static int sieve_reject(void *ac,
+     body = msg_getheader(md, "original-recipient");
+     origreceip = body ? body[0] : NULL;
+     if ((res = send_rejection(md->id, md->return_path,
+-                              origreceip, mbname_userid(sd->mbname),
++                              origreceip, mbname_recipient(sd->mbname, ((deliver_data_t *) mc)->ns),
+                               rc->msg, md->data)) == 0) {
+         snmp_increment(SIEVE_REJECT, 1);
+         syslog(LOG_INFO, "sieve rejected: %s to: %s",
+@@ -735,7 +735,7 @@ static int send_response(void *ac,
+     while (waitpid(sm_pid, &sm_stat, 0) < 0);
+ 
+     if (sm_stat == 0) { /* sendmail exit value */
+-        sievedb = make_sieve_db(mbname_userid(sdata->mbname));
++        sievedb = make_sieve_db(mbname_recipient(sdata->mbname, ((deliver_data_t *) mc)->ns));
+ 
+         dkey.id = outmsgid;
+         dkey.to = sievedb;
+diff --git a/imap/mbexamine.c b/imap/mbexamine.c
+index 670b27d4f..25cf003ed 100644
+--- a/imap/mbexamine.c
++++ b/imap/mbexamine.c
+@@ -216,11 +216,6 @@ static int do_examine(struct findall_data *data, void *rock __attribute__((unuse
+     r = mailbox_open_irl(name, &mailbox);
+     if (r) return r;
+ 
+-    if (chdir(mailbox_datapath(mailbox, 0)) == -1) {
+-        r = IMAP_IOERROR;
+-        goto done;
+-    }
+-
+     printf(" Mailbox Header Info:\n");
+     printf("  Path to mailbox: %s\n", mailbox_datapath(mailbox, 0));
+     printf("  Mailbox ACL: %s\n", mailbox->acl); /* xxx parse */
+@@ -352,7 +347,6 @@ static int do_examine(struct findall_data *data, void *rock __attribute__((unuse
+         printf("Desired message not found\n");
+     }
+ 
+- done:
+     mailbox_close(&mailbox);
+ 
+     return r;
+@@ -384,11 +378,6 @@ static int do_quota(struct findall_data *data, void *rock __attribute__((unused)
+     r = mailbox_open_irl(name, &mailbox);
+     if (r) return r;
+ 
+-    if (chdir(mailbox_datapath(mailbox, 0)) == -1) {
+-        r = IMAP_IOERROR;
+-        goto done;
+-    }
+-
+     struct mailbox_iter *iter = mailbox_iter_init(mailbox, 0, ITER_SKIP_EXPUNGED);
+     const message_t *msg;
+     while ((msg = mailbox_iter_step(iter))) {
+diff --git a/lib/charset.c b/lib/charset.c
+index 0fa6c1415..6c5eaa3e6 100644
+--- a/lib/charset.c
++++ b/lib/charset.c
+@@ -2766,19 +2766,25 @@ static char *qp_encode(const char *data, size_t len, int isheader,
+             unsigned char this = data[n];
+             unsigned char next = (n < len - 1) ? data[n+1] : '\0';
+ 
+-            if (cnt >= BASE64_MAX_LINE_LEN) {
+-                if (isheader) {
+-                    /* split encoded token with fold */
+-                    buf_appendcstr(&buf, "?=");
+-                    buf_appendcstr(&buf, "\r\n ");
+-                    buf_appendcstr(&buf, "=?UTF-8?Q?");
++            /* Insert line break before exceeding line length limits */
++            if (isheader) {
++                /* RFC2047 forbids splitting multi-octet characters */
++                int needbytes;
++                if (this < 0x80) needbytes = 0;
++                else if (this < 0xc0) needbytes = 0; // UTF-8 continuation
++                else if (this < 0xe0) needbytes = 3;
++                else if (this < 0xf0) needbytes = 6;
++                else if (this < 0xf8) needbytes = 9;
++                else needbytes = 0; // impossible UTF-8 encoding
++                if (cnt + needbytes >= BASE64_MAX_LINE_LEN) {
++                    buf_appendcstr(&buf, "?=\r\n =?UTF-8?Q?");
+                     cnt = 11;
+                 }
+-                else {
+-                    /* add soft line break to body */
+-                    buf_appendcstr(&buf, "=\r\n");
+-                    cnt = 0;
+-                }
++            }
++            else if (cnt >= BASE64_MAX_LINE_LEN) {
++                /* add soft line break to body */
++                buf_appendcstr(&buf, "=\r\n");
++                cnt = 0;
+             }
+ 
+             if ((QPSAFECHAR[this]
+diff --git a/lib/util.c b/lib/util.c
+index 62ad7bdea..5f3cb1933 100644
+--- a/lib/util.c
++++ b/lib/util.c
+@@ -593,6 +593,7 @@ static int cap_setuid(int uid, int is_master)
+ EXPORTED int become_cyrus(int is_master)
+ {
+     struct passwd *p;
++    struct group *g;
+     uid_t newuid;
+     gid_t newgid;
+     int result;
+@@ -601,6 +602,7 @@ EXPORTED int become_cyrus(int is_master)
+     if (uid) return cap_setuid(uid, is_master);
+ 
+     const char *cyrus = cyrus_user();
++    const char *mail = cyrus_group();
+ 
+     p = getpwnam(cyrus);
+     if (p == NULL) {
+@@ -612,6 +614,15 @@ EXPORTED int become_cyrus(int is_master)
+     newuid = p->pw_uid;
+     newgid = p->pw_gid;
+ 
++    if (mail != NULL) {
++        g = getgrnam(mail);
++        if (g == NULL) {
++            syslog(LOG_ERR, "no entry in /etc/group for group %s", mail);
++            return -1;
++        }
++        newgid = g->gr_gid;
++    }
++
+     if (newuid == geteuid() &&
+         newuid == getuid() &&
+         newgid == getegid() &&
+@@ -651,6 +662,13 @@ EXPORTED const char *cyrus_user(void)
+     return cyrus;
+ }
+ 
++EXPORTED const char *cyrus_group(void)
++{
++    const char *mail = getenv("CYRUS_GROUP");
++    if (!mail) mail = config_getstring(IMAPOPT_CYRUS_GROUP);
++    return mail;
++}
++
+ static int cmdtime_enabled = 0;
+ static struct timeval cmdtime_start, cmdtime_end, nettime_start, nettime_end;
+ static double totaltime, cmdtime, nettime, search_maxtime;
+diff --git a/lib/util.h b/lib/util.h
+index 8233cfd1d..d55c56811 100644
+--- a/lib/util.h
++++ b/lib/util.h
+@@ -206,6 +206,7 @@ enum {
+ extern int set_caps(int stage, int is_master);
+ extern int become_cyrus(int is_master);
+ extern const char *cyrus_user(void);
++extern const char *cyrus_group(void);
+ 
+ /* Some systems have very inefficient implementations of isdigit,
+  * and we use it in a lot of inner loops
+diff --git a/perl/imap/IMAP/Admin.pm b/perl/imap/IMAP/Admin.pm
+index e2ef12cc8..1ca412a10 100644
+--- a/perl/imap/IMAP/Admin.pm
++++ b/perl/imap/IMAP/Admin.pm
+@@ -575,7 +575,11 @@ sub listquotaroot {
+   $self->addcallback({-trigger => 'QUOTAROOT',
+                       -callback => sub {
+                         my %d = @_;
+-                        return unless $d{-text} =~ /^\S+ (\S+)/;
++                        return unless ( $d{-text} =~ /^\"[^\"]+\" \"([^\"]+)\"/ or
++                                       $d{-text} =~ /^\"[^\"]+\" (\S+)/ or
++                                       $d{-text} =~ /[^\"]\S+ \"([^\"]+)\"/ or
++                                       $d{-text} =~ /^[^\"]\S+ (\S+)/
++                                       );
+                         ${$d{-rock}} = $1;
+                       },
+                       -rock => \$qr},
+@@ -583,7 +587,7 @@ sub listquotaroot {
+                       -callback => sub {
+                         my %d = @_;
+                         return unless
+-                          $d{-text} =~ s/^\S+ \((\S+) (\S+) (\S+)\)//;
++                          $d{-text} =~ s/\((\S+) (\S+) (\S+)\)$//;
+                         push @{$d{-rock}}, $1, [$2, $3];
+                       },
+                       -rock => \@info});
+diff --git a/ptclient/ldap.c b/ptclient/ldap.c
+index e6cbc5d71..5d324e5f2 100644
+--- a/ptclient/ldap.c
++++ b/ptclient/ldap.c
+@@ -932,7 +932,7 @@ static int ptsmodule_get_dn(
+     {
+         rc = ptsmodule_expand_tokens(ptsm->filter, canon_id, NULL, &filter);
+         if (rc != PTSM_OK)
+-            return rc;
++            goto done;
+ 
+         if (ptsm->domain_base_dn && ptsm->domain_base_dn[0] != '\0' && (strrchr(canon_id, '@') == NULL)) {
+             syslog(LOG_DEBUG, "collecting all domains from %s", ptsm->domain_base_dn);
+@@ -948,15 +948,18 @@ static int ptsmodule_get_dn(
+                     syslog(LOG_ERR, "LDAP not available: %s", ldap_err2string(rc));
+                     ldap_unbind(ptsm->ld);
+                     ptsm->ld = NULL;
+-                    return PTSM_RETRY;
++                    rc = PTSM_RETRY;
++                    goto done;
+                 }
+ 
+                 syslog(LOG_ERR, "LDAP search for domain failed: %s", ldap_err2string(rc));
+-                return PTSM_FAIL;
++                rc = PTSM_FAIL;
++                goto done;
+             }
+             if (ldap_count_entries(ptsm->ld, res) < 1) {
+                 syslog(LOG_ERR, "No domain found");
+-                return PTSM_FAIL;
++                rc = PTSM_FAIL;
++                goto done;
+             } else if (ldap_count_entries(ptsm->ld, res) >= 1) {
+                 int count_matches = 0;
+                 char *temp_base = NULL;
+@@ -976,10 +979,12 @@ static int ptsmodule_get_dn(
+ 
+                 if (count_matches > 1) {
+                     syslog(LOG_ERR, "LDAP search for %s failed because it matches multiple accounts.", canon_id);
+-                    return PTSM_FAIL;
++                    rc = PTSM_FAIL;
++                    goto done;
+                 } else if (count_matches == 0) {
+                     syslog(LOG_ERR, "LDAP search for %s failed because it does not match any account in all domains.", canon_id);
+-                    return PTSM_FAIL;
++                    rc = PTSM_FAIL;
++                    goto done;
+                 }
+ 
+                 syslog(LOG_DEBUG, "we have found %s in %s", canon_id, base);
+@@ -1006,19 +1011,23 @@ static int ptsmodule_get_dn(
+                     ldap_unbind(ptsm->ld);
+                     ptsm->ld = NULL;
+                     syslog(LOG_ERR, "LDAP not available: %s", ldap_err2string(rc));
+-                    return PTSM_RETRY;
++                    rc = PTSM_RETRY;
++                    goto done;
+                 }
+ 
+                 syslog(LOG_ERR, "LDAP search for domain failed: %s", ldap_err2string(rc));
+-                return PTSM_FAIL;
++                rc = PTSM_FAIL;
++                goto done;
+             }
+ 
+             if (ldap_count_entries(ptsm->ld, res) < 1) {
+                 syslog(LOG_ERR, "No domain %s found", domain);
+-                return PTSM_FAIL;
++                rc = PTSM_FAIL;
++                goto done;
+             } else if (ldap_count_entries(ptsm->ld, res) > 1) {
+                 syslog(LOG_ERR, "Multiple domains %s found", domain);
+-                return PTSM_FAIL;
++                rc = PTSM_FAIL;
++                goto done;
+             } else {
+                 if ((entry = ldap_first_entry(ptsm->ld, res)) != NULL) {
+                     if ((vals = ldap_get_values(ptsm->ld, entry, ptsm->domain_result_attribute)) != NULL) {
+@@ -1033,7 +1042,7 @@ static int ptsmodule_get_dn(
+                     }
+ 
+                     if (rc != PTSM_OK) {
+-                        return rc;
++                        goto done;
+                     } else {
+                         base = xstrdup(ptsm->base);
+                         syslog(LOG_DEBUG, "Continuing with ptsm->base: %s", ptsm->base);
+@@ -1044,23 +1053,23 @@ static int ptsmodule_get_dn(
+         } else {
+             rc = ptsmodule_expand_tokens(ptsm->base, canon_id, NULL, &base);
+             if (rc != PTSM_OK)
+-                return rc;
++                goto done;
+         }
+ 
+         rc = ldap_search_st(ptsm->ld, base, ptsm->scope, filter, attrs, 0, &(ptsm->timeout), &res);
+ 
+         if (rc != LDAP_SUCCESS) {
+-            syslog(LOG_DEBUG, "Searching %s with %s failed", base, base);
+-            free(filter);
+-            free(base);
++            syslog(LOG_DEBUG, "Searching %s with %s failed", base, filter);
+ 
+             if (rc == LDAP_SERVER_DOWN) {
+                 ldap_unbind(ptsm->ld);
+                 ptsm->ld = NULL;
+-                return PTSM_RETRY;
++                rc = PTSM_RETRY;
++                goto done;
+             }
+ 
+-            return PTSM_FAIL;
++            rc = PTSM_FAIL;
++            goto done;
+         }
+ 
+         free(filter);
+@@ -1086,6 +1095,13 @@ static int ptsmodule_get_dn(
+     }
+ 
+     return (*ret ? PTSM_OK : PTSM_FAIL);
++
++ done:
++    if (filter)
++        free(filter);
++    if (base)
++        free(base);
++    return rc;
+ }
+ 
+ 
+@@ -1320,11 +1336,15 @@ static int ptsmodule_make_authstate_filter(
+             syslog(LOG_ERR, "No values for attribute '%s' on entry '%s'",
+                             ptsm->member_attribute,
+                             errdn);
++            *reply = "no values";
++            rc = PTSM_FAIL;
++            ldap_value_free(vals);
++            vals = NULL;
++            goto done;
+         } else if (ldap_count_values(vals) > 1) {
+             syslog(LOG_ERR, "Too many values for attribute '%s' on entry '%s'",
+                             ptsm->member_attribute,
+                             errdn);
+-        } else {
+             *reply = "too many values";
+             rc = PTSM_FAIL;
+             ldap_value_free(vals);
+@@ -1388,13 +1408,14 @@ static int ptsmodule_make_authstate_group(
+ 
+     if (strncmp(canon_id, "group:", 6))  { // Sanity check
+         *reply = "not a group identifier";
+-        return PTSM_FAIL;
++        rc = PTSM_FAIL;
++        goto done;
+     }
+ 
+     rc = ptsmodule_connect();
+     if (rc != PTSM_OK) {
+         *reply = "ptsmodule_connect() failed";
+-        return rc;
++        goto done;
+     }
+ 
+     rc = ptsmodule_expand_tokens(ptsm->group_filter, canon_id+6, NULL, &filter);
+@@ -1425,17 +1446,19 @@ static int ptsmodule_make_authstate_group(
+ 
+         if (rc != LDAP_SUCCESS) {
+             syslog(LOG_DEBUG, "(groups) Result from domain query not OK");
+-            return rc;
++            goto done;
+         } else {
+             syslog(LOG_DEBUG, "(groups) Result from domain query OK");
+         }
+ 
+         if (ldap_count_entries(ptsm->ld, res) < 1) {
+             syslog(LOG_ERR, "(groups) No domain %s found", domain);
+-            return PTSM_FAIL;
++            rc = PTSM_FAIL;
++            goto done;
+         } else if (ldap_count_entries(ptsm->ld, res) > 1) {
+             syslog(LOG_ERR, "(groups) Multiple domains %s found", domain);
+-            return PTSM_FAIL;
++            rc = PTSM_FAIL;
++            goto done;
+         } else {
+             syslog(LOG_DEBUG, "(groups) Domain %s found", domain);
+             if ((entry = ldap_first_entry(ptsm->ld, res)) != NULL) {
+@@ -1452,7 +1475,7 @@ static int ptsmodule_make_authstate_group(
+                 }
+ 
+                 if (rc != PTSM_OK) {
+-                    return rc;
++                    goto done;
+                 } else {
+                     base = xstrdup(ptsm->group_base);
+                     syslog(LOG_DEBUG, "Continuing with ptsm->group_base: %s", ptsm->group_base);
+@@ -1462,7 +1485,7 @@ static int ptsmodule_make_authstate_group(
+     } else {
+         rc = ptsmodule_expand_tokens(ptsm->group_base, canon_id, NULL, &base);
+         if (rc != PTSM_OK)
+-            return rc;
++            goto done;
+     }
+ 
+     syslog(LOG_DEBUG, "(groups) about to search %s for %s", base, filter);
+diff --git a/ptclient/ptdump.c b/ptclient/ptdump.c
+index fb59a894f..6676e3884 100644
+--- a/ptclient/ptdump.c
++++ b/ptclient/ptdump.c
+@@ -71,11 +71,11 @@ static int dump_cb(void *rockp __attribute__((unused)),
+ int main(int argc, char *argv[])
+ {
+     struct db *ptdb;
+-    char fnamebuf[1024];
+     extern char *optarg;
+     int opt;
+     int r;
+-    char *alt_config = NULL;
++    const char *fname;
++    char *alt_config = NULL, *tofree = NULL;
+ 
+     while ((opt = getopt(argc, argv, "C:")) != EOF) {
+         switch (opt) {
+@@ -95,15 +95,21 @@ int main(int argc, char *argv[])
+     cyrus_init(alt_config, "ptdump", 0, 0);
+ 
+     /* open database */
+-    strcpy(fnamebuf, config_dir);
+-    strcat(fnamebuf, PTS_DBFIL);
+-    r = cyrusdb_open(config_ptscache_db, fnamebuf, CYRUSDB_CREATE, &ptdb);
++    fname = config_getstring(IMAPOPT_PTSCACHE_DB_PATH);
++    if (!fname) {
++        tofree = strconcat(config_dir, PTS_DBFIL, NULL);
++        fname = tofree;
++    }
++
++    r = cyrusdb_open(config_ptscache_db, fname, CYRUSDB_CREATE, &ptdb);
+     if(r != CYRUSDB_OK) {
+-        fprintf(stderr,"error opening %s (%s)", fnamebuf,
++        fprintf(stderr,"error opening %s (%s)", fname,
+                cyrusdb_strerror(r));
+         exit(1);
+     }
+ 
++    if (tofree) free(tofree);
++
+     /* iterate through db, wiping expired entries */
+     cyrusdb_foreach(ptdb, "", 0, NULL, dump_cb, ptdb, NULL);
+ 
+diff --git a/ptclient/ptexpire.c b/ptclient/ptexpire.c
+index e8eeaa7f9..96abfca43 100644
+--- a/ptclient/ptexpire.c
++++ b/ptclient/ptexpire.c
+@@ -102,11 +102,11 @@ static int expire_cb(void *rockp,
+ int main(int argc, char *argv[])
+ {
+     struct db *ptdb;
+-    char fnamebuf[1024];
+     extern char *optarg;
+     int opt;
+     int r;
+-    char *alt_config = NULL;
++    const char *fname;
++    char *alt_config = NULL, *tofree = NULL;
+ 
+     if ((geteuid()) == 0 && (become_cyrus(/*is_master*/0) != 0)) {
+         fatal("must run as the Cyrus user", EC_USAGE);
+@@ -142,15 +142,21 @@ int main(int argc, char *argv[])
+     syslog(LOG_DEBUG, "ptexpire.c %s", PACKAGE_VERSION);
+ 
+     /* open database */
+-    strcpy(fnamebuf, config_dir);
+-    strcat(fnamebuf, PTS_DBFIL);
+-    r = cyrusdb_open(config_ptscache_db, fnamebuf, CYRUSDB_CREATE, &ptdb);
++    fname = config_getstring(IMAPOPT_PTSCACHE_DB_PATH);
++    if (!fname) {
++        tofree = strconcat(config_dir, PTS_DBFIL, NULL);
++        fname = tofree;
++    }
++
++    r = cyrusdb_open(config_ptscache_db, fname, CYRUSDB_CREATE, &ptdb);
+     if(r != CYRUSDB_OK) {
+-        syslog(LOG_ERR, "error opening %s (%s)", fnamebuf,
++        syslog(LOG_ERR, "error opening %s (%s)", fname,
+                cyrusdb_strerror(r));
+         exit(1);
+     }
+ 
++    if (tofree) free(tofree);
++
+     /* iterate through db, wiping expired entries */
+     cyrusdb_foreach(ptdb, "", 0, expire_p, expire_cb, ptdb, NULL);
+ 
+diff --git a/ptclient/ptloader.c b/ptclient/ptloader.c
+index b425afd79..ef6877f97 100644
+--- a/ptclient/ptloader.c
++++ b/ptclient/ptloader.c
+@@ -119,9 +119,6 @@ struct auth_state *ptsmodule_make_authstate(const char *identifier,
+ /* config.c info (libimap) */
+ const int config_need_data = 0;
+ 
+-/* Globals */
+-#define DB (config_ptscache_db)
+-
+ static char ptclient_debug = 0;
+ struct db *ptsdb = NULL;
+ 
+@@ -129,8 +126,9 @@ int service_init(int argc, char *argv[], char **envp __attribute__((unused)))
+ {
+     int r;
+     int opt;
+-    char fnamebuf[1024];
+     extern char *optarg;
++    const char *fname;
++    char *tofree = NULL;
+ 
+     if (geteuid() == 0) fatal("must run as the Cyrus user", EC_USAGE);
+     setproctitle_init(argc, argv, envp);
+@@ -155,15 +153,21 @@ int service_init(int argc, char *argv[], char **envp __attribute__((unused)))
+         }
+     }
+ 
+-    strcpy(fnamebuf, config_dir);
+-    strcat(fnamebuf, PTS_DBFIL);
+-    r = cyrusdb_open(DB, fnamebuf, CYRUSDB_CREATE, &ptsdb);
++    fname = config_getstring(IMAPOPT_PTSCACHE_DB_PATH);
++    if (!fname) {
++        tofree = strconcat(config_dir, PTS_DBFIL, NULL);
++        fname = tofree;
++    }
++
++    r = cyrusdb_open(config_ptscache_db, fname, CYRUSDB_CREATE, &ptsdb);
+     if (r != 0) {
+-        syslog(LOG_ERR, "DBERROR: opening %s: %s", fnamebuf,
++        syslog(LOG_ERR, "DBERROR: opening %s: %s", fname,
+                cyrusdb_strerror(ret));
+         fatal("can't read pts database", EC_TEMPFAIL);
+     }
+ 
++    if (tofree) free(tofree);
++
+     ptsmodule_init();
+ 
+     return 0;

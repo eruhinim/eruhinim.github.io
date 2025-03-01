@@ -1,0 +1,251 @@
+diff --git a/bin/apt-listbugs b/bin/apt-listbugs
+index 4c5628f..88efb4c 100755
+--- a/bin/apt-listbugs
++++ b/bin/apt-listbugs
+@@ -9,6 +9,7 @@
+ # Copyright (C) 2009       Ryan Niebur <ryan@debian.org>
+ # Copyright (C) 2012       Justin B Rye <jbr@edlug.org.uk>
+ # Copyright (C) 2013       Google Inc
++# Copyright (C) 2015       Michael Gold <michael@bitplane.org>
+ #
+ #  This program is free software; you can redistribute it and/or modify
+ #  it under the terms of the GNU General Public License as published by
+@@ -46,7 +47,7 @@ installation/upgrade is safe.
+ 
+ == USAGE
+ 
+-apt-listbugs [-h] [-v] [-s <severities>] [-T <tags>] [-S <states>] [-B <bug#>] [-D] [-H <hostname>] [-p <port>] [-P <priority>] [-E <title>] [-q] [-C <apt.conf>] [-F] [-y] [-n] [-d] <command> [arguments]
++apt-listbugs [-h] [-v] [-s <severities>] [-T <tags>] [-S <states>] [-B <bug#>] [-D] [-u <url>] [-H <hostname>] [-p <port>] [-P <priority>] [-E <title>] [-q] [-C <apt.conf>] [-F] [-y] [-n] [-d] <command> [arguments]
+ 
+ == OPTIONS
+ 
+@@ -104,14 +105,23 @@ apt-listbugs [-h] [-v] [-s <severities>] [-T <tags>] [-S <states>] [-B <bug#>] [
+ 
+   Show bugs of downgraded packages. (apt mode only)
+ 
++* -u <url>, --url <url>
++
++  Specifies the SOAP URL for the Debian Bug Tracking System. Default:
++  [https://bugs.debian.org:443/cgi-bin/soap.cgi]. The default URL may be
++  changed by setting the AptListbugs::URL configuration option.
++
+ * -H <hostname>, --hostname <hostname>
+ 
+-  Specifies the hostname of the Debian Bug Tracking System [bugs.debian.org].
++  Specifies the hostname of the Debian Bug Tracking System and causes http
++  to be used instead of https (DEPRECATED: use --url instead). Default:
++  [bugs.debian.org].
+ 
+ * -p <port>, --port <port>
+ 
+-  Specifies the port number of the web interface of the Debian Bug
+-  Tracking System [80].
++  Specifies the port number of the SOAP interface of the Debian Bug
++  Tracking System and causes http to be used instead of https (DEPRECATED:
++  use --url instead). Default: [80].
+ 
+ * -P <priority>, --pin-priority <priority>
+ 
+@@ -229,6 +239,15 @@ notable configuration options are
+   hand, when this option is set, the list of severities is its value,
+   unless explicitly altered by using the "-s" command-line option.
+ 
++: AptListbugs::URL
++
++  Default SOAP URL for the Debian Bug Tracking System. When this option
++  is not set, the SOAP URL is [https://bugs.debian.org:443/cgi-bin/soap.cgi],
++  unless explicitly altered by using the "-u" command-line option (or the
++  deprecated "-H"/"-p" options). On the other hand, when this option is set,
++  the SOAP URL is its value, unless explicitly altered by using the "-u"
++  command-line option (or the deprecated "-H"/"-p" options).
++
+ : AptListbugs::IgnoreRegexp
+ 
+   Bugs to ignore when in apt mode. This is evaluated using Ruby regular
+diff --git a/debian/changelog b/debian/changelog
+index 67005a8..feaa60f 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -25,6 +25,11 @@ apt-listbugs (0.1.17) UNRELEASED; urgency=medium
+     tells apt-listbugs to pin a package, the user is asked for confirmation
+     whenever none of the bugs that affect the user's package upgrade are
+     assigned to the package under consideration (Closes: #791877)
++  * fixed "should use https to access bug tracking system": switched to
++    https by default, added the -u command-line option and the AptListbugs::URL
++    configuration option to customize the SOAP URL, deprecated the -H/-p
++    options; thanks to Michael Gold for the useful patch, modified by me
++    (Closes: #792639)
+ 
+  -- Francesco Poli (wintermute) <invernomuto@paranoici.org>  Sun, 04 Jan 2015 11:42:30 +0100
+ 
+diff --git a/debian/copyright b/debian/copyright
+index 463fc8a..4713114 100644
+--- a/debian/copyright
++++ b/debian/copyright
+@@ -12,6 +12,7 @@ Copyright (C) 2008-2015  Francesco Poli <invernomuto@paranoici.org>
+ Copyright (C) 2009-2010  Ryan Niebur <ryan@debian.org>
+ Copyright (C) 2012       Justin B Rye <jbr@edlug.org.uk>
+ Copyright (C) 2013       Google Inc
++Copyright (C) 2015       Michael Gold <michael@bitplane.org>
+ 
+   This program is free software; you can redistribute it and/or modify
+   it under the terms of the GNU General Public License as published by
+diff --git a/lib/aptlistbugs/debian/bts.rb b/lib/aptlistbugs/debian/bts.rb
+index 5b31d1b..52c05f7 100644
+--- a/lib/aptlistbugs/debian/bts.rb
++++ b/lib/aptlistbugs/debian/bts.rb
+@@ -3,6 +3,7 @@
+ # Copyright (C) 2002       Masato Taruishi <taru@debian.org>
+ # Copyright (C) 2006-2007  Junichi Uekawa <dancer@debian.org>
+ # Copyright (C) 2013-2014  Francesco Poli <invernomuto@paranoici.org>
++# Copyright (C) 2015       Michael Gold <michael@bitplane.org>
+ #
+ # This program is free software; you can redistribute it and/or modify
+ # it under the terms of the GNU General Public License as published by
+@@ -31,23 +32,21 @@ module Debian
+   module BTS
+     class Parser
+ 
+-      def initialize(host, port)
+-        @host = host
+-        @port = port
++      def initialize(url)
++        @soapurl = url
+       end
+ 
+       # use SOAP interface to obtain the index.
+       class SoapIndex < Parser
+-        def initialize(host, port)
+-          @host = host
+-          @port = port
++        def initialize(url)
++          @soapurl = url
+           @indexes = {}
+           @buf = nil
+         end
+ 
+         def parse_bug(bugnum)
+           require 'aptlistbugs/debian/btssoap'
+-          soap = Debian::BTSSOAP::Soap.new(@host, @port)
++          soap = Debian::BTSSOAP::Soap.new(@soapurl)
+           sa = Debian::BTSSOAP::StringArray.new
+ 
+           # query the BTS about the given bug number
+@@ -58,7 +57,7 @@ module Debian
+ 
+         def parse(ma_copies, parsestep, severities = ["critical", "grave"])
+           require 'aptlistbugs/debian/btssoap'
+-          soap = Debian::BTSSOAP::Soap.new(@host, @port)
++          soap = Debian::BTSSOAP::Soap.new(@soapurl)
+           sa = Debian::BTSSOAP::StringArray.new
+           bugs = Debian::Bugs.new
+ 
+diff --git a/lib/aptlistbugs/debian/btssoap.rb b/lib/aptlistbugs/debian/btssoap.rb
+index 759ab7f..fce7b45 100644
+--- a/lib/aptlistbugs/debian/btssoap.rb
++++ b/lib/aptlistbugs/debian/btssoap.rb
+@@ -1,6 +1,7 @@
+ # btssoap.rb - ruby interface for Debian BTS SOAP engine
+ # Copyright (C) 2006-2008  Junichi Uekawa <dancer@debian.org>
+ # Copyright (C) 2009-2014  Francesco Poli <invernomuto@paranoici.org>
++# Copyright (C) 2015       Michael Gold <michael@bitplane.org>
+ #
+ # This program is free software; you can redistribute it and/or modify
+ # it under the terms of the GNU General Public License as published by
+@@ -23,8 +24,8 @@ module Debian
+   module BTSSOAP
+     class StringArray < Array; end
+     class Soap
+-      def initialize(host = "bugs.debian.org", port = 80)
+-        @server="http://#{host}:#{port}/cgi-bin/soap.cgi"
++      def initialize(soapurl)
++        @server = soapurl
+         @ns = 'Debbugs/SOAP/'
+         @drv = SOAP::RPC::Driver.new(@server, @ns)
+         @drv.wiredump_dev = STDOUT if $DEBUG
+diff --git a/lib/aptlistbugs/logic.rb b/lib/aptlistbugs/logic.rb
+index 1e42891..2c6caeb 100644
+--- a/lib/aptlistbugs/logic.rb
++++ b/lib/aptlistbugs/logic.rb
+@@ -8,6 +8,7 @@
+ # Copyright (C) 2008-2015  Francesco Poli <invernomuto@paranoici.org>
+ # Copyright (C) 2009-2010  Ryan Niebur <ryan@debian.org>
+ # Copyright (C) 2013       Google Inc
++# Copyright (C) 2015       Michael Gold <michael@bitplane.org>
+ #
+ #  This program is free software; you can redistribute it and/or modify
+ #  it under the terms of the GNU General Public License as published by
+@@ -57,8 +58,9 @@ class AppConfig
+       sprintf(_(" -S <states>      : Filter bugs by pending-state categories you want to see\n                    [%s].\n"), @stats.join(',')),
+       _(" -B <bug#>        : Filter bugs by number, showing only the specified bugs.\n"),
+       _(" -D               : Show downgraded packages, too.\n"),
+-      sprintf(_(" -H <hostname>    : Hostname of Debian Bug Tracking System [%s].\n"), @hostname),
+-      sprintf(_(" -p <port>        : Port number of the server [%s].\n"), @port),
++      sprintf(_(" -u <url>         : SOAP URL for Debian Bug Tracking System\n                    [%s].\n"), @soapurl),
++      _(" -H <hostname>    : Hostname of Debian Bug Tracking System\n                    (for http, deprecated).\n"),
++      _(" -p <port>        : Port number of the server\n                    (for http, deprecated).\n"),
+       sprintf(_(" -P <priority>    : Pin-Priority value [%s].\n"), @pin_priority),
+       _(" -E <title>       : Title of RSS output.\n"),
+       _(" -q               : Don't display progress bar.\n"),
+@@ -87,6 +89,7 @@ class AppConfig
+                 ["done", _("Resolved in some Version")]]
+     @fbugs = nil
+     @show_downgrade = false
++    @soapurl = "https://bugs.debian.org:443/cgi-bin/soap.cgi"
+     @hostname = "bugs.debian.org"
+     @port = 80
+     @parsestep = 200
+@@ -128,6 +131,10 @@ class AppConfig
+       end
+     end
+ 
++    if /soap_url='(.*)'/ =~ `apt-config #{@apt_conf} shell soap_url AptListbugs::URL`
++      @soapurl = $1
++    end
++
+     if /qb='(.*)'/ =~ `apt-config #{@apt_conf} shell qb AptListbugs::ParseStep`
+       @parsestep = $1.to_i if $1.to_i > 0
+     end
+@@ -148,6 +155,7 @@ class AppConfig
+                            ['--stats', '-S', GetoptLong::REQUIRED_ARGUMENT],
+                            ['--bugs', '-B', GetoptLong::REQUIRED_ARGUMENT],
+                            ['--show-downgrade', '-D', GetoptLong::NO_ARGUMENT],
++                           ['--url', '-u', GetoptLong::REQUIRED_ARGUMENT],
+                            ['--hostname', '-H', GetoptLong::REQUIRED_ARGUMENT],
+                            ['--port', '-p', GetoptLong::REQUIRED_ARGUMENT],
+                            ['--pin-priority', '-P', GetoptLong::REQUIRED_ARGUMENT],
+@@ -184,10 +192,17 @@ class AppConfig
+           @fbugs = optargs.split(',')
+         when '--show-downgrade'
+           @show_downgrade = true
++        when '--url'
++          @soapurl = optargs
+         when '--hostname'
+           @hostname = optargs
++          @soapurl = "http://#{@hostname}:#{@port}/cgi-bin/soap.cgi"
++          # TRANSLATORS: "W: " is a label for warnings; you may translate it with a suitable abbreviation of the word "warning"
++          $stderr.puts _("W: ") + sprintf(_("%s IS DEPRECATED. USE --url INSTEAD"), "--hostname")
+         when '--port'
+           @port = optargs.to_i
++          @soapurl = "http://#{@hostname}:#{@port}/cgi-bin/soap.cgi"
++          $stderr.puts _("W: ") + sprintf(_("%s IS DEPRECATED. USE --url INSTEAD"), "--port")
+         when '--pin-priority'
+           @pin_priority = optargs
+         when '--title'
+@@ -220,7 +235,6 @@ class AppConfig
+ 
+     # warn the user about unknown (possibly misspelled) severities
+     (@severity - all_severities).each { |unrec|
+-      # TRANSLATORS: "W: " is a label for warnings; you may translate it with a suitable abbreviation of the word "warning"
+       $stderr.puts _("W: ") + sprintf(_("Unrecognized severity '%s' will be ignored by the Debian BTS."), unrec)
+     }
+ 
+@@ -295,7 +309,7 @@ class AppConfig
+     end
+ 
+     @parser =
+-      Debian::BTS::Parser::SoapIndex.new(@hostname, @port)
++      Debian::BTS::Parser::SoapIndex.new(@soapurl)
+ 
+     if FileTest.executable?("#{QUERYBTS}")
+       @querybts = QUERYBTS

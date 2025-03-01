@@ -1,0 +1,105 @@
+From da698bcd6f45138869091b2a71b350f6f0d5b9e0 Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Fri, 9 Aug 2013 12:05:48 +0200
+Subject: [PATCH] dh_shlibdeps: Use new dpkg-shlibdeps -l option instead of
+ LD_LIBRARY_PATH
+
+Using LD_LIBRARY_PATH to pass additional private package library
+directories is problematic when cross-compiling, as the host and build
+directories get mixed in the run-time environment variable used by the
+dynamic linker.
+
+Depend on dpkg-dev (>= 1.17.0), the version that introduced
+dpkg-shlibdeps -l option.
+
+Closes: #717505
+---
+ debian/control |  2 +-
+ dh_shlibdeps   | 39 ++++++++-------------------------------
+ 2 files changed, 9 insertions(+), 32 deletions(-)
+
+diff --git a/debian/control b/debian/control
+index 641e5ac..bdafee5 100644
+--- a/debian/control
++++ b/debian/control
+@@ -10,7 +10,7 @@ Homepage: http://kitenet.net/~joey/code/debhelper/
+ 
+ Package: debhelper
+ Architecture: all
+-Depends: ${perl:Depends}, ${misc:Depends}, file (>= 3.23), dpkg (>= 1.16.2), dpkg-dev (>= 1.16.2), binutils, po-debconf, man-db (>= 2.5.1-1)
++Depends: ${perl:Depends}, ${misc:Depends}, file (>= 3.23), dpkg (>= 1.16.2), dpkg-dev (>= 1.17.0), binutils, po-debconf, man-db (>= 2.5.1-1)
+ Suggests: dh-make
+ Conflicts: dpkg-cross (<< 1.18), python-support (<< 0.5.3), python-central (<< 0.5.6), automake (<< 1.11.2)
+ Multi-Arch: foreign
+diff --git a/dh_shlibdeps b/dh_shlibdeps
+index 260a749..b42c84a 100755
+--- a/dh_shlibdeps
++++ b/dh_shlibdeps
+@@ -48,8 +48,9 @@ It is deprecated; use B<--> instead.
+ With recent versions of B<dpkg-shlibdeps>, this option is generally not
+ needed.
+ 
+-Before B<dpkg-shlibdeps> is run, B<LD_LIBRARY_PATH> will have added to it the 
+-specified directory (or directories -- separate with colons). With recent
++It tells B<dpkg-shlibdeps> (via its B<-l> parameter), to look for private
++package libraries in the specified directory (or directories -- separate
++with colons). With recent
+ versions of B<dpkg-shlibdeps>, this is mostly only useful for packages that
+ build multiple flavors of the same library, or other situations where
+ the library is installed into a directory not on the regular library search
+@@ -94,23 +95,6 @@ init(options => {
+ 	"l=s", => \$dh{L_PARAMS},
+ });
+ 
+-if ($dh{L_PARAMS}) {
+-	my @paths=();
+-	# Add to existing paths, if set.
+-	push @paths, $ENV{'LD_LIBRARY_PATH'}
+-		if exists $ENV{'LD_LIBRARY_PATH'};
+-	foreach (split(/:/, $dh{L_PARAMS})) {
+-		# Force the path absolute.
+-		if (m:^/:) {
+-			push @paths, $_;
+-		}
+-		else {
+-			push @paths, "/$_";
+-		}
+-	}
+-	$dh{L_PARAMS}=join(':', @paths);
+-}
+-
+ if (defined $dh{V_FLAG}) {
+ 	warning("You probably wanted to pass -V to dh_makeshlibs, it has no effect on dh_shlibdeps");
+ }
+@@ -152,23 +136,16 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 		
+ 		push @opts, "-tudeb" if is_udeb($package);
+ 		
+-		my $ld_library_path_orig=$ENV{LD_LIBRARY_PATH};
+ 		if ($dh{L_PARAMS}) {
+-			$ENV{LD_LIBRARY_PATH}=$dh{L_PARAMS};
+-			verbose_print("LD_LIBRARY_PATH=$dh{L_PARAMS}");
++			foreach (split(/:/, $dh{L_PARAMS})) {
++				# Force the path absolute.
++				my $libdir = m:^/: ? $_ : "/$_";
++				push @opts, "-l$libdir";
++			}
+ 		}
+ 		
+ 		doit("dpkg-shlibdeps","-Tdebian/${ext}substvars",
+ 			@opts,@{$dh{U_PARAMS}},@filelist);
+-
+-		if ($dh{L_PARAMS}) {
+-			if (defined $ld_library_path_orig) {
+-				$ENV{LD_LIBRARY_PATH}=$ld_library_path_orig;
+-			}
+-			else {
+-				delete $ENV{LD_LIBRARY_PATH};
+-			}
+-		}
+ 	}
+ }
+ 
+-- 
+1.8.4.rc1
+

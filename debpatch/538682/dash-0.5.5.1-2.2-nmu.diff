@@ -1,0 +1,172 @@
+diff -u dash-0.5.5.1/debian/changelog dash-0.5.5.1/debian/changelog
+--- dash-0.5.5.1/debian/changelog
++++ dash-0.5.5.1/debian/changelog
+@@ -1,7 +1,26 @@
++dash (0.5.5.1-2.2) unstable; urgency=low
++
++  [ Luk Claes ]
++  * Non-maintainer upload with maintainer's permission.
++  * Change the default for the system shell to dash.
++  * Ship /bin/sh in the package and fix the diversion handling
++    for it to make sure /bin/sh is always present.
++  * Set debconf priority to high when upgrading from an existing
++    system.
++  * Add versioned dpkg dependency for dpkg-divert --listpackage.
++  * Add NEWS file about changing /bin/sh.
++  * Adjusted the debconf template accordingly.
++  * Make dash Priority: Required
++
++  [ Raphael Geissert ]
++  * Make dash Essential: yes
++
++ -- Luk Claes <luk@debian.org>  Wed, 22 Jul 2009 20:17:31 +0200
++
+ dash (0.5.5.1-2.1) unstable; urgency=high
+ 
+   * Non-maintainer upload.
+-  * Depend on debian-utils (Closes: #537990).
++  * Depend on debianutils (Closes: #537990).
+ 
+  -- Luk Claes <luk@debian.org>  Wed, 22 Jul 2009 18:50:45 +0000
+ 
+diff -u dash-0.5.5.1/debian/control dash-0.5.5.1/debian/control
+--- dash-0.5.5.1/debian/control
++++ dash-0.5.5.1/debian/control
+@@ -9,8 +9,10 @@
+ 
+ Package: dash
+ Architecture: any
++Essential: yes
++Priority: required
+ Pre-Depends: ${shlibs:Depends}
+-Depends: debianutils (>= 2.15)
++Depends: debianutils (>= 2.15), dpkg (>= 1.15.0)
+ Description: POSIX-compliant shell
+  The Debian Almquist Shell (dash) is a lightweight POSIX-compliant shell
+  derived from ash.
+diff -u dash-0.5.5.1/debian/dash.config dash-0.5.5.1/debian/dash.config
+--- dash-0.5.5.1/debian/dash.config
++++ dash-0.5.5.1/debian/dash.config
+@@ -37,3 +37,7 @@
+ 
+-db_input low dash/sh || true
++if [ "$1" = configure ] && [ -z "$2" ] && dpkg-query -W bash >/dev/null; then
++	db_input high dash/sh || true
++else
++	db_input low dash/sh || true
++fi
+ db_go
+diff -u dash-0.5.5.1/debian/dash.postinst dash-0.5.5.1/debian/dash.postinst
+--- dash-0.5.5.1/debian/dash.postinst
++++ dash-0.5.5.1/debian/dash.postinst
+@@ -2,23 +2,35 @@
+ set -e
+ 
+ check_divert() {
+-	div=$(dpkg-divert --list $2)
+ 	distrib=${4:-$2.distrib}
++	sh_diverter=$(dpkg-divert --listpackage $2)
++	sh_truename=$(dpkg-divert --truename $2)
+ 	case "$1" in
+ 	true)
+-		if [ -z "$div" ]; then
++		if [ "$sh_diverter" != "dash" ]; then
++			dpkg-divert --remove $2
+ 			dpkg-divert --package dash --divert $distrib --add $2
++			if [ -n "$sh_truename" ]; then
++				rm -f $sh_truename
++			fi
+ 			cp -dp $2 $distrib
+ 			ln -sf $3 $2
+ 		fi
+ 		;;
+ 	false)
+-		if [ -n "$div" ] && [ -z "${div%%*by dash}" ]; then
+-			mv $distrib $2
++		if [ "$sh_diverter" = "dash" ]; then
++			bash=$(echo "$3"|sed 's/dash/bash/')
+ 			dpkg-divert --remove $2
++			dpkg-divert --package bash --divert $distrib --add $2
++			if [ -n "$sh_truename" ]; then
++				rm -f $sh_truename
++			fi
++			cp -dp $2 $distrib
++			ln -sf $bash $2
+ 		fi
+ 		;;
+ 	ash)
++		div=$(dpkg-divert --list $2)
+ 		case $div in
+ 		'')
+ 			;;
+diff -u dash-0.5.5.1/debian/dash.templates.in dash-0.5.5.1/debian/dash.templates.in
+--- dash-0.5.5.1/debian/dash.templates.in
++++ dash-0.5.5.1/debian/dash.templates.in
+@@ -11,7 +11,12 @@
+-Default: false
+-_Description: Install dash as /bin/sh?
+- The default /bin/sh shell on Debian and Debian-based systems is bash.
++Default: true
++_Description: Use dash as the default system shell (/bin/sh)?
++ The system shell is the default command interpreter for shell scripts.
+  .
+- However, since the default shell is required to be POSIX-compliant,
+- any shell that conforms to POSIX, such as dash, can serve as /bin/sh.
+- You may wish to do this because dash is faster and smaller than bash.
++ Using dash as /bin/sh will improve the system's overall performance
++ without changing the shell used interactively by the users of this machine.
++# _Description: Install dash as /bin/sh?
++#  The default /bin/sh shell on Debian and Debian-based systems is bash.
++#  .
++#  However, since the default shell is required to be POSIX-compliant,
++#  any shell that conforms to POSIX, such as dash, can serve as /bin/sh.
++#  You may wish to do this because dash is faster and smaller than bash.
+diff -u dash-0.5.5.1/debian/rules dash-0.5.5.1/debian/rules
+--- dash-0.5.5.1/debian/rules
++++ dash-0.5.5.1/debian/rules
+@@ -71,9 +71,11 @@
+ 	install -d -m0755 '$(DIR)'/bin
+ 	install -m0755 build-tmp/src/dash '$(DIR)'/bin/dash
+ 	$(STRIP) -R .comment -R .note '$(DIR)'/bin/dash
++	ln -s dash '$(DIR)'/bin/sh
+ 	install -d -m0755 '$(DIR)'/usr/share/man/man1/
+ 	install -m0644 src/dash.1 '$(DIR)'/usr/share/man/man1/dash.1
+ 	gzip -9 '$(DIR)'/usr/share/man/man1/dash.1
++	ln -s dash.1.gz '$(DIR)'/usr/share/man/man1/sh.1.gz
+ 	install -d -m0755 '$(DIR)'/usr/share/menu
+ 	install -m0644 debian/dash.menu '$(DIR)'/usr/share/menu/dash
+ 	# changelog
+only in patch2:
+unchanged:
+--- dash-0.5.5.1.orig/debian/dash.preinst
++++ dash-0.5.5.1/debian/dash.preinst
+@@ -0,0 +1,16 @@
++#!/bin/sh
++set -e
++
++divert() {
++	div=$(dpkg-divert --list $1)
++	distrib=${3:-$1.distrib}
++	if [ -z "$div" ]; then
++		dpkg-divert --package dash --divert $distrib --add $1
++		cp -dp $1 $distrib
++		ln -sf $2 $1
++	fi
++}
++
++divert /bin/sh dash
++divert /usr/share/man/man1/sh.1.gz dash.1.gz \
++	/usr/share/man/man1/sh.distrib.1.gz
+only in patch2:
+unchanged:
+--- dash-0.5.5.1.orig/debian/NEWS
++++ dash-0.5.5.1/debian/NEWS
+@@ -0,0 +1,8 @@
++dash (0.5.5.1-2.1) unstable; urgency=low
++
++  * The default system shell (/bin/sh) has been changed to dash.
++  * One can see what the current default system shell on this machine
++    is by running 'readlink /bin/sh'.
++  * Change it by running 'dpkg-reconfigure dash'. 
++
++ -- Luk Claes <luk@debian.org>  Wed, 22 Jul 2009 17:23:20 +0200
