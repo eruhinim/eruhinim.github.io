@@ -1,0 +1,114 @@
+From: Modestas Vainius <modestas@vainius.eu>
+Subject: [PATCH] Improve build system auto-selection process
+
+This patch replaces current build system auto-selection process with the
+following:
+
+1) Find the first (in @BUILDSYSTEMS order) auto-buildable build system in
+the current build step. If found, it becomes the base one. Otherwise,
+auto-selection process fails.
+
+2) Look for a more specific (i.e. deeper in the inheritance tree) build system
+that is both auto-selectable in any build step coming before the current one
+and auto-buildable in current one. If such a build system is found, auto-select
+it for current step as well. Otherwise, auto-select the base build system found
+in 1). Auto-selection process succeeds.
+
+The patch implements optimized version of the algorithm above.
+
+Signed-off-by: Modestas Vainius <modestas@vainius.eu>
+
+---
+ Debian/Debhelper/Dh_Buildsystems.pm |   42 +++++++++++++++++++++++++++++++---
+ t/buildsystems/buildsystem_tests    |    4 +--
+ 2 files changed, 39 insertions(+), 7 deletions(-)
+
+diff --git a/Debian/Debhelper/Dh_Buildsystems.pm b/Debian/Debhelper/Dh_Buildsystems.pm
+index a9a13a2..747604e 100644
+--- a/Debian/Debhelper/Dh_Buildsystems.pm
++++ b/Debian/Debhelper/Dh_Buildsystems.pm
+@@ -14,6 +14,8 @@ use File::Spec;
+ use base 'Exporter';
+ our @EXPORT=qw(&buildsystems_init &buildsystems_do &load_buildsystem &load_all_buildsystems);
+ 
++use constant BUILD_STEPS => qw(configure build test install clean);
++
+ # Historical order must be kept for backwards compatibility. New
+ # build systems MUST be added to the END of the list.
+ our @BUILDSYSTEMS = (
+@@ -66,14 +68,46 @@ sub load_buildsystem {
+ 	}
+ 	else {
+ 		# Try to determine build system automatically
+-		for $system (@BUILDSYSTEMS) {
++		my @buildsystems=@BUILDSYSTEMS;
++		my $base;
++
++		# First of all, determine a base build system for this $step. Take non
++		# auto-buildable build systems out of further consideration.
++		while ($system = shift(@buildsystems)) {
+ 			my $inst = create_buildsystem_instance($system, @_);
+ 			if ($inst->check_auto_buildable($step)) {
+-				return $inst;
++				$base = $inst;
++				last;
++			}
++		}
++
++		# Now look for a more specific build system that is auto-buildable in
++		# both any previous and current steps.
++		if ($base && @buildsystems) {
++			for my $prevstep (BUILD_STEPS) {
++				last if ($prevstep eq $step);
++
++				# Find the first build system that is auto-buildable in $prevstep.
++				for $system (@buildsystems) {
++					next unless defined $system;
++					$system = create_buildsystem_instance($system, @_) unless ref $system;
++					if ($system->check_auto_buildable($prevstep)) {
++						# If a candidate build system is both more specific than the
++						# base build system, and auto-buildable in current step, it's
++						# the one we are looking for.
++						if ($system->isa(ref $base) && $system->check_auto_buildable($step)) {
++							return $system;
++						}
++						else {
++							# It's pointless to consider this build system once again
++							$system = undef;
++						}
++					}
++				}
+ 			}
+ 		}
++		return $base;
+ 	}
+-	return;
+ }
+ 
+ sub load_all_buildsystems {
+@@ -189,7 +223,7 @@ sub buildsystems_do {
+ 		$step =~ s/^dh_auto_//;
+ 	}
+ 
+-	if (grep(/^\Q$step\E$/, qw{configure build test install clean}) == 0) {
++	if (grep(/^\Q$step\E$/, BUILD_STEPS) == 0) {
+ 		error("unrecognized build step: " . $step);
+ 	}
+ 
+diff --git a/t/buildsystems/buildsystem_tests b/t/buildsystems/buildsystem_tests
+index 0465a93..fa6891e 100755
+--- a/t/buildsystems/buildsystem_tests
++++ b/t/buildsystems/buildsystem_tests
+@@ -347,9 +347,7 @@ cleandir $tmpdir;
+ # CMake
+ touch "$tmpdir/CMakeLists.txt";
+ touch "$builddir/Makefile";
+-test_autoselection("cmake",
+-    { configure => "cmake", build => "makefile",
+-      test => "makefile", install => "makefile", clean => "makefile" }, %tmp);
++test_autoselection("cmake", "cmake", %tmp);
+ cleandir $tmpdir;
+ 
+ ### Test Buildsystem::rmdir_builddir()
+-- 
+tg: (1679f2e..) patch/improved_bs_autoselection (depends on: master)

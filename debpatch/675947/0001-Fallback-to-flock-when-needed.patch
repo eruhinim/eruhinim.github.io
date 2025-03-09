@@ -1,0 +1,112 @@
+From 1a85392f99ba56dd95d9274a31577c3403120c99 Mon Sep 17 00:00:00 2001
+From: Dominic Hargreaves <dom@earth.li>
+Date: Mon, 4 Jun 2012 12:11:46 +0100
+Subject: [PATCH] Fallback to flock when needed
+
+libfile-fcntllock-perl build-depends on dpkg-dev, so avoid this circular
+build-dependency by only libfile-fcntllock-perl and falling back to using
+flock when File::FcntlLock is not available.
+---
+ debian/control              |    5 +++--
+ scripts/dpkg-distaddfile.pl |   18 ++++++++++++++----
+ scripts/dpkg-gencontrol.pl  |   18 ++++++++++++++----
+ 3 files changed, 31 insertions(+), 10 deletions(-)
+
+diff --git a/debian/control b/debian/control
+index 3184473..62e36f7 100644
+--- a/debian/control
++++ b/debian/control
+@@ -51,9 +51,10 @@ Section: utils
+ Priority: optional
+ Architecture: all
+ Multi-Arch: foreign
+-Depends: libdpkg-perl (= ${source:Version}), libfile-fcntllock-perl, bzip2, xz-utils,
++Depends: libdpkg-perl (= ${source:Version}), bzip2, xz-utils,
+  patch, make, binutils, base-files (>= 5.0.0), ${misc:Depends}
+-Recommends: gcc | c-compiler, build-essential, fakeroot, gnupg, gpgv, libalgorithm-merge-perl
++Recommends: gcc | c-compiler, build-essential, fakeroot, gnupg, gpgv, libalgorithm-merge-perl,
++ libfile-fcntllock-perl
+ Suggests: debian-keyring
+ Breaks: dpkg-cross (<< 2.0.0), devscripts (<< 2.10.26)
+ Description: Debian package development tools
+diff --git a/scripts/dpkg-distaddfile.pl b/scripts/dpkg-distaddfile.pl
+index 5d80d5e..f39347c 100755
+--- a/scripts/dpkg-distaddfile.pl
++++ b/scripts/dpkg-distaddfile.pl
+@@ -20,7 +20,7 @@
+ use strict;
+ use warnings;
+ 
+-use File::FcntlLock;
++use Fcntl qw(:flock);
+ use POSIX;
+ use POSIX qw(:errno_h :signal_h);
+ use Dpkg;
+@@ -77,12 +77,22 @@ my ($file, $section, $priority) = @ARGV;
+ 
+ # Obtain a lock on debian/control to avoid simultaneous updates
+ # of debian/files when parallel building is in use
+-my $fs = File::FcntlLock->new(l_type => F_WRLCK);
+ my $lockfh;
+ sysopen($lockfh, "debian/control", O_WRONLY) ||
+     syserr(_g("cannot write %s"), "debian/control");
+-$fs->lock($lockfh, F_SETLKW) ||
+-    syserr(_("failed to get a write lock on %s"), "debian/control");
++
++# dpkg-dev only Recommends libfile-fcntllock-perl to allow 
++# libfile-fcntllock-perl to be rebuilt
++eval { require File::FcntlLock };
++if ($@) {
++    warning(_g("File::FcntlLock not available; using flock which is not NFS-safe"));
++    flock($lockfh, LOCK_EX) ||
++        syserr(_("fcntl: failed to get a write lock on %s"), "debian/control");
++} else {
++    my $fs = File::FcntlLock->new(l_type => F_WRLCK);
++    $fs->lock($lockfh, F_SETLKW) ||
++        syserr(_("flock: failed to get a write lock on %s"), "debian/control");
++}
+ 
+ $fileslistfile="./$fileslistfile" if $fileslistfile =~ m/^\s/;
+ open(Y, "> $fileslistfile.new") || syserr(_g("open new files list file"));
+diff --git a/scripts/dpkg-gencontrol.pl b/scripts/dpkg-gencontrol.pl
+index 103a276..c4b1ebb 100755
+--- a/scripts/dpkg-gencontrol.pl
++++ b/scripts/dpkg-gencontrol.pl
+@@ -22,7 +22,7 @@
+ use strict;
+ use warnings;
+ 
+-use File::FcntlLock;
++use Fcntl qw(:flock);
+ use POSIX;
+ use POSIX qw(:errno_h);
+ use Dpkg;
+@@ -336,12 +336,22 @@ for my $f (keys %remove) {
+ 
+ # Obtain a lock on debian/control to avoid simultaneous updates
+ # of debian/files when parallel building is in use
+-my $fs = File::FcntlLock->new(l_type => F_WRLCK);
+ my $lockfh;
+ sysopen($lockfh, "debian/control", O_WRONLY) ||
+     syserr(_g("cannot write %s"), "debian/control");
+-$fs->lock($lockfh, F_SETLKW) ||
+-    syserr(_("failed to get a write lock on %s"), "debian/control");
++
++# dpkg-dev only Recommends libfile-fcntllock-perl to allow 
++# libfile-fcntllock-perl to be rebuilt
++eval { require File::FcntlLock };
++if ($@) {
++    warning(_g("File::FcntlLock not available; using flock which is not NFS-safe"));
++    flock($lockfh, LOCK_EX) ||
++        syserr(_("fcntl: failed to get a write lock on %s"), "debian/control");
++} else {
++    my $fs = File::FcntlLock->new(l_type => F_WRLCK);
++    $fs->lock($lockfh, F_SETLKW) ||
++        syserr(_("flock: failed to get a write lock on %s"), "debian/control");
++}
+ 
+ $fileslistfile="./$fileslistfile" if $fileslistfile =~ m/^\s/;
+ open(Y, ">", "$fileslistfile.new") || syserr(_g("open new files list file"));
+-- 
+1.7.10
+

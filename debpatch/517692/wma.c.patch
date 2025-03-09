@@ -1,0 +1,119 @@
+--- wma.0.c	2008-05-23 18:44:20.000000000 -0400
++++ wma.c	2009-03-05 23:14:57.000000000 -0500
+@@ -194,15 +194,12 @@
+ static void wma_do_pause(InputPlayback *playback, short p)
+ {
+     wma_pause = p;
+-    playback->output->pause(wma_pause);
+ }
+ 
+ static void wma_seek(InputPlayback *playback, int time) 
+ {
+     wma_seekpos = time;
+-    if(wma_pause) playback->output->pause(0);
+     while(wma_decode && wma_seekpos!=-1) g_usleep(10000);
+-    if(wma_pause) playback->output->pause(1);
+ }
+ 
+ static void _assoc_string(Tuple *tuple, const gint nfield, const gchar *str)
+@@ -285,6 +282,22 @@
+     (*title_real) = aud_tuple_formatter_make_title_string(tuple, aud_get_gentitle_format());
+ }
+ 
++static void do_seek (InputPlayback * playback, AVFormatContext * context, int index) {
++   playback->output->flush (wma_seekpos * 1000);
++   av_seek_frame (context, index, (long long) wma_seekpos * 1000000);
++   wma_seekpos = -1;
++}
++
++static void do_pause (InputPlayback * playback, AVFormatContext * context, int index) {
++   playback->output->pause (1);
++   while (wma_pause) {
++      if (wma_seekpos != -1)
++         do_seek (playback, context, index);
++      g_usleep(50000);
++   }
++   playback->output->pause (0);
++}
++
+ static void wma_play_file(InputPlayback *playback)
+ {
+     AVCodec *codec;
+@@ -293,8 +306,8 @@
+     uint8_t *inbuf_ptr;
+     int out_size, size, len;
+     AVPacket pkt;
+-    guint8 *wma_outbuf, *wma_s_outbuf;
+-    int wma_st_buff, wma_idx;
++    short * wma_outbuf;
++    int wma_idx;
+ 
+     if(av_open_input_file(&ic, playback->filename, NULL, 0, NULL) < 0) return;
+ 
+@@ -316,12 +329,9 @@
+ 
+     if(playback->output->open_audio(FMT_S16_NE, c->sample_rate, c->channels) <= 0) return;
+ 
+-    wma_st_buff  = ST_BUFF;
+-
+     playback->set_params(playback, wsong_title, wsong_time, c->bit_rate, c->sample_rate, c->channels);
+ 
+     /* av_malloc() will wrap posix_memalign() if necessary -nenolod */
+-    wma_s_outbuf = av_malloc(wma_st_buff);
+     wma_outbuf = av_malloc(AVCODEC_MAX_AUDIO_FRAME_SIZE);
+ 
+     wma_seekpos = -1;
+@@ -333,11 +343,9 @@
+     while(playback->playing)
+     {
+         if(wma_seekpos != -1)
+-        {
+-            av_seek_frame(ic, wma_idx, wma_seekpos * 1000000LL);
+-            playback->output->flush(wma_seekpos * 1000);
+-            wma_seekpos = -1;
+-        }
++           do_seek (playback, ic, wma_idx);
++        if (wma_pause)
++           do_pause (playback, ic, wma_idx);
+ 
+         if(av_read_frame(ic, &pkt) < 0) break;
+ 
+@@ -347,29 +355,13 @@
+         if(size == 0) break;
+ 
+         while(size > 0){
+-            FifoBuffer f;
+-            int sst_buff;
+-
+             len = avcodec_decode_audio(c, (short *)wma_outbuf, &out_size,
+                                        inbuf_ptr, size);
+             if(len < 0) break;
+ 
+             if(out_size <= 0) continue;
+ 
+-            fifo_init(&f, out_size*2);
+-            fifo_write(&f, wma_outbuf, out_size, &f.wptr);
+-
+-            while(!fifo_read(&f, wma_s_outbuf, wma_st_buff, &f.rptr) && wma_decode)
+-            {
+-                 sst_buff = wma_st_buff;
+-                 if (wma_pause)
+-                     memset(wma_s_outbuf, 0, sst_buff);    
+-                 playback->pass_audio(playback, FMT_S16_NE,
+-                                      c->channels, sst_buff, (short *)wma_s_outbuf, NULL);
+-                 memset(wma_s_outbuf, 0, sst_buff);
+-            }
+-
+-            fifo_free(&f);
++            playback->pass_audio (playback, FMT_S16_NE, c->channels, out_size, wma_outbuf, NULL);
+ 
+             size -= len;
+             inbuf_ptr += len;
+@@ -378,7 +370,6 @@
+     }
+     while(playback->playing && playback->output->buffer_playing()) g_usleep(30000);
+     playback->playing = 0;
+-    if(wma_s_outbuf) g_free(wma_s_outbuf);
+     if(wma_outbuf) g_free(wma_outbuf);
+     if(pkt.data) av_free_packet(&pkt);
+     if(c) avcodec_close(c);

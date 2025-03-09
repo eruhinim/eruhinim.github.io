@@ -1,0 +1,89 @@
+diff --git a/apt-pkg/deb/dpkgpm.cc b/apt-pkg/deb/dpkgpm.cc
+index 6cb8bc6..e84a6db 100644
+--- a/apt-pkg/deb/dpkgpm.cc
++++ b/apt-pkg/deb/dpkgpm.cc
+@@ -328,8 +328,9 @@ bool pkgDPkgPM::SendV2Pkgs(FILE *F)
+ // DPkgPM::RunScriptsWithPkgs - Run scripts with package names on stdin /*{{{*/
+ // ---------------------------------------------------------------------
+ /* This looks for a list of scripts to run from the configuration file
+-   each one is run and is fed on standard input a list of all .deb files
+-   that are due to be installed. */
++   each one is run and is fed on standard input (or on a FIFO, if
++   HookFifoFilename is set) a list of all .deb files that are due to be
++   installed. */
+ bool pkgDPkgPM::RunScriptsWithPkgs(const char *Cnf)
+ {
+    Configuration::Item const *Opts = _config->Tree(Cnf);
+@@ -351,20 +352,35 @@ bool pkgDPkgPM::RunScriptsWithPkgs(const char *Cnf)
+       OptSec = "DPkg::Tools::Options::" + string(Opts->Value.c_str(),Pos);
+       
+       unsigned int Version = _config->FindI(OptSec+"::Version",1);
+-      
+-      // Create the pipes
++
++      // Feed subprocess via stdin, unless HookFifoFilename is set
++      string const FifoFilename = _config->Find(OptSec+"::HookFifoFilename");
++      bool const UseFifo = (FifoFilename.empty() != true);
++
+       int Pipes[2];
+-      if (pipe(Pipes) != 0)
+-	 return _error->Errno("pipe","Failed to create IPC pipe to subprocess");
+-      SetCloseExec(Pipes[0],true);
+-      SetCloseExec(Pipes[1],true);
++
++      // Create pipes or fifo
++      if (UseFifo == true)
++      {
++          // try to remove stale hook fifo if it exists
++          if ((unlink(FifoFilename.c_str()) == -1) && (errno != ENOENT))
++                return _error->Errno("unlink","Failed to remove stale hook fifo");
++          if (mkfifo(FifoFilename.c_str(), 600) == -1)
++                return _error->Errno("mkfifo","Failed to create hook fifo");
++      } else {
++          if (pipe(Pipes) != 0)
++                return _error->Errno("pipe","Failed to create IPC pipe to subprocess");
++          SetCloseExec(Pipes[0],true);
++          SetCloseExec(Pipes[1],true);
++      }
+       
+       // Purified Fork for running the script
+       pid_t Process = ExecFork();      
+       if (Process == 0)
+       {
+ 	 // Setup the FDs
+-	 dup2(Pipes[0],STDIN_FILENO);
++	 if (UseFifo == false)
++		dup2(Pipes[0],STDIN_FILENO);
+ 	 SetCloseExec(STDOUT_FILENO,false);
+ 	 SetCloseExec(STDIN_FILENO,false);      
+ 	 SetCloseExec(STDERR_FILENO,false);
+@@ -378,8 +394,15 @@ bool pkgDPkgPM::RunScriptsWithPkgs(const char *Cnf)
+ 	 execv(Args[0],(char **)Args);
+ 	 _exit(100);
+       }
+-      close(Pipes[0]);
+-      FILE *F = fdopen(Pipes[1],"w");
++
++    FILE *F;
++    if (UseFifo == true)
++    {
++        F = fopen(FifoFilename.c_str(), "w");
++    } else {
++        close(Pipes[0]);
++        F = fdopen(Pipes[1],"w");
++    }
+       if (F == 0)
+ 	 return _error->Errno("fdopen","Faild to open new FD");
+       
+@@ -409,7 +432,10 @@ bool pkgDPkgPM::RunScriptsWithPkgs(const char *Cnf)
+       fclose(F);
+       
+       // Clean up the sub process
+-      if (ExecWait(Process,Opts->Value.c_str()) == false)
++      int RetStatus = ExecWait(Process,Opts->Value.c_str());
++      if ((UseFifo == true) && (unlink(FifoFilename.c_str()) == -1))
++	 return _error->Errno("unlink","Failed to remove hook fifo");
++      if (RetStatus == false)
+ 	 return _error->Error("Failure running script %s",Opts->Value.c_str());
+    }
+ 

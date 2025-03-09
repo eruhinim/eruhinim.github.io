@@ -1,0 +1,183 @@
+diff -turN debmirror-2.17/debmirror debmirror-2.17.1/debmirror
+--- debmirror-2.17/debmirror	2014-07-02 20:54:08.000000000 +0000
++++ debmirror-2.17.1/debmirror	2015-06-03 22:41:55.517583458 +0000
+@@ -103,7 +103,8 @@
+ =item B<--method>=I<method>
+ 
+ Specify the method to download files. Currently, supported methods are
+-B<ftp>, B<http>, B<https>, and B<rsync>.
++B<ftp>, B<http>, B<https>, and B<rsync>. The B<file> method is
++experimentally supported.
+ 
+ =item B<--passive>
+ 
+@@ -766,7 +767,7 @@
+ }
+ 
+ # Backwards compatibility: remote root dir no longer needs prefix
+-$remoteroot =~ s%^[:/]%%;
++$remoteroot =~ s%^[:/]%% unless downloads_via_file();
+ 
+ # Post-process arrays. Allow commas to separate values the user entered.
+ # If the user entered nothing, provide defaults.
+@@ -802,7 +803,7 @@
+ # Display configuration.
+ $|=1 if $debug;
+ if ($passwd eq "anonymous@") {
+-  if ($download_method eq "http") {
++  if (downloads_via_http()) {
+     say("Mirroring to $mirrordir from $download_method://$host/$remoteroot/");
+   } else {
+     say("Mirroring to $mirrordir from $download_method://$user\@$host/$remoteroot/");
+@@ -823,7 +824,7 @@
+ say("Passive mode on.") if $passive;
+ say("Proxy: $proxy") if $proxy;
+ say("Download at most $max_batch files.") if ($max_batch > 0);
+-say("Download at most $rsync_batch files per rsync call.") if ($download_method eq "rsync");
++say("Download at most $rsync_batch files per rsync call.") if (downloads_via_rsync());
+ if ($pre_cleanup) {
+   say("Will clean up before mirroring.");
+ } elsif ($post_cleanup) {
+@@ -878,7 +879,7 @@
+ sub init_connection {
+   $_ = $download_method;
+ 
+-  /^http$/ && do {
++  downloads_via_http() && do {
+     $ua = LWP::UserAgent->new(keep_alive => 1);
+     $ua->timeout($timeout);
+     $ua->proxy('http', $ENV{http_proxy}) if $ENV{http_proxy};
+@@ -887,7 +888,7 @@
+     return;
+   };
+   
+-  /^https$/ && do {
++  downloads_via_https() && do {
+     $ua = LWP::UserAgent->new(keep_alive => 1, ssl_opts => {
+                     verify_hostname => ! $disable_ssl_verification });
+     $ua->timeout($timeout);
+@@ -898,7 +899,7 @@
+   };
+ 
+ 
+-  /^ftp$/ && do {
++  downloads_via_ftp() && do {
+     if ($proxy || $ENV{ftp_proxy}) {
+       $ua = LWP::UserAgent->new;
+       $ua->timeout($timeout);
+@@ -915,7 +916,15 @@
+     return;
+   };
+ 
+-  /^rsync$/ && do {
++  downloads_via_file() && do {
++    $ua = LWP::UserAgent->new;
++    $ua->timeout($timeout);
++    $ua->show_progress($progress);
++    $host='localhost';
++    return;
++  };
++  
++  downloads_via_rsync() && do {
+     return;
+   };
+ 
+@@ -926,13 +935,18 @@
+ # determine remote root for rsync transfers
+ my $rsyncremote;
+ if (length $remoteroot) {
+-        $rsyncremote = "$host\:\:$remoteroot/";
+-        if ($user ne 'anonymous') {
+-                $rsyncremote = "$user\@$rsyncremote";
++        if (downloads_via_file()) {
++                $rsyncremote = "$remoteroot/";
++        }
++        else {
++                $rsyncremote = "$host\:\:$remoteroot/";
++                if ($user ne 'anonymous') {
++                        $rsyncremote = "$user\@$rsyncremote";
++                }
+         }
+ }
+ else {
+-        if ($download_method eq 'rsync') {
++        if (downloads_via_rsync()) {
+                 die "rsync cannot be used with a root of $remoteroot/\n";
+         }
+ }
+@@ -1321,8 +1335,7 @@
+ batch_get();
+ 
+ sub batch_get {
+-  if ($download_method eq 'ftp' || $download_method eq 'http' ||
+-   $download_method eq 'https') {
++  if (uses_LWP()) {
+     my $dirname;
+     my $i=0;
+     foreach my $file (sort keys %files) {
+@@ -1681,9 +1694,8 @@
+   $tdir=$tempdir unless $tdir;
+   chdir($tdir) or die "unable to chdir($tdir): $!\n";
+ 
+-  if ($download_method eq 'ftp' || $download_method eq 'http' ||
+-    $download_method eq 'https') {
+-        $res=$ftp ? ftp_get($file) : http_get($file);
++  if (uses_LWP()) {
++    $res=$ftp ? ftp_get($file) : http_get($file);
+     $res=$res && check_lists($file);
+     if (-f $file && !$res) {
+       say("$file failed checksum verification, removing");
+@@ -2733,7 +2745,7 @@
+   if ($ftp) { $ftp->quit; }
+ 
+   my $total_time = time - $start_time;
+-  if ($download_method eq 'rsync' || $bytes_gotten == 0) {
++  if (downloads_via_rsync() || $bytes_gotten == 0) {
+     say("Download completed in ".$total_time."s.");
+   } else {
+     my $avg_speed = 0;
+@@ -2839,6 +2851,44 @@
+   }
+ }
+ 
++sub downloads_via_http {
++  local $_ = shift;
++  defined or $_ = $download_method;
++  return $_ eq 'http';
++}
++
++sub downloads_via_https {
++  local $_ = shift;
++  defined or $_ = $download_method;
++  return $_ eq 'https';
++}
++
++sub downloads_via_http_or_https {
++  return downloads_via_http(@_) || downloads_via_https(@_);
++}
++
++sub downloads_via_ftp {
++  local $_ = shift;
++  defined or $_ = $download_method;
++  return $_ eq 'ftp';
++}
++
++sub downloads_via_file {
++  local $_ = shift;
++  defined or $_ = $download_method;
++  return $_ eq 'file';
++}
++
++sub downloads_via_rsync {
++  local $_ = shift;
++  defined or $_ = $download_method;
++  return $_ eq 'rsync';
++}
++
++sub uses_LWP {
++  return !downloads_via_rsync(@_);
++}
++
+ sub say {
+   print join(' ', @_)."\n" if ($verbose or $progress);
+ }

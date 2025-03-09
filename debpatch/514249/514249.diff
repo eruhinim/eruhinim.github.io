@@ -1,0 +1,92 @@
+--- dpkg-cross.old 
++++ dpkg-cross 
+@@ -1009,11 +1009,9 @@
+ 	}
+ 
+ 	# Rewrite dependency fields
+-	# Make 'provides' field to exist always to all $package-$arch-dslN provide
+-	$control{"provides"} = "" unless defined $control{"provides"};
+ 	for $field qw(depends conflicts provides replaces) {
+ 		next if not defined $control{$field};
+-		my $rewritten = rewrite_dependencies($control{"package"}, $field, $control{$field});
++		my $rewritten = rewrite_dependencies($control{$field});
+ 		if (length($rewritten) > 0) {
+ 			# Capitalize first letter of field name
+ 			print CONTROL ucfirst($field) . ": " . $rewritten . "\n";
+@@ -1162,46 +1160,38 @@
+ 	return $? == 0;
+ }
+ 
+-# Handling of dpkg-cross layout versions:
+-# - package P-$arch-cross always provides P-$arch-dcvN, where N is the layout version
+-# - if P provides Q, P-$arch-cross provides both Q-$arch-cross and Q-$arch-dcvN
+-# - if P depends on Q, P-$arch-cross depends on Q-$arch-cross, Q-$arch-dcvN
+-# - if P depends on Q (op ver), P-$arch-cross depends on Q-$arch-cross (op ver), Q-$arch-dcvN
+-# - if P depends on Q | R, P-$arch-cross depends on Q-$arch-cross | R-$arch-cross, Q-$arch-dcvN | R-$arch-dcvN
+-# - nothing layout-specific is in conflicts or replaces
+-
+ sub rewrite_dependencies {
+-	my ($package, $field, $str) = @_;
+-	my @list = ();
+-
+-	DEP: for my $dep (split( /\s*,\s*/, $str)) {
+-		my @l = ();  # for -arch-cross
+-		my @l2 = (); # for -arch-dcvN
+-		# $alt is '|'-separated list of alternatives
+-		for my $alt (split( /\s*\|\s*/, $dep )) {
+-			# if any of alternatives is in removedeps, $dep should be completely skipped
+-			my $noopalt = $alt; $noopalt =~ s/ *\(.*//;
+-			foreach my $check (@removedeps)
+-			{
+-				next DEP if ($noopalt =~ /^$check$/);
+-			}
+-			# next DEP if grep { $_ eq $noopalt } @removedeps;
+-			# if $noopalt is in keepdeps, same unmodified alt should go both to @l and @l2
+-			if (grep { $_ eq $noopalt } @keepdeps) {
+-				push @l, $alt;
+-				push @l2, $alt;
+-			} else {
+-				my $tmp = $alt; $tmp =~ s/^([^ (]+)/$1-$arch-cross/; push @l, $tmp;
+-				push @l2, "$noopalt-$arch-dcv1";
+-			}
+-		}
+-		my $l = join(" | ", @l);
+-		my $l2 = join(" | ", @l2);
+-		push @list, $l if ($l);
+-		push @list, $l2 if ($l2 && (($field eq "depends") || ($field eq "provides")) && ($l ne $l2));
+-	}
+-	push @list, "$package-$arch-dcv1" if ($field eq "provides");
++	my $str = shift;
++
++	my @list = map( rewrite_alternatives($_), split( /\s*,\s*/, $str));
++	# remove empty elements
++	@list = map { $_ ? ( $_ ) : () } @list;
+ 	return join(", ", @list );
++}
++
++sub rewrite_alternatives {
++	my $str = shift;
++
++	my @list = map( rewrite_item($_), split( /\s*\|\s*/, $str ));
++	# if any of the alternatives became empty (because of @removedeps),
++	# the complete dependency should be removed
++	@list = ();
++	for my $item (split( /\s*\|\s*/, $str )) {
++		$item = rewrite_item($item);
++		return () if not $item;
++		push @list, $item
++	}
++	return join( " | ", @list );
++}
++
++sub rewrite_item {
++	my $str = shift;
++
++	$str =~ /^([^ (]+)/;
++	return () if grep { $_ eq $1 } @removedeps;
++	return $str if grep { $_ eq $1 } @keepdeps;
++	$str =~ s/^([^ (]+)/$1-$arch-cross/;
++	return $str;
+ }
+ 
+ sub check_exclude

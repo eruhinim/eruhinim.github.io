@@ -1,0 +1,101 @@
+
+enable error + add some traces
+tested on: kernel 3.14
+
+diff -p -r -u5 broadcom-sta_6.30.223.248-2_deb/src/wl/sys/wl_dbg.h broadcom-sta_6.30.223.248-2_fix/src/wl/sys/wl_dbg.h
+--- broadcom-sta_6.30.223.248-2_deb/src/wl/sys/wl_dbg.h
++++ broadcom-sta_6.30.223.248-2_fix/src/wl/sys/wl_dbg.h
+@@ -53,14 +53,16 @@ extern int osl_printf(const char *fmt, .
+ 
+ #else	
+ 
+ #define WL_NONE(args)
+ 
++#define FORCE_TRACE_LEVEL(fmt, ...) do { printk(KERN_ERR fmt, ## __VA_ARGS__); } while (0) /* ## is GCC specific syntax to remove comma when single arg */
++
+ #ifdef BCMDBG_ERR
+ #define	WL_ERROR(args)		WL_PRINT(args)
+ #else
+-#define	WL_ERROR(args)
++#define	WL_ERROR(args)		FORCE_TRACE_LEVEL args
+ #endif 
+ #define	WL_TRACE(args)
+ #define WL_APSTA_UPDN(args)
+ #define WL_APSTA_RX(args)
+ #define WL_WSEC(args)
+diff -p -r -u5 broadcom-sta_6.30.223.248-2_deb/src/wl/sys/wl_linux.c broadcom-sta_6.30.223.248-2_fix/src/wl/sys/wl_linux.c
+--- broadcom-sta_6.30.223.248-2_deb/src/wl/sys/wl_linux.c
++++ broadcom-sta_6.30.223.248-2_fix/src/wl/sys/wl_linux.c
+@@ -1270,10 +1270,11 @@ wl_free_if(wl_info_t *wl, wl_if_t *wlif)
+ #if (LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 24))
+ 		MFREE(wl->osh, wlif->dev->priv, sizeof(priv_link_t));
+ 		MFREE(wl->osh, wlif->dev, sizeof(struct net_device));
+ #else
+ 		free_netdev(wlif->dev);
++		wlif->dev = NULL;
+ #endif 
+ 	}
+ 
+ 	MFREE(wl->osh, wlif, sizeof(wl_if_t));
+ }
+@@ -2454,12 +2455,14 @@ wl_monitor(wl_info_t *wl, wl_rxsts_t *rx
+ 
+ 	if (wl->monitor_type == 1) {
+ 		p80211msg_t *phdr;
+ 
+ 		len = sizeof(p80211msg_t) + oskb->len - D11_PHY_HDR_LEN;
+-		if ((skb = dev_alloc_skb(len)) == NULL)
++		if ((skb = dev_alloc_skb(len)) == NULL) {
++			WL_ERROR(("in %s:%d [%s()] dev_alloc_skb() failure!", __FILE__, __LINE__, __FUNCTION__));
+ 			return;
++		}
+ 
+ 		skb_put(skb, len);
+ 		phdr = (p80211msg_t*)skb->data;
+ 
+ 		phdr->msgcode = WL_MON_FRAME;
+@@ -2534,12 +2537,14 @@ wl_monitor(wl_info_t *wl, wl_rxsts_t *rx
+ 			rtap_len = sizeof(wl_radiotap_legacy_t);
+ 		else
+ 			rtap_len = sizeof(wl_radiotap_ht_brcm_2_t);
+ 
+ 		len = rtap_len + (oskb->len - D11_PHY_HDR_LEN);
+-		if ((skb = dev_alloc_skb(len)) == NULL)
++		if ((skb = dev_alloc_skb(len)) == NULL) {
++			WL_ERROR(("in %s:%d [%s()] dev_alloc_skb() failure!", __FILE__, __LINE__, __FUNCTION__));
+ 			return;
++		}
+ 
+ 		skb_put(skb, len);
+ 
+ 		if (CHSPEC_IS2G(rxsts->chanspec)) {
+ 			channel_flags = IEEE80211_CHAN_2GHZ | IEEE80211_CHAN_DYN;
+@@ -2663,12 +2668,14 @@ wl_monitor(wl_info_t *wl, wl_rxsts_t *rx
+ 				amsdu_p = amsdu_p->next;
+ 			}
+ 			len += amsdu_len;
+ 		}
+ 
+-		if ((skb = dev_alloc_skb(len)) == NULL)
++		if ((skb = dev_alloc_skb(len)) == NULL) {
++			WL_ERROR(("in %s:%d [%s()] dev_alloc_skb() failure!", __FILE__, __LINE__, __FUNCTION__));
+ 			return;
++		}
+ 
+ 		skb_put(skb, len);
+ 
+ 		if (CHSPEC_IS2G(rxsts->chanspec)) {
+ 			channel_flags = IEEE80211_CHAN_2GHZ | IEEE80211_CHAN_DYN;
+@@ -2989,11 +2996,11 @@ _wl_del_monitor(wl_task_t *task)
+ 	MFREE(wl->osh, task, sizeof(wl_task_t));
+ 	atomic_dec(&wl->callbacks);
+ }
+ 
+ void
+-wl_set_monitor(wl_info_t *wl, int val)
++wl_set_monitor(wl_info_t *wl, int val) /* public => is called by wlc_hybrid.o_shipped */
+ {
+ 	const char *devname;
+ 	wl_if_t *wlif;
+ 
+ 	WL_TRACE(("wl%d: wl_set_monitor: val %d\n", wl->pub->unit, val));

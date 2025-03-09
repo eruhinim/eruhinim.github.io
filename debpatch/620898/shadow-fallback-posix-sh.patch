@@ -1,0 +1,80 @@
+diff --git a/configure.in b/configure.in
+index 4021479..585bdb1 100644
+--- a/configure.in
++++ b/configure.in
+@@ -574,7 +574,7 @@ if test "$enable_utmpx" = "yes"; then
+ 	          [Define if utmpx should be used])
+ fi
+ 
+-AC_DEFINE_UNQUOTED(SHELL, ["$SHELL"], [The default shell.])
++AC_DEFINE_UNQUOTED(SHELL, ["/bin/sh"], [The default shell.])
+ 
+ AM_GNU_GETTEXT_VERSION(0.16)
+ AM_GNU_GETTEXT([external], [need-ngettext])
+diff --git a/libmisc/setupenv.c b/libmisc/setupenv.c
+index 666b1c7..601430f 100644
+--- a/libmisc/setupenv.c
++++ b/libmisc/setupenv.c
+@@ -241,7 +241,8 @@ void setup_env (struct passwd *info)
+ 	 * Create the SHELL environmental variable and export it.
+ 	 */
+ 
+-	if ((NULL == info->pw_shell) || ('\0' == *info->pw_shell)) {
++	if ((NULL == info->pw_shell) || ('\0' == *info->pw_shell) ||
++	    access (info->pw_shell, R_OK|X_OK) != 0) {
+ 		static char temp_pw_shell[] = SHELL;
+ 
+ 		info->pw_shell = temp_pw_shell;
+diff --git a/libmisc/shell.c b/libmisc/shell.c
+index d815f2d..5634580 100644
+--- a/libmisc/shell.c
++++ b/libmisc/shell.c
+@@ -53,6 +53,7 @@ extern size_t newenvc;
+ 
+ int shell (const char *file, /*@null@*/const char *arg, char *const envp[])
+ {
++	const char *fallback_arg;
+ 	char arg0[1024];
+ 	int err;
+ 
+@@ -71,6 +72,10 @@ int shell (const char *file, /*@null@*/const char *arg, char *const envp[])
+ 		(void) snprintf (arg0, sizeof arg0, "-%s", Basename ((char *) file));
+ 		arg0[sizeof arg0 - 1] = '\0';
+ 		arg = arg0;
++
++		fallback_arg = "-sh";
++	} else {
++		fallback_arg = arg;
+ 	}
+ 
+ 	/*
+@@ -81,7 +86,14 @@ int shell (const char *file, /*@null@*/const char *arg, char *const envp[])
+ 	(void) execle (file, arg, (char *) 0, envp);
+ 	err = errno;
+ 
+-	if (access (file, R_OK|X_OK) == 0) {
++	if (err == ENOENT) {
++		/*
++		 * The requested shell does not seem to be present,
++		 * fallback to a POSIX shell.
++		 */
++		(void) execle (SHELL, fallback_arg, (char *)0, envp);
++		err = errno;
++	} else if (access (file, R_OK|X_OK) == 0) {
+ 		/*
+ 		 * Assume this is a shell script (with no shebang).
+ 		 * Interpret it with /bin/sh
+diff --git a/src/su.c b/src/su.c
+index f3ff666..12bd03b 100644
+--- a/src/su.c
++++ b/src/su.c
+@@ -759,7 +759,8 @@ int main (int argc, char **argv)
+ 	/*
+ 	 * Set the default shell.
+ 	 */
+-	if ((NULL == shellstr) || ('\0' == shellstr[0])) {
++	if ((NULL == shellstr) || ('\0' == shellstr[0]) ||
++	    access (pwent.pw_shell, R_OK|X_OK) != 0) {
+ 		shellstr = SHELL;
+ 	}
+ 

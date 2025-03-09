@@ -1,0 +1,55 @@
+>From bae0c643978a67f5368b6b0e5638b97687ee443a Mon Sep 17 00:00:00 2001
+From: Milan Crha <mcrha@redhat.com>
+Date: Mon, 9 Feb 2015 12:58:09 +0100
+Subject: Make camel_stream_write() try to write all bytes at once
+
+The default implementation of CamelStream::write() used
+g_output_stream_write() method, which could write only a partial
+content, returning how many bytes had been actually written. That's
+fine, but not each caller counted with this, thus for example
+a CamelStreamFilter::write() failed when only partial buffer had
+been written, which could cause a silent failure on message send.
+Easier than taking care of the not-whole-buffer-written state
+at each place of the usage is to use g_output_stream_write_all()
+function instead, which fails only on errors.
+
+This had been reported downstream as:
+https://bugzilla.redhat.com/show_bug.cgi?id=1186815
+
+diff --git a/camel/camel-stream.c b/camel/camel-stream.c
+index a4270f5..980c70b 100644
+--- a/camel/camel-stream.c
++++ b/camel/camel-stream.c
+@@ -147,20 +147,25 @@ stream_write (CamelStream *stream,
+               GError **error)
+ {
+ 	GIOStream *base_stream;
+-	gssize n_bytes_written = (gssize) n;
++	gssize n_bytes_written = -1;
+ 
+ 	base_stream = camel_stream_ref_base_stream (stream);
+ 
+ 	if (base_stream != NULL) {
+ 		GOutputStream *output_stream;
++		gsize n_written = 0;
+ 
+ 		output_stream = g_io_stream_get_output_stream (base_stream);
+ 		stream->eos = FALSE;
+ 
+-		n_bytes_written = g_output_stream_write (
+-			output_stream, buffer, n, cancellable, error);
++		if (g_output_stream_write_all (output_stream, buffer, n, &n_written, cancellable, error))
++			n_bytes_written = (gssize) n_written;
++		else
++			n_bytes_written = -1;
+ 
+ 		g_object_unref (base_stream);
++	} else {
++		g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED, _("Cannot write with no base stream"));
+ 	}
+ 
+ 	return n_bytes_written;
+-- 
+cgit v0.10.2
+
+

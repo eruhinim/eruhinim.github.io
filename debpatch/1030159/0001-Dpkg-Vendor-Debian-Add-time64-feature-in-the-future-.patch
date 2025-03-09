@@ -1,0 +1,105 @@
+From 78fd2b85741a4a8adc6c654635032cb38a50fab8 Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Tue, 31 Jan 2023 22:07:51 +0100
+Subject: [PATCH] Dpkg::Vendor::Debian: Add time64 feature in the future area
+
+This feature (disabled by default) enables 64-bit time on 32-bit
+architectures where their ABI does not define it by default. This
+feature automatically enables the lfs one as it is required by it.
+
+FIXME: Check for recent 32-bit arches with 64-bit time_t, which might
+need to be ignored?
+
+Closes: #1030159
+Based-on-patch-by: Helge Deller <deller@gmx.de>
+---
+ man/dpkg-buildflags.pod       |  7 +++++++
+ scripts/Dpkg/Vendor/Debian.pm | 19 ++++++++++++++++---
+ scripts/t/Dpkg_BuildFlags.t   |  1 +
+ 3 files changed, 24 insertions(+), 3 deletions(-)
+
+diff --git a/man/dpkg-buildflags.pod b/man/dpkg-buildflags.pod
+index 7ec5db192..5f672f2b2 100644
+--- a/man/dpkg-buildflags.pod
++++ b/man/dpkg-buildflags.pod
+@@ -341,6 +341,13 @@ This setting (disabled by default) enables Large File Support on 32-bit
+ architectures where their ABI does not include LFS by default, by adding
+ B<-D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64> to B<CPPFLAGS>.
+ 
++=item B<time64>
++
++This setting (since dpkg 1.22.0; disabled by default) enables 64-bit time_t
++support on 32-bit architectures where their ABI does not include it by
++default, by adding B<-D_TIME_BITS=64> to B<CPPFLAGS>.
++This setting automatically enables the B<lfs> feature as it requires it.
++
+ =back
+ 
+ =head2 qa
+diff --git a/scripts/Dpkg/Vendor/Debian.pm b/scripts/Dpkg/Vendor/Debian.pm
+index 06aa49ad6..7b4db3362 100644
+--- a/scripts/Dpkg/Vendor/Debian.pm
++++ b/scripts/Dpkg/Vendor/Debian.pm
+@@ -105,6 +105,7 @@ sub set_build_features {
+     my %use_feature = (
+         future => {
+             lfs => 0,
++            time64 => 0,
+         },
+         qa => {
+             bug => 0,
+@@ -162,6 +163,8 @@ sub set_build_features {
+ 
+     my $arch = Dpkg::Arch::get_host_arch();
+     my ($abi, $libc, $os, $cpu) = Dpkg::Arch::debarch_to_debtuple($arch);
++    my ($abi_bits, $abi_endian) = Dpkg::Arch::debarch_to_abiattrs($arch);
++    my $cpu_bits = Dpkg::Arch::debarch_to_cpubits($arch);
+ 
+     unless (defined $abi and defined $libc and defined $os and defined $cpu) {
+         warning(g_("unknown host architecture '%s'"), $arch);
+@@ -170,10 +173,16 @@ sub set_build_features {
+ 
+     ## Area: future
+ 
+-    if ($use_feature{future}{lfs}) {
+-        my ($abi_bits, $abi_endian) = Dpkg::Arch::debarch_to_abiattrs($arch);
+-        my $cpu_bits = Dpkg::Arch::debarch_to_cpubits($arch);
++    if ($use_feature{future}{time64}) {
++        if ($abi_bits != 32 or $cpu_bits != 32) {
++            $use_feature{future}{time64} = 0;
++        } else {
++            # On glibc 64-bit time_t support requires LFS.
++            $use_feature{future}{lfs} = 1;
++        }
++    }
+ 
++    if ($use_feature{future}{lfs}) {
+         if ($abi_bits != 32 or $cpu_bits != 32) {
+             $use_feature{future}{lfs} = 0;
+         }
+@@ -337,6 +346,10 @@ sub _add_build_flags {
+                        '-D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64');
+     }
+ 
++    if ($flags->use_feature('future', 'time64')) {
++        $flags->append('CPPFLAGS', '-D_TIME_BITS=64');
++    }
++
+     ## Area: qa
+ 
+     # Warnings that detect actual bugs.
+diff --git a/scripts/t/Dpkg_BuildFlags.t b/scripts/t/Dpkg_BuildFlags.t
+index c6e0ef8ff..1697d2787 100644
+--- a/scripts/t/Dpkg_BuildFlags.t
++++ b/scripts/t/Dpkg_BuildFlags.t
+@@ -87,6 +87,7 @@ ok($bf->is_maintainer_modified('DPKGFLAGS'), 'prepend marked flag as maint modif
+ my %known_features = (
+     future => [ qw(
+         lfs
++        time64
+     ) ],
+     hardening => [ qw(
+         bindnow
+-- 
+2.39.1
+

@@ -1,0 +1,334 @@
+From 11015f4ec1f4133a72d5774fc3ebba1b1cfebe71 Mon Sep 17 00:00:00 2001
+From: Josh Triplett <josh@freedesktop.org>
+Date: Fri, 28 Sep 2007 22:24:13 -0700
+Subject: [PATCH] Add option completion-version-sort to have readline version-sort completions
+
+---
+ bind.c          |    8 ++++
+ complete.c      |   12 ++++-
+ config.h.in     |    6 +++
+ configure.in    |    5 ++-
+ doc/rluser.texi |    9 ++++
+ rldefs.h        |    6 +++
+ rlprivate.h     |    5 ++
+ util.c          |  112 ++++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 8 files changed, 158 insertions(+), 5 deletions(-)
+
+diff --git a/bind.c b/bind.c
+index 08c906b..5f41d7c 100644
+--- a/bind.c
++++ b/bind.c
+@@ -1415,6 +1415,7 @@ static struct {
+   { "blink-matching-paren",	&rl_blink_matching_paren,	V_SPECIAL },
+   { "byte-oriented",		&rl_byte_oriented,		0 },
+   { "completion-ignore-case",	&_rl_completion_case_fold,	0 },
++  { "completion-version-sort",	&_rl_completion_version_sort,	V_SPECIAL },
+   { "convert-meta",		&_rl_convert_meta_chars_to_ascii, 0 },
+   { "disable-completion",	&rl_inhibit_completion,		0 },
+   { "enable-keypad",		&_rl_enable_keypad,		0 },
+@@ -1471,6 +1472,13 @@ hack_special_boolean_var (i)
+       else
+ 	_rl_bell_preference = AUDIBLE_BELL;
+     }
++  else if (_rl_stricmp (name, "completion-version-sort") == 0)
++    {
++      if (_rl_completion_version_sort)
++        _rl_completion_compare = _rl_qsort_string_vers_compare;
++      else
++        _rl_completion_compare = _rl_qsort_string_compare;
++    }
+ }
+ 
+ typedef int _rl_sv_func_t PARAMS((const char *));
+diff --git a/complete.c b/complete.c
+index 73f834a..36aa5b5 100644
+--- a/complete.c
++++ b/complete.c
+@@ -160,6 +160,12 @@ int _rl_completion_case_fold = 1;
+ int _rl_completion_case_fold;
+ #endif
+ 
++/* If non-zero, sort completions using a version sort. */
++int _rl_completion_version_sort = 0;
++
++/* Function to compare two completions, for use in qsort. */
++_rl_completion_compare_func_t *_rl_completion_compare = _rl_qsort_string_compare;
++
+ /* If non-zero, don't match hidden files (filenames beginning with a `.' on
+    Unix) when doing filename completion. */
+ int _rl_match_hidden_files = 1;
+@@ -993,7 +999,7 @@ remove_duplicate_matches (matches)
+   /* Sort the array without matches[0], since we need it to
+      stay in place no matter what. */
+   if (i)
+-    qsort (matches+1, i-1, sizeof (char *), (QSFUNC *)_rl_qsort_string_compare);
++    qsort (matches+1, i-1, sizeof (char *), (QSFUNC *)_rl_completion_compare);
+ 
+   /* Remember the lowest common denominator for it may be unique. */
+   lowest_common = savestring (matches[0]);
+@@ -1160,7 +1166,7 @@ compute_lcd_of_matches (match_list, matches, text)
+ 	    }
+ 
+ 	  /* sort the list to get consistent answers. */
+-	  qsort (match_list+1, matches, sizeof(char *), (QSFUNC *)_rl_qsort_string_compare);
++	  qsort (match_list+1, matches, sizeof(char *), (QSFUNC *)_rl_completion_compare);
+ 
+ 	  si = strlen (text);
+ 	  if (si <= low)
+@@ -1279,7 +1285,7 @@ rl_display_match_list (matches, len, max)
+ 
+   /* Sort the items if they are not already sorted. */
+   if (rl_ignore_completion_duplicates == 0)
+-    qsort (matches + 1, len, sizeof (char *), (QSFUNC *)_rl_qsort_string_compare);
++    qsort (matches + 1, len, sizeof (char *), (QSFUNC *)_rl_completion_compare);
+ 
+   rl_crlf ();
+ 
+diff --git a/config.h.in b/config.h.in
+index 03178a4..868c9fe 100644
+--- a/config.h.in
++++ b/config.h.in
+@@ -26,6 +26,9 @@
+ /* Define if the `S_IS*' macros in <sys/stat.h> do not work properly.  */
+ #undef STAT_MACROS_BROKEN
+ 
++/* Define to get additional function declarations in header files. */
++#undef _GNU_SOURCE
++
+ /* Define if you have the fcntl function. */
+ #undef HAVE_FCNTL
+ 
+@@ -94,6 +97,9 @@
+ /* Define if you have the strpbrk function.  */
+ #undef HAVE_STRPBRK
+ 
++/* Define if you have the strverscmp function.  */
++#undef HAVE_STRVERSCMP
++
+ /* Define if you have the tcgetattr function.  */
+ #undef HAVE_TCGETATTR
+ 
+diff --git a/configure.in b/configure.in
+index 868773b..6c3cb22 100644
+--- a/configure.in
++++ b/configure.in
+@@ -139,9 +139,12 @@ AC_HEADER_STDC
+ AC_HEADER_STAT
+ AC_HEADER_DIRENT
+ 
++dnl Make sure we have functions such as strverscmp if available
++AC_DEFINE(_GNU_SOURCE)
++
+ AC_CHECK_FUNCS(fcntl kill lstat)
+ AC_CHECK_FUNCS(memmove putenv select setenv setlocale \
+-		strcasecmp strpbrk tcgetattr vsnprintf)
++		strcasecmp strpbrk strverscmp tcgetattr vsnprintf)
+ AC_CHECK_FUNCS(isascii isxdigit)
+ AC_CHECK_FUNCS(getpwent getpwnam getpwuid)
+ 
+diff --git a/doc/rluser.texi b/doc/rluser.texi
+index 5c6467a..a632821 100644
+--- a/doc/rluser.texi
++++ b/doc/rluser.texi
+@@ -438,6 +438,15 @@ This variable must be set to an integer value greater than or equal to 0.
+ A negative value means Readline should never ask.
+ The default limit is @code{100}.
+ 
++@item completion-version-sort
++@vindex completion-version-sort
++If set to @samp{on}, Readline sorts completions using a version sort, which
++orders items that differ in digit characters by the values starting at those
++digits rather than by the first differing digit characters.  For example, this
++will sort the completions @samp{file1}, @samp{file5}, and @samp{file10} in that
++order rather than putting @samp{file10} immediately after @samp{file1}.
++The default value is @samp{off}.
++
+ @item convert-meta
+ @vindex convert-meta
+ If set to @samp{on}, Readline will convert characters with the
+diff --git a/rldefs.h b/rldefs.h
+index 0f6c874..b31e330 100644
+--- a/rldefs.h
++++ b/rldefs.h
+@@ -87,6 +87,12 @@ extern int _rl_strnicmp PARAMS((char *, char *, int));
+ extern char *_rl_strpbrk PARAMS((const char *, const char *));
+ #endif
+ 
++#if defined (HAVE_STRVERSCMP)
++#  define _rl_strverscmp strverscmp
++#else
++extern int _rl_strverscmp PARAMS((const char *, const char *));
++#endif
++
+ #if !defined (emacs_mode)
+ #  define no_mode -1
+ #  define vi_mode 0
+diff --git a/rlprivate.h b/rlprivate.h
+index 64aa7bd..dbb7cde 100644
+--- a/rlprivate.h
++++ b/rlprivate.h
+@@ -117,6 +117,8 @@ typedef struct __rl_callback_generic_arg
+ 
+ typedef int _rl_callback_func_t PARAMS((_rl_callback_generic_arg *));
+ 
++typedef int _rl_completion_compare_func_t PARAMS((char **, char **));
++
+ /*************************************************************************
+  *									 *
+  * Global functions undocumented in texinfo manual and not in readline.h *
+@@ -317,6 +319,7 @@ extern UNDO_LIST *_rl_copy_undo_list PARAMS((UNDO_LIST *));
+ extern int _rl_abort_internal PARAMS((void));
+ extern char *_rl_strindex PARAMS((const char *, const char *));
+ extern int _rl_qsort_string_compare PARAMS((char **, char **));
++extern int _rl_qsort_string_vers_compare PARAMS((char **, char **));
+ extern int (_rl_uppercase_p) PARAMS((int));
+ extern int (_rl_lowercase_p) PARAMS((int));
+ extern int (_rl_pure_alphabetic) PARAMS((int));
+@@ -351,6 +354,8 @@ extern int _rl_complete_mark_directories;
+ extern int _rl_complete_mark_symlink_dirs;
+ extern int _rl_print_completions_horizontally;
+ extern int _rl_completion_case_fold;
++extern int _rl_completion_version_sort;
++extern _rl_completion_compare_func_t *_rl_completion_compare;
+ extern int _rl_match_hidden_files;
+ extern int _rl_page_completions;
+ 
+diff --git a/util.c b/util.c
+index e44ef64..166f675 100644
+--- a/util.c
++++ b/util.c
+@@ -1,6 +1,6 @@
+ /* util.c -- readline utility functions */
+ 
+-/* Copyright (C) 1987-2005 Free Software Foundation, Inc.
++/* Copyright (C) 1987-2006 Free Software Foundation, Inc.
+ 
+    This file is part of the GNU Readline Library, a library for
+    reading lines of text with interactive input and history editing.
+@@ -315,6 +315,108 @@ _rl_stricmp (string1, string2)
+ }
+ #endif /* !HAVE_STRCASECMP */
+ 
++#if !defined (HAVE_STRVERSCMP)
++/* strverscmp copied from gnulib implementation by Jean-FranÃ§ois Bignolles.
++   Modified to use VERSCMP_ISDIGIT rather than ISDIGIT, to avoid conflicting
++   with readline's ISDIGIT in chardefs.h.
++*/
++
++/* states: S_N: normal, S_I: comparing integral part, S_F: comparing
++           fractional parts, S_Z: idem but with leading Zeroes only */
++#define S_N    0x0
++#define S_I    0x4
++#define S_F    0x8
++#define S_Z    0xC
++
++/* result_type: CMP: return diff; LEN: compare using len_diff/diff */
++#define CMP    2
++#define LEN    3
++
++
++/* VERSCMP_ISDIGIT differs from isdigit, as follows:
++   - Its arg may be any int or unsigned int; it need not be an unsigned char
++     or EOF.
++   - It's typically faster.
++*/
++#define VERSCMP_ISDIGIT(c) ((unsigned int) (c) - '0' <= 9)
++
++/* Compare S1 and S2 as strings holding indices/version numbers,
++   returning less than, equal to or greater than zero if S1 is less than,
++   equal to or greater than S2 (for more info, see the texinfo doc).
++*/
++
++int
++_rl_strverscmp (s1, s2)
++  const char *s1, *s2;
++{
++  const unsigned char *p1 = (const unsigned char *) s1;
++  const unsigned char *p2 = (const unsigned char *) s2;
++  unsigned char c1, c2;
++  int state;
++  int diff;
++
++  /* Symbol(s)    0       [1-9]   others  (padding)
++     Transition   (10) 0  (01) d  (00) x  (11) -   */
++  static const unsigned int next_state[] =
++  {
++      /* state    x    d    0    - */
++      /* S_N */  S_N, S_I, S_Z, S_N,
++      /* S_I */  S_N, S_I, S_I, S_I,
++      /* S_F */  S_N, S_F, S_F, S_F,
++      /* S_Z */  S_N, S_F, S_Z, S_Z
++  };
++
++  static const int result_type[] =
++  {
++      /* state   x/x  x/d  x/0  x/-  d/x  d/d  d/0  d/-
++                 0/x  0/d  0/0  0/-  -/x  -/d  -/0  -/- */
++
++      /* S_N */  CMP, CMP, CMP, CMP, CMP, LEN, CMP, CMP,
++                 CMP, CMP, CMP, CMP, CMP, CMP, CMP, CMP,
++      /* S_I */  CMP, -1,  -1,  CMP,  1,  LEN, LEN, CMP,
++                  1,  LEN, LEN, CMP, CMP, CMP, CMP, CMP,
++      /* S_F */  CMP, CMP, CMP, CMP, CMP, LEN, CMP, CMP,
++                 CMP, CMP, CMP, CMP, CMP, CMP, CMP, CMP,
++      /* S_Z */  CMP,  1,   1,  CMP, -1,  CMP, CMP, CMP,
++                 -1,  CMP, CMP, CMP
++  };
++
++  if (p1 == p2)
++    return 0;
++
++  c1 = *p1++;
++  c2 = *p2++;
++  /* Hint: '0' is a digit too.  */
++  state = S_N | ((c1 == '0') + (VERSCMP_ISDIGIT (c1) != 0));
++
++  while ((diff = c1 - c2) == 0 && c1 != '\0')
++    {
++      state = next_state[state];
++      c1 = *p1++;
++      c2 = *p2++;
++      state |= (c1 == '0') + (VERSCMP_ISDIGIT (c1) != 0);
++    }
++
++  state = result_type[state << 2 | ((c2 == '0') + (VERSCMP_ISDIGIT (c2) != 0))];
++
++  switch (state)
++    {
++    case CMP:
++      return diff;
++
++    case LEN:
++      while (VERSCMP_ISDIGIT (*p1++))
++	if (!VERSCMP_ISDIGIT (*p2++))
++	  return 1;
++
++      return VERSCMP_ISDIGIT (*p2) ? -1 : diff;
++
++    default:
++      return state;
++    }
++}
++#endif /* !HAVE_STRVERSCMP */
++
+ /* Stupid comparison routine for qsort () ing strings. */
+ int
+ _rl_qsort_string_compare (s1, s2)
+@@ -333,6 +435,14 @@ _rl_qsort_string_compare (s1, s2)
+ #endif
+ }
+ 
++/* Comparison routine for qsort () ing strings by strverscmp. */
++int
++_rl_qsort_string_vers_compare (s1, s2)
++  char **s1, **s2;
++{
++  return _rl_strverscmp (*s1, *s2);
++}
++
+ /* Function equivalents for the macros defined in chardefs.h. */
+ #define FUNCTION_FOR_MACRO(f)	int (f) (c) int c; { return f (c); }
+ 
+-- 
+1.5.3.2
+

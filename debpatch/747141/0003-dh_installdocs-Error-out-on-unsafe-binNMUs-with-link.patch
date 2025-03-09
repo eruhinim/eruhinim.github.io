@@ -1,0 +1,111 @@
+From 43ff757e0a64eeded33447efbd214a098c8fab64 Mon Sep 17 00:00:00 2001
+From: Niels Thykier <niels@thykier.net>
+Date: Sun, 16 Nov 2014 21:27:00 +0100
+Subject: [PATCH 3/3] dh_installdocs: Error out on unsafe binNMUs with
+ --link-doc
+
+Detect during a binNMU when an call to dh_installdocs (with
+--link-doc) is unsafe by also looking at packages that dh_installdocs
+/would/ process during an "full" build.
+
+Signed-off-by: Niels Thykier <niels@thykier.net>
+---
+ Debian/Debhelper/Dh_Getopt.pm | 17 ++++++++++++++++-
+ dh_installdocs                | 20 +++++++++++++++++---
+ 2 files changed, 33 insertions(+), 4 deletions(-)
+
+diff --git a/Debian/Debhelper/Dh_Getopt.pm b/Debian/Debhelper/Dh_Getopt.pm
+index e4f3e47..3468071 100644
+--- a/Debian/Debhelper/Dh_Getopt.pm
++++ b/Debian/Debhelper/Dh_Getopt.pm
+@@ -182,7 +182,7 @@ sub split_options_string {
+ sub parseopts {
+ 	my %params=@_;
+ 	
+-	my @ARGV_extra;
++	my (@ARGV_extra, %internal_excluded);
+ 
+ 	# DH_INTERNAL_OPTIONS is used to pass additional options from
+ 	# dh through an override target to a command.
+@@ -199,6 +199,7 @@ sub parseopts {
+ 			foreach my $package (getpackages()) {
+ 				if (! grep { $_ eq $package } @{$dh{DOPACKAGES}}) {
+ 					$exclude_package{$package}=1;
++					$internal_excluded{$package}=1;
+ 				}
+ 			}
+ 		}
+@@ -260,6 +261,14 @@ sub parseopts {
+ 				$packages_seen{$package}=1;
+ 				push @package_list, $package;	
+ 			}
++		} elsif ($internal_excluded{$package}) {
++			# Record packages we would have processed if not for
++			# DH_INTERNAL_OPTIONS.
++			# We need this for dh_installdocs to check for broken
++			# binNMUs with --link-doc
++			push @{$dh{_INTERNAL_EXCL_DOPACKAGES}}, $package;
++			# Remove it to avoid duplicates
++			delete $internal_excluded{$package};
+ 		}
+ 	}
+ 	@{$dh{DOPACKAGES}}=@package_list;
+@@ -286,3 +295,9 @@ sub parseopts {
+ }
+ 
+ 1
++
++# Local Variables:
++# indent-tabs-mode: t
++# tab-width: 4
++# cperl-indent-level: 4
++# End:
+diff --git a/dh_installdocs b/dh_installdocs
+index af10898..30899a0 100755
+--- a/dh_installdocs
++++ b/dh_installdocs
+@@ -159,6 +159,7 @@ init(options => {
+ });
+ 
+ my $called_getpackages = 0;
++my $link_doc_arch;
+ 
+ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 	next if is_udeb($package);
+@@ -168,9 +169,22 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 	my $link_doc=($dh{LINK_DOC} && $dh{LINK_DOC} ne $package);
+ 
+ 	if ($link_doc) {
+-		getpackages('both') unless $called_getpackages++;
++		my $has_issue = 0;
++		unless ($called_getpackages++) {
++			# Called for the side-effect of making package_arch work.
++			getpackages('both');
++			$link_doc_arch = package_arch($dh{LINK_DOC});
++			# Check for broken --link-doc during binNMUs.
++			for my $excl_pkg (@{$dh{_INTERNAL_EXCL_DOPACKAGES}}) {
++				if (package_arch($excl_pkg) ne $link_doc_arch) {
++					$has_issue = $excl_pkg;
++					last;
++				}
++			}
++		}
+ 
+-		if (package_arch($package) ne package_arch($dh{LINK_DOC})) {
++		$has_issue = $package if (package_arch($package) ne $link_doc_arch);
++		if ($has_issue) {
+ 			if (compat(9)) {
+ 				my $changelog=pkgfile($package, 'changelog') || 'debian/changelog';
+ 				if (! -e $changelog) {
+@@ -186,7 +200,7 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 					error("Aborting build as this is a binNMU (leading to a broken package)");
+ 				}
+ 			} else {
+-				error("--link-doc not allowed between ${package} and $dh{LINK_DOC} (one is all and the other not)");
++				error("--link-doc not allowed between ${has_issue} and $dh{LINK_DOC} (one is all and the other not)");
+ 			}
+ 		}
+ 		# Make sure that the parent directory exists.
+-- 
+2.1.3
+

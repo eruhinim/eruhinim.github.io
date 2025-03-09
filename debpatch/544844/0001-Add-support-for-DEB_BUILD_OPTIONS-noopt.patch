@@ -1,0 +1,215 @@
+From e1a7a300c677db2a0da9b94c68b61773da213cff Mon Sep 17 00:00:00 2001
+From: Marcelo E. Magallon <marcelo.magallon@gmail.com>
+Date: Wed, 17 Feb 2010 11:29:36 -0600
+Subject: [PATCH] Add support for DEB_BUILD_OPTIONS=noopt
+
+This should only affect packages using dh (without overrides for
+auto_{configure,build}) or in some cases packages directly using
+dh_auto_{configure,build}.  If *no* CFLAGS value is passed, as in
+"dh_auto_configure -- CFLAGS=...", then the appropriate one will be
+generated taking into account the presence (or absence) of "noopt" in
+DEB_BUILD_OPTIONS.
+---
+ Debian/Debhelper/Buildsystem.pm          |   10 ++++++++++
+ Debian/Debhelper/Buildsystem/autoconf.pm |    3 +++
+ Debian/Debhelper/Buildsystem/makefile.pm |   16 ++++++++++++++++
+ Debian/Debhelper/Dh_Buildsystems.pm      |   14 ++++++++++++++
+ debian/changelog                         |   17 +++++++++++++++++
+ t/buildsystems/autoconf/configure        |    1 +
+ t/buildsystems/buildsystem_tests         |    6 +++---
+ 7 files changed, 64 insertions(+), 3 deletions(-)
+
+diff --git a/Debian/Debhelper/Buildsystem.pm b/Debian/Debhelper/Buildsystem.pm
+index 88aefab..ae7a550 100644
+--- a/Debian/Debhelper/Buildsystem.pm
++++ b/Debian/Debhelper/Buildsystem.pm
+@@ -50,6 +50,7 @@ sub DEFAULT_BUILD_DIRECTORY {
+ #                  DEFAULT_BUILD_DIRECTORY directory will be used.
+ # - parallel -     max number of parallel processes to be spawned for building
+ #                  sources (-1 = unlimited; 1 = no parallel)
++# - noopt    -     don't use optimization flags when compiling
+ # Derived class can override the constructor to initialize common object
+ # parameters. Do NOT use constructor to execute commands or otherwise
+ # configure/setup build environment. There is absolutely no guarantee the
+@@ -61,6 +62,7 @@ sub new {
+ 	my $this = bless({ sourcedir => '.',
+ 	                   builddir => undef,
+ 	                   parallel => undef,
++	                   noopt => undef,
+ 	                   cwd => Cwd::getcwd() }, $class);
+ 
+ 	if (exists $opts{sourcedir}) {
+@@ -77,6 +79,9 @@ sub new {
+ 	if (defined $opts{parallel}) {
+ 		$this->{parallel} = $opts{parallel};
+ 	}
++	if (defined $opts{noopt}) {
++		$this->{noopt} = $opts{noopt};
++	}
+ 	return $this;
+ }
+ 
+@@ -263,6 +268,11 @@ sub get_parallel {
+ 	return $this->{parallel};
+ }
+ 
++sub get_noopt {
++	my $this=shift;
++	return $this->{noopt};
++}
++
+ # When given a relative path to the build directory, converts it
+ # to the path that is relative to the source directory. If $path is
+ # not given, returns a path to the build directory that is relative
+diff --git a/Debian/Debhelper/Buildsystem/autoconf.pm b/Debian/Debhelper/Buildsystem/autoconf.pm
+index d7b0bed..3b3d647 100644
+--- a/Debian/Debhelper/Buildsystem/autoconf.pm
++++ b/Debian/Debhelper/Buildsystem/autoconf.pm
+@@ -48,6 +48,9 @@ sub configure {
+ 		push @opts, "--host=" . dpkg_architecture_value("DEB_HOST_GNU_TYPE");
+ 	}
+ 
++	my $cflags = $this->get_cflags(@_);
++	push @opts, $cflags if defined $cflags;
++
+ 	$this->mkdir_builddir();
+ 	eval {
+ 		$this->doit_in_builddir($this->get_source_rel2builddir("configure"), @opts, @_);
+diff --git a/Debian/Debhelper/Buildsystem/makefile.pm b/Debian/Debhelper/Buildsystem/makefile.pm
+index 2c14c15..e44e15d 100644
+--- a/Debian/Debhelper/Buildsystem/makefile.pm
++++ b/Debian/Debhelper/Buildsystem/makefile.pm
+@@ -75,8 +75,24 @@ sub check_auto_buildable {
+ 	        -e $this->get_buildpath("GNUmakefile")) ? 1 : 0;
+ }
+ 
++sub get_cflags {
++	my $this=shift;
++
++	if (grep(/^CFLAGS=/, @_) == 0) {
++		my @cflags = qw(-g -Wall);
++		push @cflags, '-O2' unless $this->get_noopt();
++		return 'CFLAGS=' . join(' ', @cflags);
++	}
++
++	return undef;
++}
++
+ sub build {
+ 	my $this=shift;
++
++	my $cflags = $this->get_cflags(@_);
++	push @_, $cflags if defined $cflags;
++
+ 	$this->do_make(@_);
+ }
+ 
+diff --git a/Debian/Debhelper/Dh_Buildsystems.pm b/Debian/Debhelper/Dh_Buildsystems.pm
+index a14ff03..6c55340 100644
+--- a/Debian/Debhelper/Dh_Buildsystems.pm
++++ b/Debian/Debhelper/Dh_Buildsystems.pm
+@@ -34,6 +34,7 @@ my $opt_sourcedir;
+ my $opt_builddir;
+ my $opt_list;
+ my $opt_parallel;
++my $opt_noopt;
+ 
+ sub create_buildsystem_instance {
+ 	my $system=shift;
+@@ -54,6 +55,9 @@ sub create_buildsystem_instance {
+ 	if (!exists $bsopts{parallel}) {
+ 		$bsopts{parallel} = $opt_parallel;
+ 	}
++	if (!exists $bsopts{noopt}) {
++		$bsopts{noopt} = $opt_noopt;
++	}
+ 	return $module->new(%bsopts);
+ }
+ 
+@@ -159,6 +163,7 @@ sub buildsystems_init {
+ 	$args{options}{$_} = $options{$_} foreach keys(%options);
+ 	Debian::Debhelper::Dh_Lib::init(%args);
+ 	set_parallel($max_parallel);
++	set_noopt();
+ }
+ 
+ sub set_parallel {
+@@ -180,6 +185,15 @@ sub set_parallel {
+ 	}
+ }
+ 
++sub set_noopt {
++	$opt_noopt=0;
++
++	if (exists $ENV{DEB_BUILD_OPTIONS}) {
++		$opt_noopt = grep { $_ eq 'noopt'}
++			    split(/\s+/, $ENV{DEB_BUILD_OPTIONS});
++	}
++}
++
+ sub buildsystems_list {
+ 	my $step=shift;
+ 
+diff --git a/debian/changelog b/debian/changelog
+index 77f1844..e965adf 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,3 +1,20 @@
++debhelper (7.4.14.0.1) unstable; urgency=low
++
++  * Debian/Debhelper/Buildsystem.pm,
++    Debian/Debhelper/Buildsystem/autoconf.pm,
++    Debian/Debhelper/Buildsystem/makefile.pm,
++    Debian/Debhelper/Dh_Buildsystems.pm,
++    t/buildsystems/autoconf/configure,
++    t/buildsystems/buildsystem_tests: Add support for
++    DEB_BUILD_OPTIONS=noopt.  This should only affect packages using dh
++    (without overrides for auto_{configure,build}) or in some cases
++    packages directly using dh_auto_{configure,build}.  If *no* CFLAGS
++    value is passed, as in "dh_auto_configure -- CFLAGS=...", then the
++    appropriate one will be generated taking into account the presence
++    (or absence) of "noopt" in DEB_BUILD_OPTIONS.
++
++ -- Marcelo E. Magallon <mmagallo@debian.org>  Wed, 17 Feb 2010 09:16:10 -0600
++
+ debhelper (7.4.14) unstable; urgency=low
+ 
+   * dh: Disable option bundling to avoid mis-parsing bundled options such
+diff --git a/t/buildsystems/autoconf/configure b/t/buildsystems/autoconf/configure
+index adea14e..627b8c2 100755
+--- a/t/buildsystems/autoconf/configure
++++ b/t/buildsystems/autoconf/configure
+@@ -16,6 +16,7 @@ my @OPTIONS=qw(
+    ^--libexecdir=\$\{prefix\}/lib/.*$
+    ^--disable-maintainer-mode$
+    ^--disable-dependency-tracking$
++   ^CFLAGS=-g\s-Wall(?:\s-O2)?$
+ );
+ 
+ # Verify if all command line arguments were passed
+diff --git a/t/buildsystems/buildsystem_tests b/t/buildsystems/buildsystem_tests
+index 15c902a..4d396c9 100755
+--- a/t/buildsystems/buildsystem_tests
++++ b/t/buildsystems/buildsystem_tests
+@@ -423,15 +423,15 @@ $tmp = Cwd::getcwd();
+ # enabled if run under dpkg-buildpackage -jX) to make output deterministic.
+ is_deeply( process_stdout("$^X -- - --builddirectory='autoconf/bld dir' --sourcedirectory autoconf --max-parallel=1",
+                           get_load_bs_source(undef, "configure")),
+-    [ 'NAME=autoconf', 'builddir=autoconf/bld dir', "cwd=$tmp",  'makecmd=make', 'parallel=1', 'sourcedir=autoconf' ],
++    [ 'NAME=autoconf', 'builddir=autoconf/bld dir', "cwd=$tmp", 'makecmd=make', 'noopt=0', 'parallel=1', 'sourcedir=autoconf' ],
+     "autoconf autoselection and sourcedir/builddir" );
+ 
+ is_deeply( process_stdout("$^X -- - -Sautoconf -D autoconf --max-parallel=1", get_load_bs_source("autoconf", "build")),
+-    [ 'NAME=autoconf', 'builddir=undef', "cwd=$tmp", 'makecmd=make', 'parallel=1', 'sourcedir=autoconf' ],
++    [ 'NAME=autoconf', 'builddir=undef', "cwd=$tmp", 'makecmd=make', 'noopt=0', 'parallel=1', 'sourcedir=autoconf' ],
+     "forced autoconf and sourcedir" );
+ 
+ is_deeply( process_stdout("$^X -- - -B -Sautoconf --max-parallel=1", get_load_bs_source("autoconf", "build")),
+-    [ 'NAME=autoconf', "builddir=$default_builddir", "cwd=$tmp", 'makecmd=make', 'parallel=1', 'sourcedir=.' ],
++    [ 'NAME=autoconf', "builddir=$default_builddir", "cwd=$tmp", 'makecmd=make', 'noopt=0', 'parallel=1', 'sourcedir=.' ],
+     "forced autoconf and default build directory" );
+ 
+ # Build the autoconf test package
+-- 
+1.6.6.2
+

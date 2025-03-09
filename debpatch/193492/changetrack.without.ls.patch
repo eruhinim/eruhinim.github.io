@@ -1,0 +1,139 @@
+--- changetrack.pl	2002-07-05 22:09:34.000000000 +0200
++++ changetrack.pl.without.ls	2003-06-14 22:41:13.000000000 +0200
+@@ -96,29 +96,12 @@
+ 
+ open(CONFIG, "$configfile") or die "Exiting: can't open $configfile:$!\n";
+ 
+-# translate 'ls -l' to octal
+-sub getoctalbits {
+-    my ($out, $in, $one, $num, @tmp);
+-    $out = "";
+-    $in = $_[0];
+-    $in = substr($in,1,9);
+-    @tmp = (substr($in,0,3),substr($in,3,3),substr($in,6,3));
+-    foreach $one (@tmp) {
+-	$num = 0;
+-	if(substr($one,0,1) ne "-") {$num += 4;}
+-	if(substr($one,1,1) ne "-") {$num += 2;}
+-	if(substr($one,2,1) ne "-") {$num += 1;}
+-	$out = $out . $num;
+-    }
+-    return $out;
+-}
+-
+ if(!$opt_q) {print "Using $configfile, writing to $historypath\n";};
+ my $emailaddresses = "";
+ my @emails;
+ my ($compfile, $filemode, $fileuid, $filegid);
+ my ($logfile, $statfile, $origfile, $outfile, $edfile, $yestfile);
+-my ($oldfilebits, $oldfileuid, $oldfilegid, $statschanged, $newnums);
++my ($oldfilemode, $oldfileuid, $oldfilegid, $statschanged );
+ my ($oldusername, $username, $oldgroupname, $groupname, $diff);
+ my %emessages;
+ 
+@@ -153,35 +136,33 @@
+ 	$filename = $homedir . $filename;
+     }
+ 		
+-    open(LS,"ls -l -d $filename |");              # match wildcards like 'ls'
++    # find non-backup files matching the filename
++    my @files = glob $filename;
+     my $anyfile = 0;                              # flag in case we find nothing
+-    while(<LS>) {                                 # may match several (wildcards)
++    foreach my $realfile ( @files ) {
+ 	my @diff = ();
+ 	my @ed = ();
+-	chomp;
+-	s/  / /g;                                 # remove redundant spaces
+-	my $realfile = (split(/\s+/))[8];         # filename
+-	my $filebits = (split(/\s+/))[0];         # permission bits
++
++	# skip backup files not explicitly included	
+ 	if((substr($realfile,-1,1) eq "~") && ($filename =~ m/\*/)) {
+-	    # it's a backup file not explicitly included	
+ 	    if(!$opt_q)
+ 	    { print "Skipping backup file $realfile\n";}
+ 	    next;	
+ 	}
+ 	
+-	if(substr($filebits,0,1) eq "d")
+-	{
++	# skip directories
++	if(-d $realfile) {
+ 	    if(!$opt_q)
+-	    { print "Skipping directory $realfile\n";}
+-	    
++	    { print "Skipping directory $realfile\n";}	    
+ 	    next;
+ 	}
++
+ 	$anyfile = 1;                             # at least one real file found
+ 	$compfile = $realfile;                    # file for comparison
+ 	
+ 	@temp = stat $realfile;                   # other statistics:
+-	$filemode= $temp[2];
+-	$fileuid = $temp[4];                      # owner,
++	$filemode= $temp[2] & 0777;               # access mode
++	$fileuid = $temp[4];                      # owner
+ 	$filegid = $temp[5];                      # group
+ 	
+ 	$compfile =~ s/\//:/g;                    # replace '/' with ':'
+@@ -197,7 +178,7 @@
+ 	}
+ 	$yestfile = $compfile . ".yesterday";     # stores current data
+ 	
+-	if(!open(OLD,"$yestfile")) {              # can't open yesterday, doesn't exist.
++	if( ! -r "$yestfile" ) {             # can't open yesterday, doesn't exist.
+ 	    @diff = (@diff, "New file $realfile\n");
+ 	    if($opt_e) {
+ 		@ed = (@ed,"# cat this file into ed, eg 'cat $edfile | ed'\n");
+@@ -213,7 +194,7 @@
+ 	    copy($realfile, $yestfile);
+ 	    
+ 	    open (STAT, ">$statfile") or die "Exiting: can't open > $statfile:$!\n";
+-	    print STAT "$filebits\n$fileuid\n$filegid\n";
++	    printf STAT "%o\n%s\n%s\n", $filemode, $fileuid, $filegid;
+ 	    close(STAT);
+ 	    if(!$opt_r) {
+ 		`cp $realfile $compfile`;
+@@ -224,14 +205,11 @@
+ 		`rm $compfile -f`;
+ 	    }
+ 	}
+-	else {
+-	    # only opening it to see if it exists.
+-	    close(OLD);
+-	}
+ 	
+ 	open(STAT, "$statfile") or die "Exiting: can't open < $statfile:$!\n";
+-	$oldfilebits = <STAT>;                    # get the comparison permissions
+-	chomp($oldfilebits);
++	$oldfilemode = <STAT>;                    # get the old permissions
++	chomp($oldfilemode);
++	$oldfilemode = oct $oldfilemode;
+ 	
+ 	$oldfileuid = <STAT>;                     # get the old owner
+ 	chomp($oldfileuid);
+@@ -243,10 +221,9 @@
+ 
+ 	$statschanged = 0;                        # 'nothing changed' flag
+ 
+-	$newnums = getoctalbits($filebits);
+-	if($oldfilebits ne $filebits) {
+-	    @diff = (@diff, "File permissions changed: was $oldfilebits now $filebits\n");
+-	    @ed = (@ed, "!chmod $newnums $outfile\n");
++	if($oldfilemode != $filemode) {
++	    @diff = (@diff, (sprintf "File permissions changed: was %o now %o\n", $oldfilemode, $filemode));
++	    @ed = (@ed, ( sprintf "!chmod %o %s\n", $filemode, $outfile));
+ 	    $statschanged = 1;
+ 	}
+ 
+@@ -268,7 +245,7 @@
+ 
+ 	if($statschanged) {
+ 	    open(STAT, ">$statfile") or die "Exiting: can't open to rewrite $statfile:$!\n";
+-	    print STAT "$filebits\n$fileuid\n$filegid\n";
++	    printf STAT "%o\n%s\n%s\n", $filemode, $fileuid, $filegid;
+ 	    close(STAT);
+ 	}
+ 

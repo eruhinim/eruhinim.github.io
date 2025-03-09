@@ -1,0 +1,98 @@
+From e5bb6c8d765da5622189f322815b9b92b45ad540 Mon Sep 17 00:00:00 2001
+From: Simon McVittie <simon.mcvittie@collabora.co.uk>
+Date: Wed, 26 Oct 2016 18:02:00 +0100
+Subject: [PATCH 2/5] autopkgtest-virt-qemu: add --no-attach-base-image option
+
+btrfs gets *really* confused if you attach multiple copies of the
+same filesystem, because it tracks filesystems by UUID, not by
+device node (part of its built-in RAID-equivalent):
+<https://btrfs.wiki.kernel.org/index.php/Gotchas#Block-level_copies_of_devices>
+
+In my experiments with a btrfs-based virtual machine, /proc/self/mounts
+etc. thought the mounted partitions and subvolumes all came from
+/dev/vdb, even though they clearly weren't because only /dev/vda could
+have been mounted read/write.
+
+For least-astonishment, the default should perhaps be to *not* provide
+the base image as a block device (and tests that need to exercise
+nested virtualization can specifically ask for it), but that would be
+a behaviour change so I haven't done it here.
+
+Signed-off-by: Simon McVittie <simon.mcvittie@collabora.co.uk>
+---
+ virt/autopkgtest-virt-qemu   |  9 +++++++++
+ virt/autopkgtest-virt-qemu.1 | 17 ++++++++++++++++-
+ 2 files changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/virt/autopkgtest-virt-qemu b/virt/autopkgtest-virt-qemu
+index 0036f2e..bfb8e73 100755
+--- a/virt/autopkgtest-virt-qemu
++++ b/virt/autopkgtest-virt-qemu
+@@ -89,6 +89,12 @@ def parse_args():
+                         help='Enable debugging output')
+     parser.add_argument('--qemu-options',
+                         help='Pass through arguments to QEMU command.')
++    parser.add_argument('--attach-base-image', action='store_true',
++                        default=True,
++                        help='Attach base image as an extra virtual disk')
++    parser.add_argument('--no-attach-base-image', action='store_false',
++                        default=True, dest='attach_base_image',
++                        help='Attach base image as an extra virtual disk')
+     parser.add_argument('image', nargs='+',
+                         help='disk image to add to the VM (in order)')
+ 
+@@ -192,6 +198,9 @@ def login_tty_and_setup_shell():
+ def setup_baseimage():
+     '''setup /dev/baseimage in VM'''
+ 
++    if not args.attach_base_image:
++        return
++
+     term = VirtSubproc.get_unix_socket(os.path.join(workdir, 'ttyS1'))
+ 
+     # Setup udev rules for /dev/baseimage; set link_priority to -1024 so
+diff --git a/virt/autopkgtest-virt-qemu.1 b/virt/autopkgtest-virt-qemu.1
+index 39602b4..a62dde9 100644
+--- a/virt/autopkgtest-virt-qemu.1
++++ b/virt/autopkgtest-virt-qemu.1
+@@ -26,7 +26,7 @@ does
+ the given images, but will instead create a temporary overlay for the
+ primary image, and add all other images as read-only.
+ 
+-The first image without the overlay is always added as an additional
++By default, the first image without the overlay is added as an additional
+ read-only hard drive, which will be available for tests as
+ .IR /dev/baseimage .
+ This allows tests that require nested VMs to reuse the same image. Be
+@@ -35,6 +35,9 @@ aware that
+ will not be accessible between calling
+ .B autopkgtest-reboot-prepare
+ and the next boot, thus make sure to stop accessing it before.
++The
++.B \-\-no\-attach\-base\-image
++command-line option disables this behaviour.
+ 
+ .SH REQUIREMENTS
+ .B autopkgtest-virt-qemu
+@@ -108,6 +111,18 @@ Show boot messages from serial console.
+ Enable debugging output.
+ 
+ .TP
++.BR  \-\-attach\-base\-image ", " \-\-no\-attach\-base\-image
++Enable or disable attaching a read-only copy of the base image (without the
++read/write overlay) for the first disk image as an extra virtual disk, with
++hardware serial number
++.B BASEIMAGE
++and udev rules to create a symbolic link
++.BR /dev/baseimage .
++This allows tests that require nested VMs to reuse the same image, but is
++a very bad idea when using btrfs, which is confused by the duplicate
++filesystem UUIDs.
++
++.TP
+ .BI "--qemu-options=" arguments
+ Pass through arguments to QEMU command; e. g. --qemu-options='-readconfig qemu.cfg'
+ 
+-- 
+2.10.1
+

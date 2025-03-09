@@ -1,0 +1,97 @@
+From 38cc6948ad7caff1df5df17cf3a21eb4228e2eda Mon Sep 17 00:00:00 2001
+From: Benjamin Cama <benjamin.cama@telecom-bretagne.eu>
+Date: Wed, 27 Mar 2013 12:51:56 +0100
+Subject: [PATCH] Get back InRelease support
+
+We can extract the cleartext with sed. Should be compatible with
+RFC 4880 format.
+
+Signed-off-by: Benjamin Cama <benjamin.cama@telecom-bretagne.eu>
+---
+ functions |   50 ++++++++++++++++++++++++++++++++++++++------------
+ 1 files changed, 38 insertions(+), 12 deletions(-)
+
+diff --git a/functions b/functions
+index 2dc777d..7c7f84a 100644
+--- a/functions
++++ b/functions
+@@ -503,38 +503,64 @@ download_release_sig () {
+ 	local m1="$1"
+ 	local reldest="$2"
+ 	local relsigdest="$3"
++	local release_file_variant="$4"
+ 
+ 	if [ -n "$KEYRING" ] && [ -z "$DISABLE_KEYRING" ]; then
+-		progress 0 100 DOWNRELSIG "Downloading Release file signature"
+-		progress_next 50
+-		get "$m1/dists/$SUITE/Release.gpg" "$relsigdest" nocache ||
+-			error 1 NOGETRELSIG "Failed getting release signature file %s" \
+-			"$m1/dists/$SUITE/Release.gpg"
+-		progress 50 100 DOWNRELSIG "Downloading Release file signature"
++		if [ "$release_file_variant" != "IN" ]; then
++			progress 0 100 DOWNRELSIG "Downloading Release file signature"
++			progress_next 50
++			get "$m1/dists/$SUITE/Release.gpg" "$relsigdest" nocache ||
++				error 1 NOGETRELSIG "Failed getting release signature file %s" \
++				"$m1/dists/$SUITE/Release.gpg"
++			progress 50 100 DOWNRELSIG "Downloading Release file signature"
++		fi
+ 
+ 		info RELEASESIG "Checking Release signature"
+ 		# Don't worry about the exit status from gpgv; parsing the output will
+ 		# take care of that.
+-		(gpgv --status-fd 1 --keyring "$KEYRING" --ignore-time-conflict \
+-		 "$relsigdest" "$reldest" || true) | read_gpg_status
++		if [ "$release_file_variant" = "IN" ]; then
++			(gpgv --status-fd 1 --keyring "$KEYRING" --ignore-time-conflict \
++			 "$relsigdest" || true) | read_gpg_status
++		else
++			(gpgv --status-fd 1 --keyring "$KEYRING" --ignore-time-conflict \
++			 "$relsigdest" "$reldest" || true) | read_gpg_status
++		fi
+ 		progress 100 100 DOWNRELSIG "Downloading Release file signature"
+ 	elif [ -z "$DISABLE_KEYRING" ] && [ -n "$KEYRING_WANTED" ]; then
+ 		warning KEYRING "Cannot check Release signature; keyring file not available %s" "$KEYRING_WANTED"
+ 	fi
++	if [ "$release_file_variant" = "IN" ]; then
++		sed -n '/^-----BEGIN PGP SIGNED MESSAGE-----$/ {
++				n
++				: check_hash /^Hash:/ { n ; b check_hash }
++				n # blank line
++			}
++			s/^- //
++			/^-----BEGIN PGP SIGNATURE-----$/ q
++			p' < "$relsigdest" > "$reldest"
++	fi
+ }
+ 
+ download_release_indices () {
+ 	local m1="${MIRRORS%% *}"
+ 	local reldest="$TARGET/$($DLDEST rel "$SUITE" "$m1" "dists/$SUITE/Release")"
++	local inreldest="$TARGET/$($DLDEST rel "$SUITE" "$m1" "dists/$SUITE/InRelease")"
+ 	local relsigdest
++	local release_file_variant="IN"
+ 	progress 0 100 DOWNREL "Downloading Release file"
+ 	progress_next 100
+-	get "$m1/dists/$SUITE/Release" "$reldest" nocache ||
+-		error 1 NOGETREL "Failed getting release file %s" "$m1/dists/$SUITE/Release"
+-	relsigdest="$TARGET/$($DLDEST rel "$SUITE" "$m1" "dists/$SUITE/Release.gpg")"
++	if get "$m1/dists/$SUITE/InRelease" "$inreldest" nocache; then
++		relsigdest="$inreldest"
++	else
++		info RETRIEVING "Failed to retrieve InRelease"
++		get "$m1/dists/$SUITE/Release" "$reldest" nocache ||
++			error 1 NOGETREL "Failed getting release file %s" "$m1/dists/$SUITE/Release"
++		release_file_variant="GPG"
++		relsigdest="$TARGET/$($DLDEST rel "$SUITE" "$m1" "dists/$SUITE/Release.gpg")"
++	fi
+ 	progress 100 100 DOWNREL "Downloading Release file"
+ 
+-	download_release_sig "$m1" "$reldest" "$relsigdest"
++	download_release_sig "$m1" "$reldest" "$relsigdest" "$release_file_variant"
+ 
+ 	extract_release_components $reldest
+ 
+-- 
+1.7.2.5
+

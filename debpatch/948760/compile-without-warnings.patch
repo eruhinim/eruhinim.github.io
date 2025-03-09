@@ -1,0 +1,3651 @@
+Description: Make Berusky2 compile cleanly with no warnings
+ Berusky2 used to generate a *lot* of warnings when compiled. Some of
+ these were not too serious, but some seemed like they could possibly
+ allow buffer overflows. This patch likely fixes many potential
+ crashes as well.
+Author: Asher Gordon <AsDaGo@posteo.net>
+Bug-Debian: TODO
+Reviewed-by: TODO
+Last-Update: 2020-01-12
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+Index: berusky2/src/adas/adas.c
+===================================================================
+--- berusky2.orig/src/adas/adas.c
++++ berusky2/src/adas/adas.c
+@@ -214,7 +214,7 @@ void adas_Init(ADAS_INIT_DATA * p_adas_d
+ 
+   memcpy(&ADAS_data, p_adas_data, sizeof(ADAS_INIT_DATA));
+ 
+-  p_Device = alcOpenDevice((ALCubyte *) p_adas_data->Implementation);
++  p_Device = alcOpenDevice(p_adas_data->Implementation);
+   if (p_Device) {
+     bDevice = 1;
+     p_Context = alcCreateContext(p_Device, NULL);
+@@ -222,14 +222,14 @@ void adas_Init(ADAS_INIT_DATA * p_adas_d
+     if (p_Context) {
+       //Set active context
+       if (alcMakeContextCurrent(p_Context)) {
+-        int bEAXExtPresent = alIsExtensionPresent((ALubyte *) "EAX2.0");
++        int bEAXExtPresent = alIsExtensionPresent("EAX2.0");
+ 
+         if (!bEAXExtPresent) {
+           adas_Set_Last_Warning("No EAX2.0 Extension found");
+         }
+         else {
+-          p_EAXSet = (EAXSet) alGetProcAddress((ALubyte *) "EAXSet");
+-          p_EAXGet = (EAXGet) alGetProcAddress((ALubyte *) "EAXGet");
++          p_EAXSet = (EAXSet) alGetProcAddress("EAXSet");
++          p_EAXGet = (EAXGet) alGetProcAddress("EAXGet");
+ 
+           if (!p_EAXSet || !p_EAXGet) {
+             adas_Set_Last_Error("Cannot find EAXSet and/or EAXGet function");
+@@ -370,7 +370,12 @@ unsigned long adas_Load_First(char *p_In
+     return 0;
+   }
+ 
+-  fgets(data, 100, file);
++  if (fgets(data, 100, file) == NULL) {
++    adas_Set_Last_Error("Unable to read index file");
++    fclose(file);
++    file = NULL;
++    return 0;
++  }
+   Size_of_Indexes = atoi(data);
+   WaveFile = (ADAS_WAVEFILEDESC *) malloc(Size_of_Indexes * sizeof(ADAS_WAVEFILEDESC));
+   if (!WaveFile) {
+@@ -381,10 +386,24 @@ unsigned long adas_Load_First(char *p_In
+   }
+ 
+   for (i = 0; i < Size_of_Indexes; i++) {
+-    fgets(data, 100, file);
++    if (fgets(data, 100, file) == NULL) {
++      adas_Set_Last_Error("Unable to read index file");
++      fclose(file);
++      file = NULL;
++      free(WaveFile);
++      WaveFile = NULL;
++      return 0;
++    }
+     newline_cut(data);
+     strcpy(WaveFile[i].Name, data);
+-    fgets(data, 100, file);
++    if (fgets(data, 100, file) == NULL) {
++      adas_Set_Last_Error("Unable to read index file");
++      fclose(file);
++      file = NULL;
++      free(WaveFile);
++      WaveFile = NULL;
++      return 0;
++    }
+     WaveFile[i].Index = atoi(data);
+   }
+   fclose(file);
+@@ -409,13 +428,13 @@ unsigned long adas_Load_First(char *p_In
+       return 0;
+     }
+ 
+-    alutLoadWAVFile(p_File_Name, &pSound->Format, &pSound->Data,
++    adasLoadWAVFile(p_File_Name, &pSound->Format, &pSound->Data,
+                     &pSound->Size, &pSound->Frequece, &loop);
+ 
+     alBufferData(pSound->Buffer, pSound->Format, pSound->Data, pSound->Size,
+                  pSound->Frequece);
+ 
+-    alutUnloadWAV(pSound->Format, pSound->Data, pSound->Size,
++    adasUnloadWAV(pSound->Format, pSound->Data, pSound->Size,
+                   pSound->Frequece);
+ 
+     pSound->Wave_Index = adas_Translate_Wave(p_File_Name);
+@@ -458,7 +477,12 @@ unsigned long adas_Load_FirstMemory(char
+   }
+ 
+ 
+-  fgets(data, 100, file);
++  if (fgets(data, 100, file) == NULL) {
++    adas_Set_Last_Error("Unable to read index file");
++    fclose(file);
++    file = NULL;
++    return 0;
++  }
+   Size_of_Indexes = atoi(data);
+   WaveFile = (ADAS_WAVEFILEDESC *) malloc(Size_of_Indexes *
+                                   sizeof(ADAS_WAVEFILEDESC));
+@@ -471,10 +495,24 @@ unsigned long adas_Load_FirstMemory(char
+   ZeroMemory(WaveFile, Size_of_Indexes*sizeof(ADAS_WAVEFILEDESC));
+ 
+   for (i = 0; i < Size_of_Indexes; i++) {
+-    fgets(data, 100, file);
++    if (fgets(data, 100, file) == NULL) {
++      adas_Set_Last_Error("Unable to read index file");
++      fclose(file);
++      file = NULL;
++      free(WaveFile);
++      WaveFile = NULL;
++      return 0;
++    }
+     newline_cut(data);
+     strcpy(WaveFile[i].Name, data);
+-    fgets(data, 100, file);
++    if (fgets(data, 100, file) == NULL) {
++      adas_Set_Last_Error("Unable to read index file");
++      fclose(file);
++      file = NULL;
++      free(WaveFile);
++      WaveFile = NULL;
++      return 0;
++    }
+     WaveFile[i].Index = atoi(data);
+   }
+   fclose(file);
+@@ -498,7 +536,7 @@ unsigned long adas_Load_FirstMemory(char
+   if (adasLoadWAVMemory(p_File, File_Size, &pSound->Format, &pSound->Data, &pSound->Size, &pSound->Frequece, &loop)) {
+     alBufferData(pSound->Buffer, pSound->Format, pSound->Data, pSound->Size,
+                  pSound->Frequece);
+-    alutUnloadWAV(pSound->Format, pSound->Data, pSound->Size,
++    adasUnloadWAV(pSound->Format, pSound->Data, pSound->Size,
+                   pSound->Frequece);
+     pSound->Wave_Index = adas_Translate_Wave(p_File_Name);
+     Size_of_Sound_Data++;
+@@ -526,7 +564,8 @@ unsigned long adas_Load_Next(char *p_Fil
+   if ((Size_of_Sound_Data > SIZEOFSOUNDDATA) || (!p_File_Name))
+     return 0;
+ 
+-  chdir(sound_dir);
++  if (chdir(sound_dir))
++    return 0;
+   file = fopen(p_File_Name, "r");
+   if (file) {
+     GetFileSize(file, &Return);
+@@ -545,13 +584,13 @@ unsigned long adas_Load_Next(char *p_Fil
+       return 0;
+     }
+ 
+-    alutLoadWAVFile(p_File_Name, &pSound->Format, &pSound->Data,
++    adasLoadWAVFile(p_File_Name, &pSound->Format, &pSound->Data,
+                     &pSound->Size, &pSound->Frequece, &loop);
+ 
+     alBufferData(pSound->Buffer, pSound->Format, pSound->Data, pSound->Size,
+                  pSound->Frequece);
+ 
+-    alutUnloadWAV(pSound->Format, pSound->Data, pSound->Size,
++    adasUnloadWAV(pSound->Format, pSound->Data, pSound->Size,
+                   pSound->Frequece);
+ 
+     pSound->Wave_Index = adas_Translate_Wave(p_File_Name);
+@@ -593,7 +632,7 @@ unsigned long adas_Load_NextMemory(void
+   if (adasLoadWAVMemory(p_File, File_Size, &pSound->Format, &pSound->Data, &pSound->Size, &pSound->Frequece, &loop)) {
+     alBufferData(pSound->Buffer, pSound->Format, pSound->Data, pSound->Size,
+                  pSound->Frequece);
+-    alutUnloadWAV(pSound->Format, pSound->Data, pSound->Size,
++    adasUnloadWAV(pSound->Format, pSound->Data, pSound->Size,
+                   pSound->Frequece);
+     pSound->Wave_Index = adas_Translate_Wave(p_File_Name);
+     Size_of_Sound_Data++;
+@@ -914,11 +953,12 @@ int adas_Load_Wave(ADAS_SOUND_SOURCE * p
+     return 0;
+ 
+   strcpy(text, name);
+-  chdir(sound_dir);
+-  alutLoadWAVFile(text, &Format, &Data, &Size, &Frequece, &loop);
+-  alBufferData(p_ss->Buffer[p_ss->Buffer_Pointer], Format, Data, Size,
++  if (chdir(sound_dir))
++    return 0;
++  adasLoadWAVFile(text, &Format, &Data, &Size, &Frequece, &loop);
++  alBufferData(p_ss->Buffer[(int)p_ss->Buffer_Pointer], Format, Data, Size,
+                Frequece);
+-  alutUnloadWAV(Format, Data, Size, Frequece);
++  adasUnloadWAV(Format, Data, Size, Frequece);
+   return 1;
+ }
+ 
+@@ -2569,6 +2609,23 @@ ALCdevice *adas_Get_Device(void)
+ }
+ 
+ void *
++adasLoadWAVFile(const char * filename, ALenum * format,
++		void **data, ALsizei * size, ALuint * frequency,
++		ALboolean * loop)
++{
++  ALfloat freq;
++  *data = alutLoadMemoryFromFile(filename, format, size, &freq);
++  if (!(*data)) {
++    fprintf(stderr, "ADAS: adasLoadWAVFile(): %s\n",
++	    alutGetErrorString(alutGetError()));
++    return (FALSE);
++  }
++  *frequency = (ALuint)freq;
++  *loop = AL_FALSE;
++  return (*data);
++}
++
++void *
+ adasLoadWAVMemory(ALbyte * buffer, ALsizei buffer_length, ALenum * format,
+                   void **data, ALsizei * size, ALuint * frequency,
+                   ALboolean * loop)
+@@ -2585,6 +2642,12 @@ adasLoadWAVMemory(ALbyte * buffer, ALsiz
+   return (*data);
+ }
+ 
++void
++adasUnloadWAV(ALenum format, ALvoid * data, ALsizei size, ALsizei frequency)
++{
++  free(data);
++}
++
+ void adas_set_sound_dir(char *p_dir)
+ {
+   strcpy(sound_dir, p_dir);
+Index: berusky2/src/adas/adas.h
+===================================================================
+--- berusky2.orig/src/adas/adas.h
++++ berusky2/src/adas/adas.h
+@@ -317,9 +317,12 @@
+ 		// get current device
+ 		ALCdevice *adas_Get_Device(void);
+ 
+-    // Replacement for alutLoadWAVMemory
++    // Replacements for alutLoadWAV{File,Memory} and alutUnloadWAV
++    void * adasLoadWAVFile(const char *filename, ALenum *format, void **data, ALsizei *size,
++			   ALuint *frequency, ALboolean *loop);
+     void * adasLoadWAVMemory(ALbyte *buffer, ALsizei buffer_length, ALenum *format, void **data, ALsizei *size,
+                           ALuint *frequency, ALboolean *loop);
++    void adasUnloadWAV(ALenum format, ALvoid *data, ALsizei size, ALsizei frequency);
+                           
+     void adas_set_sound_dir(char *p_dir);
+ 
+Index: berusky2/src/adas/ogg_io.c
+===================================================================
+--- berusky2.orig/src/adas/ogg_io.c
++++ berusky2/src/adas/ogg_io.c
+@@ -99,29 +99,29 @@ void ogg_release()
+ 
+ char ogg_playback()
+ {
+- 	if(!bDevice) return 0;
++  if(!bDevice) return 0;
+ 
+-	if(ogg_playing())
+-        return 1;
++  if(ogg_playing())
++    return 1;
+         
+-    if(!ogg_stream(buffers[0]))
+-        return 0;
++  if(!ogg_stream(buffers[0]))
++    return 0;
+         
+-    if(!ogg_stream(buffers[1]))
+-        return 0;
++  if(!ogg_stream(buffers[1]))
++    return 0;
+     
+-    if(!ogg_stream(buffers[2]))
+-        return 0;
++  if(!ogg_stream(buffers[2]))
++    return 0;
+ 
+-	alSourceQueueBuffers(source, 3, buffers);
+-	ogg_stop = 0;
++  alSourceQueueBuffers(source, 3, buffers);
++  ogg_stop = 0;
+ 
+-	thread = CreateThread( NULL, 0, ogg_proc, NULL, 0, &(threadid));
+-	if(!thread)
+-		return 0;
++  thread = CreateThread( NULL, 0, ogg_proc, NULL, 0, &(threadid));
++  if(!thread)
++    return 0;
+ 
+-	SetThreadPriority(thread,THREAD_PRIORITY_HIGHEST);
+-	//SetThreadPriority(thread,THREAD_PRIORITY_ABOVE_NORMAL);
++  SetThreadPriority(thread,THREAD_PRIORITY_HIGHEST);
++  //SetThreadPriority(thread,THREAD_PRIORITY_ABOVE_NORMAL);
+ 
+   return 1;
+ }
+Index: berusky2/src/adas/ogg_stream.c
+===================================================================
+--- berusky2.orig/src/adas/ogg_stream.c
++++ berusky2/src/adas/ogg_stream.c
+@@ -6,6 +6,7 @@
+ #include <vorbis/vorbisfile.h>
+ #include "compat_mini.h"
+ 
++#include <stdlib.h>
+ #include <time.h>
+ #include <math.h>
+ 
+@@ -294,7 +295,7 @@ long adas_OGG_Read_StreamB(ADAS_OGG_STRU
+ 		iCounter++;
+ 
+ 		if(p_size_file) {
+-			fprintf(p_size_file,"%d\n",lReturn);
++			fprintf(p_size_file,"%ld\n",lReturn);
+     }
+ 
+ 		switch(lReturn)
+@@ -529,7 +530,7 @@ void * adas_OGG_Proc( void *lpParameter
+ 	int   dwStart, dwFinish, dwEplased;
+ 	long  losttime = 0;
+ 	
+-	strncpy(text, ogg.Name, (strlen(ogg.Name)-3));
++	strcpy(text, ogg.Name);
+ 	text[(strlen(ogg.Name)-3)] = '\0'; //TODO - newline?
+ 	strcat(text,"cyc");
+ 
+@@ -541,10 +542,15 @@ void * adas_OGG_Proc( void *lpParameter
+ 		ExitThread(0);
+ 	}
+ 
+-	if(!p_ogg->bSetup)
++	if(!p_ogg->bSetup) {
+ 		for(i=0;i<3;i++)
+ 		{
+-			fgets(text,256, file);
++			if (fgets(text,256, file) == NULL) {
++				adas_Set_Last_Error("Cannot read file");
++				p_ogg->bEof = 2;
++				fclose(file);
++				ExitThread(0);
++			}
+ 			cycles = atoi(text);
+ 			time = (int)floor(750.0f / (float)cycles);
+ 			adas_OGG_Read_StreamA(p_ogg, time);
+@@ -556,9 +562,17 @@ void * adas_OGG_Proc( void *lpParameter
+ 				ExitThread(0);
+ 			}
+ 		}
+-	else
+-		for(i=0;i<3;i++)
+-			fgets(text,256, file);
++	}
++	else {
++		for(i=0;i<3;i++) {
++			if (fgets(text,256, file) == NULL) {
++				adas_Set_Last_Error("Cannot read file");
++				p_ogg->bEof = 2;
++				fclose(file);
++				ExitThread(0);
++			}
++		}
++	}
+ 
+ 	alSourceQueueBuffers(p_ogg->Source,3,p_ogg->Buffer);
+ 	alSourcePlay(p_ogg->Source);
+@@ -571,9 +585,14 @@ void * adas_OGG_Proc( void *lpParameter
+ 		{
+ 			if (!p_ogg->bEof)
+ 			{
+-				alSourceUnqueueBuffers(p_ogg->Source,1,&p_ogg->Buffer[buffer]);
++				alSourceUnqueueBuffers(p_ogg->Source,1,&p_ogg->Buffer[(int)buffer]);
+ 				
+-				fgets(text,256, file);
++				if (fgets(text,256, file) == NULL) {
++					adas_Set_Last_Error("Cannot read file");
++					p_ogg->bEof = 2;
++					fclose(file);
++					ExitThread(0);
++				}
+ 				cycles = atoi(text);
+ 
+ 				dwStart = timeGetTime();
+@@ -589,9 +608,9 @@ void * adas_OGG_Proc( void *lpParameter
+ 					adas_OGG_Read_StreamA(p_ogg, time);
+ 				}
+ 
+-				alBufferData(p_ogg->Buffer[buffer], p_ogg->Format, &p_ogg->Data, p_ogg->Size, 
+-							       p_ogg->Frequece);
+-				alSourceQueueBuffers(p_ogg->Source,1,&p_ogg->Buffer[buffer]);
++				alBufferData(p_ogg->Buffer[(int)buffer],
++					     p_ogg->Format, &p_ogg->Data, p_ogg->Size, p_ogg->Frequece);
++				alSourceQueueBuffers(p_ogg->Source,1,&p_ogg->Buffer[(int)buffer]);
+ 				
+ 				dwFinish = timeGetTime();
+ 				dwEplased = dwFinish - dwStart;
+Index: berusky2/src/age/graph/box.cpp
+===================================================================
+--- berusky2.orig/src/age/graph/box.cpp
++++ berusky2/src/age/graph/box.cpp
+@@ -62,9 +62,10 @@ BOX * box_create(BOX_TYPE type, BOX * p_
+   bool translate = FALSE;      
+   int i;
+   for(i = 0; i < num; i++) {
+-    if(p_list[i].box_type_get() != type)
++    if(p_list[i].box_type_get() != type) {
+       translate = TRUE;
+       break;
++    }
+   }  
+   
+   switch(type) {
+Index: berusky2/src/age/graph/material_texture.cpp
+===================================================================
+--- berusky2.orig/src/age/graph/material_texture.cpp
++++ berusky2/src/age/graph/material_texture.cpp
+@@ -48,7 +48,8 @@ bool material_text_bitmap_params::load(c
+     f.close();
+     return(pixmap[0] != '\0');
+   } 
+-  else {  
++  else {
++    assert(strlen(p_file) < MAX_FILENAME);
+     strncpy(pixmap,p_file,MAX_FILENAME);
+     pixmap_alpha[0] = '\0'; // No alpha file    
+     return(TRUE);  
+@@ -593,7 +594,8 @@ void material_text_gl::gl_text_params_de
+ bool material_text_gl::gl_text_params_load(char *p_file)
+ {  
+   char tmp[MAX_FILENAME];
+-  
++
++  assert(strlen(p_file) < MAX_FILENAME);
+   strncpy(tmp,p_file,MAX_FILENAME);
+   tail_change(tmp,TEXTURE_GL_PARAM_FILE);
+   
+Index: berusky2/src/age/graph/matrix.h
+===================================================================
+--- berusky2.orig/src/age/graph/matrix.h
++++ berusky2/src/age/graph/matrix.h
+@@ -857,7 +857,7 @@ public:
+ 
+ inline GLMATRIX * matrix_zero(GLMATRIX * m)
+ {
+-  memset(m,0,sizeof(*m));
++  memset((void *)m,0,sizeof(*m));
+   return(m);
+ } 
+ 
+Index: berusky2/src/age/graph/object_name.h
+===================================================================
+--- berusky2.orig/src/age/graph/object_name.h
++++ berusky2/src/age/graph/object_name.h
+@@ -48,10 +48,13 @@ public:
+   
+   void name_set(const char *p_name)
+   {
+-    if(p_name)
++    if(p_name) {
++      assert(strlen(p_name) < MAX_NAME);
+       strncpy(name,p_name,MAX_NAME);
+-    else
++    }
++    else {
+       name[0] = '\0';
++    }
+   }
+   
+   int name_ID_get(void)
+Index: berusky2/src/age/graph/surface_sdl.cpp
+===================================================================
+--- berusky2.orig/src/age/graph/surface_sdl.cpp
++++ berusky2/src/age/graph/surface_sdl.cpp
+@@ -337,7 +337,12 @@ void surface_sdl::fill(tcolor color)
+ void surface_sdl::fill(tpos x, tpos y, tpos dx, tpos dy, tcolor color)
+ { 
+   if(p_surf) {
+-    SDL_Rect rec = { x, y, dx, dy };
++    SDL_Rect rec;
++    /* Make sure no info will be lost in the conversion to a narrower
++       type. */
++    assert(x < INT16_MAX); assert(y < INT16_MAX);
++    assert(dx < UINT16_MAX); assert(dy < UINT16_MAX);
++    rec = { (Sint16) x, (Sint16) y, (Uint16) dx, (Uint16) dy };
+     SDL_FillRect(p_surf, &rec, color);
+   }
+ }
+@@ -346,7 +351,12 @@ void surface_sdl::fill(tpos x, tpos y, t
+ void surface_sdl::blit(class surface_sdl *p_dst, tpos tx, tpos ty)
+ {
+   if(p_surf) {
+-    SDL_Rect dst_rec = {tx,ty,p_surf->w,p_surf->h};
++    SDL_Rect dst_rec;
++    /* Make sure no info will be lost in the conversion to a narrower
++       type. */
++    assert(tx < INT16_MAX); assert(ty < INT16_MAX);
++    assert(p_surf->w < UINT16_MAX); assert(p_surf->h < UINT16_MAX);
++    dst_rec = { (Sint16) tx, (Sint16) ty, (Uint16) p_surf->w, (Uint16) p_surf->h};
+     SDL_BlitSurface(p_surf, NULL, p_dst->p_surf, &dst_rec);
+   }
+ }
+@@ -355,8 +365,15 @@ void surface_sdl::blit(class surface_sdl
+ void surface_sdl::blit(tpos sx, tpos sy, tpos dx, tpos dy, class surface_sdl *p_dst, tpos tx, tpos ty)
+ {
+   if(p_surf) {
+-    SDL_Rect src_rec = {sx,sy,dx,dy};
+-    SDL_Rect dst_rec = {tx,ty,dx,dy};
++    SDL_Rect src_rec;
++    SDL_Rect dst_rec;
++    /* Make sure no info will be lost in the conversion to a narrower
++       type. */
++    assert(sx < INT16_MAX); assert(sy < INT16_MAX);
++    assert(tx < INT16_MAX); assert(ty < INT16_MAX);
++    assert(dx < UINT16_MAX); assert(dy < UINT16_MAX);
++    src_rec = { (Sint16) sx, (Sint16) sy, (Uint16) dx, (Uint16) dy };
++    dst_rec = { (Sint16) tx, (Sint16) ty, (Uint16) dx, (Uint16) dy };
+     SDL_BlitSurface(p_surf, &src_rec, p_dst->p_surf, &dst_rec);  
+   }
+ }
+Index: berusky2/src/age/graph/vector.h
+===================================================================
+--- berusky2.orig/src/age/graph/vector.h
++++ berusky2/src/age/graph/vector.h
+@@ -169,6 +169,7 @@ typedef struct vect3di
+     
+   vect3di(void)
+   {
++    x = y = z = 0;
+   }
+   
+   vect3di(tpos val)
+@@ -214,6 +215,7 @@ typedef struct vect3df
+     
+   vect3df(void)
+   {
++    x = y = z = 0;
+   }
+   
+   vect3df(float val)
+Index: berusky2/src/age/utils/data_file.cpp
+===================================================================
+--- berusky2.orig/src/age/utils/data_file.cpp
++++ berusky2/src/age/utils/data_file.cpp
+@@ -163,6 +163,7 @@ bool data_file_section::section_new(int
+       source_line_set(line);
+     }
+     else if(!strcasecmp(token,SECTION_NAME_TYPE)) {
++      assert(strlen(value) < MAX_NAME);
+       strncpy(section_type,value,MAX_NAME);
+       source_line_set(line);
+     }
+@@ -434,6 +435,7 @@ void data_file::import(class data_file *
+ 
+ void data_file::source_file_set(const char *p_file)
+ {
++  assert(strlen(p_file) < MAX_FILENAME);
+   strncpy(current_file_name, p_file, MAX_FILENAME);
+ }
+ 
+Index: berusky2/src/age/utils/utils.cpp
+===================================================================
+--- berusky2.orig/src/age/utils/utils.cpp
++++ berusky2/src/age/utils/utils.cpp
+@@ -44,9 +44,11 @@ void dir_list::update_path(char *p_dir)
+ {
+   char buffer[MAX_FILENAME];
+   return_path(p_dir, "", buffer, MAX_FILENAME);
+-  chdir(cwd);
+-  chdir(buffer);
+-  getcwd(p_dir,MAX_FILENAME);
++  /* Separate assertions so the line number in the assertion message
++     will be more helpful. */
++  if (chdir(cwd)) assert(0);
++  if (chdir(buffer)) assert(0);
++  if (getcwd(p_dir,MAX_FILENAME) == NULL) assert(0);
+ }
+ 
+ void dir_list::load(char *p_ini)
+@@ -63,14 +65,16 @@ void dir_list::load(char *p_ini)
+   ini_read_string(p_ini, INI_LEVEL_USER, levels_user, sizeof(levels_user), "./Lihen/User");
+   ini_read_string(p_ini, INI_TMP, tmp, sizeof(tmp), "/var/tmp");
+ 
+-  getcwd(cwd,MAX_FILENAME);
++  if (getcwd(cwd,MAX_FILENAME) == NULL)
++    assert(0);
+   
+   update_path(levels);
+   update_path(gamedata);
+   update_path(graphics);  
+   update_path(levels_user);
+   update_path(tmp);
+-  chdir(cwd);
++  if (chdir(cwd))
++    assert(0);
+ 
+   #define INI_BINARY      "game_binary"
+   ini_read_string(p_ini, INI_BINARY, game_binary, sizeof(game_binary), "berusky");
+Index: berusky2/src/kofola/3D_graphic.cpp
+===================================================================
+--- berusky2.orig/src/kofola/3D_graphic.cpp
++++ berusky2/src/kofola/3D_graphic.cpp
+@@ -150,31 +150,43 @@ int _3d_Load_Texture(char *p_File_Name,
+ void _3d_Get_Cursor_Name(char *cName)
+ {
+   FILE *file;
+-  char text[MAX_FILENAME];
++  char filename[MAX_FILENAME], text[32];
+ 
+-  GetPrivateProfileString("game", "cursor", "cursor", text, 32, ini_file);
++  GetPrivateProfileString("game", "cursor", "cursor", filename, 32, ini_file);
+ 
+-  strcpy(cName, text);
++  strcpy(cName, filename);
+   strcat(cName, ".bmp");
+ 
+-  strcat(text, ".inf");
++  strcat(filename, ".inf");
+ 
+-  file = fopen(text, "r");
++  file = fopen(filename, "r");
+   if (!file) {
+-    kprintf(1, "Soubor %s, nebyl nalezen!", text);
++    kprintf(1, "Soubor %s, nebyl nalezen!", filename);
+     return;
+   }
+ 
+-  fgets(text, 32, file);
++  if (fgets(text, 32, file) == NULL) {
++    kprintf(1, "Cannot read from %s!", filename);
++    return;
++  }
+   _3dCur.idx = atoi(text);
+ 
+-  fgets(text, 32, file);
++  if (fgets(text, 32, file) == NULL) {
++    kprintf(1, "Cannot read from %s!", filename);
++    return;
++  }
+   _3dCur.idy = atoi(text);
+ 
+-  fgets(text, 32, file);
++  if (fgets(text, 32, file) == NULL) {
++    kprintf(1, "Cannot read from %s!", filename);
++    return;
++  }
+   _3dCur.iaddx = atoi(text);
+ 
+-  fgets(text, 32, file);
++  if (fgets(text, 32, file) == NULL) {
++    kprintf(1, "Cannot read from %s!", filename);
++    return;
++  }
+   _3dCur.iaddy = atoi(text);
+ 
+   fclose(file);
+@@ -189,7 +201,10 @@ int _3d_Load_List(char *p_File_Name)
+   FILE *file = 0;
+   int c = 0;
+ 
+-  chdir((_3dd.bm_dir));
++  if (chdir((_3dd.bm_dir))) {
++    kprintf(1, "Cannot change directory to %s", _3dd.bm_dir);
++    return 0;
++  }
+   achdir(p3DMArchive, _3dd.bm_dir);
+ 
+   file = aopen(p3DMArchive, p_File_Name, "rb");
+Index: berusky2/src/kofola/Apak.cpp
+===================================================================
+--- berusky2.orig/src/kofola/Apak.cpp
++++ berusky2/src/kofola/Apak.cpp
+@@ -249,6 +249,7 @@ APAK_HANDLE *apakopen(char *cArchive, ch
+   int iRet;
+   APAK_HANDLE *pHandle;
+   FILE *pFile;
++  char tmp_dir[MAX_FILENAME];
+ 
+   apakCheck();
+ 
+@@ -280,7 +281,8 @@ APAK_HANDLE *apakopen(char *cArchive, ch
+     return NULL;
+   }
+ 
+-  if (!apakLoadFAT(pHandle, apak_dir_correction(cDir)))
++  apak_dir_correction(cDir, tmp_dir);
++  if (!apakLoadFAT(pHandle, tmp_dir))
+     apakError(pHandle, "AFAT corrupted");
+ 
+   return pHandle;
+@@ -332,14 +334,3 @@ void apak_dir_correction(char *dir, char
+     strcpy(out+2, dir);
+   }
+ }
+-
+-char * apak_dir_correction(char *dir)
+-{
+-  static char tmp[MAX_FILENAME] = "c:";
+-  if(dir || (tolower(dir[0]) == 'c' && dir[1] == ':'))
+-    return(dir);
+-  
+-  assert(strlen(dir) < 254);
+-  strcat(tmp+2, dir);
+-  return(tmp);
+-}
+Index: berusky2/src/kofola/Apak.h
+===================================================================
+--- berusky2.orig/src/kofola/Apak.h
++++ berusky2/src/kofola/Apak.h
+@@ -70,7 +70,6 @@ FILE *afiletoswitch(FILE * stream);
+ // testuje zda je textovy soubor v uni code
+ int aunicode(FILE * stream);
+ 
+-char * apak_dir_correction(char *dir);
+ void apak_dir_correction(char *dir, char *out);
+ 
+ #endif
+Index: berusky2/src/kofola/Apakio.cpp
+===================================================================
+--- berusky2.orig/src/kofola/Apakio.cpp
++++ berusky2/src/kofola/Apakio.cpp
+@@ -61,7 +61,10 @@ int fillbuffer(APAK_FILE_HANDLE * pFHand
+   pTmp = (char *) mmalloc(size);
+ 
+   fseek(pFHandle->pArchive->pFILE, pFHandle->apuLfStartofFile, SEEK_SET);
+-  fread(pTmp, size, 1, pFHandle->pArchive->pFILE);
++  if (fread(pTmp, size, 1, pFHandle->pArchive->pFILE) != 1) {
++    free((void *) pTmp);
++    return 0;
++  }
+ 
+   if (pFHandle->pFileInfo->bNotCompressed)
+     memcpy(pFHandle->pBuffer, pTmp, size);
+Index: berusky2/src/kofola/Comics.cpp
+===================================================================
+--- berusky2.orig/src/kofola/Comics.cpp
++++ berusky2/src/kofola/Comics.cpp
+@@ -97,7 +97,8 @@ void cmcs_Start_Comics(char *cFile, HWND
+     cmcs_Picture[i].iPicture = -1;
+ 
+   while (strcmp(text, "LOAD_END")) {
+-    fgets(text, MAX_FILENAME, file);
++    if (fgets(text, MAX_FILENAME, file) == NULL)
++      return;
+     newline_cut(text);
+ 
+     if (!strcmp(text, "LOAD_END"))
+@@ -109,7 +110,8 @@ void cmcs_Start_Comics(char *cFile, HWND
+   i = 0;
+ 
+   while (strcmp(text, "COMICS_END")) {
+-    fgets(text, MAX_FILENAME, file);
++    if (fgets(text, MAX_FILENAME, file) == NULL)
++      return;
+     newline_cut(text);
+     cmcs_Read_Line(text, &cmcs_Picture[i]);
+     cmcs_Picture[i].iPicture = i + 1;
+@@ -154,7 +156,8 @@ void cmcs_Start_Comics(char *cFile, HWND
+ 
+ void cmcs_Play_Intro(char *cFile, HWND hWnd, AUDIO_DATA * p_ad)
+ {
+-  chdir(DATA_DIR);
++  if (chdir(DATA_DIR))
++    return;
+   cmcs_Start_Comics("gamelogo.txt", hWnd, p_ad, 0);
+ }
+ 
+Index: berusky2/src/kofola/Demo.cpp
+===================================================================
+--- berusky2.orig/src/kofola/Demo.cpp
++++ berusky2/src/kofola/Demo.cpp
+@@ -22,24 +22,35 @@ void demo_Set_Scene_Level(char *cDemo, i
+   FILE *file;
+   DEMOFILEHEADER FileHeader;
+ 
+-  getcwd(odir, MAX_FILENAME);
++  if (getcwd(odir, MAX_FILENAME) == NULL)
++    return;
+ 
+-  chdir(SAVE_DIR);
++  if (chdir(SAVE_DIR))
++    return;
+ 
+   file = fopen(cDemo, "rb");
+ 
+   if (!file) {
+-    chdir((odir));
++    /* GCC warns when we don't check the return value of chdir(). For
++       some reason, casting to (void) doesn't work. */
++    if (chdir(odir))
++      return;
+     return;
+   }
+ 
+-  fread(&FileHeader, sizeof(DEMOFILEHEADER), 1, file);
++  if (fread(&FileHeader, sizeof(DEMOFILEHEADER), 1, file) != 1) {
++    fclose(file);
++    return;
++  }
+   fclose(file);
+ 
+   (*pScene) = FileHeader.iScene;
+   (*pLevel) = FileHeader.iLevel;
+ 
+-  chdir((odir));
++  /* GCC warns when we don't check the return value of chdir(). For
++     some reason, casting to (void) doesn't work. */
++  if (chdir(odir))
++    return;
+ }
+ 
+ int demo_Check_Owner(WCHAR * wPlayer, char *cDemo, WCHAR * wDemoName)
+@@ -258,7 +269,8 @@ int demo_SaveWC(DEMOSTRUCTURE * p_Demo,
+ 
+   sprintf(cFile, "demo_[%s]_[%s].dem", pom, pom2);
+ 
+-  chdir(SAVE_DIR);
++  if (chdir(SAVE_DIR))
++    return 0;
+ 
+   //strcat(cText, DIR_SLASH_STRING);
+   //strcat(cText, cFile);
+@@ -323,7 +335,11 @@ int demo_Load(DEMOSTRUCTURE * p_Demo, ch
+     return 0;
+   }
+ 
+-  fread(&FileHeader, sizeof(DEMOFILEHEADER), 1, file);
++  if (fread(&FileHeader, sizeof(DEMOFILEHEADER), 1, file) != 1) {
++    kprintf(1, "Cannot read %s", p_File_Name);
++    fclose(file);
++    return 0;
++  }
+ 
+   if (FileHeader.iDemoID != 123456789 ||
+     FileHeader.iHiVer != DEMO_HIVERSION ||
+@@ -342,7 +358,11 @@ int demo_Load(DEMOSTRUCTURE * p_Demo, ch
+   if (FileHeader.iLoadedLevel)
+     strcpy(cLoadedSignature, "LOAD_GAME");
+ 
+-  fread(p_Demo, sizeof(DEMOSTRUCTURE), 1, file);
++  if (fread(p_Demo, sizeof(DEMOSTRUCTURE), 1, file) != 1) {
++    kprintf(1, "Cannot read %s", p_File_Name);
++    fclose(file);
++    return 0;
++  }
+ 
+   p_Frame = (DEMOKEYFRAME *) mmalloc(sizeof(DEMOKEYFRAME));
+ 
+@@ -354,7 +374,14 @@ int demo_Load(DEMOSTRUCTURE * p_Demo, ch
+   for (i = 0; i < p_Demo->Frame_Counter - 1; i++) {
+     p_Frame = (DEMOKEYFRAME *) mmalloc(sizeof(DEMOKEYFRAME));
+ 
+-    fread(p_Frame, sizeof(DEMOKEYFRAME), 1, file);
++    if (fread(p_Frame, sizeof(DEMOKEYFRAME), 1, file) != 0) {
++      kprintf(1, "Cannot read %s", p_File_Name);
++      fclose(file);
++      demo_Release(p_Demo);
++      free(p_Frame);
++      return 0;
++    }
++
+     p_Last->p_Next = p_Frame;
+ 
+     p_Last = p_Frame;
+Index: berusky2/src/kofola/Init.cpp
+===================================================================
+--- berusky2.orig/src/kofola/Init.cpp
++++ berusky2/src/kofola/Init.cpp
+@@ -24,9 +24,11 @@ int lsi_Load_Items(LEVELINFO * p_Level)
+   SECONDDATADESC sec;
+   APAK_HANDLE *aHandle;
+   
+-  getcwd(odir, MAX_FILENAME);
++  if (getcwd(odir, MAX_FILENAME) == NULL)
++    return 0;
+   strcpy(dir, PRVKY_DIR);
+-  chdir(dir);
++  if (chdir(dir))
++    return 0;
+ 
+   strcpy(text, "*.itm");
+   Count = 0;
+@@ -82,10 +84,11 @@ int lsi_Load_Items(LEVELINFO * p_Level)
+ 
+   afindclose(Done);
+ 
+-  chdir((odir));
+-
+   apakclose(&aHandle);
+ 
++  if (chdir(odir))
++    return 0;
++
+   return 1;
+ }
+ 
+Index: berusky2/src/kofola/Menu.cpp
+===================================================================
+--- berusky2.orig/src/kofola/Menu.cpp
++++ berusky2/src/kofola/Menu.cpp
+@@ -1477,7 +1477,10 @@ void RunMenuSettings(char *p_File_Name,
+   lastcmd = 0;
+   timercnt = 0;
+ 
+-  chdir(DATA_DIR);
++  if (chdir(DATA_DIR)) {
++    free((void *) res);
++    return;
++  }
+   strcpy(dir, DATA_DIR);
+ 
+   //natadhe skript menu
+@@ -2024,7 +2027,13 @@ void RunStretchAnimation(char *cScene, i
+   if (iLanguageVersion == 4) {
+     strcpy(cDir, BITMAP_DIR);
+   
+-    sprintf(cFile, "%s%cscene%d.pak", cDir, DIR_SLASH, iActualScene);    
++    if (snprintf(cFile, sizeof(cFile), "%s%cscene%d.pak",
++		 cDir, DIR_SLASH, iActualScene) >=
++	(int) sizeof(cFile)) {
++      kprintf(1, "Filename too long: %s%cscene%d.pak",
++	      cDir, DIR_SLASH, iActualScene);
++      return;
++    }
+     hArchive = apakopen(cFile, cDir, &idx);
+ 
+     if (!hArchive) {
+@@ -2320,7 +2329,10 @@ void RunMenuNewGameScene(char *p_File_Na
+   lastcmd = 0;
+   timercnt = 0;
+ 
+-  chdir(DATA_DIR);
++  if (chdir(DATA_DIR)) {
++    free((void *) res);
++    return;
++  }
+   
+   char dir[MAX_FILENAME];
+   strcpy(dir, DATA_DIR);
+@@ -2785,7 +2797,13 @@ void LoadSceneMap(int *pBmp, char *cScen
+ 
+   if (iLanguageVersion == 4) {
+     strcpy(cDir, BITMAP_DIR);
+-    sprintf(cFile, "%s%cscene%d.pak", cDir, DIR_SLASH, iScene);
++    if (snprintf(cFile, sizeof(cFile), "%s%cscene%d.pak",
++		 cDir, DIR_SLASH, iActualScene) >=
++	(int) sizeof(cFile)) {
++      kprintf(1, "Filename too long: %s%cscene%d.pak",
++	      cDir, DIR_SLASH, iActualScene);
++      return;
++    }
+     hArchive = apakopen(cFile, cDir, &i);
+ 
+     if (!hArchive) {
+@@ -3466,7 +3484,10 @@ BRUTAL_RESTART_SCENE_MAP_MENU:
+   lastcmd = 0;
+   timercnt = 0;
+ 
+-  chdir(DATA_DIR);
++  if (chdir(DATA_DIR)) {
++    free((void *) res);
++    return;
++  }
+ 
+   //natadhe skript menu
+   LoadMenuScript(csrriptname, res, &lastcmd);
+@@ -3877,7 +3898,10 @@ int RunMenuNewGame(char *p_File_Name, HW
+   lastcmd = 0;
+   timercnt = 0;
+ 
+-  chdir(DATA_DIR);
++  if (chdir(DATA_DIR)) {
++    free((void *) res);
++    return 1;
++  }
+ 
+   char dir[MAX_FILENAME];
+   strcpy(dir, DATA_DIR);
+@@ -4325,7 +4349,8 @@ int FillComboProfiles(COMBO_CONTROL * p_
+   int isize;
+ 
+   strcpy(dir, PROFILE_DIR);
+-  chdir(dir);
++  if (chdir(dir))
++    return 0;
+ 
+   GetPrivateProfileString("game", "last_profile", "c:\\", cprofile, MAX_FILENAME, ini_file);
+ 
+@@ -4379,9 +4404,11 @@ int check_Save_Owner(char *cDir, WCHAR *
+ 
+   int ver;
+ 
+-  getcwd(dir, MAX_FILENAME);
++  if (getcwd(dir, MAX_FILENAME) == NULL)
++    return 0;
+ 
+-  chdir((cDir));
++  if (chdir(cDir))
++    return 0;
+ 
+   ZeroMemory(&pProfile, sizeof(PLAYER_PROFILE));
+ 
+@@ -4390,27 +4417,35 @@ int check_Save_Owner(char *cDir, WCHAR *
+ 
+   file = fopen(text, "rb");
+   if (!file) {
+-    chdir((dir));
++    /* GCC warns when we don't check the return value of chdir(). For
++       some reason, casting to (void) doesn't work. */
++    if (chdir(dir))
++      return 0;
+     return 0;
+   }
+ 
+-  fread(&pProfile, sizeof(PLAYER_PROFILE), 1, file);
+-  fread(wFileName, 32 * sizeof(WCHAR), 1, file);
+-
+-  fread(&ver, sizeof(int), 1, file);
++  if (fread(&pProfile, sizeof(PLAYER_PROFILE), 1, file) != 1 ||
++      fread(wFileName, 32 * sizeof(WCHAR), 1, file) != 1 ||
++      fread(&ver, sizeof(int), 1, file) != 1) {
++    fclose(file);
++    return 0;
++  }
+ 
+   if (ver != SAVE_VER) {
+     fclose(file);
+     return 0;
+   }
+ 
+-  fread(wdir, (MAX_FILENAME + 1) * sizeof(WCHAR), 1, file);
+-
+-  fread(&l_h, sizeof(LEVEL_HEADER), 1, file);
++  if (fread(wdir, (MAX_FILENAME + 1) * sizeof(WCHAR), 1, file) != 1 ||
++      fread(&l_h, sizeof(LEVEL_HEADER), 1, file) != 1) {
++    fclose(file);
++    return 0;
++  }
+ 
+   fclose(file);
+ 
+-  chdir((dir));
++  if (chdir(dir))
++    return 0;
+ 
+   if (wcscmp(pPlayerProfile.cName, pProfile.cName))
+     return 0;
+@@ -4435,7 +4470,8 @@ int FillListLoad(LIST_VIEW_CONTROL * p_l
+   LIST_ITEM_ *list;
+   int isize;
+ 
+-  chdir(SAVE_DIR);
++  if (chdir(SAVE_DIR))
++    return 0;
+ 
+   FillStringList(mask, &list, &isize);
+ 
+@@ -4515,7 +4551,10 @@ void RunMenuLoadGameLoad(char *p_File_Na
+   lastcmd = 0;
+   timercnt = 0;
+ 
+-  chdir(DATA_DIR);
++  if (chdir(DATA_DIR)) {
++    free((void *) res);
++    return;
++  }
+ 
+   char dir[MAX_FILENAME];
+   strcpy(dir, DATA_DIR);
+@@ -5012,7 +5051,10 @@ void RunMenuLoadGame(char *p_File_Name,
+   lastcmd = 0;
+   timercnt = 0;
+ 
+-  chdir(DATA_DIR);
++  if (chdir(DATA_DIR)) {
++    free((void *) res);
++    return;
++  }
+ 
+   char dir[MAX_FILENAME];
+   strcpy(dir, DATA_DIR);
+@@ -5441,7 +5483,7 @@ void RunMenuCibron(char *cBmp)
+   dim.t1 = 0;
+   dim.t2 = 0;
+ 
+-  memset(key, 0, POCET_KLAVES * sizeof(char));
++  memset(key, 0, POCET_KLAVES * sizeof(int));
+ 
+   ddxBitBlt(HDC2DD, 0, 0, 1024, 768, idx, 0, 0);
+ 
+@@ -5482,7 +5524,7 @@ void RunMenuCinemax(void)
+   dim.t1 = 0;
+   dim.t2 = 0;
+ 
+-  memset(key, 0, POCET_KLAVES * sizeof(char));
++  memset(key, 0, POCET_KLAVES * sizeof(int));
+ 
+   ddxReleaseBitmap(cib);
+   ddxSetCursor(1);
+@@ -5572,7 +5614,10 @@ RUN_MENU_BRUTAL_RESTART:
+ 
+   ZeroMemory(res, RES_NUM * sizeof(CMD_LINE));
+ 
+-  chdir(DATA_DIR);
++  if (chdir(DATA_DIR)) {
++    free((void *) res);
++    return;
++  }
+ 
+   char dir[MAX_FILENAME];
+   strcpy(dir, DATA_DIR);
+@@ -6054,7 +6099,10 @@ void RunMenuChildGame(char *p_File_Name,
+   lastcmd = 0;
+   timercnt = 0;
+ 
+-  chdir(DATA_DIR);
++  if (chdir(DATA_DIR)) {
++    free((void *) res);
++    return;
++  }
+ 
+   char dir[MAX_FILENAME];
+   strcpy(dir, DATA_DIR);
+@@ -6500,7 +6548,10 @@ void RunMenuStartGame(char *p_File_Name,
+   lastcmd = 0;
+   timercnt = 0;
+ 
+-  chdir(DATA_DIR);
++  if (chdir(DATA_DIR)) {
++    free((void *) res);
++    return;
++  }
+ 
+   char dir[MAX_FILENAME];
+   strcpy(dir, DATA_DIR);
+@@ -7019,7 +7070,10 @@ int RunMenuComixB(char *p_File_Name, HWN
+   lastcmd = 0;
+   timercnt = 0;
+ 
+-  chdir(DATA_DIR);
++  if (chdir(DATA_DIR)) {
++    free((void *) res);
++    return 0;
++  }
+ 
+   char dir[MAX_FILENAME];
+   strcpy(dir, DATA_DIR);
+@@ -7399,7 +7453,13 @@ int RunMenuComix(char *p_File_Name, HWND
+ 
+   if (iLanguageVersion == 4) {
+     strcpy(cDir, BITMAP_DIR);
+-    sprintf(cFile, "%s%cscene%d.pak", cDir, DIR_SLASH, iScene);
++    if (snprintf(cFile, sizeof(cFile), "%s%cscene%d.pak",
++		 cDir, DIR_SLASH, iActualScene) >=
++	(int) sizeof(cFile)) {
++      kprintf(1, "Filename too long: %s%cscene%d.pak",
++	      cDir, DIR_SLASH, iActualScene);
++      return 0;
++    }
+     hArchive = apakopen(cFile, cDir, &idx);
+ 
+     if (!hArchive) {
+Index: berusky2/src/kofola/Menu2.cpp
+===================================================================
+--- berusky2.orig/src/kofola/Menu2.cpp
++++ berusky2/src/kofola/Menu2.cpp
+@@ -1138,7 +1138,10 @@ void RunMenuSettings2(char *p_File_Name,
+   lastcmd = 0;
+   timercnt = 0;
+ 
+-  chdir(DATA_DIR);
++  if (chdir(DATA_DIR)) {
++    free((void *) res);
++    return;
++  }
+ 
+   char dir[MAX_FILENAME];
+   strcpy(dir, DATA_DIR);
+@@ -1696,7 +1699,8 @@ int FillListLoad2(LIST_VIEW_CONTROL2 * p
+   LIST_ITEM_ *list;
+   int isize;
+ 
+-  chdir(SAVE_DIR);
++  if (chdir(SAVE_DIR))
++    return 0;
+ 
+   FillStringList(mask, &list, &isize);
+ 
+@@ -1806,7 +1810,10 @@ int RunMenuLoadGameLoad2(char *p_File_Na
+   lastcmd = 0;
+   timercnt = 0;
+ 
+-  chdir(DATA_DIR);
++  if (chdir(DATA_DIR)) {
++    free((void *) res);
++    return 0;
++  }
+ 
+   char dir[MAX_FILENAME];
+   strcpy(dir, DATA_DIR);
+@@ -2657,7 +2664,10 @@ void RunMenuHelp2(char *p_File_Name, AUD
+   lastcmd = 0;
+   timercnt = 0;
+ 
+-  chdir(DATA_DIR);
++  if (chdir(DATA_DIR)) {
++    free((void *) res);
++    return;
++  }
+ 
+   char dir[MAX_FILENAME];
+   strcpy(dir, DATA_DIR);
+@@ -3197,7 +3207,10 @@ void RunMenuLevelStats2(char *p_File_Nam
+   lastcmd = 0;
+   timercnt = 0;
+ 
+-  chdir(DATA_DIR);
++  if (chdir(DATA_DIR)) {
++    free((void *) res);
++    return;
++  }
+ 
+   char dir[MAX_FILENAME];
+   strcpy(dir, DATA_DIR);
+@@ -3562,7 +3575,10 @@ void RunMenuTutorial2(char *p_File_Name,
+   lastcmd = 0;
+   timercnt = 0;
+ 
+-  chdir(DATA_DIR);
++  if (chdir(DATA_DIR)) {
++    free((void *) res);
++    return;
++  }
+ 
+   char dir[MAX_FILENAME];
+   strcpy(dir, DATA_DIR);
+@@ -3907,7 +3923,13 @@ void RunMenuLoadScreen2(void)
+ 
+     if (iLanguageVersion == 4) {
+       strcpy(cDir, BITMAP_DIR);
+-      sprintf(cFile, "%s%cscene%d.pak", cDir, DIR_SLASH, iActualScene);
++      if (snprintf(cFile, sizeof(cFile), "%s%cscene%d.pak",
++		   cDir, DIR_SLASH, iActualScene) >=
++	  (int) sizeof(cFile)) {
++	kprintf(1, "Filename too long: %s%cscene%d.pak",
++		cDir, DIR_SLASH, iActualScene);
++	return;
++      }
+       hArchive = apakopen(cFile, cDir, &sh);
+ 
+       if (!hArchive) {
+Index: berusky2/src/kofola/Tools.cpp
+===================================================================
+--- berusky2.orig/src/kofola/Tools.cpp
++++ berusky2/src/kofola/Tools.cpp
+@@ -33,16 +33,16 @@ void tools_Parse_Command_Line(char *pCom
+     strcpy(pDemo, (const char *) &pCommnad[i + 4]);
+   }
+   else {
++    /* This allows 18 chars for abbreviated month name. Should be more
++       than enough in any locale. */
++    char timestamp[40];
++    time_t date = time(NULL);
++    struct tm *unpacked_date = localtime(&date);
++    size_t ret = strftime(timestamp, sizeof(timestamp),
++			  "[%b_%d_%Y]_[%H_%M_%S]", unpacked_date);
++    assert(ret);
+     *demo = 0;
+-    sprintf(pDemo, "[%s]_[%s]_[%s].dem", pLevel, __DATE__, __TIME__);
+-
+-    for (i = 0; i < (int) strlen(pDemo); i++) {
+-      if (pDemo[i] == 32)
+-        pDemo[i] = '_';
+-
+-      if (pDemo[i] == ':')
+-        pDemo[i] = '_';
+-    }
++    sprintf(pDemo, "[%s]_%s.dem", pLevel, timestamp);
+ 
+     //strcpy(pDemo, "Demo.dem");
+   }
+@@ -85,14 +85,19 @@ void MyMessageBox(HWND hWnd, char *ctagt
+   if (!ctagtitle || !ctagtext)
+     return;
+ 
+-  getcwd(odir, MAX_FILENAME);
++  if (getcwd(odir, MAX_FILENAME) == NULL)
++    return;
+ 
+   strcpy(dir, BITMAP_DIR);
+-  chdir(dir);
++  if (chdir(dir))
++    return;
+   hArchive = apakopen(cFontFile[2], dir, &error);
+ 
+   if (!hArchive) {
+-    chdir((odir));
++    /* GCC warns when we don't check the return value of chdir(). For
++       some reason, casting to (void) doesn't work. */
++    if (chdir(odir))
++      return;
+     return;
+   }
+   else
+@@ -102,7 +107,8 @@ void MyMessageBox(HWND hWnd, char *ctagt
+ 
+   if (!file) {
+     apakclose(&hArchive);
+-    chdir((odir));
++    if (chdir(odir))
++      return;
+   }
+ 
+   agetbuffer(file, (char **) &buffer, &ulsize);
+@@ -120,7 +126,10 @@ void MyMessageBox(HWND hWnd, char *ctagt
+ 
+   aclose(file);
+   apakclose(&hArchive);
+-  chdir((odir));
++  /* GCC warns when we don't check the return value of chdir(). For
++     some reason, casting to (void) doesn't work. */
++  if (chdir(odir))
++    return;
+ }
+ 
+ static int translation_table[KEYNUM];
+Index: berusky2/src/kofola/animationk.cpp
+===================================================================
+--- berusky2.orig/src/kofola/animationk.cpp
++++ berusky2/src/kofola/animationk.cpp
+@@ -77,7 +77,10 @@ int am_Init(ANIMATION_MODULE * p_am, LEV
+     p_am->p_animation[i].p_matrix = -1;
+   }
+ 
+-  chdir(DATA_DIR);
++  if (chdir(DATA_DIR)) {
++    kprintf(1, "Unable to change directory to %s", DATA_DIR);
++    return 0;
++  }
+ 
+   pDataArchive->pActualNode = pDataArchive->pRootNode->pNextNode;
+ 
+@@ -785,7 +788,9 @@ void am_Init_Zhave_Castice(LEVELINFO * p
+   for (i = 0; i < 100; i++) {
+     p_Level->VodniKolaB[i].pCastice = NULL;
+     p_Level->VodniKolaB[i].System = (size_ptr)NULL;
++  }
+ 
++  for (i = 0; i < 10; i++) {
+     for (j = 0; j < 64; j++)
+       p_Level->VodniKola[i].hHnizdo[j] = 0;
+   }
+@@ -808,18 +813,18 @@ void am_Init_Zhave_Castice(LEVELINFO * p
+     memset(&p_Level->StarL[i], 0, sizeof(STREET_LIGHT_EFFECT));
+ 
+   for (i = 0; i < 2; i++) {
+-    memset(&p_Level->StarFall[i], 0, sizeof(FAIRY_EFFECT));
++    memset((void *) &p_Level->StarFall[i], 0, sizeof(FAIRY_EFFECT));
+   }
+ 
+   for (i = 0; i < 6; i++) {
+-    memset(&p_Level->CandleEffect[i], 0, sizeof(CANDLE_EFFECT));    
++    memset((void *) &p_Level->CandleEffect[i], 0, sizeof(CANDLE_EFFECT));    
+     p_Level->CandleEffect[i].hSvetlo = -1;
+-    memset(&p_Level->CandleSmoke[i], 0, sizeof(CANDLE_EFFECT));
++    memset((void *) &p_Level->CandleSmoke[i], 0, sizeof(CANDLE_EFFECT));
+     p_Level->CandleSmoke[i].hSvetlo = -1;
+   }
+ 
+   for (i = 0; i < 4; i++) {
+-    memset(&p_Level->FairyEffect[i], 0, sizeof(FAIRY_EFFECT));
++    memset((void *) &p_Level->FairyEffect[i], 0, sizeof(FAIRY_EFFECT));
+   }
+ }
+ 
+@@ -1271,11 +1276,11 @@ void am_Do_Water_KolaB(LEVELINFO * p_Lev
+           p_Level->VodniKolaB[i].dwExpireTime += ber.TimeLastFrame;
+ 
+         if (p_Level->VodniKolaB[i].dwExpireTime >= p_Level->VodniKolaB[i].dwExpire && 
+-            p_Level->VodniKolaB[i].hHnizdo[2] != -1)
++            p_Level->VodniKolaB[i].hHnizdo[2] != (size_ptr) -1)
+           p_Level->VodniKolaB[i].hHnizdo[2] = -1;
+       }
+ 
+-      if (p_Level->VodniKolaB[i].hHnizdo[2] != -1) {
++      if (p_Level->VodniKolaB[i].hHnizdo[2] != (size_ptr) -1) {
+         kom_mesh_get_float(p_Level->VodniKolaB[i].hHnizdo[2],
+                            &pos[0], &pos[1], &pos[2], &rot);
+ 
+@@ -1782,7 +1787,7 @@ int am_Find_Corresponding_VodniKolaB(int
+ 
+   for (i = 0; i < 100; i++) {
+     if (p_Level->VodniKolaB[i].System &&
+-        p_Level->VodniKolaB[i].hHnizdo[2] == mesh)
++        p_Level->VodniKolaB[i].hHnizdo[2] == (size_ptr) mesh)
+       return i;
+   }
+ 
+Index: berusky2/src/kofola/apakdir.cpp
+===================================================================
+--- berusky2.orig/src/kofola/apakdir.cpp
++++ berusky2/src/kofola/apakdir.cpp
+@@ -109,8 +109,10 @@ int achdir(APAK_HANDLE * pHandle, char *
+ 
+ char *agetcwd(APAK_HANDLE * pHandle, char *buffer, int maxlen)
+ {
+-  if (!pHandle)
+-    getcwd(buffer, maxlen);
++  if (!pHandle) {
++    if (getcwd(buffer, maxlen) == NULL)
++      return NULL;
++  }
+ 
+   if (maxlen > 256)
+     maxlen = 256;
+Index: berusky2/src/kofola/audio_plug-in.cpp
+===================================================================
+--- berusky2.orig/src/kofola/audio_plug-in.cpp
++++ berusky2/src/kofola/audio_plug-in.cpp
+@@ -86,7 +86,10 @@ int ap_Load_Sound_List(AUDIO_DATA * p_ad
+   int c = iStart;
+   int iMaterial = 0;
+ 
+-  chdir(p_ber->dir.sound_dir);
++  if (chdir(p_ber->dir.sound_dir)) {
++    kprintf(1, "Cannot change directory to %s", p_ber->dir.sound_dir);
++    return 0;
++  }
+ 
+   if (!strlen(cFile))
+     return 0;
+@@ -132,7 +135,10 @@ int ap_Load_Play_List(char *p_File_Name,
+   if (p_ad->p_Play_List)
+     return 0;
+ 
+-  chdir(p_ber->dir.music_dir);
++  if (chdir(p_ber->dir.music_dir)) {
++    kprintf(1, "Cannot change directory to %s", p_ber->dir.music_dir);
++    return 0;
++  }
+ 
+   file = fopen(p_File_Name, "r");
+   if (!file) {    
+@@ -141,7 +147,11 @@ int ap_Load_Play_List(char *p_File_Name,
+     return 0;
+   }
+ 
+-  fgets(text, 30, file);
++  if (fgets(text, 30, file) == NULL) {
++    kprintf(1, "Cannot read play list file");
++    MyMessageBox(NULL, "##error_title", "##play_list_error", "");
++    return 0;
++  }
+   p_ad->Size_of_Play_List = atoi(text);
+ 
+   p_ad->p_Play_List = (PLAY_LIST_ITEM *) malloc((p_ad->Size_of_Play_List) * sizeof(PLAY_LIST_ITEM));
+@@ -153,7 +163,11 @@ int ap_Load_Play_List(char *p_File_Name,
+ 
+   for (i = 0; i < p_ad->Size_of_Play_List; i++) {
+     char *p_name = p_ad->p_Play_List[i].Song_Name;
+-    fgets(p_name, 30, file);
++    if (fgets(p_name, 30, file) == NULL) {
++      kprintf(1, "Cannot read play list file");
++      MyMessageBox(NULL, "##error_title", "##play_list_error", "");
++      return 0;
++    }
+     newline_cut(p_name);
+   }
+   fclose(file);
+Index: berusky2/src/kofola/controls.cpp
+===================================================================
+--- berusky2.orig/src/kofola/controls.cpp
++++ berusky2/src/kofola/controls.cpp
+@@ -3218,7 +3218,7 @@ int co_Handle_Edit(CONTROL_EDIT * p_ed,
+       int   size;
+ 
+       if (co_Handle_Edit_Key_Filter() || (co_Handle_wsclen(p_ed) && !key[K_BKSP])) {
+-        memset(key, 0, POCET_KLAVES * sizeof(char));
++        memset(key, 0, POCET_KLAVES * sizeof(int));
+         return 1;
+       }
+ 
+@@ -3226,18 +3226,18 @@ int co_Handle_Edit(CONTROL_EDIT * p_ed,
+       size = MultiByteToWideChar(CP_ACP, 0, (char *) &key_pressed, 1, wt, sizeof(wt)/sizeof(wt[0]));
+       if(size > 1) {
+         // we have got some unsupported character - ignore it
+-        memset(key, 0, POCET_KLAVES * sizeof(char));
++        memset(key, 0, POCET_KLAVES * sizeof(int));
+         return 1;
+       }
+       wt[0] = co_ToUnicode(key_pressed);
+ 
+       if (!wt[0]) {
+-        memset(key, 0, POCET_KLAVES * sizeof(char));
++        memset(key, 0, POCET_KLAVES * sizeof(int));
+         return 1;
+       }
+ 
+       if (wt[0] == '_') {
+-        memset(key, 0, POCET_KLAVES * sizeof(char));
++        memset(key, 0, POCET_KLAVES * sizeof(int));
+         return 1;
+       }
+ 
+@@ -3280,7 +3280,7 @@ int co_Handle_Edit(CONTROL_EDIT * p_ed,
+ 
+       p_ed->tx = draw_edit(p_ed, x, y, hdc, xcor, ycor);
+ 
+-      memset(key, 0, POCET_KLAVES * sizeof(char));
++      memset(key, 0, POCET_KLAVES * sizeof(int));
+     }
+   }
+ 
+Index: berusky2/src/kofola/controls3d.cpp
+===================================================================
+--- berusky2.orig/src/kofola/controls3d.cpp
++++ berusky2/src/kofola/controls3d.cpp
+@@ -3004,7 +3004,7 @@ int co2_Handle_Edit(CONTROL_EDIT2 * p_ed
+       int size;
+ 
+       if (co_Handle_Edit_Key_Filter() || (co2_Handle_wsclen(p_ed) && !key[K_BKSP])) {
+-        memset(key, 0, POCET_KLAVES * sizeof(char));
++        memset(key, 0, POCET_KLAVES * sizeof(int));
+         return 1;
+       }
+ 
+@@ -3012,18 +3012,18 @@ int co2_Handle_Edit(CONTROL_EDIT2 * p_ed
+       size = MultiByteToWideChar(CP_ACP, 0, (char *) &key_pressed, 1, wt, sizeof(wt) / sizeof(wt[0]));
+       if(size > 1) {
+         // we have got some unsupported character - ignore it
+-        memset(key, 0, POCET_KLAVES * sizeof(char));
++        memset(key, 0, POCET_KLAVES * sizeof(int));
+         return 1;
+       }      
+       wt[0] = co_ToUnicode(key_pressed);
+ 
+       if (!wt[0]) {
+-        memset(key, 0, POCET_KLAVES * sizeof(char));
++        memset(key, 0, POCET_KLAVES * sizeof(int));
+         return 1;
+       }
+ 
+       if (wt[0] == '_') {
+-        memset(key, 0, POCET_KLAVES * sizeof(char));
++        memset(key, 0, POCET_KLAVES * sizeof(int));
+         return 1;
+       }
+ 
+@@ -3079,7 +3079,7 @@ int co2_Handle_Edit(CONTROL_EDIT2 * p_ed
+         TRANSCOLOR);
+ 
+       p_ed->tx = xt;
+-      memset(key, 0, POCET_KLAVES * sizeof(char));
++      memset(key, 0, POCET_KLAVES * sizeof(int));
+     }
+   }
+ 
+Index: berusky2/src/kofola/credits.cpp
+===================================================================
+--- berusky2.orig/src/kofola/credits.cpp
++++ berusky2/src/kofola/credits.cpp
+@@ -219,7 +219,8 @@ int cr_Credits(HWND hWnd, AUDIO_DATA * p
+ 	}
+ 
+   strcpy(text, BITMAP_DIR);
+-	chdir(text);
++	if (chdir(text))
++		return 0;
+ 	hArchive = apakopen(cFontFile[2], text, &error);
+ 
+ 	if(!hArchive)
+@@ -471,7 +472,8 @@ int cr_CreditsUNI(HWND hWnd, AUDIO_DATA
+ 	}
+ 
+   strcpy(text,BITMAP_DIR);
+-	chdir(text);
++	if (chdir(text))
++		return 0;
+ 
+ 	hArchive = apakopen(cFontFile[2], text, &error);
+ 	
+Index: berusky2/src/kofola/font.cpp
+===================================================================
+--- berusky2.orig/src/kofola/font.cpp
++++ berusky2/src/kofola/font.cpp
+@@ -1,4 +1,5 @@
+ #include <stdio.h>
++#include <errno.h>
+ #include "font.h"
+ #include "2D_graphic.h"
+ #include "menu_def.h"
+@@ -370,7 +371,11 @@ void fn_Gen_Texture(char ** lpTexture, i
+ int fn_Open_Archive(char *cFile, APAK_HANDLE ** pAHandle, char *p_dir)
+ {
+   int e;
+-  chdir(p_dir);
++  if (chdir(p_dir)) {
++    kprintf(1, "Unable to change directory to %s: %s",
++	    p_dir, strerror(errno));
++    return 0;
++  }
+ 
+   (*pAHandle) = apakopen(cFile, p_dir, &e);
+ 
+@@ -877,7 +882,8 @@ void fn_Convert_Rect(char *cFile, int xm
+   char t[32];
+   float *fl1, *fl2, *fl3, *fl4, *fl5;
+ 
+-  getcwd(text, 255);
++  if (getcwd(text, 255) == NULL)
++    return;
+ 
+   f = fopen("fontout.txt", "w");
+   fi = fopen("font_def.txt", "r");
+@@ -888,7 +894,11 @@ void fn_Convert_Rect(char *cFile, int xm
+         {
+           if (gt->command[i].LastParam > 5 &&
+             gt->command[i].Parametr[0].Type == 3) {
+-            fgets(textt, 256, fi);
++            if (fgets(textt, 256, fi) == NULL) {
++	      fclose(fi);
++	      fclose(f);
++	      return;
++	    }
+             strncpy(t, textt, 10);
+             t[10] = '\0';
+             strcpy(text, "");
+Index: berusky2/src/kofola/font3d.cpp
+===================================================================
+--- berusky2.orig/src/kofola/font3d.cpp
++++ berusky2/src/kofola/font3d.cpp
+@@ -1,4 +1,5 @@
+ #include <stdio.h>
++#include <errno.h>
+ #include "Apak.h"
+ #include "font3d.h"
+ //#include "2d_graphic.h"
+@@ -631,7 +632,11 @@ int fn2_Open_Archive(char *cFile, APAK_H
+ {
+   int e;
+ 
+-  chdir(p_dir);
++  if (chdir(p_dir)) {
++    kprintf(1, "Unable to change directory to %s: %s",
++	    p_dir, strerror(errno));
++    return 0;
++  }
+   (*pAHandle) = apakopen(cFile, p_dir, &e);
+ 
+   if (!(*pAHandle)) {
+@@ -1149,7 +1154,11 @@ void fn2_Convert_Rect(char *cFile, int x
+         {
+           if (gt->command[i].LastParam > 5 &&
+             gt->command[i].Parametr[0].Type == 3) {
+-            fgets(textt, 256, fi);
++            if (fgets(textt, 256, fi) == NULL) {
++	      fclose(fi);
++	      fclose(f);
++	      return;
++	    }
+             strncpy(t, textt, 10);
+             t[10] = '\0';
+             strcpy(text, "");
+Index: berusky2/src/kofola/game_init.cpp
+===================================================================
+--- berusky2.orig/src/kofola/game_init.cpp
++++ berusky2/src/kofola/game_init.cpp
+@@ -2,6 +2,7 @@
+ // version 0.0.1
+ //------------------------------------------------------------------------------------------------
+ #include <stdio.h>
++#include <errno.h>
+ #include "Apak.h"
+ #include "adas.h"
+ 
+@@ -41,7 +42,11 @@ int gi_Open_Archive(char *cFile, APAK_HA
+ {
+   int e;
+ 
+-  chdir(p_dir);
++  if (chdir(p_dir)) {
++    kprintf(1, "Unable to change directory to %s: %s",
++	    p_dir, strerror(errno));
++    return 0;
++  }
+   (*pAHandle) = apakopen(cFile, p_dir, &e);
+ 
+   if (!(*pAHandle)) {
+@@ -185,7 +190,11 @@ void gi_Init_Sound_Engine(AUDIO_DATA *p_
+ 			kprintf(1, "Extensions: %s", cString);			
+ 
+ 			p_ad->bAudio = 1;
+-			chdir(p_ber->dir.sound_dir);
++			if (chdir(p_ber->dir.sound_dir)) {
++				kprintf(1, "Cannot change directory to %s: %s",
++					p_ber->dir.sound_dir, strerror, errno);
++				return;
++			}
+ 			achdir(pSndArchive, p_ber->dir.sound_dir);
+ 
+ 			ap_Load_Sound_List(p_ad, "basicset.dat", 0);
+Index: berusky2/src/kofola/game_logic.cpp
+===================================================================
+--- berusky2.orig/src/kofola/game_logic.cpp
++++ berusky2/src/kofola/game_logic.cpp
+@@ -9431,19 +9431,17 @@ int gl_Moveto_Beatle(int btl, LEVELINFO
+ 
+ int gl_Screen_Shot(int i)
+ {
+-  char text[256], t[32];
+-  char z[] = "0000";
++  char text[MAX_FILENAME];
+   FILE *f = NULL;
+ 
+   do {
+-    strcpy(text, CurrentWorkingDirectory);    
+-    strcat(text, DIR_SLASH_STRING"screenshot");
+-
+-    itoa(i, t, 10);
++    if (snprintf(text, sizeof(text), "%s%s%04d.bmp",
++		 CurrentWorkingDirectory,
++		 DIR_SLASH_STRING"screenshot", i) >=
++	(int) sizeof(text)) {
++      break;
++    }
+ 
+-    strncat(text, z, 4 - strlen(t));
+-    strcat(text, t);
+-    strcat(text, ".bmp");
+     f = fopen(text, "r");
+     if (!f)
+       break;
+@@ -10415,9 +10413,11 @@ PLAY_LEVEL_START:
+     int isize;
+     char ctext[MAX_FILENAME];
+ 
+-    chdir(GAME_LEVEL_DIR);
++    if (chdir(GAME_LEVEL_DIR))
++      return -1;
+     lsi_Get_Dir_Name(ctext, cLevelName);
+-    chdir(ctext);
++    if (chdir(ctext))
++      return -1;
+ 
+     kprintf(1, "lsi_Create_Level_Raw...");
+     if (!lsi_Create_Level_Raw(cLevelName, &b_l_d, &isize))
+@@ -10427,9 +10427,11 @@ PLAY_LEVEL_START:
+     kprintf(1, "kom_load_level...");
+     kom_load_level(cLevelName, 1, bRestart, b_l_d, isize);
+     
+-    chdir(GAME_LEVEL_DIR);
++    if (chdir(GAME_LEVEL_DIR))
++      return -1;
+     lsi_Get_Dir_Name(ctext, cLevelName);
+-    chdir(ctext);
++    if (chdir(ctext))
++      return -1;
+ 
+     kprintf(1, "free((void *) b_l_d);");
+     free((void *) b_l_d);
+Index: berusky2/src/kofola/game_main.cpp
+===================================================================
+--- berusky2.orig/src/kofola/game_main.cpp
++++ berusky2/src/kofola/game_main.cpp
+@@ -56,7 +56,8 @@ int winmain_Game_Run(char *p_Level_Name)
+   kprintf(1, "Kofola - verze zdrojaku: MASTER %d.%d", VERZEHI, VERZELO);
+ 
+   gi_Set_Win_Version();
+-  getcwd(CurrentWorkingDirectory, MAX_FILENAME);
++  if (getcwd(CurrentWorkingDirectory, MAX_FILENAME) == NULL)
++    return 0;
+ 
+   srand((unsigned) time(NULL));
+ 
+@@ -128,9 +129,23 @@ int winmain_Game_Run(char *p_Level_Name)
+   }
+ 
+ 	gi_Init_Sound_Engine(&ad);
+-	chdir(p_ber->dir.music_dir);
++	if (chdir(p_ber->dir.music_dir)) {
++	  apakclose(&pDataArchive);
++	  apakclose(&p3DMArchive);
++	  apakclose(&pControlsArchive);
++	  apakclose(&pBmpArchive);
++	  apakclose(&pSndArchive);
++	  return 0;
++	}
+ 	ap_Load_Play_List("play_list.dat",&ad);
+-  chdir(p_ber->dir.sound_dir);
++  if (chdir(p_ber->dir.sound_dir)) {
++    apakclose(&pDataArchive);
++    apakclose(&p3DMArchive);
++    apakclose(&pControlsArchive);
++    apakclose(&pBmpArchive);
++    apakclose(&pSndArchive);
++    return 0;
++  }
+ 
+   ap_Load_Material_List("material.dat", &ad);
+ 
+Index: berusky2/src/kofola/grammar.cpp
+===================================================================
+--- berusky2.orig/src/kofola/grammar.cpp
++++ berusky2/src/kofola/grammar.cpp
+@@ -55,7 +55,8 @@ char gr_Load_Grammar(char *pFile, GRAMMA
+   FILE *file;
+   char text[256];
+ 
+-  chdir(DATA_DIR);
++  if (chdir(DATA_DIR))
++    return 0;
+ 
+   file = aopen(pDataArchive, pFile, "r");
+ 
+Index: berusky2/src/kofola/load_level.cpp
+===================================================================
+--- berusky2.orig/src/kofola/load_level.cpp
++++ berusky2/src/kofola/load_level.cpp
+@@ -598,11 +598,13 @@ void lsi_Load_Level_Script(LEVELINFO * p
+   GAME_TRIGER gt;
+   GRAMMAR gr;
+ 
+-  chdir(DATA_DIR);
++  if (chdir(DATA_DIR))
++    return;
+ 
+   gr_Load_Grammar("lsc_grammar.txt", &gr);
+ 
+-  chdir(GAME_DATA_DIR);
++  if (chdir(GAME_DATA_DIR))
++    return;
+ 
+   ts.LastStr = 0;
+   ts.sizeofT = 0;
+@@ -800,35 +802,48 @@ int lsi_Create_Level_Raw(char *p_Level_N
+ {
+   LEVEL_HEADER l_h;
+   char text[MAX_FILENAME + 1];
++  char filename[MAX_FILENAME];
+   FILE *file;
+ 
+   kprintf(1, "Tvorba raw struktury pro komata...");
+-  getcwd(text, MAX_FILENAME);
++  if (getcwd(text, MAX_FILENAME) == NULL) {
++    kprintf(1, "Cannot get current directory");
++    return 0;
++  }
+   kprintf(1, "_getcwd = %s", text);
+ 
+-  file = fopen(p_Level_Name, "rb");
++  strcpy(filename, p_Level_Name);
++  file = fopen(filename, "rb");
+   if (!file) {
+-    kprintf(1, "Unable to load level '%s', guessing level name...", p_Level_Name);
++    kprintf(1, "Unable to load level '%s', guessing level name...", filename);
+     
+-    char tmp[MAX_FILENAME];
+-    strcpy(tmp, p_Level_Name);
+-    strcat(tmp, KONCOVKA_LEVELU);
++    strcat(filename, KONCOVKA_LEVELU);
+   
+-    file = fopen(tmp, "rb");
++    file = fopen(filename, "rb");
+     if (!file) {
+-      kprintf(1, "Unable to load level '%s'.", tmp);
++      kprintf(1, "Unable to load level '%s'.", filename);
+       return 0;
+     }
+-    kprintf(1, "Going with '%s' level name", tmp);
++    kprintf(1, "Going with '%s' level name", filename);
+   }
+ 
+-  fread(&l_h, sizeof(LEVEL_HEADER), 1, file);
++  if (fread(&l_h, sizeof(LEVEL_HEADER), 1, file) != 1) {
++    fclose(file);
++    kprintf(1, "Unable to load level '%s'.", filename);
++    return 0;
++  }
+   (*size) = l_h.x * l_h.y * l_h.z * 2;
+   (*b_l_d) = (BUNKA_LEVELU_DISK *) mmalloc((*size) * sizeof(BUNKA_LEVELU_DISK));
+-  fread((*b_l_d), sizeof(BUNKA_LEVELU_DISK), (*size), file);
++  if (fread((*b_l_d), sizeof(BUNKA_LEVELU_DISK), (*size), file) != (size_t) (*size)) {
++    free(*b_l_d);
++    fclose(file);
++    kprintf(1, "Unable to load level '%s'.", filename);
++    return 0;
++  }
+ 
+   fclose(file);
+-  chdir((text));
++  if (chdir(text))
++    return 0;
+   return 1;
+ }
+ 
+@@ -838,6 +853,7 @@ int lsi_Create_Level_Raw(char *p_Level_N
+ int lsi_Load_Level(char *p_Level_Name, LEVELINFO * p_Level)
+ {
+   char text[256];
++  char filename[MAX_FILENAME];
+   FILE *file;
+   int Vazba1, Vazba2, Rotation;
+   int i, Guid, errors = 0, error;
+@@ -870,7 +886,10 @@ int lsi_Load_Level(char *p_Level_Name, L
+     p_Level->BeetleAnim[i].dwTime = timeGetTime();
+   }
+ 
+-  getcwd(text, 255);
++  if (getcwd(text, 255) == NULL) {
++    kprintf(1, "Unable to get current directory");
++    return -1;
++  }
+ 
+   kprintf(1, "Loading level from %s ...", text);
+   
+@@ -883,23 +902,26 @@ int lsi_Load_Level(char *p_Level_Name, L
+   p_Level->KvalitaCastic = kvalita_castic;
+   p_Level->KvalitaCasticV = kvalita_casticv;
+ 
+-  file = fopen(p_Level_Name, "rb");
++  strcpy(filename, p_Level_Name);
++  file = fopen(filename, "rb");
+   if (!file) {
+-    kprintf(1, "Unable to load level '%s', guessing level name...", p_Level_Name);
++    kprintf(1, "Unable to load level '%s', guessing level name...", filename);
+   
+-    char tmp[MAX_FILENAME];
+-    strcpy(tmp, p_Level_Name);
+-    strcat(tmp, KONCOVKA_LEVELU);
++    strcat(filename, KONCOVKA_LEVELU);
+   
+-    file = fopen(tmp, "rb");
++    file = fopen(filename, "rb");
+     if (!file) {
+-      kprintf(1, "Unable to load level '%s'.", tmp);
++      kprintf(1, "Unable to load level '%s'.", filename);
+       return(-1);
+     }
+-    kprintf(1, "Going with '%s' level name", tmp);
++    kprintf(1, "Going with '%s' level name", filename);
+   }
+ 
+-  fread(&l_h, sizeof(LEVEL_HEADER), 1, file);
++  if (fread(&l_h, sizeof(LEVEL_HEADER), 1, file) != 1) {
++    fclose(file);
++    kprintf(1, "Unable to load level '%s'.", filename);
++    return 0;
++  }
+ 
+   p_Level->Size[0] = l_h.x;
+   p_Level->Size[1] = l_h.z;
+@@ -1285,7 +1307,7 @@ void lsi_Release_Level(LEVELINFO * p_Lev
+     p_Level->Rain.bWaterCircles = 0;
+   }
+ 
+-  memset(&p_Level->Rain, 0, sizeof(p_Level->Rain));
++  memset((void *) &p_Level->Rain, 0, sizeof(p_Level->Rain));
+ 
+   if (p_Level->StreetRain.bWaterCircles) {
+     kprintf(1, "p_Level->StreetRain.pWSystem");
+@@ -1299,7 +1321,7 @@ void lsi_Release_Level(LEVELINFO * p_Lev
+     p_Level->StreetRain.bWaterCircles = 0;
+   }
+ 
+-  memset(&p_Level->StreetRain, 0, sizeof(p_Level->StreetRain));
++  memset((void *) &p_Level->StreetRain, 0, sizeof(p_Level->StreetRain));
+ 
+   if (p_Level->Snow.bSnow) {
+     kprintf(1, "p_Level->Snow.pSystem");
+@@ -1312,7 +1334,7 @@ void lsi_Release_Level(LEVELINFO * p_Lev
+     p_Level->Snow.bSnow = 0;
+   }
+ 
+-  memset(&p_Level->Snow, 0, sizeof(p_Level->Snow));
++  memset((void *) &p_Level->Snow, 0, sizeof(p_Level->Snow));
+ 
+   if (p_Level->Mist.bMist) {
+     kprintf(1, "edl_svetlo_zrus ,p_Level->Mist.hSvetlo = %d",
+@@ -1342,28 +1364,39 @@ void lsi_copy_save(char *cMask, LEVELINF
+   char cLevelMask[MAX_FILENAME];
+   char csrc[MAX_FILENAME + 1];
+   char cout[MAX_FILENAME + 1];
++  int ret;
+ 
+   strcpy(dir, GAME_LEVEL_DIR);
+   lsi_Get_Dir_Name(cLevelMask, p_Level->cLoadedFrom);
+ 
+   sprintf(cout, "%s%s", cMask, ".b2l");
+-  sprintf(csrc, "%s%c%s%c%s%s", dir, DIR_SLASH, cLevelMask, DIR_SLASH, cLevelMask, ".b2l");
++  ret = snprintf(csrc, sizeof(csrc), "%s%c%s%c%s%s",
++		 dir, DIR_SLASH, cLevelMask, DIR_SLASH, cLevelMask, ".b2l");
++  assert(ret < (int) sizeof(csrc));
+   lsi_file_copy(csrc, cout);
+ 
+   sprintf(cout, "%s%s", cMask, ".b2t");
+-  sprintf(csrc, "%s%c%s%c%s%s", dir, DIR_SLASH, cLevelMask, DIR_SLASH, cLevelMask, ".b2t");
++  ret = snprintf(csrc, sizeof(csrc), "%s%c%s%c%s%s",
++		dir, DIR_SLASH, cLevelMask, DIR_SLASH, cLevelMask, ".b2t");
++  assert(ret < (int) sizeof(csrc));
+   lsi_file_copy(csrc, cout);
+ 
+   sprintf(cout, "%s%s", cMask, ".bpr");
+-  sprintf(csrc, "%s%c%s%c%s%s", dir, DIR_SLASH, cLevelMask, DIR_SLASH, cLevelMask, ".bpr");
++  ret = snprintf(csrc, sizeof(csrc), "%s%c%s%c%s%s",
++		 dir, DIR_SLASH, cLevelMask, DIR_SLASH, cLevelMask, ".bpr");
++  assert(ret < (int) sizeof(csrc));
+   lsi_file_copy(csrc, cout);
+ 
+   sprintf(cout, "%s%s", cMask, ".lv6");
+-  sprintf(csrc, "%s%c%s%c%s%s", dir, DIR_SLASH, cLevelMask, DIR_SLASH, cLevelMask, ".lv6");
++  ret = snprintf(csrc, sizeof(csrc), "%s%c%s%c%s%s",
++		 dir, DIR_SLASH, cLevelMask, DIR_SLASH, cLevelMask, ".lv6");
++  assert(ret < (int) sizeof(csrc));
+   lsi_file_copy(csrc, cout);
+ 
+   sprintf(cout, "%s%s", cMask, ".ply");
+-  sprintf(csrc, "%s%c%s%c%s%s", dir, DIR_SLASH, cLevelMask, DIR_SLASH, cLevelMask, ".ply");
++  ret = snprintf(csrc, sizeof(csrc), "%s%c%s%c%s%s",
++		 dir, DIR_SLASH, cLevelMask, DIR_SLASH, cLevelMask, ".ply");
++  assert(ret < (int) sizeof(csrc));
+   lsi_file_copy(csrc, cout);
+ }
+ 
+@@ -1376,8 +1409,8 @@ int lsi_Get_Save_Info(char *p_Level_Name
+   WCHAR wTmp[512];
+   int ver;
+ 
+-  chdir(SAVE_DIR);
+-  chdir(p_Level_Name);
++  if (chdir(SAVE_DIR) || chdir(p_Level_Name))
++    return 0;
+ 
+   sprintf(text, "%s.lvc", p_Level_Name);
+ 
+@@ -1386,11 +1419,14 @@ int lsi_Get_Save_Info(char *p_Level_Name
+   if (!file)
+     return 0;
+ 
+-  fread(&pPlayer, sizeof(PLAYER_PROFILE), 1, file);
+-  fread(wTmp, 32 * sizeof(WCHAR), 1, file);
+-  fread(&ver, sizeof(int), 1, file);
+-  fread(wTmp, (256+1) * sizeof(WCHAR), 1, file);
+-  fread(&l_h, sizeof(LEVEL_HEADER), 1, file);
++  if (fread(&pPlayer, sizeof(PLAYER_PROFILE), 1, file) != 1 ||
++      fread(wTmp, 32 * sizeof(WCHAR), 1, file) != 1 ||
++      fread(&ver, sizeof(int), 1, file) != 1 ||
++      fread(wTmp, (256+1) * sizeof(WCHAR), 1, file) != 1 ||
++      fread(&l_h, sizeof(LEVEL_HEADER), 1, file) != 1) {
++    fclose(file);
++    return 0;
++  }
+ 
+   *pActLevel = l_h.rezerved[0];
+   *pActScene = l_h.rezerved[1];
+@@ -1493,7 +1529,8 @@ int lsi_Save_Exist(WCHAR * wName, char *
+     return 0;
+   }
+ 
+-  getcwd(cwd,MAX_FILENAME);
++  if (getcwd(cwd,MAX_FILENAME) == NULL)
++    return 0;
+ 
+   int ret = false;
+   for(i = 0; i < c; i++) {
+@@ -1512,8 +1549,11 @@ int lsi_Save_Exist(WCHAR * wName, char *
+       PLAYER_PROFILE	pPlayer;
+       WCHAR	wTmp[32];
+     
+-      fread(&pPlayer, sizeof(PLAYER_PROFILE), 1, file);
+-      fread(wTmp, 32 * sizeof(WCHAR), 1, file);
++      if (fread(&pPlayer, sizeof(PLAYER_PROFILE), 1, file) != 1 ||
++	  fread(wTmp, 32 * sizeof(WCHAR), 1, file) != 1) {
++	fclose(file);
++	return 0;
++      }
+       fclose(file);
+ 
+       if(!wcscmp(pPlayer.cName, pPlayerProfile.cName) && !wcscmp(wTmp, wName))
+@@ -1524,10 +1564,16 @@ int lsi_Save_Exist(WCHAR * wName, char *
+       }
+     }
+ 
+-    chdir(cwd);
++    if(chdir(cwd)) {
++      kwarning(1, "Unable to chdir(%s)", cwd);
++      break;
++    }
+   }
+ 
+-  chdir(cwd);
++  if(chdir(cwd)) {
++    kwarning(1, "Unable to chdir(%s)", cwd);
++    ret = false;
++  }
+ 
+   for(i = 0; i < c; i++)
+     free(namelist[i]);
+@@ -1556,7 +1602,8 @@ void delete_dir(char *p_Level_Name)
+   }
+   free(namelist);
+ 
+-	chdir("..");
++	if (chdir(".."))
++		return;
+ 	rmdir(p_Level_Name);
+ }
+ #endif
+@@ -1575,7 +1622,8 @@ void lsi_Save_Level(WCHAR * pwc_Level_Na
+ 
+ 	ZeroMemory(p_Level_Name, MAX_FILENAME);
+ 
+-	chdir(SAVE_DIR);
++	if (chdir(SAVE_DIR))
++		return;
+ 
+ 	_strdate(pom);
+ 
+@@ -1601,11 +1649,14 @@ void lsi_Save_Level(WCHAR * pwc_Level_Na
+ 	mkdir(p_Level_Name, DEFAULT_DIR_MASK);
+ #endif
+   
+-	chdir(p_Level_Name);
++	if (chdir(p_Level_Name))
++		return;
+ 
+ 	lsi_copy_save(p_Level_Name, p_Level);
+ 
+-	sprintf(buffer, "%s.lvc", p_Level_Name);
++	if (snprintf(buffer, sizeof(buffer), "%s.lvc", p_Level_Name) >=
++	    (int) sizeof(buffer))
++		return;
+ 
+ 	file = fopen(buffer, "wb");
+ 	if(!file)
+@@ -1721,7 +1772,6 @@ void lsi_Destroy_Beetle(LEVELINFO * p_Le
+ int lsi_Load_Saved_Level(char *p_Level_Name, LEVELINFO * p_Level)
+ {
+   int real;
+-  char text[MAX_FILENAME];
+   char ctext[MAX_FILENAME];
+   FILE *file;
+   int i, j;
+@@ -1739,40 +1789,46 @@ int lsi_Load_Saved_Level(char *p_Level_N
+ 
+   file = fopen(ctext, "rb");
+   if (!file) {
+-    sprintf(text, "Level change file %s not present", ctext);
+-    kprintf(1, text);
+-    return -1;
++    kprintf(1, "Level change file %s not present", ctext);
++    return -2;
+   }
+ 
+-  fread(&pProfile, sizeof(PLAYER_PROFILE), 1, file);
+-  lsi_Add_Prifile(&pProfile);
++  if (fread(&pProfile, sizeof(PLAYER_PROFILE), 1, file) != 1 ||
++      fread(pwc_Level_Name, 32 * sizeof(WCHAR), 1, file) != 1 ||
++      fread(&ver, sizeof(int), 1, file) != 1) {
++    kprintf(1, "Cannot read level change file %s", ctext);
++    fclose(file);
++    return -2;
++  }
+ 
+-  fread(pwc_Level_Name, 32 * sizeof(WCHAR), 1, file);
++  lsi_Add_Prifile(&pProfile);
+ 
+-  fread(&ver, sizeof(int), 1, file);
+   if (ver != SAVE_VER) {
+     kprintf(1, "Save version mismatch! Level %s", p_Level_Name);
+     fclose(file);
+     return -2;
+   }
+ 
+-  fread(p_Level->cLoadedFrom, (256+1)*sizeof(char), 1, file);
+-  fread(&l_h, sizeof(LEVEL_HEADER), 1, file);
++  if (fread(p_Level->cLoadedFrom, (256+1)*sizeof(char), 1, file) != 1 ||
++      fread(&l_h, sizeof(LEVEL_HEADER), 1, file) != 1 ||
++      fread(&p_Level->dwPlayTime, sizeof(DWORD), 1, file) != 1 ||
++      fread(&p_Level->iNumOfSteps, sizeof(int), 1, file) != 1) {
++    kprintf(1, "Cannot read level change file %s", ctext);
++    fclose(file);
++    return -2;
++  }
+ 
+   memset(p_Level->Level, 0, sizeof(p_Level->Level[0])*p_Level->Size_of_Level);
+ 
+   iActualLevel = l_h.rezerved[0];
+   iActualScene = l_h.rezerved[1];
+ 
+-  fread(&p_Level->dwPlayTime, sizeof(DWORD), 1, file);
+-  fread(&p_Level->iNumOfSteps, sizeof(int), 1, file);
+-
+   for (i = 0; i < p_Level->Count_Of_Items; i++) {
+-#ifdef _DEBUG
+-    assert(fread(&b_l_d, sizeof(b_l_d), 1, file) == 1);
+-#else
+-    fread(&b_l_d, sizeof(b_l_d), 1, file);
+-#endif
++    if (fread(&b_l_d, sizeof(b_l_d), 1, file) != 1) {
++      kprintf(1, "Cannot read level change file %s", ctext);
++      fclose(file);
++      return -2;
++    }
+ 
+     /* p_Level->Size[0] = x
+        p_Level->Size[1] = y
+@@ -1821,13 +1877,24 @@ int lsi_Load_Saved_Level(char *p_Level_N
+     }
+   }
+ 
+-  for (i = 0; i < p_Level->Count_Of_Items; i++)
+-    if (p_Level->Item[i].p_Back_Pack)
+-      fread(p_Level->Item[i].p_Back_Pack, sizeof(BACK_PACK), 1, file);
++  for (i = 0; i < p_Level->Count_Of_Items; i++) {
++    if (p_Level->Item[i].p_Back_Pack) {
++      if (fread(p_Level->Item[i].p_Back_Pack, sizeof(BACK_PACK), 1, file) != 1) {
++	kprintf(1, "Cannot read level change file %s", ctext);
++	fclose(file);
++	return -2;
++      }
++    }
++  }
+ 
+   //ulozi spodni patro fleku
+-  fread(p_Level->pSquare, sizeof(SQUAREDESC),
+-    p_Level->Size[0] * p_Level->Size[1], file);
++  if (fread(p_Level->pSquare, sizeof(SQUAREDESC),
++	    p_Level->Size[0] * p_Level->Size[1], file) !=
++      (size_t) (p_Level->Size[0] * p_Level->Size[1])) {
++    kprintf(1, "Cannot read level change file %s", ctext);
++    fclose(file);
++    return -2;
++  }
+ 
+   for (i = 0; i < p_Level->Size[0] * p_Level->Size[1]; i++) {
+     p_Level->pSquare[i].pExtFlek = NULL;
+@@ -1844,7 +1911,11 @@ int lsi_Load_Saved_Level(char *p_Level_N
+ 
+   //ulozi flaky privazane k prvkum
+   for (i = 0; i < p_Level->Count_Of_Items; i++) {
+-    fread(&p_Level->Item[i].Square, sizeof(SQUAREDESC), 1, file);
++    if (fread(&p_Level->Item[i].Square, sizeof(SQUAREDESC), 1, file) != 1) {
++      kprintf(1, "Cannot read level change file %s", ctext);
++      fclose(file);
++      return -2;
++    }
+     p_Level->Item[i].Square.pExtFlek = NULL;
+   }
+ 
+Index: berusky2/src/kofola/menu_script.cpp
+===================================================================
+--- berusky2.orig/src/kofola/menu_script.cpp
++++ berusky2/src/kofola/menu_script.cpp
+@@ -420,7 +420,10 @@ void Parse_ScenarioLine(FILE * file, int
+   char text[256], expression[256];
+   int p = 0, r = 1;
+ 
+-  fgets(text, 256, file);
++  if (fgets(text, 256, file) == NULL) {
++    result[0] = COM_NOCOMMAND;
++    return;
++  }
+ 
+   p = Find_Next_Expresion(text, p, expression);
+ 
+Index: berusky2/src/kofola/profiles.cpp
+===================================================================
+--- berusky2.orig/src/kofola/profiles.cpp
++++ berusky2/src/kofola/profiles.cpp
+@@ -62,18 +62,12 @@ int pr_GetPlayerName(char *cFile, WCHAR
+ int pr_FindFreeFileName(char *cFile)
+ {
+   int i = 0;
+-  char text[256], t[32];
+-  char z[] = "0000";
++  char text[256];
+   FILE *f = NULL;
+ 
+   do {
+-    strcpy(text, "");
+-
+-    itoa(i, t, 10);
+-
+-    strncat(text, z, 4 - strlen(t));
+-    strcat(text, t);
+-    strcat(text, ".prf");
++    if (snprintf(text, sizeof(text), "%04d.prf", i) >= (int) sizeof(text))
++      break;
+ 
+     f = fopen(text, "r");
+     if (!f)
+@@ -100,11 +94,17 @@ int pr_CreateProfile(WCHAR * cPlayerName
+   ZeroMemory(&Profile, sizeof(PLAYER_PROFILE_DISC));
+ 
+   strcpy(dir, PROFILE_DIR);
+-  chdir(dir);
++  if (chdir(dir)) {
++    kprintf(1, "Cannot change directory to %s", dir);
++    return 0;
++  }
+ 
+   pr_FindFreeFileName(cFile);
+ 
+-  getcwd(dir, MAX_FILENAME);
++  if (getcwd(dir, MAX_FILENAME) == NULL) {
++    kprintf(1, "Cannot get current directory");
++    return 0;
++  }
+   kprintf(1, "pr_CreateProfile adr = %s", dir);
+ 
+   file = fopen(cFile, "wb");
+@@ -168,13 +168,15 @@ int pr_ReadProfile(char *cFileName, PLAY
+ 
+   ZeroMemory(&disc, sizeof(PLAYER_PROFILE_DISC));
+ 
+-  chdir(PROFILE_DIR);
++  if (chdir(PROFILE_DIR))
++    return 0;
+   strcpy(dir, cFileName);
+ 
+   {
+     char ddir[MAX_FILENAME];
+ 
+-    getcwd(ddir, MAX_FILENAME);
++    if (getcwd(ddir, MAX_FILENAME) == NULL)
++      return 0;
+     kprintf(1, "pr_ReadProfile adr = %s", ddir);
+   }
+ 
+@@ -221,7 +223,10 @@ int pr_FindFileToProfile(WCHAR * wName,
+     if(file)
+     {
+       PLAYER_PROFILE_DISC	tmp;
+-      fread(&tmp, sizeof(tmp), 1, file);
++      if (fread(&tmp, sizeof(tmp), 1, file) != 1) {
++	fclose(file);
++	return 0;
++      }
+       fclose(file);
+ 
+       PLAYER_PROFILE Profile;
+@@ -293,12 +298,14 @@ int pr_SaveProfile(PLAYER_PROFILE * pPro
+   ZeroMemory(cFile, sizeof(cFile));
+ 
+   strcpy(dir, PROFILE_DIR);
+-  chdir(dir);
++  if (chdir(dir))
++    return 0;
+ 
+   if (!pr_FindFileToProfile(pProfile->cName, cFile))
+     return 0;
+ 
+-  getcwd(dir, MAX_FILENAME);
++  if (getcwd(dir, MAX_FILENAME) == NULL)
++    return 0;
+   kprintf(1, "pr_SaveProfile adr = %s", dir);
+ 
+   file = fopen(cFile, "wb");
+Index: berusky2/src/kofola/trigers.cpp
+===================================================================
+--- berusky2.orig/src/kofola/trigers.cpp
++++ berusky2/src/kofola/trigers.cpp
+@@ -184,21 +184,27 @@ char trig_Load_Trigers(char *pLevel, cha
+   char text[MAX_FILENAME];
+   int i;
+ 
+-  chdir(GAME_LEVEL_DIR);
++  pTStruct->pTriger = NULL;
++  pTStruct->sizeofT = 0;
+ 
+-  strncpy(text, pLevel, strlen(pLevel) - 4);
++  if (chdir(GAME_LEVEL_DIR))
++    return 0;
++
++  strcpy(text, pLevel);
+   text[strlen(pLevel) - 4] = '\0'; //TODO - newline?
+-  chdir(text);
++  if (chdir(text))
++    return 0;
+ 
+   file = fopen(pFile, "r");
+-  if (!file) {
+-    pTStruct->pTriger = NULL;
+-    pTStruct->sizeofT = 0;
+-    return(0);
++  if (!file)
++    return 0;
++
++  if (chdir(DATA_DIR) ||
++      fgets(text, MAX_FILENAME, file) == NULL) {
++    fclose(file);
++    return 0;
+   }
+ 
+-  chdir(DATA_DIR);
+-  fgets(text, MAX_FILENAME, file);
+   pTStruct->sizeofT = atoi(text);
+ 
+   pTStruct->pTriger =
+@@ -213,7 +219,12 @@ char trig_Load_Trigers(char *pLevel, cha
+   pTStruct->LastStr = 0;
+ 
+   for (i = 0; i < pTStruct->sizeofT; i++) {
+-    fgets(text, MAX_FILENAME, file);
++    if (fgets(text, MAX_FILENAME, file) == NULL) {
++      pTStruct->pTriger = NULL;
++      pTStruct->sizeofT = 0;
++      fclose(file);
++      return 0;
++    }
+     newline_cut(text);
+     if (!trig_Load_Triger(text, &pTStruct->pTriger[i], pGr, pTStruct))
+       kprintf(1, "Unable to load triger %s", text);
+Index: berusky2/src/komat/Berusky3d.h
+===================================================================
+--- berusky2.orig/src/komat/Berusky3d.h
++++ berusky2/src/komat/Berusky3d.h
+@@ -533,7 +533,7 @@ typedef struct g_config
+ 
+   g_config(void)
+   {
+-    memset(this, 0, sizeof(*this));
++    memset((void *) this, 0, sizeof(*this));
+   }
+ 
+ } G_KONFIG;
+Index: berusky2/src/komat/Berusky3d_ini.cpp
+===================================================================
+--- berusky2.orig/src/komat/Berusky3d_ini.cpp
++++ berusky2/src/komat/Berusky3d_ini.cpp
+@@ -225,7 +225,8 @@ void ini_file_init(void)
+ 
+       // current working directory init
+       if (i == 1) {
+-        getcwd(ini_file_dirs[i], MAX_FILENAME);
++        if (getcwd(ini_file_dirs[i], MAX_FILENAME) == NULL)
++	  pperror(1, "Cannot get current directory");
+       }
+ 
+       strcat(ini_file_dirs[i], "/" INI_FILE_NAME);
+Index: berusky2/src/komat/Berusky3d_kofola_interface.cpp
+===================================================================
+--- berusky2.orig/src/komat/Berusky3d_kofola_interface.cpp
++++ berusky2/src/komat/Berusky3d_kofola_interface.cpp
+@@ -535,7 +535,7 @@ void kom_zrus_level(int restart)
+       p_poly = p_tmp;
+     }
+     p_ber->zrc_akt = FALSE;
+-    memset(&p_ber->zrc, 0, sizeof(p_ber->zrc));
++    memset((void *) &p_ber->zrc, 0, sizeof(p_ber->zrc));
+   }
+ 
+   kprintf(TRUE, "Kom_zrus_level - obb a renderlist...");
+@@ -543,7 +543,7 @@ void kom_zrus_level(int restart)
+   /* Smaze obalky + poly render list
+    */
+   obbtree_zrus(&p_ber->obbtree);
+-  memset(&p_ber->obbtree, 0, sizeof(p_ber->obbtree));
++  memset((void *) &p_ber->obbtree, 0, sizeof(p_ber->obbtree));
+   ber_poly_render_list_zrus(p_ber);
+ 
+   memset(p_ber->p_dyn_meshlist, 0,
+@@ -695,19 +695,21 @@ void kom_load_level(char *p_file, int zm
+   kom_posun_slider();
+ 
+   // Load systemovych materialu
+-  getcwd(dir, 200);
++  if (getcwd(dir, 200) == NULL)
++    konec(TRUE);
+ 
+   for (i = 0; i < 10; i++)
+     kom_load_sys_material(i);
+ 
+   if (zmen_dir) {
+-    chdir((p_ber->dir.game_level_dir));
++    if (chdir(p_ber->dir.game_level_dir))
++      konec(TRUE);
+     strcpy(dir, p_file);
+     zamen_koncovku(dir, "");
+   }
+ 
+-  chdir((dir));
+-  getcwd(dir, 200);
++  if (chdir(dir) || getcwd(dir, 200) == NULL)
++    konec(TRUE);
+   strcpy(file, p_file);
+ 
+   kom_posun_slider();
+Index: berusky2/src/komat/Berusky3d_light.cpp
+===================================================================
+--- berusky2.orig/src/komat/Berusky3d_light.cpp
++++ berusky2/src/komat/Berusky3d_light.cpp
+@@ -1811,28 +1811,27 @@ inline int sdl_poly_pripocitej_svetla_fa
+   EDIT_MESH_POLY * p_poly, LIGHTMAP_FACE * p_lf, int full_light)
+ {
+   int lnum = p_poly->lightakt;
+-  dword *p_data;
+-  int ddx;
++  // dword *p_data;
+   float suf1, suf2, svf1, svf2;
+-  float vzdal, dosah2d, look_max, max_vzdal;
++  float vzdal, dosah2d /*, look_max, max_vzdal*/;
+   BOD s;
+   DYN_LIGHT *p_dlight;
+   int l, sv, su, u = 0;
+-  dword r, g, b;
+-  dword sr, sg, sb;
+-  int nup, nul;                 // pocet pravych/levych pixelu
+-  int sup, sul;                 // pocet pravych/levych pixelu
+-  int nvp, nvl;                 // pocet pravych/levych pixelu
+-  int svp, svl;                 // pocet pravych/levych pixelu
+-  int kup, skup;                // fixed pricitaci krok prave/leve strany
+-  int kul, skul;                // fixed start prave/leve strany
+-  int kvp, skvp;                // fixed pricitaci krok prave/leve strany
+-  int kvl, skvl;                // fixed start prave/leve strany
+-  int fvzdal;                   // fixed-point 8:24 korekcni hodnota v look-up tabulce
+-  int min_u, max_u;
+-  int min_v, max_v;
+-  int zal, nusu, nvsv;
+-  int *p_looksqrt;
++  // dword r, g, b;
++  // dword sr, sg, sb;
++  // int nup, nul;              // pocet pravych/levych pixelu
++  // int sup, sul;              // pocet pravych/levych pixelu
++  // int nvp, nvl;              // pocet pravych/levych pixelu
++  // int svp, svl;              // pocet pravych/levych pixelu
++  // int kup, skup;             // fixed pricitaci krok prave/leve strany
++  // int kul, skul;             // fixed start prave/leve strany
++  // int kvp, skvp;             // fixed pricitaci krok prave/leve strany
++  // int kvl, skvl;             // fixed start prave/leve strany
++  // int fvzdal;                // fixed-point 8:24 korekcni hodnota v look-up tabulce
++  // int min_u, max_u;
++  // int min_v, max_v;
++  // int zal, nusu, nvsv;
++  // int *p_looksqrt;
+   int nu, nv;
+ 
+ 
+@@ -1866,8 +1865,7 @@ inline int sdl_poly_pripocitej_svetla_fa
+     return (TRUE);
+   }
+ 
+-  ddx = p_lf->p_bmp->x;
+-  p_data = p_lf->p_bmp->data;
++  // p_data = p_lf->p_bmp->data;
+ 
+   // udelam to pro kazde svetlo extra zvlaste
+   for (l = 0; l < lnum; l++) {
+@@ -1875,8 +1873,8 @@ inline int sdl_poly_pripocitej_svetla_fa
+     if (!p_dlight->aup)
+       continue;
+ 
+-    p_looksqrt = p_dlight->flag & SDL_UTLUM_KVADRATIC ?
+-      p_ber->p_looksqrt_quadratic : p_ber->p_looksqrt_linear;
++    // p_looksqrt = p_dlight->flag & SDL_UTLUM_KVADRATIC ?
++    //   p_ber->p_looksqrt_quadratic : p_ber->p_looksqrt_linear;
+ 
+     // 3D bod na rovine
+     s.x = p_dlight->tp.x - p_lf->n.x * p_dlight->avzdal;
+@@ -1900,110 +1898,110 @@ inline int sdl_poly_pripocitej_svetla_fa
+     suf2 = vzdal_bodu_a_primky(&s, &p_lf->s2, &p_lf->s3);
+     svf2 = vzdal_bodu_a_primky(&s, &p_lf->s1, &p_lf->s3);
+ 
+-    r = (byte) ftoi(255.0f * p_dlight->dr);
+-    g = (byte) ftoi(255.0f * p_dlight->dg);
+-    b = (byte) ftoi(255.0f * p_dlight->db);
+-    if (p_dlight->flag & SDL_ADD_SUB) {
+-      sr = (byte) ftoi(255.0f * p_dlight->sr);
+-      sg = (byte) ftoi(255.0f * p_dlight->sg);
+-      sb = (byte) ftoi(255.0f * p_dlight->sb);
+-    }
+-
+-    look_max = p_dlight->look_max;
+-    if (p_dlight->avzdal >= p_dlight->min) {
+-      fvzdal =
+-        0x01000000 - ftoi((float) 0x01000000 * ((p_dlight->avzdal -
+-            p_dlight->min) / p_dlight->max));
+-    }
+-    else {
+-      fvzdal = 0x01000000;
+-    }
++    // r = (byte) ftoi(255.0f * p_dlight->dr);
++    // g = (byte) ftoi(255.0f * p_dlight->dg);
++    // b = (byte) ftoi(255.0f * p_dlight->db);
++    // if (p_dlight->flag & SDL_ADD_SUB) {
++    //   sr = (byte) ftoi(255.0f * p_dlight->sr);
++    //   sg = (byte) ftoi(255.0f * p_dlight->sg);
++    //   sb = (byte) ftoi(255.0f * p_dlight->sb);
++    // }
++
++    // look_max = p_dlight->look_max;
++    // if (p_dlight->avzdal >= p_dlight->min) {
++    //   fvzdal =
++    //     0x01000000 - ftoi((float) 0x01000000 * ((p_dlight->avzdal -
++    //         p_dlight->min) / p_dlight->max));
++    // }
++    // else {
++    //   fvzdal = 0x01000000;
++    // }
+ 
+     dosah2d =
+       sqrtf(p_dlight->dosah * p_dlight->dosah -
+       p_dlight->avzdal * p_dlight->avzdal);
+-    nusu = nu - su;
+-    nvsv = nv - sv;
++    // nusu = nu - su;
++    // nvsv = nv - sv;
+ 
+     // Strana U lightmapy
+     if (su <= 0) {
+       if (suf1 > dosah2d)
+         continue;
+ 
+-      min_u = ftoi(look_max * suf1 / dosah2d);
+-
+-      if (suf2 > dosah2d) {
+-        max_u = ftoi(look_max);
+-        nup = ftoi(((dosah2d - suf1) / (suf2 - suf1)) * nu);
+-      }
+-      else {
+-        nup = nu;
+-        max_u = ftoi(look_max * suf2 / dosah2d);
+-      }
+-
+-      nul = sul = sup = 0;
++      // min_u = ftoi(look_max * suf1 / dosah2d);
+ 
+-      if (nup > 0) {
+-        kup = ((max_u - min_u) << 16) / nup;
+-        skup = (min_u << 16) - kup;
+-      }
++      // if (suf2 > dosah2d) {
++      //   max_u = ftoi(look_max);
++      //   nup = ftoi(((dosah2d - suf1) / (suf2 - suf1)) * nu);
++      // }
++      // else {
++      //   nup = nu;
++      //   max_u = ftoi(look_max * suf2 / dosah2d);
++      // }
++
++      // nul = sul = sup = 0;
++
++      // if (nup > 0) {
++      //   kup = ((max_u - min_u) << 16) / nup;
++      //   skup = (min_u << 16) - kup;
++      // }
+     }
+     else if (su >= nu - 1) {
+ 
+       if (suf2 > dosah2d)
+         continue;
+ 
+-      min_u = ftoi(look_max * suf2 / dosah2d);
+-
+-      if (suf1 > dosah2d) {
+-        max_u = ftoi(look_max);
+-        nul = ftoi(((dosah2d - suf2) / (suf1 - suf2)) * nu);
+-      }
+-      else {
+-        nul = nu;
+-        max_u = ftoi(look_max * suf1 / dosah2d);
+-      }
++      // min_u = ftoi(look_max * suf2 / dosah2d);
+ 
+-      nup = sup = 0;
+-      sul = nu - 1;
+-
+-      if (nul > 0) {
+-        kul = ((max_u - min_u) << 16) / nul;
+-        skul = (min_u << 16) - kul;
+-      }
++      // if (suf1 > dosah2d) {
++      //   max_u = ftoi(look_max);
++      //   nul = ftoi(((dosah2d - suf2) / (suf1 - suf2)) * nu);
++      // }
++      // else {
++      //   nul = nu;
++      //   max_u = ftoi(look_max * suf1 / dosah2d);
++      // }
++
++      // nup = sup = 0;
++      // sul = nu - 1;
++
++      // if (nul > 0) {
++      //   kul = ((max_u - min_u) << 16) / nul;
++      //   skul = (min_u << 16) - kul;
++      // }
+ 
+     }
+-    else {
+-
+-      min_u = MIN_LOOK;
++//     else {
+ 
+-      max_vzdal = (suf2 > suf1) ? suf2 : suf1;
+-      max_u =
+-        (max_vzdal >
+-        dosah2d) ? ftoi(look_max) : ftoi(look_max * max_vzdal / dosah2d);
+-
+-      // Spocitam pravou stranu -> sf2
+-      nup = (suf2 > dosah2d) ? ftoi((dosah2d / suf2) * nusu) : nusu;
+-
+-      // Leva strana -> su
+-      nul = (suf1 > dosah2d) ? ftoi((dosah2d / suf1) * su) : su;
+-/*      
+-      if(--nul < 0)
+-        nul = 0;
+-*/
+-
+-      sup = su;                 // Start prave strany
+-      sul = su - 1;             // Start leve strany
++//       min_u = MIN_LOOK;
+ 
+-      if (nup > 0 && nul > 0)
+-        kup = kul = (nul > nup) ? (max_u << 16) / nul : (max_u << 16) / nup;
+-      else if (nul > nup && nul > 0)
+-        kup = kul = (max_u << 16) / nul;
+-      else if (nup > 0)
+-        kup = kul = (max_u << 16) / nup;
++//       max_vzdal = (suf2 > suf1) ? suf2 : suf1;
++//       max_u =
++//         (max_vzdal >
++//         dosah2d) ? ftoi(look_max) : ftoi(look_max * max_vzdal / dosah2d);
++
++//       // Spocitam pravou stranu -> sf2
++//       nup = (suf2 > dosah2d) ? ftoi((dosah2d / suf2) * nusu) : nusu;
++
++//       // Leva strana -> su
++//       nul = (suf1 > dosah2d) ? ftoi((dosah2d / suf1) * su) : su;
++// /*      
++//       if(--nul < 0)
++//         nul = 0;
++// */
++
++//       sup = su;                 // Start prave strany
++//       sul = su - 1;             // Start leve strany
++
++//       if (nup > 0 && nul > 0)
++//         kup = kul = (nul > nup) ? (max_u << 16) / nul : (max_u << 16) / nup;
++//       else if (nul > nup && nul > 0)
++//         kup = kul = (max_u << 16) / nul;
++//       else if (nup > 0)
++//         kup = kul = (max_u << 16) / nup;
+ 
+-      skul = skup = -kup;
+-    }
++//       skul = skup = -kup;
++//     }
+ 
+     /*
+        Strana V lightmapy
+@@ -2013,80 +2011,80 @@ inline int sdl_poly_pripocitej_svetla_fa
+       if (svf1 > dosah2d)
+         continue;
+ 
+-      min_v = ftoi(look_max * svf1 / dosah2d);
++      // min_v = ftoi(look_max * svf1 / dosah2d);
+ 
+-      if (svf2 > dosah2d) {
+-        max_v = ftoi(look_max);
+-        nvp = ftoi(((dosah2d - svf1) / (svf2 - svf1)) * nv);
+-      }
+-      else {
+-        nvp = nv;
+-        max_v = ftoi(look_max * svf2 / dosah2d);
+-      }
+-
+-      nvl = svl = svp = 0;
+-
+-      if (nvp > 0) {
+-        kvp = ((max_v - min_v) << 16) / nvp;
+-        skvp = (min_v << 16) - kvp;
+-      }
++      // if (svf2 > dosah2d) {
++      //   max_v = ftoi(look_max);
++      //   nvp = ftoi(((dosah2d - svf1) / (svf2 - svf1)) * nv);
++      // }
++      // else {
++      //   nvp = nv;
++      //   max_v = ftoi(look_max * svf2 / dosah2d);
++      // }
++
++      // nvl = svl = svp = 0;
++
++      // if (nvp > 0) {
++      //   kvp = ((max_v - min_v) << 16) / nvp;
++      //   skvp = (min_v << 16) - kvp;
++      // }
+     }
+     else if (sv >= nv - 1) {
+ 
+       if (svf2 > dosah2d)
+         continue;
+ 
+-      min_v = ftoi(look_max * svf2 / dosah2d);
+-
+-      if (svf1 > dosah2d) {
+-        max_v = ftoi(look_max);
+-        nvl = ftoi(((dosah2d - svf2) / (svf1 - svf2)) * nv);
+-      }
+-      else {
+-        nvl = nv;
+-        max_v = ftoi(look_max * svf1 / dosah2d);
+-      }
+-
+-      nvp = svp = 0;
+-      svl = nv - 1;
++      // min_v = ftoi(look_max * svf2 / dosah2d);
+ 
+-      if (nvl > 0) {
+-        kvl = ((max_v - min_v) << 16) / nvl;
+-        skvl = (min_v << 16) - kvl;
+-      }
++      // if (svf1 > dosah2d) {
++      //   max_v = ftoi(look_max);
++      //   nvl = ftoi(((dosah2d - svf2) / (svf1 - svf2)) * nv);
++      // }
++      // else {
++      //   nvl = nv;
++      //   max_v = ftoi(look_max * svf1 / dosah2d);
++      // }
++
++      // nvp = svp = 0;
++      // svl = nv - 1;
++
++      // if (nvl > 0) {
++      //   kvl = ((max_v - min_v) << 16) / nvl;
++      //   skvl = (min_v << 16) - kvl;
++      // }
+ 
+     }
+-    else {
++//     else {
+ 
+-      min_v = MIN_LOOK;
+-
+-      max_vzdal = (svf2 > svf1) ? svf2 : svf1;
+-      max_v =
+-        (max_vzdal >
+-        dosah2d) ? ftoi(look_max) : ftoi(look_max * max_vzdal / dosah2d);
+-
+-      // Spocitam pravou stranu -> sf2
+-      nvp = (svf2 > dosah2d) ? ftoi((dosah2d / svf2) * nvsv) : nvsv;
+-
+-      // Leva strana -> su
+-      nvl = (svf1 > dosah2d) ? ftoi((dosah2d / svf1) * sv) : sv;
+-/*      
+-      if(--nvl < 0)
+-        nvl = 0;
+-*/
++//       min_v = MIN_LOOK;
+ 
+-      svp = sv;                 // Start prave strany
+-      svl = sv - 1;             // Start leve strany
++//       max_vzdal = (svf2 > svf1) ? svf2 : svf1;
++//       max_v =
++//         (max_vzdal >
++//         dosah2d) ? ftoi(look_max) : ftoi(look_max * max_vzdal / dosah2d);
++
++//       // Spocitam pravou stranu -> sf2
++//       nvp = (svf2 > dosah2d) ? ftoi((dosah2d / svf2) * nvsv) : nvsv;
++
++//       // Leva strana -> su
++//       nvl = (svf1 > dosah2d) ? ftoi((dosah2d / svf1) * sv) : sv;
++// /*      
++//       if(--nvl < 0)
++//         nvl = 0;
++// */
++
++//       svp = sv;                 // Start prave strany
++//       svl = sv - 1;             // Start leve strany
++
++//       if (nvp > 0 && nvl > 0)
++//         kvp = kvl = (nvl > nvp) ? (max_v << 16) / nvl : (max_v << 16) / nvp;
++//       else if (nvl > nvp && nvl > 0)
++//         kvp = kvl = (max_v << 16) / nvl;
++//       else if (nvp > 0)
++//         kvp = kvl = (max_v << 16) / nvp;
+ 
+-      if (nvp > 0 && nvl > 0)
+-        kvp = kvl = (nvl > nvp) ? (max_v << 16) / nvl : (max_v << 16) / nvp;
+-      else if (nvl > nvp && nvl > 0)
+-        kvp = kvl = (max_v << 16) / nvl;
+-      else if (nvp > 0)
+-        kvp = kvl = (max_v << 16) / nvp;
+-
+-      skvl = skvp = -kvp;
+-    }
++//       skvl = skvp = -kvp;
++//     }
+ 
+     // pokud je index po priteni mensi nez 0 -> vezmu maximum !!!
+     // pokud je vetsi nez 255 -> kaslu na to    
+@@ -2962,22 +2960,26 @@ int sdl_poly_updatuj_lightmap(G_KONFIG *
+   return (uploaded);
+ }
+ 
+-void sdl_save_lightmap(EDIT_MESH_POLY * p_poly, int p)
+-{
+-  char pom[200];
+-  int l;
+-
+-  chdir("/home/komat");
+-  for (l = 0; l < p_poly->lightnum; l++) {
+-    sprintf(pom, "poly%dlight%d.bmp", p, l);
+-    bmp_uloz(pom, p_poly->p_light[l]->p_bmp);
+-  }
+-  for (l = 0; l < p_poly->facenum / 3; l++) {
+-    sprintf(pom, "poly%dfacelight%d.bmp", p, l);
+-    bmp_uloz(pom, p_poly->p_ind[l].p_bmp);
+-  }
++/*
++ * This function is not used, and it chdir's to /home/komat, so I've
++ * removed it.
++ */
++// void sdl_save_lightmap(EDIT_MESH_POLY * p_poly, int p)
++// {
++//   char pom[200];
++//   int l;
++
++//   chdir("/home/komat");
++//   for (l = 0; l < p_poly->lightnum; l++) {
++//     sprintf(pom, "poly%dlight%d.bmp", p, l);
++//     bmp_uloz(pom, p_poly->p_light[l]->p_bmp);
++//   }
++//   for (l = 0; l < p_poly->facenum / 3; l++) {
++//     sprintf(pom, "poly%dfacelight%d.bmp", p, l);
++//     bmp_uloz(pom, p_poly->p_ind[l].p_bmp);
++//   }
+ 
+-}
++// }
+ 
+ inline void sdl_updatuj_poly(G_KONFIG * p_ber, EDIT_MESH_POLY * p_poly,
+   int full_light)
+Index: berusky2/src/komat/Berusky3d_load.cpp
+===================================================================
+--- berusky2.orig/src/komat/Berusky3d_load.cpp
++++ berusky2/src/komat/Berusky3d_load.cpp
+@@ -299,7 +299,11 @@ int ber_nahraj_materialy(G_KONFIG * p_be
+   strcpy(pom, p_jmeno);
+   zamen_koncovku(pom, KONCOVKA_MATERIAL);
+ 
+-  chdir((p_dir));
++  if (chdir(p_dir)) {
++    kprintf(1, "Unable to change directory to %s", p_dir);
++    return (FALSE);
++  }
++
+   if (!lo_nahraj_materialy(p_ber->p_mat, MAX_CELKEM_MATERIALU, p_ber->p_text,
+       MAX_CELKEM_TEXTUR, pom)) {
+     kprintf(1, "Unable to load materials %s", p_jmeno);
+@@ -326,8 +330,11 @@ void ber_materialy_rozkopiruj(G_KONFIG *
+       mat = p_mesh->p_mat[i];
+       p_mat = p_imat[mat];
+       if (p_mat->flag & MAT_ANIM_FRAME) {
++	int ret;
++
+         if (restart) {
+-          sprintf(pom, "%s_%d", p_mat->jmeno, i);
++          ret = snprintf(pom, sizeof(pom), "%s_%d", p_mat->jmeno, i);
++	  assert(ret < (int) sizeof(pom));
+           mnew = lo_najdi_material(p_ber->p_mat, MAX_CELKEM_MATERIALU, pom);
+           assert(mnew != K_CHYBA);
+           p_mesh->p_mat[i] = mnew;
+@@ -339,7 +346,10 @@ void ber_materialy_rozkopiruj(G_KONFIG *
+ 
+           p_imat[mnew] = kopiruj_material(p_mat);
+           p_mesh->p_mat[i] = mnew;
+-          sprintf(p_imat[mnew]->jmeno, "%s_%d", p_mat->jmeno, i);
++          ret = snprintf(p_imat[mnew]->jmeno,
++			 sizeof(p_imat[mnew]->jmeno),
++			 "%s_%d", p_mat->jmeno, i);
++	  assert(ret < (int) sizeof(p_imat[mnew]->jmeno));
+         }
+       }
+     }
+@@ -350,7 +360,8 @@ void ber_materialy_rozkopiruj(G_KONFIG *
+ */
+ bool ber_nahraj_mesh(G_KONFIG * p_ber, char *p_jmeno, GAME_MESH_OLD ** p_mesh, int json_export)
+ {
+-  chdir((p_ber->dir.out_dir));
++  if (chdir(p_ber->dir.out_dir))
++    return (FALSE);
+   p_mesh[0] = lo_nahraj_mesh(p_ber->p_mat, MAX_CELKEM_MATERIALU, p_ber->p_text,
+                              MAX_CELKEM_TEXTUR, p_jmeno, TRUE, 
+                              p_ber->conf_extra_light_vertex, json_export);
+@@ -588,7 +599,8 @@ int ber_nahraj_scenu(G_KONFIG * p_ber, c
+   strcpy(file, p_jmeno);
+   zamen_koncovku(file, KONCOVKA_SCENY);
+ 
+-  chdir((p_dir));
++  if (chdir(p_dir))
++    return (FALSE);
+ 
+   kprintf(1, "           - Load project....");
+   if (lo_nahraj_projekt(p_ber->p_mat, MAX_CELKEM_MATERIALU,
+@@ -722,7 +734,8 @@ void ber_nahraj_poly(G_KONFIG * p_ber, c
+   char file[200];
+   int i;
+ 
+-  chdir((p_dir));
++  if (chdir(p_dir))
++    return;
+   strcpy(file, p_jmeno);
+   zamen_koncovku(file, ".ply");
+ 
+@@ -773,8 +786,10 @@ void ber_nahraj_lightmap(G_KONFIG * p_be
+   char pom[200];
+   KFILE *f;
+   int i, r, loaded;
++  int ret;
+ 
+-  chdir(p_dir);
++  if (chdir(p_dir))
++    return;
+   strcpy(pom, p_jmeno);
+   zamen_koncovku(pom, KONCOVKA_LIGHTMAPY);
+ 
+@@ -789,7 +804,10 @@ void ber_nahraj_lightmap(G_KONFIG * p_be
+     while (!keof(f)) {
+       if (kread(&i, sizeof(i), 1, f)) {
+         assert(i >= 0 && i < MAX_RAY_TEXTUR);
+-        sprintf(p_ber->p_lightmap[i].jmeno, "%s_lp%.3d.bmp", pom, i);
++        ret = snprintf(p_ber->p_lightmap[i].jmeno,
++		       sizeof(p_ber->p_lightmap[i].jmeno),
++		       "%s_lp%.3d.bmp", pom, i);
++	assert(ret < (int) sizeof(p_ber->p_lightmap[i].jmeno));
+         kprintf(TRUE, "Lightmap %s...", p_ber->p_lightmap[i].jmeno);
+         r = txt_nahraj_lightmapu_z_bmp(NULL, f, p_ber->p_lightmap + i, TRUE);
+         assert(r);
+@@ -800,7 +818,10 @@ void ber_nahraj_lightmap(G_KONFIG * p_be
+   }
+   else {                        // stara verze lightmap
+     for (i = 0; i < MAX_RAY_TEXTUR; i++) {
+-      sprintf(p_ber->p_lightmap[i].jmeno, "%s\\%s_lp%.3d.bmp", p_dir, pom, i);
++      ret = snprintf(p_ber->p_lightmap[i].jmeno,
++		     sizeof(p_ber->p_lightmap[i].jmeno),
++		     "%s\\%s_lp%.3d.bmp", p_dir, pom, i);
++      assert(ret < (int) sizeof(p_ber->p_lightmap[i].jmeno));
+       if (efile(p_ber->p_lightmap[i].jmeno)) {
+         kprintf(TRUE, "Lightmap %s...", p_ber->p_lightmap[i].jmeno);
+         txt_nahraj_lightmapu_z_bmp(p_ber->p_lightmap[i].jmeno, NULL,
+Index: berusky2/src/komat/Kdtree.cpp
+===================================================================
+--- berusky2.orig/src/komat/Kdtree.cpp
++++ berusky2/src/komat/Kdtree.cpp
+@@ -492,7 +492,7 @@ void kd_strom_vyrob(EDIT_MESH_POLY * p_u
+   if (num || kontnum)
+     kd_strom_vyrob_rec(p_poly, num, p_kont, kontnum, p_prvni, 1);
+   else
+-    memset(p_prvni, 0, sizeof(p_prvni[0]));
++    memset((void *) p_prvni, 0, sizeof(p_prvni[0]));
+ 
+   p_prvni->cislo = kd_hloubka_stromu++;
+ }
+Index: berusky2/src/komat/Keyframe.cpp
+===================================================================
+--- berusky2.orig/src/komat/Keyframe.cpp
++++ berusky2/src/komat/Keyframe.cpp
+@@ -1487,7 +1487,7 @@ HIERARCHY_TRACK_INFO *key_tri_vyrob_indi
+   int poskey, int rotkey, int scalekey)
+ {
+ 
+-  memset(p_hir, 0, sizeof(p_hir[0]));
++  memset((void *) p_hir, 0, sizeof(p_hir[0]));
+ 
+   // pozicni klice
+   if ((p_hir->pos_keys = poskey)) {
+@@ -2094,7 +2094,7 @@ SIMPLE_TRACK_INFO *key_tri_to_sim_indir(
+   int i, endtime;
+ 
+   // prevedu hlavni track
+-  memset(p_sim, 0, sizeof(SIMPLE_TRACK_INFO));
++  memset((void *) p_sim, 0, sizeof(SIMPLE_TRACK_INFO));
+ 
+   p_sim->keynum = calc_keynum(p_track->endtime);
+ 
+@@ -2153,7 +2153,7 @@ SIMPLE_TRACK_INFO *key_tri_to_sim_indir_
+   int i, keynum, endtime;
+ 
+   // prevedu hlavni track
+-  memset(p_sim, 0, sizeof(SIMPLE_TRACK_INFO));
++  memset((void *) p_sim, 0, sizeof(SIMPLE_TRACK_INFO));
+ 
+   keynum = p_sim->keynum = calc_keynum(p_track->endtime);
+   keynum--;
+@@ -2251,7 +2251,10 @@ void key_sim_uloz(SIMPLE_TRACK_INFO * p_
+   int i;
+   int loop = p_sim->flag & GK_LOOP;
+ 
+-  chdir((p_dir));
++  if (chdir(p_dir)) {
++    ddw("Unable to change directory to %s");
++    return;
++  }
+ 
+   if (!(f = fopen(p_file, "w"))) {
+     ddw("File %s Line %d Chyba otevreni souboru '%s' v %s", __FILE__,
+@@ -2294,7 +2297,11 @@ int key_sim_nahraj(APAK_HANDLE * pHandle
+   char **p_line;
+   int l, lmax;
+ 
+-  chdir((p_dir));
++  if (chdir(p_dir)) {
++    ddw("Unable to change directory to %s");
++    return (FALSE);
++  }
++
+   if (!(f = kopen(pHandle, p_file, "r"))) {
+     kprintf(TRUE, "File %s Line %d Chyba otevreni souboru '%s' v %s",
+       __FILE__, __LINE__, p_file, (p_dir));
+@@ -2461,7 +2468,11 @@ int key_sim_nahraj_extended(EDIT_KONTEJN
+   int i, objektu = 0, stop, ob, float_scale = FALSE;
+   size_ptr end;
+ 
+-  chdir((p_dir));
++  if (chdir(p_dir)) {
++    ddw("Unable to change directory to %s");
++    return (FALSE);
++  }
++
+   if (!(f = fopen(p_file, "r"))) {
+     ddw("File %s Line %d Chyba otevreni souboru '%s' v %s", __FILE__,
+       __LINE__, p_file, (p_dir));
+@@ -2504,7 +2515,7 @@ int key_sim_nahraj_extended(EDIT_KONTEJN
+ 
+     p_track = p_track_list[akt_track++] =
+       (HIERARCHY_TRACK_INFO *) alloca(sizeof(p_track[0]));
+-    memset(p_track, 0, sizeof(p_track[0]));
++    memset((void *) p_track, 0, sizeof(p_track[0]));
+ 
+     /* reset pivot-pointu
+      */
+@@ -2874,7 +2885,7 @@ typedef struct _HIERARCHY_SIM {
+ void key_sim_root_to_sim_indir(HIERARCHY_SIM * p_root,
+   SIMPLE_TRACK_INFO * p_sim)
+ {
+-  memset(p_sim, 0, sizeof(SIMPLE_TRACK_INFO));
++  memset((void *) p_sim, 0, sizeof(SIMPLE_TRACK_INFO));
+ 
+   p_sim->flag = p_root->flag;
+   p_sim->keynum = p_root->keynum;
+@@ -3058,7 +3069,10 @@ int key_kamera_uloz(KAMERA_TRACK_INFO *
+   int i, keynum;
+   int p, t, r, fv;
+ 
+-  chdir((p_dir));
++  if (chdir(p_dir)) {
++    ddw("Unable to change directory to %s");
++    return (FALSE);
++  }
+ 
+   if (!(f = fopen(p_file, "w"))) {
+     ddw("File %s Line %d Chyba otevreni souboru '%s' v %s", __FILE__,
+@@ -3132,8 +3146,11 @@ int key_kamera_nahraj(KAMERA_TRACK_INFO
+   char **p_line;
+   int l, lmax;
+ 
++  if (chdir(p_dir)) {
++    ddw("Unable to change directory to %s");
++    return (FALSE);
++  }
+ 
+-  chdir((p_dir));
+   if (!(f = kopen(pHandle, p_file, "r"))) {
+     kprintf(TRUE, "File %s Line %d Chyba otevreni souboru '%s' v %s",
+       __FILE__, __LINE__, p_file, (p_dir));
+@@ -3449,7 +3466,11 @@ ANIM_TEXT *key_text_nahraj(char *p_file,
+   int p, r, s, v, fr;
+   float uhel;
+ 
+-  chdir((p_dir));
++  if (chdir(p_dir)) {
++    ddw("Unable to change directory to %s");
++    return (NULL);
++  }
++
+   if (!(f = fopen(p_file, "r"))) {
+     ddw("File %s Line %d Chyba otevreni souboru '%s' v %s", 
+         __FILE__, __LINE__, p_file, (p_dir));
+@@ -3560,7 +3581,10 @@ int key_text_uloz(ANIM_TEXT * p_track, c
+   int keynum;
+   dword time;
+ 
+-  chdir((p_dir));
++  if (chdir(p_dir)) {
++    ddw("Unable to change directory to %s");
++    return (FALSE);
++  }
+ 
+   if (!(f = fopen(p_file, "w"))) {
+     ddw("File %s Line %d Chyba otevreni souboru '%s' v %s", __FILE__,
+Index: berusky2/src/komat/Load.cpp
+===================================================================
+--- berusky2.orig/src/komat/Load.cpp
++++ berusky2/src/komat/Load.cpp
+@@ -16,14 +16,14 @@ template < class T > void vyrob_pole(T *
+ {
+   if (!(*p_dst = (T *) mmalloc(sizeof(*p_dst[0]) * num)))
+     chyba("Pamet");
+-  memset(*p_dst, 0, sizeof(*p_dst[0]) * num);
++  memset((void *) *p_dst, 0, sizeof(*p_dst[0]) * num);
+ }
+ 
+ template < class T > void vyrob_pole_abs(T ** p_dst, int num)
+ {
+   if (!(*p_dst = (T *) mmalloc(sizeof(byte) * num)))
+     chyba("Pamet");
+-  memset(*p_dst, 0, sizeof(byte) * num);
++  memset((void *) *p_dst, 0, sizeof(byte) * num);
+ }
+ 
+ /*
+@@ -426,7 +426,12 @@ EDIT_OBJEKT *slep_objekty(EDIT_OBJEKT *
+     strcpy(p_obj->jmeno, p_obj1->jmeno);
+   }
+   else {
+-    sprintf(p_obj->jmeno, "%s_%s", p_obj1->jmeno, p_obj2->jmeno);
++    if (snprintf(p_obj->jmeno, sizeof(p_obj->jmeno),
++		 "%s_%s", p_obj1->jmeno, p_obj2->jmeno) >=
++	(int) sizeof(p_obj->jmeno)) {
++      zrus_objekt(&p_obj);
++      return (NULL);
++    }
+   }
+ 
+   assert(strlen(p_obj->jmeno) < MAX_JMENO);
+@@ -474,7 +479,7 @@ EDIT_KONTEJNER *vyrob_kontejner(void)
+   if ((p_kont = (EDIT_KONTEJNER *) mmalloc(sizeof(EDIT_KONTEJNER))) == NULL)
+     chyba("pamet!");
+ 
+-  memset(p_kont, 0, sizeof(p_kont[0]));
++  memset((void *) p_kont, 0, sizeof(p_kont[0]));
+   p_kont->max_objektu = MAX_KONT_OBJEKTU;
+   p_kont->kreslit = 1;
+   p_kont->prvek = K_CHYBA;
+@@ -993,7 +998,7 @@ EDIT_MATERIAL *vyrob_material(void)
+   if ((p_mat = (EDIT_MATERIAL *) mmalloc(sizeof(EDIT_MATERIAL))) == NULL) {
+     chyba("pamet");
+   }
+-  memset(p_mat, 0, sizeof(EDIT_MATERIAL));
++  memset((void *) p_mat, 0, sizeof(EDIT_MATERIAL));
+ 
+   p_mat->dxmat.diffuse_r = 1.0f;
+   p_mat->dxmat.diffuse_g = 1.0f;
+@@ -1259,7 +1264,7 @@ GAME_MESH_DATA *kopiruj_mesh_data(GAME_M
+     p_ldd = p_desc->p_ldlight;
+     while (p_lds) {
+       p_ldd->p_next = (DYN_LIGHT *) mmalloc(sizeof(p_ldd->p_next[0]));
+-      memcpy(p_ldd->p_next, p_lss, sizeof(p_lds[0]));
++      memcpy((void *) p_ldd->p_next, p_lss, sizeof(p_lds[0]));
+       p_lds = p_lds->p_next;
+       p_ldd = p_ldd->p_next;
+     }
+@@ -1933,7 +1938,7 @@ GAME_MESH_OLD *vyrob_mesh(int objektu, G
+   if ((p_mesh = (GAME_MESH_OLD *) mmalloc(sizeof(p_mesh[0]))) == NULL) {
+     chyba("pamet");
+   }
+-  memset(p_mesh, 0, sizeof(p_mesh[0]));
++  memset((void *) p_mesh, 0, sizeof(p_mesh[0]));
+ 
+   p_mesh->p_data = (p_data) ? p_data : vyrob_mesh_data();
+   p_mesh->objektu = objektu;
+@@ -2644,7 +2649,11 @@ void lo_vyrob_animaci_list(EDIT_MATERIAL
+   int linenum;
+   int first_text = 1, i, t, akt, pos, alfa, a;
+ 
+-  chdir((p_dir));
++  if (chdir(p_dir)) {
++    ddw("Cannot change directory to %s", p_dir);
++    assert(0);
++    return;
++  }
+ 
+   if ((f = fopen(p_list, "r")) == NULL) {
+     ddw("Nemuzu otevrit soubor %s", p_list);
+@@ -2657,9 +2666,14 @@ void lo_vyrob_animaci_list(EDIT_MATERIAL
+   // Prekopiruj list
+   strcpy(p_amat->jmeno, p_list);
+ 
++  if (fgets(line, 200, f) == NULL) {
++    ddw("Cannot read %s", p_list);
++    assert(0);
++    return;
++  }
++
+   // nahraj informace o frame animaci
+   if (komplet == ANIM_LOAD_ALL || komplet == ANIM_LOAD_FRAME) {
+-    fgets(line, 200, f);
+     sscanf(line, "FRAME %d %d %d", &akt, &p_amat->frameakt, &alfa);
+     if (akt) {
+       p_mat->flag =
+@@ -2667,16 +2681,16 @@ void lo_vyrob_animaci_list(EDIT_MATERIAL
+       //p_mat->flag = alfa ? p_mat->flag|MAT_ALFA_FAKTOR : p_mat->flag&~MAT_ALFA_FAKTOR;
+     }
+   }
+-  else
+-    fgets(line, 200, f);
++
++  if (fgets(line, 200, f) == NULL) {
++    ddw("Cannot read %s", p_list);
++    assert(0);
++    return;
++  }
+ 
+   // nahraj informace o posunu
+-  if (komplet == ANIM_LOAD_ALL || komplet == ANIM_LOAD_POSUN) {
+-    fgets(line, 200, f);
++  if (komplet == ANIM_LOAD_ALL || komplet == ANIM_LOAD_POSUN)
+     sscanf(line, "POSUN %d\n", &pos);
+-  }
+-  else
+-    fgets(line, 200, f);
+ 
+   // pokud je pozadavek na load frame animace
+   if (komplet == ANIM_LOAD_ALL || komplet == ANIM_LOAD_FRAME) {
+@@ -2692,11 +2706,19 @@ void lo_vyrob_animaci_list(EDIT_MATERIAL
+       (ANIM_FRAME *) mmalloc(sizeof(ANIM_FRAME) * p_amat->framenum);
+ 
+     fseek(f, 0, SEEK_SET);
+-    fgets(line, 200, f);
+-    fgets(line, 200, f);
++    if (fgets(line, 200, f) == NULL || fgets(line, 200, f) == NULL) {
++      ddw("Cannot read %s", p_list);
++      assert(0);
++      return;
++    }
+ 
+     for (i = 0; i < p_amat->framenum; i++) {
+-      fgets(line, 200, f);      // nacti jmeno souboru
++      // nacti jmeno souboru
++      if (fgets(line, 200, f) == NULL) {
++	ddw("Cannot read %s", p_list);
++	assert(0);
++	return;
++      }
+ 
+       if ((p_pom = strchr(line, '\n')))
+         *p_pom = 0;
+@@ -2916,7 +2938,7 @@ EDIT_MESH_POLY *edit_to_poly_indir(EDIT_
+   p_obj = p_kont->p_obj[0];
+   assert(p_obj);
+ 
+-  memset(p_poly, 0, sizeof(*p_poly));
++  memset((void *) p_poly, 0, sizeof(*p_poly));
+ 
+   strcpy(p_poly->jmeno, p_kont->jmeno);
+ 
+@@ -3178,6 +3200,8 @@ EDIT_MESH_POLY *lo_nahraj_poly_list(char
+     lo_poly_nahraj_indir(f, p_poly + i, p_light);
+ 
+     if (p_poly[i].m1flag & MAT_ANIM_FRAME) {
++      int ret;
++
+       // animovany material u poly-listu skopiruju
+       mat = lo_najdi_material(p_mat, matnum, material);
+       assert(mat != K_CHYBA);
+@@ -3186,7 +3210,9 @@ EDIT_MESH_POLY *lo_nahraj_poly_list(char
+       assert(mn != K_CHYBA);
+ 
+       p_mat[mn] = kopiruj_material(p_mat[mat]);
+-      sprintf(p_mat[mn]->jmeno, "%s_ak%d", p_mat[mat]->jmeno, mn);
++      ret = snprintf(p_mat[mn]->jmeno, sizeof(p_mat[mn]->jmeno),
++		     "%s_ak%d", p_mat[mat]->jmeno, mn);
++      assert(ret < (int) sizeof(p_mat[mn]->jmeno));
+     }
+     else {
+       p_poly[i].material = lo_najdi_material(p_mat, matnum, material);
+@@ -3424,10 +3450,8 @@ int lo_uloz_materialy(EDIT_MATERIAL ** p
+   strcpy(file, p_file);
+   zamen_koncovku(file, KONCOVKA_MATERIAL);
+ 
+-  chdir((p_dir));
+-  if ((f = ffopen(file, "wb")) == NULL) {
++  if (chdir(p_dir) || (f = ffopen(file, "wb")) == NULL)
+     return (FALSE);
+-  }
+ 
+   for (i = 0; i < max_mat; i++) {
+     if (p_mat[i])
+@@ -3446,10 +3470,8 @@ int lo_uloz_material(EDIT_MATERIAL * p_m
+   strcpy(file, p_file);
+   zamen_koncovku(file, KONCOVKA_MATERIAL);
+ 
+-  chdir((p_dir));
+-  if ((f = ffopen(file, "wb")) == NULL) {
++  if (chdir (p_dir) || (f = ffopen(file, "wb")) == NULL)
+     return (FALSE);
+-  }
+ 
+   lo_uloz_material_chunk(f, p_mat);
+ 
+@@ -3470,10 +3492,8 @@ int lo_uloz_materialy_pouzite(EDIT_MATER
+   strcpy(file, p_file);
+   zamen_koncovku(file, KONCOVKA_MATERIAL);
+ 
+-  chdir((p_dir));
+-  if ((f = ffopen(file, "wb")) == NULL) {
++  if (chdir(p_dir) || (f = ffopen(file, "wb")) == NULL)
+     return (FALSE);
+-  }
+ 
+   for (i = 0; i < max_mat; i++) {
+     if (p_mat[i] && p_mat[i]->flag & (MAT_POUZITY | MAT_SYSTEM)) {
+@@ -4274,17 +4294,17 @@ void lo_vymaz_svetla_ze_sceny(EDIT_KONTE
+ 
+   while (p_slight) {
+     p_snext = p_slight->p_next;
+-    memset(p_slight, 0, sizeof(p_slight[0]));
++    memset((void *) p_slight, 0, sizeof(p_slight[0]));
+     p_slight = p_snext;
+   }
+   while (p_dlight) {
+     p_dnext = p_dlight->p_next;
+-    memset(p_dlight, 0, sizeof(p_dlight[0]));
++    memset((void *) p_dlight, 0, sizeof(p_dlight[0]));
+     p_dlight = p_dnext;
+   }
+   while (p_elight) {
+     p_enext = p_elight->p_next;
+-    memset(p_elight, 0, sizeof(p_elight[0]));
++    memset((void *) p_elight, 0, sizeof(p_elight[0]));
+     p_elight = p_enext;
+   }
+ }
+@@ -4319,12 +4339,12 @@ void lo_vymaz_svetla_ze_sceny_mesh(GAME_
+ 
+   while (p_dlight) {
+     p_dnext = p_dlight->p_next;
+-    memset(p_dlight, 0, sizeof(p_dlight[0]));
++    memset((void *) p_dlight, 0, sizeof(p_dlight[0]));
+     p_dlight = p_dnext;
+   }
+   while (p_elight) {
+     p_enext = p_elight->p_next;
+-    memset(p_elight, 0, sizeof(p_elight[0]));
++    memset((void *) p_elight, 0, sizeof(p_elight[0]));
+     p_elight = p_enext;
+   }
+ }
+Index: berusky2/src/komat/Load_chunks.cpp
+===================================================================
+--- berusky2.orig/src/komat/Load_chunks.cpp
++++ berusky2/src/komat/Load_chunks.cpp
+@@ -2995,7 +2995,7 @@ int lo_chunk_load_flare(FFILE f, OUT_CHU
+       return (FALSE);
+     }
+     p_flare = p_flarelist + i;
+-    memset(p_flare, 0, sizeof(p_flare[0]));
++    memset((void *) p_flare, 0, sizeof(p_flare[0]));
+     ffread(&p_flare->p, sizeof(BOD), 1, f);
+     ffread(&p_flare->r, sizeof(float), 4, f);
+     ffread(&p_flare->dx, sizeof(float), 2, f);
+@@ -3041,7 +3041,7 @@ int lo_chunk_load_flare_ext(FFILE f, OUT
+       return (FALSE);
+     }
+     p_flare = p_flarelist + i;
+-    memset(p_flare, 0, sizeof(p_flare[0]));
++    memset((void *) p_flare, 0, sizeof(p_flare[0]));
+     ffread(&p_flare->p, sizeof(BOD), 1, f);
+     ffread(&p_flare->r, sizeof(float), 4, f);
+     ffread(&p_flare->dx, sizeof(float), 2, f);
+@@ -3410,7 +3410,7 @@ int lo_chunk_load_static_light(FFILE f,
+ 
+   if (p_lightlist && p_ch->typ == CHUNK_STATIC_LIGHT) {
+ 
+-    memset(&light, 0, sizeof(light));
++    memset((void *) &light, 0, sizeof(light));
+ 
+     ffread(&light.akt, sizeof(light.akt), 1, f);
+     str_read(light.jmeno, f);
+@@ -4792,7 +4792,7 @@ int lo_chunk_load_sim_node(FFILE f, SIMP
+   if (p_sim && (ch.typ == CHUNK_SIM_NODE || ch.typ == CHUNK_SIM_NODE_EXT
+       || ch.typ == CHUNK_SIM_NODE_EXT2)) {
+ 
+-    memset(p_sim, 0, sizeof(p_sim[0]));
++    memset((void *) p_sim, 0, sizeof(p_sim[0]));
+ 
+     ffread(&p_sim->Objekt_ID, sizeof(p_sim->Objekt_ID), 1, f);
+     ffread(&p_sim->flag, sizeof(p_sim->flag), 1, f);
+Index: berusky2/src/komat/Matrix.h
+===================================================================
+--- berusky2.orig/src/komat/Matrix.h
++++ berusky2/src/komat/Matrix.h
+@@ -7,7 +7,7 @@
+ // vynuluje matici
+ inline GLMATRIX *zero_matrix(GLMATRIX * m)
+ {
+-  memset(m, 0, sizeof(*m));
++  memset((void *) m, 0, sizeof(*m));
+   return (m);
+ }
+ 
+@@ -350,11 +350,7 @@ inline GLMATRIX *invert_matrix(GLMATRIX
+   inv->_13 = src->_12 * src->_23 - src->_13 * src->_22;
+ 
+   det = inv->_11 * src->_11 + inv->_12 * src->_21 + inv->_13 * src->_31;
+-  if (det == 0.0f) {
+-    // we're not very happy with the source matrix ;-)
+-    memset(inv, 0, sizeof(*inv));
+-    return (NULL);
+-  }
++  assert(det);
+ 
+   inv->_21 = -src->_21 * src->_33 + src->_23 * src->_31;
+   inv->_22 = src->_11 * src->_33 - src->_13 * src->_31;
+@@ -400,10 +396,7 @@ inline GLMATRIX *invert_matrix_copy(GLMA
+   m._12 = -src->_12 * src->_33 + src->_13 * src->_32;
+   m._13 = src->_12 * src->_23 - src->_13 * src->_22;
+   det = m._11 * src->_11 + m._12 * src->_21 + m._13 * src->_31;
+-  if (det == 0) {
+-    memset(inv, 0, sizeof(*inv));
+-    return (NULL);
+-  }
++  assert(det);
+   m._21 = -src->_21 * src->_33 + src->_23 * src->_31;
+   m._22 = src->_11 * src->_33 - src->_13 * src->_31;
+   m._23 = -src->_11 * src->_23 + src->_13 * src->_21;
+Index: berusky2/src/komat/json_export.cpp
+===================================================================
+--- berusky2.orig/src/komat/json_export.cpp
++++ berusky2/src/komat/json_export.cpp
+@@ -594,7 +594,9 @@ void json_export_light(STATIC_LIGHT * p_
+ void json_export_lightmap(int num, bitmapa *p_bmp)
+ {
+   char file[MAX_FILENAME];
+-  sprintf(file,"%s/%s_%d.bmp",export_level_dir,"lightmap",num);
++  int ret = snprintf(file,sizeof(file),"%s/%s_%d.bmp",
++		     export_level_dir,"lightmap",num);
++  assert(ret < (int) sizeof(file));
+   bmp_uloz(file, p_bmp);
+ }
+ 
+@@ -674,9 +676,12 @@ void json_export_level(LEVELINFO * p_Lev
+ 
+ void json_export_start(char *p_file)
+ {
+-  if(!export_file) {    
++  if(!export_file) {
++    char *ret;
+     export_file = fopen(p_file,"w");
+-    getcwd(export_level_dir,MAX_FILENAME);
++    assert(export_file);
++    ret = getcwd(export_level_dir,MAX_FILENAME);
++    assert(ret);
+   }
+ }
+ 
+Index: berusky2/src/komat/obbo.cpp
+===================================================================
+--- berusky2.orig/src/komat/obbo.cpp
++++ berusky2/src/komat/obbo.cpp
+@@ -415,7 +415,7 @@ float obb_calc_obalka_obj(EDIT_OBJEKT *
+ 
+ void obb_prvek(OBB_OLD * p_obb)
+ {
+-  memset(p_obb, 0, sizeof(p_obb[0]));
++  memset((void *) p_obb, 0, sizeof(p_obb[0]));
+   vektor_set_all(p_obb->obb, 1, 0, 0);
+   vektor_set_all(p_obb->obb + 1, 0, 1, 0);
+   vektor_set_all(p_obb->obb + 2, 0, 0, 1);
+@@ -894,7 +894,7 @@ void obbtree_vyrob(OBB_TREE_OLD * p_prvn
+ 
+   p_mat = p_matlist;
+ 
+-  memset(p_prvni, 0, sizeof(p_prvni[0]));
++  memset((void *) p_prvni, 0, sizeof(p_prvni[0]));
+   p_prvni->p_item =
+     (OBB_TREE_ITEM_OLD *) mmalloc(sizeof(p_prvni->p_item[0]) * itnum);
+   p_prvni->itnum = itnum;
+@@ -991,7 +991,7 @@ void obbtree_vyrob_rec(OBB_TREE_OLD * p_
+     return;
+ 
+   memset(p_tmp_item, 0, sizeof(p_tmp_item[0]) * itemnum);
+-  memset(p_obalky, 0, sizeof(p_obalky[0]) * itemnum);
++  memset((void *) p_obalky, 0, sizeof(p_obalky[0]) * itemnum);
+   memset(p_hits, 0, sizeof(p_hits[0]) * itemnum);
+   memset(p_lhits, 0, sizeof(p_lhits[0]) * itemnum);
+ 
+Index: berusky2/src/tmp/alut_test.cpp
+===================================================================
+--- berusky2.orig/src/tmp/alut_test.cpp
++++ berusky2/src/tmp/alut_test.cpp
+@@ -29,6 +29,7 @@
+ #include <stdlib.h>
+ #include <AL/alut.h>
+ #include "compat_mini.h"
++#include "adas.h"
+ 
+ #define NUM_BUFFERS 3
+ #define NUM_SOURCES 3
+@@ -71,17 +72,17 @@ void init(int ini)
+       kerror(TRUE, "- Error creating buffers !!\n");
+   }
+     
+-  alutLoadWAVFile(reinterpret_cast<ALbyte*>(const_cast<char *>(HOME_DIR"1.wav")),&format,&data,&size,&freq,0);
++  adasLoadWAVFile(HOME_DIR"1.wav", &format,&data,&size,reinterpret_cast<ALuint*>(&freq),0);
+   alBufferData(buffer[0],format,data,size,freq);
+-  alutUnloadWAV(format,data,size,freq);
++  adasUnloadWAV(format,data,size,freq);
+   
+-  alutLoadWAVFile(reinterpret_cast<ALbyte*>(const_cast<char *>(HOME_DIR"2.wav")),&format,&data,&size,&freq,0);
++  adasLoadWAVFile(HOME_DIR"2.wav", &format,&data,&size,reinterpret_cast<ALuint*>(&freq),0);
+   alBufferData(buffer[1],format,data,size,freq);
+-  alutUnloadWAV(format,data,size,freq);
++  adasUnloadWAV(format,data,size,freq);
+ 
+-  alutLoadWAVFile(reinterpret_cast<ALbyte*>(const_cast<char *>(HOME_DIR"3.wav")),&format,&data,&size,&freq,0);
++  adasLoadWAVFile(HOME_DIR"3.wav", &format,&data,&size,reinterpret_cast<ALuint*>(&freq),0);
+   alBufferData(buffer[2],format,data,size,freq);
+-  alutUnloadWAV(format,data,size,freq);
++  adasUnloadWAV(format,data,size,freq);
+ 
+   alGetError(); /* clear error */
+   alGenSources(NUM_SOURCES, source);
+Index: berusky2/src/tmp/compat.cpp
+===================================================================
+--- berusky2.orig/src/tmp/compat.cpp
++++ berusky2/src/tmp/compat.cpp
+@@ -675,7 +675,8 @@ char current_working_dir_file[MAX_FILENA
+ 
+ void working_dir_init(void)
+ {
+-  getcwd(current_working_dir, MAX_FILENAME);
++  char *ret = getcwd(current_working_dir, MAX_FILENAME);
++  assert(ret);
+ }
+ 
+ char *working_file_get(const char *p_file)
+Index: berusky2/src/tmp/compat.h
+===================================================================
+--- berusky2.orig/src/tmp/compat.h
++++ berusky2/src/tmp/compat.h
+@@ -258,8 +258,6 @@ inline void null_free(void **p_mem)
+   }
+ }
+ 
+-char * apak_dir_correction(char *dir);
+-
+ wchar_t *wchar_windows_to_linux(word * p_in, int bytes_in_len);
+ void wchar_windows_to_linux(word * p_in, int str_len, wchar_t * p_out);
+ void wchar_linux_to_windows(wchar_t * p_in, int str_len, word * p_out);

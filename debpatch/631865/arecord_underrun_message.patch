@@ -1,0 +1,82 @@
+Description: arecord underrun message are incorrect
+ This fixes underrun value computation.
+Author: Jean-Michel Vourgère <jmv_deb@nirgal.com>
+Bug-Debian: http://bugs.debian.org/631865
+Forwarded: https://bugtrack.alsa-project.org/alsa-bug/view.php?id=5536
+Reviewed-By: <name and email of someone who approved the patch>
+Last-Update: 2012-01-15
+
+Index: alsa-utils-1.0.24.2/aplay/aplay.c
+===================================================================
+--- alsa-utils-1.0.24.2.orig/aplay/aplay.c
++++ alsa-utils-1.0.24.2/aplay/aplay.c
+@@ -102,7 +102,6 @@
+ static int avail_min = -1;
+ static int start_delay = 0;
+ static int stop_delay = 0;
+-static int monotonic = 0;
+ static int interactive = 0;
+ static int can_pause = 0;
+ static int verbose = 0;
+@@ -1122,7 +1121,6 @@
+ 							     &buffer_frames);
+ 	}
+ 	assert(err >= 0);
+-	monotonic = snd_pcm_hw_params_is_monotonic(params);
+ 	can_pause = snd_pcm_hw_params_can_pause(params);
+ 	err = snd_pcm_hw_params(handle, params);
+ 	if (err < 0) {
+@@ -1284,18 +1282,6 @@
+ 	}
+ }
+ 
+-#ifndef timersub
+-#define	timersub(a, b, result) \
+-do { \
+-	(result)->tv_sec = (a)->tv_sec - (b)->tv_sec; \
+-	(result)->tv_usec = (a)->tv_usec - (b)->tv_usec; \
+-	if ((result)->tv_usec < 0) { \
+-		--(result)->tv_sec; \
+-		(result)->tv_usec += 1000000; \
+-	} \
+-} while (0)
+-#endif
+-
+ #ifndef timermsub
+ #define	timermsub(a, b, result) \
+ do { \
+@@ -1320,27 +1306,13 @@
+ 		prg_exit(EXIT_FAILURE);
+ 	}
+ 	if (snd_pcm_status_get_state(status) == SND_PCM_STATE_XRUN) {
+-		if (monotonic) {
+-#ifdef HAVE_CLOCK_GETTIME
+-			struct timespec now, diff, tstamp;
+-			clock_gettime(CLOCK_MONOTONIC, &now);
+-			snd_pcm_status_get_trigger_htstamp(status, &tstamp);
+-			timermsub(&now, &tstamp, &diff);
+-			fprintf(stderr, _("%s!!! (at least %.3f ms long)\n"),
+-				stream == SND_PCM_STREAM_PLAYBACK ? _("underrun") : _("overrun"),
+-				diff.tv_sec * 1000 + diff.tv_nsec / 10000000.0);
+-#else
+-			fprintf(stderr, "%s !!!\n", _("underrun"));
+-#endif
+-		} else {
+-			struct timeval now, diff, tstamp;
+-			gettimeofday(&now, 0);
+-			snd_pcm_status_get_trigger_tstamp(status, &tstamp);
+-			timersub(&now, &tstamp, &diff);
+-			fprintf(stderr, _("%s!!! (at least %.3f ms long)\n"),
+-				stream == SND_PCM_STREAM_PLAYBACK ? _("underrun") : _("overrun"),
+-				diff.tv_sec * 1000 + diff.tv_usec / 1000.0);
+-		}
++		struct timespec now, diff, tstamp;
++		snd_pcm_status_get_htstamp(status, &now);
++		snd_pcm_status_get_trigger_htstamp(status, &tstamp);
++		timermsub(&now, &tstamp, &diff);
++		fprintf(stderr, _("%s!!! (at least %.3f ms long)\n"),
++			stream == SND_PCM_STREAM_PLAYBACK ? _("underrun") : _("overrun"),
++			diff.tv_sec * 1000 + diff.tv_nsec / 1000000.0);
+ 		if (verbose) {
+ 			fprintf(stderr, _("Status:\n"));
+ 			snd_pcm_status_dump(status, log);

@@ -1,0 +1,207 @@
+From 47f5c88087f204431c7db6b873c10d69accf1572 Mon Sep 17 00:00:00 2001
+From: Felipe Sateler <fsateler@debian.org>
+Date: Wed, 14 Dec 2016 22:31:27 -0300
+Subject: [PATCH] installinit: do not process systemd files from compat 11
+ onwards
+
+---
+ debhelper.pod                       |  6 ++++
+ dh_installinit                      | 12 ++++----
+ t/dh_installinit/debian/changelog   |  5 ++++
+ t/dh_installinit/debian/compat      |  1 +
+ t/dh_installinit/debian/control     | 20 +++++++++++++
+ t/dh_installinit/debian/foo.service |  5 ++++
+ t/dh_installinit/dh_installinit.t   | 57 +++++++++++++++++++++++++++++++++++++
+ 7 files changed, 101 insertions(+), 5 deletions(-)
+ create mode 100644 t/dh_installinit/debian/changelog
+ create mode 100644 t/dh_installinit/debian/compat
+ create mode 100644 t/dh_installinit/debian/control
+ create mode 100644 t/dh_installinit/debian/foo.service
+ create mode 100755 t/dh_installinit/dh_installinit.t
+
+diff --git a/debhelper.pod b/debhelper.pod
+index e7697ead..c9a3739e 100644
+--- a/debhelper.pod
++++ b/debhelper.pod
+@@ -586,6 +586,12 @@ F<menu-method> files are still installed.
+ 
+ =item -
+ 
++B<dh_installinit> no longer installs F<service> or F<tmpfile> files, nor
++generates maintainer scripts for those files. Use B<dh_systemd_enable> and
++B<dh_systemd_start> instead.
++
++=item -
++
+ The B<-s> (B<--same-arch>) option is removed.
+ 
+ =item -
+diff --git a/dh_installinit b/dh_installinit
+index 087a3bd8..3f80d127 100755
+--- a/dh_installinit
++++ b/dh_installinit
+@@ -47,13 +47,13 @@ build directory.
+ =item debian/I<package>.service
+ 
+ If this exists, it is installed into lib/systemd/system/I<package>.service in
+-the package build directory.
++the package build directory. Only compat levels 10 and below.
+ 
+ =item debian/I<package>.tmpfile
+ 
+ If this exists, it is installed into usr/lib/tmpfiles.d/I<package>.conf in the
+ package build directory. (The tmpfiles.d mechanism is currently only used
+-by systemd.)
++by systemd.) Only compa levels 10 and below.
+ 
+ =back
+ 
+@@ -216,14 +216,16 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 		}
+ 	}       
+ 
+-	my $service=pkgfile($package,"service");
++	my $service='';
++	$service=pkgfile($package,"service") if compat(10);
+ 	if ($service ne '' && ! $dh{ONLYSCRIPTS}) {
+ 		my $path="$tmp/lib/systemd/system";
+ 		install_dir($path);
+ 		install_file($service, "$path/$script.service");
+ 	}
+ 
+-	my $tmpfile=pkgfile($package,"tmpfile");
++	my $tmpfile='';
++	$tmpfile=pkgfile($package,"tmpfile") if compat(10);
+ 	if ($tmpfile ne '' && ! $dh{ONLYSCRIPTS}) {
+ 		my $path="$tmp/usr/lib/tmpfiles.d";
+ 		install_dir($path);
+@@ -254,7 +256,7 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 		error("Can't use --init-script with an upstart job");
+ 	}
+ 
+-	if (!$dh{NOSCRIPTS}) {
++	if (compat(10) && !$dh{NOSCRIPTS}) {
+ 		# Include postinst-init-tmpfiles if the package ships any files
+ 		# in /usr/lib/tmpfiles.d or /etc/tmpfiles.d
+ 		my @tmpfiles;
+diff --git a/t/dh_installinit/debian/changelog b/t/dh_installinit/debian/changelog
+new file mode 100644
+index 00000000..5850f0e2
+--- /dev/null
++++ b/t/dh_installinit/debian/changelog
+@@ -0,0 +1,5 @@
++foo (1.0-1) unstable; urgency=low
++
++  * Initial release. (Closes: #XXXXXX)
++
++ -- Test <testing@nowhere>  Mon, 11 Jul 2016 18:10:59 +0200
+diff --git a/t/dh_installinit/debian/compat b/t/dh_installinit/debian/compat
+new file mode 100644
+index 00000000..f599e28b
+--- /dev/null
++++ b/t/dh_installinit/debian/compat
+@@ -0,0 +1 @@
++10
+diff --git a/t/dh_installinit/debian/control b/t/dh_installinit/debian/control
+new file mode 100644
+index 00000000..48d4de2f
+--- /dev/null
++++ b/t/dh_installinit/debian/control
+@@ -0,0 +1,20 @@
++Source: foo
++Section: misc
++Priority: optional
++Maintainer: Test <testing@nowhere>
++Standards-Version: 3.9.8
++
++Package: foo
++Architecture: all
++Description: package foo
++ Package foo
++
++Package: bar
++Architecture: all
++Description: package bar
++ Package bar
++
++Package: baz
++Architecture: all
++Description: package baz
++ Package baz
+diff --git a/t/dh_installinit/debian/foo.service b/t/dh_installinit/debian/foo.service
+new file mode 100644
+index 00000000..aa216362
+--- /dev/null
++++ b/t/dh_installinit/debian/foo.service
+@@ -0,0 +1,5 @@
++[Unit]
++Description=A unit
++
++[Service]
++ExecStart=/bin/true
+diff --git a/t/dh_installinit/dh_installinit.t b/t/dh_installinit/dh_installinit.t
+new file mode 100755
+index 00000000..d05c2074
+--- /dev/null
++++ b/t/dh_installinit/dh_installinit.t
+@@ -0,0 +1,57 @@
++#!/usr/bin/perl
++use strict;
++use Test::More;
++use File::Basename ();
++
++# Let the tests be run from anywhere, but current directory
++# is expected to be the one where this test lives in.
++chdir File::Basename::dirname($0) or die "Unable to chdir to ".File::Basename::dirname($0);
++
++my $TOPDIR = "../..";
++my $rootcmd;
++
++if ($< == 0) {
++	$rootcmd = '';
++}
++else {
++	system("fakeroot true 2>/dev/null");
++	$rootcmd = $? ? undef : 'fakeroot';
++}
++
++if (not defined($rootcmd)) {
++	plan skip_all => 'fakeroot required';
++}
++else {
++	plan(tests => 5);
++}
++
++system("$TOPDIR/dh_clean");
++
++my $service = "debian/foo.service";
++
++system("mkdir -p debian/foo debian/bar debian/baz");
++system("$rootcmd $TOPDIR/dh_installinit");
++ok(-e "debian/foo/lib/systemd/system/foo.service");
++ok(-e "debian/foo.postinst.debhelper");
++system("$TOPDIR/dh_clean");
++
++system("mkdir -p debian/foo debian/bar debian/baz");
++system("DH_COMPAT=11 $rootcmd $TOPDIR/dh_installinit");
++ok(! -e "debian/foo/lib/systemd/system/foo.service");
++ok(! -e "debian/foo.postinst.debhelper");
++system("$TOPDIR/dh_clean");
++
++system("mkdir -p debian/foo debian/bar debian/baz");
++system("mkdir -p debian/foo/lib/systemd/system/");
++system("cp debian/foo.service debian/foo/lib/systemd/system/");
++system("DH_COMPAT=11 $rootcmd $TOPDIR/dh_installinit");
++ok(! -e "debian/foo.postinst.debhelper");
++system("$TOPDIR/dh_clean");
++
++system("$TOPDIR/dh_clean");
++
++# Local Variables:
++# indent-tabs-mode: t
++# tab-width: 4
++# cperl-indent-level: 4
++# End:
+-- 
+2.11.0
+

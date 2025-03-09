@@ -1,0 +1,53 @@
+Description: Read PIPE_BUF bytes from pipes in tests.
+  When we write() <= PIPE_BUF bytes to an anonymous pipe on Linux,
+  PIPE_BUF bytes appear to be received by the other side of the
+  pipe (irrespective of the length passed to write()).
+
+  This would cause the read() in async-unix-test to succeed with
+  EAGAIN when PIPE_BUF >= 4096 because the pipe would not enter the
+  writable state until all PIPE_BUF bytes have been read.
+
+  Affects certain flavors of mips{,el} and ppc{,64el} as far as I
+  can tell.
+Author: Tom Lee <debian@tomlee.co>
+Bug-Debian: https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=790571
+Last-Update: 2015-08-01
+--- a/src/kj/async-unix-test.c++
++++ b/src/kj/async-unix-test.c++
+@@ -394,15 +394,20 @@
+   KJ_SYSCALL(pipe(pipefds));
+   kj::AutoCloseFd infd(pipefds[0]), outfd(pipefds[1]);
+   setNonblocking(outfd);
++  setNonblocking(infd);
+ 
+   UnixEventPort::FdObserver observer(port, outfd, UnixEventPort::FdObserver::OBSERVE_WRITE);
+ 
+-  // Fill buffer.
++  // Fill the pipe buffer.
+   ssize_t n;
+   do {
+     KJ_NONBLOCKING_SYSCALL(n = write(outfd, "foo", 3));
+   } while (n >= 0);
+ 
++  // Make sure we haven't hit some unexpected failure.
++  EXPECT_EQ(n, -1);
++  EXPECT_EQ(errno, EAGAIN);
++
+   bool writable = false;
+   auto promise = observer.whenBecomesWritable()
+       .then([&]() { writable = true; }).eagerlyEvaluate(nullptr);
+@@ -414,7 +419,13 @@
+   EXPECT_FALSE(writable);
+ 
+   char buffer[4096];
+-  KJ_SYSCALL(read(infd, &buffer, sizeof(buffer)));
++  do {
++      KJ_NONBLOCKING_SYSCALL(n = read(infd, &buffer, sizeof(buffer)));
++  } while (n >= 0);
++
++  // Make sure we've fully drained the buffer.
++  EXPECT_EQ(n, -1);
++  EXPECT_EQ(errno, EAGAIN);
+ 
+   loop.run();
+   port.poll();

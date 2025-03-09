@@ -1,0 +1,168 @@
+diff --git a/bundle-files/Dockerfile b/bundle-files/Dockerfile
+index f766bb7..dd0fdee 100644
+--- a/bundle-files/Dockerfile
++++ b/bundle-files/Dockerfile
+@@ -4,25 +4,32 @@ MAINTAINER Tomasz Buchert <tomasz@debian.org>
+ ENV DEBIAN_FRONTEND noninteractive
+ 
+ #
+-# ADD ./steps /root/steps
++# ADD ./steps /home/debocker/steps
+ #
+ 
+-ADD ./steps/01-upgrade /root/steps/01-upgrade
+-RUN /root/steps/01-upgrade '${args_01}'
++RUN useradd -ms /bin/bash debocker
+ 
+-ADD ./steps/02-install-utils /root/steps/02-install-utils
+-RUN /root/steps/02-install-utils '${args_02}'
++ADD ./steps/01-upgrade /home/debocker/steps/01-upgrade
++RUN /home/debocker/steps/01-upgrade '${args_01}'
+ 
+-ADD ./control /root/control
+-ADD ./steps/03-install-deps /root/steps/03-install-deps
+-RUN /root/steps/03-install-deps '${args_03}'
++ADD ./steps/02-install-utils /home/debocker/steps/02-install-utils
++RUN /home/debocker/steps/02-install-utils '${args_02}'
+ 
+-COPY ./source/* ./info /root/source/
+-ADD ./steps/04-extract-source /root/steps/04-extract-source
+-RUN ./root/steps/04-extract-source '${args_04}'
++ADD ./control /home/debocker/control
++ADD ./steps/03-install-deps /home/debocker/steps/03-install-deps
++RUN /home/debocker/steps/03-install-deps '${args_03}'
+ 
+-ADD ./steps/05-build /root/steps/05-build
+-ADD ./buildinfo /root/source/
+-RUN /root/steps/05-build '${args_05}'
++COPY ./source/* ./info /home/debocker/source/
+ 
+-ADD ./steps/build-tar /root/steps/build-tar
++RUN chown -R debocker: /home/debocker
++
++USER debocker
++
++ADD ./steps/04-extract-source /home/debocker/steps/04-extract-source
++RUN ./home/debocker/steps/04-extract-source '${args_04}'
++
++ADD ./steps/05-build /home/debocker/steps/05-build
++ADD ./buildinfo /home/debocker/source/
++RUN /home/debocker/steps/05-build '${args_05}'
++
++ADD ./steps/build-tar /home/debocker/steps/build-tar
+diff --git a/bundle-files/steps/02-install-utils b/bundle-files/steps/02-install-utils
+index 4bc6fba..1a1a8b0 100755
+--- a/bundle-files/steps/02-install-utils
++++ b/bundle-files/steps/02-install-utils
+@@ -8,7 +8,7 @@ echo "== STAGE 02 (installing build tools) =="
+ set -eux
+ 
+ apt-get -y --no-install-recommends \
+-        install devscripts pbuilder build-essential aptitude lintian
++        install devscripts pbuilder build-essential aptitude lintian fakeroot
+ 
+ apt-get -y clean
+ 
+diff --git a/bundle-files/steps/03-install-deps b/bundle-files/steps/03-install-deps
+index 1483ba5..c139ac2 100755
+--- a/bundle-files/steps/03-install-deps
++++ b/bundle-files/steps/03-install-deps
+@@ -1,7 +1,7 @@
+ #!/bin/bash
+ #
+ # installs package dependencies
+-# assumes that /root/control exists
++# assumes that /home/debocker/control exists
+ # (presumably added by Dockerfile)
+ 
+ echo "== STAGE 03 (install dependencies) =="
+@@ -9,7 +9,7 @@ echo "== STAGE 03 (install dependencies) =="
+ set -eux
+ 
+ /usr/lib/pbuilder/pbuilder-satisfydepends-aptitude \
+-    --control /root/control
++    --control /home/debocker/control
+ 
+ apt-get -y clean
+ 
+diff --git a/bundle-files/steps/04-extract-source b/bundle-files/steps/04-extract-source
+index ccd5b98..ba521d9 100755
+--- a/bundle-files/steps/04-extract-source
++++ b/bundle-files/steps/04-extract-source
+@@ -1,13 +1,14 @@
+ #!/bin/bash
+ #
+ # extracts sources
+-# the files are in /root/source
++# the files are in /home/debocker/source
+ 
+ echo "== STAGE 04 (extract sources) =="
+ 
+ set -eux
+ 
+-cd /root/source
++cd /home/debocker/source
++ls -la  /home/debocker/source
+ dpkg-source -x *.dsc ./build
+ 
+ # remove .dsc so it does not collide with the build
+diff --git a/bundle-files/steps/05-build b/bundle-files/steps/05-build
+index 493cf31..1cd88be 100755
+--- a/bundle-files/steps/05-build
++++ b/bundle-files/steps/05-build
+@@ -7,16 +7,16 @@ echo "== STAGE 04 (building package) =="
+ 
+ set -eux
+ 
+-source /root/source/buildinfo
++source /home/debocker/source/buildinfo
+ 
+ echo "Build flags: ${flags}"
+ 
+-cd /root/source/build
++cd /home/debocker/source/build
+ 
+ # TODO: also store stderr?
+-dpkg-buildpackage ${flags} | tee /root/source/build.log
++dpkg-buildpackage ${flags} | tee /home/debocker/source/build.log
+ 
+-cd /root/source
++cd /home/debocker/source
+ name=$(basename --suffix .dsc *.dsc)
+ mv build.log ${name}.build
+ 
+diff --git a/bundle-files/steps/build-tar b/bundle-files/steps/build-tar
+index 06fb0e0..b226228 100755
+--- a/bundle-files/steps/build-tar
++++ b/bundle-files/steps/build-tar
+@@ -4,9 +4,9 @@
+ 
+ set -eu
+ 
+-source /root/source/info
++source /home/debocker/source/info
+ 
+-cd /root/source/
++cd /home/debocker/source/
+ 
+ if [ "${format}" = "native" ]; then
+     # native
+diff --git a/debocker b/debocker
+index ae68c8a..41d14cb 100755
+--- a/debocker
++++ b/debocker
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env python3
++#!/usr/bin/python3
+ # coding: utf-8
+ 
+ import click
+@@ -528,7 +528,7 @@ def build_bundle(bundle, output, sign, no_cache, pull):
+     build_tar = tmppath('build.tar')
+     with open(build_tar, 'wb') as f:
+         log_check_call([ 'docker', 'run', '--rm=true',
+-                         image, '/root/steps/build-tar' ], stdout = f)
++                         image, '/home/debocker/steps/build-tar' ], stdout = f)
+     log("Build tar stored in '{}'".format(build_tar))
+     tar_list = log_check_output([ 'tar', 'tf', build_tar ])
+     tar_files = tar_list.decode('utf-8').split()

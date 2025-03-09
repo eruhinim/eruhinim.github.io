@@ -1,0 +1,262 @@
+>From c010705581f04efe27ceab899f8f45b34bb20da7 Mon Sep 17 00:00:00 2001
+From: Daniel Schaal <farbing@web.de>
+Date: Sun, 11 Dec 2011 09:40:59 +0100
+Subject: [PATCH] use dpkg triggers to dynamically update compiler links
+ (adapted from ccache)
+
+---
+ debian/distcc.dirs               |    1 +
+ debian/distcc.manpages           |    1 +
+ debian/distcc.postinst           |   23 +++++++++---
+ debian/distcc.prerm              |    7 ++++
+ debian/distcc.triggers.in        |    2 +
+ debian/rules                     |   20 ++++-------
+ debian/update-distcc-symlinks.8  |   17 +++++++++
+ debian/update-distcc-symlinks.in |   67 ++++++++++++++++++++++++++++++++++++++
+ 8 files changed, 120 insertions(+), 18 deletions(-)
+ create mode 100644 debian/distcc.manpages
+ create mode 100644 debian/distcc.prerm
+ create mode 100644 debian/distcc.triggers.in
+ create mode 100644 debian/update-distcc-symlinks.8
+ create mode 100644 debian/update-distcc-symlinks.in
+
+diff --git a/debian/distcc.dirs b/debian/distcc.dirs
+index edc4b09..5ff6c91 100644
+--- a/debian/distcc.dirs
++++ b/debian/distcc.dirs
+@@ -1,4 +1,5 @@
+ usr/bin
++usr/sbin
+ usr/lib/distcc
+ usr/share/doc/distcc
+ usr/share/man/man1
+diff --git a/debian/distcc.manpages b/debian/distcc.manpages
+new file mode 100644
+index 0000000..f8283c1
+--- /dev/null
++++ b/debian/distcc.manpages
+@@ -0,0 +1 @@
++debian/update-distcc-symlinks.8
+diff --git a/debian/distcc.postinst b/debian/distcc.postinst
+index 4e6bf53..e220209 100644
+--- a/debian/distcc.postinst
++++ b/debian/distcc.postinst
+@@ -7,18 +7,24 @@ update_config_file()
+ {
+ 	db_field=$1
+ 	config_field=$2
+-  
++
+ 	RET=false
+   	db_get $db_field
+ 	if grep -q "^$config_field" $conffile ; then 
+ 		# keep any admin changes, while replacing the variable content
+-		sed "s#^[ ]*$config_field=\".*\"#$config_field=\"$RET\"#" < $conffile > $conffile.new && 
++		sed "s#^[ ]*$config_field=\".*\"#$config_field=\"$RET\"#" < $conffile > $conffile.new &&
+    		mv $conffile.new $conffile
+   	else
+     		echo "$config_field=\"$RET\"" >> $conffile
+ 	fi
+ }
+ 
++update_symlinks()
++{
++                echo "Updating symlinks in /usr/lib/distcc ..."
++                update-distcc-symlinks
++}
++
+ . /usr/share/debconf/confmodule
+ db_version 2.0
+ 
+@@ -92,7 +98,7 @@ JOBS=""
+ ZEROCONF="true"
+ EOF
+ 		fi
+-	  
++
+ 		update_config_file distcc/daemon STARTDISTCC
+ 		update_config_file distcc/daemon-allow ALLOWEDNETS
+ 		update_config_file distcc/daemon-listen LISTENER
+@@ -120,16 +126,21 @@ EOF
+ 		fi
+ 
+ 		db_stop
++
++                update_symlinks
+ 		;;
++        triggered)
++                update_symlinks
++		exit 0
++        ;;
+         abort-upgrade|abort-remove|abort-deconfigure)
+         ;;
+-                                                                                      
+         *)
+                 echo "postinst called with unknown argument \`$1'" >&2
+                 exit 1
+                 ;;
+ esac
+-                                                                                      
++
+ #DEBHELPER#
+- 
++
+ exit 0
+diff --git a/debian/distcc.prerm b/debian/distcc.prerm
+new file mode 100644
+index 0000000..b63c4a4
+--- /dev/null
++++ b/debian/distcc.prerm
+@@ -0,0 +1,7 @@
++#!/bin/sh
++
++set -eu
++
++rm -f /usr/lib/distcc/* 2>/dev/null || true
++
++#DEBHELPER#
+diff --git a/debian/distcc.triggers.in b/debian/distcc.triggers.in
+new file mode 100644
+index 0000000..bd5b1ef
+--- /dev/null
++++ b/debian/distcc.triggers.in
+@@ -0,0 +1,2 @@
++interest /usr/lib/gcc
++interest /usr/lib/%DEB_HOST_MULTIARCH%/gcc
+diff --git a/debian/rules b/debian/rules
+index 534ccd3..67c33d0 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -9,6 +9,8 @@
+ # Uncomment this to turn on verbose mode.
+ #export DH_VERBOSE=1
+ 
++DEB_HOST_MULTIARCH ?= $(shell dpkg-architecure -qDEB_HOST_MULTIARCH)
++
+ # This has to be exported to make some magic below work.
+ export DH_OPTIONS
+ 
+@@ -114,18 +116,12 @@ install-arch:
+ 	install -m755 -d debian/distcc/etc/distcc
+ 	install -m644 debian/hosts debian/distcc/etc/distcc/hosts
+ 
+-	ln -s ../../bin/distcc $(CURDIR)/debian/distcc/usr/lib/distcc/$(DEB_BUILD_GNU_TYPE)-gcc
+-	ln -s ../../bin/distcc $(CURDIR)/debian/distcc/usr/lib/distcc/$(DEB_BUILD_GNU_TYPE)-g++
+-	set -e; for ver in 2.95 3.0 3.2 3.3 3.4 4.0 4.1 4.2 4.3 4.4; do \
+-		ln -s ../../bin/distcc $(CURDIR)/debian/distcc/usr/lib/distcc/$(DEB_BUILD_GNU_TYPE)-gcc-$$ver; \
+-		ln -s ../../bin/distcc $(CURDIR)/debian/distcc/usr/lib/distcc/gcc-$$ver; \
+-		ln -s ../../bin/distcc $(CURDIR)/debian/distcc/usr/lib/distcc/$(DEB_BUILD_GNU_TYPE)-g++-$$ver; \
+-		ln -s ../../bin/distcc $(CURDIR)/debian/distcc/usr/lib/distcc/g++-$$ver; \
+-	done
+-	ln -s ../../bin/distcc $(CURDIR)/debian/distcc/usr/lib/distcc/cc
+-	ln -s ../../bin/distcc $(CURDIR)/debian/distcc/usr/lib/distcc/c++
+-	ln -s ../../bin/distcc $(CURDIR)/debian/distcc/usr/lib/distcc/gcc
+-	ln -s ../../bin/distcc $(CURDIR)/debian/distcc/usr/lib/distcc/g++
++	# shamelessly stolen from ccache
++	sed s/%DEB_HOST_MULTIARCH%/$(DEB_HOST_MULTIARCH)/ \
++		debian/distcc.triggers.in >debian/distcc.triggers
++	sed s/%DEB_HOST_MULTIARCH%/$(DEB_HOST_MULTIARCH)/ \
++		debian/update-distcc-symlinks.in >debian/distcc/usr/sbin/update-distcc-symlinks
++	chmod +x debian/distcc/usr/sbin/update-distcc-symlinks
+ 
+ 	# rename pump
+ 	mv $(CURDIR)/debian/tmp/usr/bin/pump $(CURDIR)/debian/tmp/usr/bin/distcc-pump
+diff --git a/debian/update-distcc-symlinks.8 b/debian/update-distcc-symlinks.8
+new file mode 100644
+index 0000000..5e16f48
+--- /dev/null
++++ b/debian/update-distcc-symlinks.8
+@@ -0,0 +1,17 @@
++.TH UPDATE-DISTCC-SYMLINKS 8 "2011-11-03"
++.SH NAME
++update-distcc-symlinks \- update symlinks in /usr/lib/distcc
++.SH SYNOPSIS
++.B update-distcc-symlinks
++.SH DESCRIPTION
++\fBupdate-distcc-symlinks\fR creates and removes symlinks in
++\fI/usr/lib/distcc\fR. See the \fBdistcc\fR man page for more information.
++.P
++It is normally not necessary to run \fBupdate-distcc-symlinks\fR by hand as
++this is done automatically when compiler packages are removed or
++installed.
++.SH SEE ALSO
++.BR distcc (1)
++.SH AUTHOR
++This manual page was written by Joel Rosdahl <joel@debian.org> for the
++Debian GNU/Linux system.
+diff --git a/debian/update-distcc-symlinks.in b/debian/update-distcc-symlinks.in
+new file mode 100644
+index 0000000..cda89e1
+--- /dev/null
++++ b/debian/update-distcc-symlinks.in
+@@ -0,0 +1,67 @@
++#!/usr/bin/perl
++
++use strict;
++use warnings FATAL => "all";
++
++my $distcc_dir = "/usr/lib/distcc";
++my $old_gcc_dir = "/usr/lib/gcc";
++my $new_gcc_dir = "/usr/lib/%DEB_HOST_MULTIARCH%/gcc";
++my %old_symlinks; # Current compiler names in /usr/lib/distcc
++my %new_symlinks; # Compiler names that should be in /usr/lib/distcc
++my @standard_names = qw(cc c++);
++
++sub consider {
++    my ($name) = @_;
++    if (-x "/usr/bin/$name") {
++        $new_symlinks{$name} = 1;
++    }
++}
++
++sub consider_gcc {
++    my ($prefix, $suffix) = @_;
++    consider "${prefix}gcc${suffix}";
++    consider "${prefix}g++${suffix}";
++}
++
++# Find existing standard compiler names.
++foreach (@standard_names) {
++    consider $_;
++}
++
++# Find existing GCC variants.
++consider_gcc "", "";
++consider_gcc "c89-", "";
++consider_gcc "c99-", "";
++foreach my $dir (<$old_gcc_dir/*>, <$new_gcc_dir/*>) {
++    (my $kind = $dir) =~ s|.*/||;
++    consider_gcc "$kind-", "";
++    foreach (<$dir/*>) {
++        if (! -l $_ and -d $_) {
++            s|.*/||;
++            consider_gcc "", "-$_";
++            consider_gcc "$kind-", "-$_";
++        }
++    }
++}
++
++# Find existing symlinks.
++foreach (<$distcc_dir/*>) {
++    if (-l) {
++        s|.*/||;
++        $old_symlinks{$_} = 1;
++    }
++}
++
++# Remove obsolete symlinks.
++foreach (keys %old_symlinks) {
++    if (! exists $new_symlinks{$_}) {
++        unlink "$distcc_dir/$_";
++    }
++}
++
++# Add missing symlinks.
++foreach (keys %new_symlinks) {
++    if (! exists $old_symlinks{$_}) {
++        symlink "../../bin/distcc", "$distcc_dir/$_";
++    }
++}
+-- 
+1.7.7.3
+

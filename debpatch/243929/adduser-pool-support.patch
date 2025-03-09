@@ -1,0 +1,281 @@
+diff --git a/AdduserCommon.pm b/AdduserCommon.pm
+index d8cf966..21d2195 100644
+--- a/AdduserCommon.pm
++++ b/AdduserCommon.pm
+@@ -27,6 +27,7 @@ my $lockfile;
+     'gtx',
+     'invalidate_nscd',
+     'read_config',
++    'read_pool',
+     's_print',
+     's_printf',
+     'systemcall',
+@@ -132,6 +133,64 @@ sub read_config {
+     close CONF || die "$!";
+ }
+ 
++# read names and IDs from a pool file
++# parameters:
++#  -- filename of the pool file, or directory containing files
++#  -- a hash for the pool data
++sub read_pool {
++    my ($pool_file, $poolref) = @_;
++    my ($name, $id);
++    my %ids = ();
++
++    if (-d $pool_file) {
++	opendir (DIR, $pool_file) or
++	    dief gtx("Cannot read directory `%s'"),$pool_file;
++	my @files = readdir (DIR);
++	closedir (DIR);
++	foreach (sort @files) {
++	    next if (/^\./);
++	    next if (!/\.conf$/);
++	    my $file = "$pool_file/$_";
++	    next if (! -f $file);
++	    read_pool ($file, $poolref);
++	}
++	return;
++    }
++    if (! -f $pool_file) {
++	warnf gtx("`%s' does not exist.\n"),$pool_file if $verbose;
++	return;
++    }
++
++    open (POOL, $pool_file) || dief ("%s: `%s'\n",$pool_file,$!);
++    while (<POOL>) {
++	chomp;
++	next if /^#/ || /^\s*$/;
++
++	($name, $id, $gecos, $home, $shell) = split (/:/);
++	if (!$name || $name !~ /^([_a-zA-Z0-9-]+)$/ ||
++	    !$id || $id !~ /^(\d+)$/) {
++	    warnf gtx("Couldn't parse `%s', line %d.\n"),$pool_file,$.;
++	    next;
++	}
++	if (defined($poolref->{$name})) {
++	    dief gtx("Duplicate name `%s' at `%s', line %d.\n"),$name,$pool_file,$.;
++	}
++	if (defined($ids{$id})) {
++	    dief gtx("Duplicate ID `%s' at `%s', line %d.\n"),$id,$pool_file,$.;
++	}
++
++	$poolref->{$name} = {
++	    'id' => $id,
++	    'gecos' => $gecos,
++	    'home' => $home,
++	    'shell' => $shell
++	};
++    }
++
++    close POOL || die "$!";
++}
++
++
+ # return a user's groups
+ sub get_users_groups {
+     my($user) = @_;
+@@ -281,7 +340,9 @@ sub preseed_config {
+     exclude_fstypes => "(proc|sysfs|usbfs|devpts|devtmpfs|devfs|afs)",
+     skel_ignore_regex => "(dpkg|ucf)-(old|new|dist)\$",
+     extra_groups => "users",
+-    add_extra_groups => 0
++    add_extra_groups => 0,
++    uid_pool => "",
++    gid_pool => "",
+   );
+ 
+   # Initialize to the set of known variables.
+diff --git a/adduser b/adduser
+index 045b87f..531af4e 100755
+--- a/adduser
++++ b/adduser
+@@ -116,6 +116,8 @@ my $first_uid = undef;
+ my $last_uid = undef;
+ my $dir_mode = undef;
+ my $perm = undef;
++my %uid_pool;
++my %gid_pool;
+ 
+ our @names;
+ 
+@@ -237,6 +239,14 @@ $ENV{"DEBUG"}   = $verbose;
+ # preseed configuration data and then read the config file
+ preseed_config(\@defaults,\%config);
+ 
++# read the uid and gid pool
++if ($config{"uid_pool"}) {
++    read_pool ($config{"uid_pool"}, \%uid_pool);
++}
++if ($config{"gid_pool"}) {
++    read_pool ($config{"gid_pool"}, \%gid_pool);
++}
++
+ &checkname($new_name) if defined $new_name;
+ $SIG{'INT'} = $SIG{'QUIT'} = $SIG{'HUP'} = 'handler';
+ 
+@@ -293,7 +303,8 @@ if ($action eq "addsysgroup") {
+ 
+     if (!defined($new_gid)) {
+         $new_gid = &first_avail_gid($config{"first_system_gid"},
+-				   $config{"last_system_gid"});
++				   $config{"last_system_gid"},
++				   $gid_pool{$new_name}{'id'});
+         if ($new_gid == -1) {
+ 	    warnf gtx("No GID is available in the range %d-%d (FIRST_SYS_GID - LAST_SYS_GID).\n"),$config{"first_system_gid"},$config{"last_system_gid"};
+             dief (gtx("The group `%s' was not created.\n"),$new_name);
+@@ -323,7 +334,8 @@ if ($action eq "addgroup") {
+ 	if (defined($new_gid) && defined(getgrgid($new_gid)));
+     if (!defined($new_gid)) {
+         $new_gid = &first_avail_gid($config{"first_gid"},
+-				   $config{"last_gid"});
++				   $config{"last_gid"},
++				   $gid_pool{$new_name}{'id'});
+ 
+         if ($new_gid == -1) {
+ 	    print STDERR "$0: ";
+@@ -391,18 +403,21 @@ if ($action eq "addsysuser") {
+ 
+     if (!defined($new_uid) && $make_group_also) {
+ 	$new_uid = &first_avail_uid($config{"first_system_uid"},
+-				   $config{"last_system_uid"});
++				   $config{"last_system_uid"},
++				   $uid_pool{$new_name}{'id'});
+         if ($new_uid == -1) {
+ 	    warnf gtx("No UID/GID pair is available in the range %d-%d (FIRST_SYS_UID - LAST_SYS_UID).\n"),$config{"first_system_uid"},$config{"last_system_uid"};
+             dief (gtx("The user `%s' was not created.\n"),$new_name);
+         }
+         $new_gid = &first_avail_gid($config{"first_system_gid"},
+-	                            $config{"last_system_gid"});
++	                            $config{"last_system_gid"},
++				    $gid_pool{$new_name}{'id'});
+ 	$ingroup_name = $new_name;
+     }
+     elsif (!defined($new_uid) && !$make_group_also) {
+ 	$new_uid = &first_avail_uid($config{"first_system_uid"},
+-				   $config{"last_system_uid"});
++				   $config{"last_system_uid"},
++				   $uid_pool{$new_name}{'id'});
+         if ($new_uid == -1) {
+ 	    warnf gtx("No UID is available in the range %d-%d (FIRST_SYS_UID - LAST_SYS_UID).\n"),$config{"first_system_uid"},$config{"last_system_uid"};
+ 	    dief (gtx("The user `%s' was not created.\n"),$new_name);
+@@ -431,10 +446,10 @@ if ($action eq "addsysuser") {
+ 
+     printf gtx("Adding new user `%s' (UID %d) with group `%s' ...\n"),$new_name,$new_uid,$ingroup_name
+ 	if $verbose;
+-    $home_dir = $special_home || '/nonexistent';
++    $home_dir = $special_home  || $uid_pool{$new_name}{'home'} || '/nonexistent';
+     $no_create_home = $home_dir =~ /^\/+nonexistent(\/|$)/ ? 1 : $no_create_home;
+ 
+-    $shell = $special_shell || '/usr/sbin/nologin';
++    $shell = $special_shell || $uid_pool{$new_name}{'shell'} || '/usr/sbin/nologin';
+     $undouser = $new_name;
+ 
+     &systemcall('/usr/sbin/useradd', '-r',
+@@ -451,6 +466,8 @@ if ($action eq "addsysuser") {
+ 
+     if (defined($new_gecos)) {
+         &ch_gecos($new_gecos);
++    } elsif ($uid_pool{$new_name}{'gecos'}) {
++        &ch_gecos($uid_pool{$new_name}{'gecos'});
+     }
+ 
+     create_homedir(0);
+@@ -475,19 +492,22 @@ if ($action eq "adduser") {
+ 
+     if (!defined($new_uid) && $make_group_also) {
+ 	$new_uid = &first_avail_uid($first_uid,
+-				   $last_uid);
++				   $last_uid,
++				   $uid_pool{$new_name}{'id'});
+ 
+         if ($new_uid == -1) {
+             warnf gtx("No UID/GID pair is available in the range %d-%d (FIRST_UID - LAST_UID).\n"),$first_uid,$last_uid;
+ 	        dief (gtx("The user `%s' was not created.\n"),$new_name);
+         }
+ 	$new_gid = &first_avail_gid($config{"first_gid"},
+-	                            $config{"last_gid"});
++	                            $config{"last_gid"},
++				    $gid_pool{$new_name}{'id'});
+ 	$ingroup_name = $new_name;
+     }
+     elsif (!defined($new_uid) && !$make_group_also) {
+ 	$new_uid = &first_avail_uid($first_uid,
+-				   $last_uid);
++				   $last_uid,
++				   $uid_pool{$new_name}{'id'});
+ 	if ($new_uid == -1) {
+ 	    warnf gtx("No UID is available in the range %d-%d (FIRST_UID - LAST_UID).\n"),$config{"first_uid"},$config{"last_uid"};
+             dief (gtx("The user `%s' was not created.\n"),$new_name);
+@@ -514,8 +534,8 @@ if ($action eq "adduser") {
+ 
+     printf gtx("Adding new user `%s' (%d) with group `%s' ...\n"),$new_name,$new_uid,$ingroup_name
+ 	if $verbose;
+-    $home_dir = $special_home || &homedir($new_name, $ingroup_name);
+-	$shell = $special_shell || $config{"dshell"};
++    $home_dir = $special_home || $uid_pool{$new_name}{'home'} || &homedir($new_name, $ingroup_name);
++	$shell = $special_shell || $uid_pool{$new_name}{'shell'} || $config{"dshell"};
+     $undouser = $new_name;
+     my $useradd = &which('useradd');
+     &systemcall($useradd, '-d', $home_dir, '-g', $ingroup_name, '-s',
+@@ -568,6 +588,8 @@ if ($action eq "adduser") {
+ 
+     if (defined($new_gecos)) {
+ 	&ch_gecos($new_gecos);
++    } elsif ($uid_pool{$new_name}{'gecos'}) {
++	&ch_gecos($uid_pool{$new_name}{'gecos'});
+     }
+     else {
+     my $noexpr = langinfo(NOEXPR());
+@@ -914,11 +936,16 @@ sub checkname {
+ # first_avail_uid: return the first available uid in given range
+ # parameters:
+ #   min, max: the range
++#   pool_id: user id suggested from pool
+ # return values:
+ #   -1 if no free uid is available
+ #  otherwise the choosen uid
+ sub first_avail_uid {
+-    my ($min, $max) = @_;
++    my ($min, $max, $pool_id) = @_;
++    if (defined ($pool_id)) {
++       return $pool_id if (!defined(getpwuid($pool_id)));
++       return -1;
++    }
+     printf (gtx("Selecting UID from range %d to %d ...\n"),$min,$max) if ($verbose > 1);
+ 
+     my $t = $min;
+@@ -932,11 +959,16 @@ sub first_avail_uid {
+ # first_avail_gid: return the first available gid in given range
+ # parameters:
+ #   min, max: the range
++#   pool_id: group id suggested from pool
+ # return values:
+ #   -1 if no free gid is available
+ #   otherwise the choosen gid
+ sub first_avail_gid {
+-    my ($min, $max) = @_;
++    my ($min, $max, $pool_id) = @_;
++    if (defined ($pool_id)) {
++       return $pool_id if (!defined(getgrgid($pool_id)));
++       return -1;
++    }
+     printf (gtx("Selecting GID from range %d to %d ...\n"),$min,$max) if ($verbose > 1);
+ 
+     my $t = $min;
+diff --git a/adduser.conf b/adduser.conf
+index 59c8cd6..7ed3ab6 100644
+--- a/adduser.conf
++++ b/adduser.conf
+@@ -96,3 +96,11 @@
+ 
+ # check system user and group names also against this regular expression.
+ #SYS_NAME_REGEX="^[a-z_][-a-z0-9_]*\$?$"
++
++# pool files
++#UID_POOL=/etc/adduser-pool.conf
++#GID_POOL=/etc/adduser-pool.conf
++
++# pool directories
++UID_POOL=/etc/adduser-pool.d/
++GID_POOL=/etc/adduser-pool.d/

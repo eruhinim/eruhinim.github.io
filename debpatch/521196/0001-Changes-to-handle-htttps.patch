@@ -1,0 +1,117 @@
+>From 58f41212e6adc6a9a45a4a4c36578199e2af61d1 Mon Sep 17 00:00:00 2001
+From: Jonathan Klee <jonathan.klee@openwide.fr>
+Date: Wed, 8 Sep 2010 14:19:26 +0200
+Subject: [PATCH] Changes to handle htttps
+
+---
+ debootstrap   |   29 +++++++++++++++++++++++++++++
+ debootstrap.8 |    9 +++++++++
+ functions     |   17 ++++++++++++++++-
+ 3 files changed, 54 insertions(+), 1 deletions(-)
+
+diff --git a/debootstrap b/debootstrap
+index 171a5ef..194cfed 100755
+--- a/debootstrap
++++ b/debootstrap
+@@ -94,6 +94,9 @@ usage()
+                                (supported: $EXTRACTORS_SUPPORTED)
+       --boot-floppies        used for internal purposes by boot-floppies
+       --debian-installer     used for internal purposes by debian-installer
++      --private-key=file     read the private key from file
++      --certificate=file     use the client certificate stored in file (PEM)
++      --no-check-certificate do not check certificate against certificate authorities
+ EOF
+ }
+ 
+@@ -301,6 +304,32 @@ if [ $# != 0 ] ; then
+ 			error 1 NEEDARG "option requires an argument %s" "$1"
+ 		fi
+ 		;;
++	    --certificate|--certificate=?*)
++		if [ "$1" = "--certificate" -a -n "$2" ]; then
++			CERTIFICATE="--certificate=$2"
++			shift 2
++		elif [ "$1" != "${1#--certificate=}" ]; then
++			CERTIFICATE="--certificate=${1#--certificate=}" 
++			shift 1
++		else
++		       error 1 NEEDARG "option requires an argument %s" "$1" 
++		fi
++		;;
++	    --private-key|--private-key=?*)
++		if [ "$1" = "--private-key" -a -n "$2" ]; then
++			PRIVATEKEY="$2"
++			shift 2
++		elif [ "$1" != "${1#--private-key=}" ]; then
++			PRIVATEKEY="--private--key=${1#--private-key=}" 
++			shift 1
++		else
++		       error 1 NEEDARG "option requires an argument %s" "$1" 
++		fi
++		;;
++	    --no-check-certificate)
++		CHECKCERTIF="--no-check-certificate"
++		shift
++		;;
+ 	    --*)
+ 		error 1 BADARG "unrecognized or invalid option %s" "$1"
+ 		;;
+diff --git a/debootstrap.8 b/debootstrap.8
+index ec13649..d32d19b 100644
+--- a/debootstrap.8
++++ b/debootstrap.8
+@@ -137,6 +137,15 @@ Override automatic .deb extractor selection to
+ .IR TYPE .
+ Supported extractors are: dpkg-deb and ar.
+ .IP
++.IP "\fB\-\-no\-check\-certificate\fP"
++Do not check certificate against certificate authorities
++.IP
++.IP "\fB\-\-certificate=FILE\fP"
++Use the client certificate stored in file (PEM)
++.IP
++.IP "\fB\-\-private\-key=FILE\fP"
++Read the private key from file
++
+ .SH EXAMPLES
+ .
+ .PP 
+diff --git a/functions b/functions
+index 14f86ff..07b56d2 100644
+--- a/functions
++++ b/functions
+@@ -70,7 +70,7 @@ wgetprogress () {
+ 		wget "$@" 2>&1 >/dev/null | $PKGDETAILS "WGET%" $PROGRESS_NOW $PROGRESS_NEXT $PROGRESS_END "$PROGRESS_WHAT" >&3
+ 		ret=$?
+ 	else
+-		wget $QSWITCH "$@"
++		wget $QSWITCH "$@" 
+ 		ret=$?
+ 	fi
+ 	return $ret
+@@ -342,6 +342,21 @@ just_get () {
+ 			rm -f "$dest"
+ 			return 1
+ 		fi
++	elif [ "${from#https://}" != "$from" ] ; then
++		# http/ftp mirror
++		if wgetprogress $CHECKCERTIF $CERTIFICATE $PRIVATEKEY -O "$dest" "$from"; then
++			return 0
++		elif [ -s "$dest" ]; then
++			local iters=0
++			while [ "$iters" -lt 3 ]; do
++				warning RETRYING "Retrying failed download of %s" "$from"
++				if wgetprogress $CHECKCERTIF $CERTIFICATE $PRIVATEKEY -c -O "$dest" "$from"; then break; fi
++				iters="$(($iters + 1))"
++			done
++		else
++			rm -f "$dest"
++			return 1
++		fi
+ 	elif [ "${from#file:}" != "$from" ]; then
+ 		local base="${from#file:}"
+ 		if [ "${base#//}" != "$base" ]; then
+-- 
+1.6.3.3
+
+

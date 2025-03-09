@@ -1,0 +1,57 @@
+From 782b2e9c90fb6f9ab682bb91b179af46a72f605b Mon Sep 17 00:00:00 2001
+From: chrysn <chrysn@fsfe.org>
+Date: Fri, 4 Aug 2017 17:38:30 +0200
+Subject: [PATCH] dpkg calls: Respond to error codes
+
+Contributes-To: https://bugs.debian.org/870724
+---
+ dpkg-repack | 14 +++++++++-----
+ 1 file changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/dpkg-repack b/dpkg-repack
+index 920f434..6f65499 100755
+--- a/dpkg-repack
++++ b/dpkg-repack
+@@ -131,9 +131,9 @@ sub Extract_Status {
+     my $inst = Dpkg::Control->new(type => CTRL_FILE_STATUS);
+ 
+     open my $fh, '-|', 'dpkg', "--root=$rootdir/", '-s', $pkgname
+-        or Die "Unable to locate $pkgname in the package list.";
++        or Die "Failed to fork dpkg.";
+     $inst->parse($fh, "dpkg status for $pkgname");
+-    close $fh;
++    close $fh or Die "`dpkg -s` failed (status " . ($? >> 8) . ").";
+ 
+     if ($inst->{Status} !~ m/^\S+\s+\S+\s+installed$/) {
+         Die "Package $pkgname not fully installed: $inst->{Status}";
+@@ -184,12 +184,12 @@ sub Install_DEBIAN {
+ 
+     my @control_files;
+     open my $q_fh, '-|', "dpkg-query --admindir=$rootdir/var/lib/dpkg --control-path $inst->{Package} 2>/dev/null"
+-        or Die "dpkg-query failed: $!";
++        or Die "Failed to fork dpkg.";
+     while (my $fn = <$q_fh>) {
+         chomp $fn;
+         push @control_files, $fn;
+     }
+-    close $q_fh;
++    close $q_fh or Die "`dpkg-query` failed (status " . ($? >> 8) . ").";
+ 
+     foreach my $fn (@control_files) {
+         my ($basename) = $fn =~ m/^.*\.(.*?)$/;
+@@ -233,7 +233,11 @@ sub Install_Files {
+     # it runs with English language output.
+     my $lc_all = $ENV{LC_ALL};
+     $ENV{LC_ALL} = 'C';
+-    my @filelist = split /\n/, qx{dpkg --root=$rootdir/ -L $inst->{Package}};
++    my $filelist = qx{dpkg --root=$rootdir/ -L $inst->{Package}:$inst->{Architecture}};
++    if ($? != 0) {
++        Die "`dpkg -L` failed (status " . ($? >> 8) . ").";
++    }
++    my @filelist = split /\n/, $filelist;
+     $ENV{LC_ALL} = $lc_all if defined $lc_all; # important to reset it.
+ 
+     # Set up a hash for easy lookups.
+-- 
+2.13.2
+

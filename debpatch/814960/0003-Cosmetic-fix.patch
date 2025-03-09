@@ -1,0 +1,326 @@
+From 3befa4d1e65c9471f9321339c088b90c834b6be0 Mon Sep 17 00:00:00 2001
+From: Hiroshi Ohkubo <ohkubo.fs@gmail.com>
+Date: Sat, 13 Feb 2016 15:02:41 +0900
+Subject: [PATCH 3/3] Cosmetic fix
+
+* Define detect_and_mount_cdrom earlier
+* Indent
+* Remove trailing spaces
+
+Signed-off-by: Hiroshi Ohkubo <ohkubo.fs@gmail.com>
+---
+ debian/cdrom-detect.postinst | 289 ++++++++++++++++++++++---------------------
+ 1 file changed, 145 insertions(+), 144 deletions(-)
+
+diff --git a/debian/cdrom-detect.postinst b/debian/cdrom-detect.postinst
+index 5f5cf1a..0c92e8e 100755
+--- a/debian/cdrom-detect.postinst
++++ b/debian/cdrom-detect.postinst
+@@ -39,6 +39,150 @@ try_mount() {
+ 	return $ret
+ }
+ 
++detect_and_mount_cdrom() {
++	# Is a cdrom already mounted? If so, assume it's the right one.
++	mount | grep -q 'on /cdrom' && return 0
++	if [ -e /cdrom/.disk/info ]; then
++		CDNAME=$(cat /cdrom/.disk/info)
++		log "Detected CD '$CDNAME'"
++		return 0
++	fi
++
++	hw-detect cdrom-detect/detect_progress_title || true
++
++	log "Searching for Debian installation media..."
++
++	mkdir /cdrom 2>/dev/null || true
++
++	# Need to wait for the usb device scan to complete
++	if [ "$OS" = "linux" ]; then
++	  for count in 1 2 3 4 5 6 8 9 10; do
++	    devices="$(list-devices cd; list-devices maybe-usb-floppy)"
++	    log "Devices: '$devices'"
++	    if [ -n "$devices" ]; then
++	      break 2
++	    else
++	      sleep 1
++	    fi
++	  done
++	fi
++
++	while true; do
++		WRONG=
++
++		devices="$(list-devices cd; list-devices maybe-usb-floppy)"
++		for device in $devices; do
++			if try_mount $device $CDFS; then
++				return 0
++			fi
++		done
++
++		devices="$(list-devices usb-partition)"
++		for device in $devices; do
++			if try_mount $device $CDFS; then
++				db_set cdrom-detect/hybrid true
++				return 0
++			fi
++			if try_mount $device $FATFS; then
++				db_set cdrom-detect/usb-hdd true
++				return 0
++			fi
++		done
++
++
++		if [ "$WRONG" ]; then
++			db_input critical cdrom-detect/wrong-cd || [ $? -eq 30 ]
++			db_go
++			fail
++		fi
++
++		# If a device was detected but the mount failed, ask for the CD.
++		if [ -n "$devices" ]; then
++			db_input critical cdrom-detect/retry || [ $? -eq 30 ]
++			db_go
++			db_get cdrom-detect/retry
++			if [ "$RET" = "true" ]; then
++				log "Unmounting CD just to be sure"
++				umount /cdrom 2>/dev/null || true
++				continue
++			else
++				fail
++			fi
++		fi
++
++		# If no device was detected, perhaps a driver floppy is needed.
++		if [ -e /usr/lib/debian-installer/retriever/media-retriever ]; then
++			db_input critical cdrom-detect/load_media
++			db_go
++			db_get cdrom-detect/load_media
++			if [ "$RET" = true ]; then
++				anna media-retriever
++				hw-detect cdrom-detect/detect_progress_title || true
++				continue
++			fi
++		fi
++
++		# Otherwise manual configuration may be needed
++		db_input critical cdrom-detect/manual_config || [ $? -eq 30 ]
++		db_go
++		db_get cdrom-detect/manual_config
++
++		if [ "$RET" = true ]; then
++			case "$OS" in
++				linux)
++					modules=none
++					for i in $(ls -1 /lib/modules/*/kernel/drivers/cdrom/ | \
++						   sed 's/\.ko$//' | sed 's/\.o$//'); do
++						modules="$modules, $i"
++					done
++
++					db_subst cdrom-detect/cdrom_module choices "$modules"
++					db_input critical cdrom-detect/cdrom_module || [ $? -eq 30 ]
++					db_go
++
++					db_get cdrom-detect/cdrom_module
++					if [ "$RET" != none ]; then
++						modprobe $RET
++					fi
++					;;
++				kfreebsd)
++					modules=none
++					for i in $(ls -1 /lib/modules/$(uname -r)/ | \
++						   sed 's/\.ko$//'); do
++						modules="$modules, $i"
++					done
++
++					db_subst cdrom-detect/cdrom_module choices "$modules"
++					db_input critical cdrom-detect/cdrom_module || [ $? -eq 30 ]
++					db_go
++
++					db_get cdrom-detect/cdrom_module
++					if [ "$RET" != none ]; then
++						kldload $RET
++					fi
++					;;
++			esac
++
++			db_input critical cdrom-detect/cdrom_device || [ $? -eq 30 ]
++			db_go
++
++			db_get cdrom-detect/cdrom_device
++			device="$RET"
++
++			if mount -t $CDFS -o $OPTIONS $device /cdrom; then
++				log "CD-ROM mount succeeded: device=$device fstype=$CDFS"
++				db_set cdrom-detect/cdrom_fs $CDFS
++				return 0
++			else
++				log "CD-ROM mount failed: device=$device fstype=$CDFS"
++				fail
++			fi
++		else
++			fail
++		fi
++	done
++}
++
+ OS=$(udpkg --print-os)
+ case "$OS" in
+ 	kfreebsd)
+@@ -59,152 +203,9 @@ case "$OS" in
+ 	*)
+ 		log "Unknown OS '$OS', exiting"
+ 		exit 0
+-		
+-esac
+- 
+-detect_and_mount_cdrom() {
+-# Is a cdrom already mounted? If so, assume it's the right one.
+-mount | grep -q 'on /cdrom' && return 0
+-if [ -e /cdrom/.disk/info ]; then
+-	CDNAME=$(cat /cdrom/.disk/info)
+-	log "Detected CD '$CDNAME'"
+-	return 0
+-fi
+-
+-hw-detect cdrom-detect/detect_progress_title || true
+-
+-log "Searching for Debian installation media..."
+-
+-mkdir /cdrom 2>/dev/null || true
+-
+-# Need to wait for the usb device scan to complete
+-if [ "$OS" = "linux" ]; then
+-  for count in 1 2 3 4 5 6 8 9 10; do
+-    devices="$(list-devices cd; list-devices maybe-usb-floppy)"
+-    log "Devices: '$devices'"
+-    if [ -n "$devices" ]; then
+-      break 2
+-    else
+-      sleep 1
+-    fi
+-  done
+-fi
+ 
+-while true; do
+-	WRONG=
+-
+-	devices="$(list-devices cd; list-devices maybe-usb-floppy)"
+-	for device in $devices; do
+-		if try_mount $device $CDFS; then
+-			return 0
+-		fi
+-	done
+-	
+-	devices="$(list-devices usb-partition)"
+-	for device in $devices; do
+-		if try_mount $device $CDFS; then
+-			db_set cdrom-detect/hybrid true
+-			return 0
+-		fi
+-		if try_mount $device $FATFS; then
+-			db_set cdrom-detect/usb-hdd true
+-			return 0
+-		fi
+-	done
+-
+-
+-	if [ "$WRONG" ]; then
+-		db_input critical cdrom-detect/wrong-cd || [ $? -eq 30 ]
+-		db_go
+-		fail
+-	fi
+-
+-	# If a device was detected but the mount failed, ask for the CD.
+-	if [ -n "$devices" ]; then
+-		db_input critical cdrom-detect/retry || [ $? -eq 30 ]
+-		db_go
+-		db_get cdrom-detect/retry
+-		if [ "$RET" = "true" ]; then
+-			log "Unmounting CD just to be sure"
+-			umount /cdrom 2>/dev/null || true
+-			continue
+-		else
+-			fail
+-		fi
+-	fi
+- 
+-	# If no device was detected, perhaps a driver floppy is needed.
+-	if [ -e /usr/lib/debian-installer/retriever/media-retriever ]; then
+-		db_input critical cdrom-detect/load_media
+-		db_go
+-		db_get cdrom-detect/load_media
+-		if [ "$RET" = true ]; then
+-			anna media-retriever
+-			hw-detect cdrom-detect/detect_progress_title || true
+-			continue
+-		fi
+-	fi
+-    
+-	# Otherwise manual configuration may be needed
+-	db_input critical cdrom-detect/manual_config || [ $? -eq 30 ]
+-	db_go
+-	db_get cdrom-detect/manual_config
+-
+-	if [ "$RET" = true ]; then
+-		case "$OS" in
+-			linux)
+-				modules=none
+-				for i in $(ls -1 /lib/modules/*/kernel/drivers/cdrom/ | \
+-					   sed 's/\.ko$//' | sed 's/\.o$//'); do
+-					modules="$modules, $i"
+-				done  
+-
+-				db_subst cdrom-detect/cdrom_module choices "$modules"
+-				db_input critical cdrom-detect/cdrom_module || [ $? -eq 30 ]
+-				db_go
+-
+-				db_get cdrom-detect/cdrom_module
+-				if [ "$RET" != none ]; then
+-					modprobe $RET
+-				fi
+-				;;
+-			kfreebsd)
+-				modules=none
+-				for i in $(ls -1 /lib/modules/$(uname -r)/ | \
+-					   sed 's/\.ko$//'); do
+-					modules="$modules, $i"
+-				done
+-
+-				db_subst cdrom-detect/cdrom_module choices "$modules"
+-				db_input critical cdrom-detect/cdrom_module || [ $? -eq 30 ]
+-				db_go
+-				
+-				db_get cdrom-detect/cdrom_module
+-				if [ "$RET" != none ]; then
+-					kldload $RET
+-				fi
+-				;;
+-		esac
+-
+-		db_input critical cdrom-detect/cdrom_device || [ $? -eq 30 ]
+-		db_go
+-
+-		db_get cdrom-detect/cdrom_device
+-		device="$RET"
++esac
+ 
+-		if mount -t $CDFS -o $OPTIONS $device /cdrom; then
+-			log "CD-ROM mount succeeded: device=$device fstype=$CDFS"
+-			db_set cdrom-detect/cdrom_fs $CDFS
+-			return 0
+-		else
+-			log "CD-ROM mount failed: device=$device fstype=$CDFS"
+-			fail
+-		fi
+-	else
+-		fail
+-	fi
+-done
+-}
+ detect_and_mount_cdrom
+ 
+ # Check for unetbootin files
+-- 
+2.1.4
+

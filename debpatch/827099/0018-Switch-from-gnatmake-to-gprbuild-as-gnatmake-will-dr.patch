@@ -1,0 +1,130 @@
+From 9c3e9ed4122fd4b72b1d9fc0e3b8b4ebf3472789 Mon Sep 17 00:00:00 2001
+From: Nicolas Boulenguez <nicolas.boulenguez@free.fr>
+Date: Fri, 3 Jun 2016 02:45:49 +0200
+Subject: [PATCH 18/20] Switch from gnatmake to gprbuild, as gnatmake will drop
+ project support.
+
+---
+ debian/control                   |  5 +++++
+ debian/manpages/adabrowse.1      |  5 -----
+ debian/misc/adabrowse.gpr        |  4 ++++
+ debian/patches/01-gnatmake.patch |  6 +++---
+ debian/rules                     | 10 +++++-----
+ 5 files changed, 17 insertions(+), 13 deletions(-)
+
+diff --git a/debian/control b/debian/control
+index 38e43b7..ef4ac7c 100644
+--- a/debian/control
++++ b/debian/control
+@@ -4,6 +4,8 @@ Priority: optional
+ Maintainer: Adrian-Ken Rueegsegger <ken@codelabs.ch>
+ Build-Depends: debhelper (>= 9), dpkg-dev (>= 1.16.1),
+ # dpkg-dev 1.16.1 provides /usr/share/dpkg/default.mk
++ gprbuild (>= 2015-2),
++# gprbuild compatible with gnat-6
+  gnat, gnat-6, libasis2015-dev
+ Standards-Version: 3.9.8
+ Homepage: http://home.datacomm.ch/t_wolf/tw/ada95/adabrowse/
+@@ -13,7 +15,10 @@ Vcs-Git: https://git.codelabs.ch/git/debian/adabrowse.git
+ Package: adabrowse
+ Architecture: any
+ Depends: ${shlibs:Depends}, ${misc:Depends}
++Recommends: gprbuild
+ Description: HTML generator for Ada 95 library unit specifications
+  AdaBrowse is a javadoc-like HTML generator for Ada 95 library unit
+  specifications. It can also generate XML output; a DTD is included in
+  the distribution.
++ .
++ The gprbuild package adds support for .gpr GNAT projects.
+diff --git a/debian/manpages/adabrowse.1 b/debian/manpages/adabrowse.1
+index fdb0703..6471b0c 100644
+--- a/debian/manpages/adabrowse.1
++++ b/debian/manpages/adabrowse.1
+@@ -366,11 +366,6 @@ for any other reasons, but will otherwise continue processing.
+ 
+ The full user's guide in /usr/share/doc/adabrowse.
+ 
+-.SH BUGS
+-The Debian package of \fBadabrowse\fR does not have the Project
+-Manager feature; the command\-line option \fB\-P\fR \fIproject_file\fR
+-is therefore disabled.
+-
+ .SH AUTHOR
+ \fBadabrowse\fR and the accompanying documentation was written by
+ Thomas Wolf <twolf@acm.org>.
+diff --git a/debian/misc/adabrowse.gpr b/debian/misc/adabrowse.gpr
+index 05e2999..0759126 100644
+--- a/debian/misc/adabrowse.gpr
++++ b/debian/misc/adabrowse.gpr
+@@ -21,6 +21,7 @@ project Adabrowse is
+    for Object_Dir use "../../obj";
+    for Exec_Dir use "../..";
+    for Main use ("adabrowse");
++   for Languages use ("Ada", "C");
+ 
+    Extra_Flags := External_As_List ("ADAFLAGS", " ");
+ 
+@@ -28,6 +29,9 @@ project Adabrowse is
+       for Default_Switches ("Ada") use
+ 	  ("-O2", "-gnatafno", "-gnatVa", "-gnatwa",
+ 	   "-gnaty3abefhiklmprt") & Extra_Flags;
++      for Default_Switches ("C") use ("-O2")
++        & External_As_List ("CFLAGS", " ")
++        & External_As_List ("CPPFLAGS", " ");
+    end Compiler;
+ 
+    package Linker is
+diff --git a/debian/patches/01-gnatmake.patch b/debian/patches/01-gnatmake.patch
+index 522ca2f..eeecbba 100644
+--- a/debian/patches/01-gnatmake.patch
++++ b/debian/patches/01-gnatmake.patch
+@@ -1,5 +1,5 @@
+ Author: Ludovic Brenta <lbrenta@debian.org>
+-Description: Make sure never to call the "gnat" command, just "gnatmake" or "gnatgcc".
++Description: Make sure never to call the "gnat" command, just "gprbuild" or "gnatgcc".
+ 
+ --- a/ad-driver.adb
+ +++ b/ad-driver.adb
+@@ -8,7 +8,7 @@ Description: Make sure never to call the "gnat" command, just "gnatmake" or "gna
+           --     Note: we also pass on -X options!
+           AD.Compiler.Set_Compile_Command
+ -           ("gnat compile -c -gnatc -gnatt -P" &
+-+           ("gnatmake -c -gnatc -gnatt -P" &
+++           ("gprbuild -c -gnatc -gnatt " &
+              AD.Projects.Get_Project_File_Name &
+              ASU.To_String (Pass_On_Options));
+        end if;
+@@ -22,7 +22,7 @@ Description: Make sure never to call the "gnat" command, just "gnatmake" or "gna
+ -   --  "gnat compile -P<file_name>", if it starts with the default compiler
+ -   --  name (which is "gcc" -- or "gnatgcc" on some Linux installations.)
+ +   --  Warning: if a project file is given, the compile command is
+-+   --  changed to "gnatmake -c -gnatc -gnatt -P<file_name>", if it
+++   --  changed to "gprbuild -c -gnatc -gnatt <file_name>", if it
+ +   --  starts with the default compiler name (which is "gcc" -- or
+ +   --  "gnatgcc" on some Linux installations.)
+     --
+diff --git a/debian/rules b/debian/rules
+index 7282971..adeaf18 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -16,12 +16,12 @@ $(POLICY_TARGETS):
+ 
+ override_dh_auto_clean:
+ 	rm -fr obj
+-	rm adabrowse
++	rm -f adabrowse auto.cgpr
+ 
+-override_dh_auto_build: obj/util-nl.o
+-	gnatmake $(BUILDER_OPTIONS) -Pdebian/misc/adabrowse.gpr
+-obj/util-nl.o: util-nl.c | obj
+-	$(CC) -c $< -o $@ $(CFLAGS) $(CPPFLAGS)
++override_dh_auto_build: auto.cgpr | obj
++	gprbuild $(BUILDER_OPTIONS) debian/misc/adabrowse.gpr
++auto.cgpr:
++	gprconfig --config=Ada --config=C,,,,gnatgcc
+ obj:
+ 	mkdir $@
+ 
+-- 
+2.8.1
+

@@ -1,0 +1,119 @@
+diff -u -r --new-file cron_3.0pl1-136.debian/changelog cron_3.0pl1-136.1.debian/changelog
+--- cron-3.0pl1/debian/changelog	2020-02-10 20:16:06.000000000 +0100
++++ cron-3.0pl1/debian/changelog	2021-02-16 11:28:04.000000000 +0100
+@@ -1,3 +1,12 @@
++cron (3.0pl1-136.1) unstable; urgency=medium
++
++  * allow to set MAILFROM
++    * patch from Laurent Combe <laurent.combe@free.fr>, thank you!
++    * inspired by cronie
++    * Closes: #898177
++
++ -- Tomas Pospisek <tpo_deb@sourcepole.ch>  Tue, 16 Feb 2021 11:28:04 +0100
++
+ cron (3.0pl1-136) unstable; urgency=medium
+ 
+   * Convert package to source format 3.0 (quilt). Finally.
+diff -u -r --new-file cron_3.0pl1-136.debian/patches/features/Add-MAILFROM-environment-variable.patch cron_3.0pl1-136.1.debian/patches/features/Add-MAILFROM-environment-variable.patch
+--- cron-3.0pl1/debian/patches/features/Add-MAILFROM-environment-variable.patch	1970-01-01 01:00:00.000000000 +0100
++++ cron-3.0pl1/debian/patches/features/Add-MAILFROM-environment-variable.patch	2021-02-16 11:28:04.000000000 +0100
+@@ -0,0 +1,91 @@
++Description: use MAILFROM environment variable if set
++ This patch lets cron use the MAILFROM variable to set the sender
++ as which it will send emails. MAILFROM has the same semantics as
++ the same environment variabl in cronie.
++ .
++ The patch has been written by Laurent Combe <laurent.combe@free.fr>
++ and has been inspired by the same feature in cronie.
++
++Origin: https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=898177
++Bug: <url in upstream bugtracker>
++Bug-Debian: https://bugs.debian.org/898177
++Bug-Ubuntu: https://bugs.launchpad.net/ubuntu/+source/cron/+bug/1750051
++Last-Update: 2021-02-16
++
++--- cron-3.0pl1.orig/cron.8
+++++ cron-3.0pl1/cron.8
++@@ -123,7 +123,9 @@ then wakes up every minute, examining al
++ each command to see if it should be run in the current minute.  When
++ executing commands, any output is mailed to the owner of the crontab
++ (or to the user named in the MAILTO environment variable in the
++-crontab, if such exists).  The children copies of cron running these
+++crontab, if such exists) as the owner of the crontab (or from the email
+++address given in the MAILFROM environment variable in the crontab, if
+++such exists).  The children copies of cron running these
++ processes have their name coerced to uppercase, as will be seen in the
++ syslog and ps output.
++ .PP
++--- cron-3.0pl1.orig/crontab.5
+++++ cron-3.0pl1/crontab.5
++@@ -100,12 +100,16 @@ on these systems, USER will be set also.
++ .PP
++ In addition to LOGNAME, HOME, and SHELL,
++ .IR cron (8)
++-will look at MAILTO if it has any reason to send mail as a result of running
++-commands in ``this'' crontab.  If MAILTO is defined (and non-empty), mail is
++-sent to the user so named.  MAILTO may also be used to direct mail to multiple
++-recipients by separating recipient users with a comma.  If MAILTO is defined
++-but empty (MAILTO=""), no mail will be sent.  Otherwise mail is sent to the
++-owner of the crontab.
+++will look at MAILTO and MAILFROM if it has any reason to send mail as a result
+++of running commands in ``this'' crontab.
+++.PP
+++If MAILTO is defined (and non-empty), mail is sent to the user so named.
+++MAILTO may also be used to direct mail to multiple recipients by separating
+++recipient users with a comma.  If MAILTO is defined but empty (MAILTO=""),
+++no mail will be sent.  Otherwise mail is sent to the owner of the crontab.
+++.PP
+++If MAILFROM is defined, the sender email address is set to MAILFROM. Otherwise
+++mail is sent as "root (Cron Daemon)".
++ .PP
++ On the Debian GNU/Linux system, cron supports the
++ .B pam_env
++--- cron-3.0pl1.orig/do_command.c
+++++ cron-3.0pl1/do_command.c
++@@ -129,7 +129,7 @@ child_process(e, u)
++ 	int		stdin_pipe[2];
++ 	FILE		*tmpout;
++ 	register char	*input_data;
++-	char		*usernm, *mailto;
+++	char		*usernm, *mailto, *mailfrom;
++ 	int		children = 0;
++ 	pid_t		job_pid;
++ #if defined(USE_PAM)
++@@ -152,6 +152,7 @@ child_process(e, u)
++ 	 */
++ 	usernm = env_get("LOGNAME", e->envp);
++ 	mailto = env_get("MAILTO", e->envp);
+++	mailfrom = env_get("MAILFROM", e->envp);
++ 
++ 	/* Check for arguments */
++ 	if (mailto) {
++@@ -515,6 +516,10 @@ child_process(e, u)
++ 	else if (!*mailto)
++                 goto mail_finished;
++ 
+++	// get sender address
+++	if (mailfrom == NULL)
+++		mailfrom = "root (Cron Daemon)";
+++
++ 	/* Don't send mail if MAILCMD is not available */
++ 	if (stat(MAILCMD, &mcsb) != 0) {
++ 		Debug(DPROC|DEXT, ("%s not found, not sending mail\n", MAILCMD))
++@@ -543,7 +548,7 @@ child_process(e, u)
++ 		perror(MAILCMD);
++ 		(void) _exit(ERROR_EXIT);
++ 	}
++-	fprintf(mail, "From: root (Cron Daemon)\n");
+++	fprintf(mail, "From: %s\n", mailfrom);
++ 	fprintf(mail, "To: %s\n", mailto);
++ 	fprintf(mail, "Subject: Cron <%s@%s> %s%s\n",
++ 			usernm,
+diff -u -r --new-file cron_3.0pl1-136.debian/patches/series cron_3.0pl1-136.1.debian/patches/series
+--- cron-3.0pl1/debian/patches/series	2020-02-10 20:16:06.000000000 +0100
++++ cron-3.0pl1/debian/patches/series	2021-02-16 11:28:04.000000000 +0100
+@@ -67,3 +67,4 @@
+ features/Selective-logging.patch
+ features/Check-orphaned-crontabs-for-adoption.patch
+ features/Add-option-to-include-FQDN-in-email.patch
++features/Add-MAILFROM-environment-variable.patch

@@ -1,0 +1,317 @@
+diff --git a/apt-pkg/contrib/fileutl.cc b/apt-pkg/contrib/fileutl.cc
+index e4c40fb4f..8b3ac8015 100644
+--- a/apt-pkg/contrib/fileutl.cc
++++ b/apt-pkg/contrib/fileutl.cc
+@@ -741,22 +741,28 @@ void SetNonBlock(int Fd,bool Block)
+ // WaitFd - Wait for a FD to become readable				/*{{{*/
+ // ---------------------------------------------------------------------
+ /* This waits for a FD to become readable using select. It is useful for
+-   applications making use of non-blocking sockets. The timeout is 
+-   in seconds. */
+-bool WaitFd(int Fd,bool write,unsigned long timeout)
++   applications making use of non-blocking sockets. */
++bool WaitFd(int Fd,bool write,unsigned long timeout_sec,
++	    unsigned long timeout_usec)
+ {
+    fd_set Set;
+    struct timeval tv;
+    FD_ZERO(&Set);
+    FD_SET(Fd,&Set);
+-   tv.tv_sec = timeout;
+-   tv.tv_usec = 0;
++
++   tv.tv_sec = timeout_sec;
++   tv.tv_usec = timeout_usec;
++
++   struct timeval * tv_arg = 0;
++   if (timeout_sec != 0 || timeout_usec != 0)
++      tv_arg = &tv;
++
+    if (write == true) 
+    {      
+       int Res;
+       do
+       {
+-	 Res = select(Fd+1,0,&Set,0,(timeout != 0?&tv:0));
++	 Res = select(Fd+1,0,&Set,0,tv_arg);
+       }
+       while (Res < 0 && errno == EINTR);
+       
+@@ -768,7 +774,7 @@ bool WaitFd(int Fd,bool write,unsigned long timeout)
+       int Res;
+       do
+       {
+-	 Res = select(Fd+1,&Set,0,0,(timeout != 0?&tv:0));
++	 Res = select(Fd+1,&Set,0,0,tv_arg);
+       }
+       while (Res < 0 && errno == EINTR);
+       
+diff --git a/apt-pkg/contrib/fileutl.h b/apt-pkg/contrib/fileutl.h
+index dddeb70f5..474b283f8 100644
+--- a/apt-pkg/contrib/fileutl.h
++++ b/apt-pkg/contrib/fileutl.h
+@@ -191,7 +191,8 @@ std::vector<std::string> GetListOfFilesInDir(std::string const &Dir, bool SortLi
+ std::string SafeGetCWD();
+ void SetCloseExec(int Fd,bool Close);
+ void SetNonBlock(int Fd,bool Block);
+-bool WaitFd(int Fd,bool write = false,unsigned long timeout = 0);
++bool WaitFd(int Fd,bool write = false,unsigned long timeout_sec = 0,
++	    unsigned long timeout_usec = 0);
+ pid_t ExecFork();
+ pid_t ExecFork(std::set<int> keep_fds);
+ void MergeKeepFdsFromConfiguration(std::set<int> &keep_fds);
+diff --git a/methods/connect.cc b/methods/connect.cc
+index dc2aee05c..be4ea3c86 100644
+--- a/methods/connect.cc
++++ b/methods/connect.cc
+@@ -25,8 +25,8 @@
+ #include <unistd.h>
+ #include <sstream>
+ #include <string.h>
+-#include<set>
+-#include<string>
++#include <set>
++#include <string>
+ 
+ // Internet stuff
+ #include <netinet/in.h>
+@@ -49,6 +49,14 @@ static std::vector<SrvRec> SrvRecords;
+ // Set of IP/hostnames that we timed out before or couldn't resolve
+ static std::set<std::string> bad_addr;
+ 
++// Time-out for attempting Happy Eyeballs rotation
++// See https://tools.ietf.org/rfc/rfc6555.txt
++static struct timeval const TimeOutHE =
++{ // 300 ms
++   0,
++   300 * 1000
++};
++
+ // RotateDNS - Select a new server from a DNS rotation			/*{{{*/
+ // ---------------------------------------------------------------------
+ /* This is called during certain errors in order to recover by selecting a 
+@@ -79,9 +87,34 @@ static bool ConnectionAllowed(char const * const Service, std::string const &Hos
+ // DoConnect - Attempt a connect operation				/*{{{*/
+ // ---------------------------------------------------------------------
+ /* This helper function attempts a connection to a single address. */
++
++// The previous value of DoConnect's HappyEyeballsAttempt parameter.
++// We expect to see either:
++// 0 (no attempt) followed by 0 or 1
++// 1 (first connect during Happy Eyeballs) followed by 2
++// 2 (second connect during Happy Eyeballs) followed by 0 or 1
++// Anything else is wrong.
++static unsigned char prevAttemptHE = 0;
++
+ static bool DoConnect(struct addrinfo *Addr,std::string const &Host,
+-		      unsigned long TimeOut,int &Fd,pkgAcqMethod *Owner)
++		      unsigned long TimeOutSec,unsigned long TimeOutUsec,
++		      int &Fd,pkgAcqMethod *Owner,
++		      unsigned char HappyEyeballsAttempt = 0)
+ {
++   if (HappyEyeballsAttempt > 2
++       ||
++       (prevAttemptHE == 0 && HappyEyeballsAttempt == 2)
++       ||
++       (prevAttemptHE == 1 && HappyEyeballsAttempt != 2)
++       ||
++       (prevAttemptHE == 2 && HappyEyeballsAttempt == 2))
++   {
++      prevAttemptHE = HappyEyeballsAttempt;
++      return _error->Error(_("DoConnect: invalid call sequence"));
++   }
++
++   prevAttemptHE = HappyEyeballsAttempt;
++
+    // Show a status indicator
+    char Name[NI_MAXHOST];
+    char Service[NI_MAXSERV];
+@@ -105,6 +138,10 @@ static bool DoConnect(struct addrinfo *Addr,std::string const &Host,
+       ioprintf(ss, _("[IP: %s %s]"),Name,Service);
+       Owner->SetIP(ss.str());
+    }
++
++   // If we are making a second simultaneous connection
++   // (HappyEyeballsAttempt == 2), we need the previous Fd too
++   int const prevFd = Fd;
+       
+    // Get a socket
+    if ((Fd = socket(Addr->ai_family,Addr->ai_socktype,
+@@ -120,24 +157,81 @@ static bool DoConnect(struct addrinfo *Addr,std::string const &Host,
+    
+    /* This implements a timeout for connect by opening the connection
+       nonblocking */
+-   if (WaitFd(Fd,true,TimeOut) == false) {
+-      bad_addr.insert(bad_addr.begin(), std::string(Name));
+-      Owner->SetFailReason("Timeout");
+-      return _error->Error(_("Could not connect to %s:%s (%s), "
+-			   "connection timed out"),Host.c_str(),Service,Name);
++   if (HappyEyeballsAttempt == 0)
++   {
++      if (WaitFd(Fd,true,TimeOutSec,TimeOutUsec) == false)
++      {
++	 bad_addr.insert(bad_addr.begin(), std::string(Name));
++	 Owner->SetFailReason("Timeout");
++	 return _error->Error(_("Could not connect to %s:%s (%s), "
++			      "connection timed out"),Host.c_str(),Service,Name);
++      }
++   }
++   else if (HappyEyeballsAttempt == 1)
++   {
++      if (WaitFd(Fd,true,TimeOutSec,TimeOutUsec) == false)
++      {
++	 // Do not register an error yet, as the connection could
++	 // still complete
++	 return false;
++      }
++   }
++   else if (HappyEyeballsAttempt == 2)
++   {
++      // Wait for the first completed connection
++
++      fd_set Set;
++      struct timeval tv = { TimeOutSec, TimeOutUsec };
++      FD_ZERO(&Set);
++      FD_SET(prevFd,&Set);
++      FD_SET(Fd,&Set);
++
++      int Res;
++      do
++      {
++	 Res = select((prevFd>Fd?prevFd:Fd)+1,0,&Set,0,&tv);
++      }
++      while (Res < 0 && errno == EINTR);
++
++      // Neither connection completed successfully
++      if (Res <= 0)
++      {
++	 close(Fd);
++	 Fd = prevFd; // after this, Fd/prevFd will be closed by ConnectToHostname
++
++	 bad_addr.insert(bad_addr.begin(), std::string(Name));
++	 Owner->SetFailReason("Timeout");
++	 return _error->Error(_("Could not connect to %s:%s (%s), "
++			      "connection timed out"),Host.c_str(),Service,Name);
++      }
++
++      if (FD_ISSET(prevFd,&Set) != 0) // First connection completed
++      {
++	 close(Fd);
++	 Fd = prevFd;
++      }
++      else if (FD_ISSET(Fd,&Set) != 0) // Second connection completed
++      {
++	 close(prevFd);
++      }
++      else
++      {
++	 return _error->Error(_("Happy Eyeballs unexpected code path"));
++      }
+    }
+ 
+    // Check the socket for an error condition
+    unsigned int Err;
+    unsigned int Len = sizeof(Err);
++
+    if (getsockopt(Fd,SOL_SOCKET,SO_ERROR,&Err,&Len) != 0)
+       return _error->Errno("getsockopt",_("Failed"));
+-   
++
+    if (Err != 0)
+    {
+       errno = Err;
+       if(errno == ECONNREFUSED)
+-         Owner->SetFailReason("ConnectionRefused");
++	 Owner->SetFailReason("ConnectionRefused");
+       else if (errno == ETIMEDOUT)
+ 	 Owner->SetFailReason("ConnectionTimedOut");
+       bad_addr.insert(bad_addr.begin(), std::string(Name));
+@@ -150,6 +244,26 @@ static bool DoConnect(struct addrinfo *Addr,std::string const &Host,
+    return true;
+ }
+ 									/*}}}*/
++// Rotate to another IP protocol family (IPv6 or IPv4).			/*{{{*/
++// Returns an address of the other family or 0 if there is no
++// such address.
++static struct addrinfo * RotateHE(struct addrinfo * Current)
++{
++   if (Current == 0)
++      return 0;
++
++   for (struct addrinfo * Next = Current->ai_next; Next != 0;
++	Next = Next->ai_next)
++   {
++      if ((Current->ai_family == AF_INET && Next->ai_family == AF_INET6)
++	  ||
++	  (Current->ai_family == AF_INET6 && Next->ai_family == AF_INET))
++	 return Next;
++   }
++
++   return 0;
++}
++									/*}}}*/
+ // Connect to a given Hostname						/*{{{*/
+ static bool ConnectToHostname(std::string const &Host, int const Port,
+       const char * const Service, int DefPort, int &Fd,
+@@ -163,7 +277,7 @@ static bool ConnectToHostname(std::string const &Host, int const Port,
+       snprintf(ServStr,sizeof(ServStr),"%i", Port);
+    else
+       snprintf(ServStr,sizeof(ServStr),"%s", Service);
+-   
++
+    /* We used a cached address record.. Yes this is against the spec but
+       the way we have setup our rotating dns suggests that this is more
+       sensible */
+@@ -194,7 +308,7 @@ static bool ConnectToHostname(std::string const &Host, int const Port,
+       if (_config->FindB("Acquire::Connect::AddrConfig", true) == true)
+ 	 Hints.ai_flags |= AI_ADDRCONFIG;
+       Hints.ai_protocol = 0;
+-      
++
+       if(_config->FindB("Acquire::ForceIPv4", false) == true)
+          Hints.ai_family = AF_INET;
+       else if(_config->FindB("Acquire::ForceIPv6", false) == true)
+@@ -252,11 +366,39 @@ static bool ConnectToHostname(std::string const &Host, int const Port,
+    
+    while (CurHost != 0)
+    {
+-      if (DoConnect(CurHost,Host,TimeOut,Fd,Owner) == true)
++      struct addrinfo * NextHE = RotateHE(CurHost);
++
++      // Perform Happy Eyeballs if possible
++      // NOTE: if the user indicated ForceIPv4 or ForceIPv6 then
++      // NextHE will be 0 because there will be only one family in
++      // the rotation.
++      if (LastUsed == 0 && NextHE != 0)
+       {
+-	 LastUsed = CurHost;
+-	 return true;
+-      }      
++	 if (DoConnect(CurHost,Host,TimeOutHE.tv_sec,TimeOutHE.tv_usec,
++		       Fd,Owner,1) == true)
++	 {
++	    LastUsed = CurHost;
++	    return true;
++	 }
++
++	 int const CurHostFd = Fd;
++
++	 if (DoConnect(NextHE,Host,TimeOut,0,Fd,Owner,2) == true)
++	 {
++	    // Set the correct address
++	    LastUsed = Fd == CurHostFd ? CurHost : NextHE;
++	    return true;
++	 }
++      }
++      else
++      {
++	 if (DoConnect(CurHost,Host,TimeOut,0,Fd,Owner) == true)
++	 {
++	    LastUsed = CurHost;
++	    return true;
++	 }
++      }
++
+       close(Fd);
+       Fd = -1;
+       

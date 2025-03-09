@@ -1,0 +1,748 @@
+From f3f04a4288076471b9f963f75d10470ba7e446a6 Mon Sep 17 00:00:00 2001
+Message-ID: <f3f04a4288076471b9f963f75d10470ba7e446a6.1716931259.git.josh@joshtriplett.org>
+From: Josh Triplett <josh@joshtriplett.org>
+Date: Tue, 28 May 2024 11:11:06 -0700
+Subject: [PATCH] Implement rm_conffile_if_unmodified
+
+Sometimes, a package wants to no longer install a conffile in new
+versions; for instance, the conffile might still be supported, but the
+default version is not needed for new installations. In this case, the
+existing `rm_conffile` doesn't suffice, because it will rename modified
+versions with a .dpkg-bak suffix.
+
+Add a new `rm_conffile_if_unmodified` (also available as
+`rm_conffile --if-unmodified`) to handle this case.
+
+Provide a declarative version `remove-if-unmodified` as well.
+
+Document these, and add tests for them.
+
+Closes: #1006655
+
+Signed-off-by: Josh Triplett <josh@joshtriplett.org>
+---
+ lib/dpkg/dpkg-db.h                            |  1 +
+ lib/dpkg/dump.c                               |  2 +
+ lib/dpkg/fields.c                             | 10 +++-
+ lib/dpkg/fsys.h                               |  2 +
+ man/deb-conffiles.pod                         | 19 ++++++-
+ man/dpkg-maintscript-helper.pod               | 43 ++++++++++++++--
+ src/deb/build.c                               |  7 ++-
+ src/dpkg-maintscript-helper.sh                | 50 +++++++++++++++----
+ src/main/archives.c                           |  7 ++-
+ src/main/configure.c                          |  8 ++-
+ src/main/help.c                               |  4 +-
+ src/main/unpack.c                             | 26 ++++++----
+ tests/t-conffile-declarative-removal/Makefile | 21 +++++++-
+ .../pkg-conffile-v1/DEBIAN/conffiles          |  1 +
+ .../test-conffile-to-be-removed-if-unmodified |  0
+ .../pkg-conffile-v2/DEBIAN/conffiles          |  1 +
+ tests/t-conffile-obsolete/Makefile            | 18 ++++++-
+ .../pkg-conff-obsolete-0/DEBIAN/conffiles     |  1 +
+ .../pkg-conff-obsolete-0/test-conffile-2      |  1 +
+ .../pkg-conff-obsolete-2/DEBIAN/postinst      |  3 ++
+ .../pkg-conff-obsolete-2/DEBIAN/postrm        |  3 ++
+ .../pkg-conff-obsolete-2/DEBIAN/preinst       |  3 ++
+ 22 files changed, 197 insertions(+), 34 deletions(-)
+ create mode 100644 tests/t-conffile-declarative-removal/pkg-conffile-v1/test-dir/test-conffile-to-be-removed-if-unmodified
+ create mode 100644 tests/t-conffile-obsolete/pkg-conff-obsolete-0/test-conffile-2
+
+diff --git a/lib/dpkg/dpkg-db.h b/lib/dpkg/dpkg-db.h
+index 61f220506..072222881 100644
+--- a/lib/dpkg/dpkg-db.h
++++ b/lib/dpkg/dpkg-db.h
+@@ -83,6 +83,7 @@ struct conffile {
+   const char *hash;
+   bool obsolete;
+   bool remove_on_upgrade;
++  bool remove_if_unmodified;
+ };
+ 
+ struct archivedetails {
+diff --git a/lib/dpkg/dump.c b/lib/dpkg/dump.c
+index 8a1e30481..db4a823ef 100644
+--- a/lib/dpkg/dump.c
++++ b/lib/dpkg/dump.c
+@@ -394,6 +394,8 @@ w_conffiles(struct varbuf *vb,
+       varbuf_add_str(vb, " obsolete");
+     if (i->remove_on_upgrade)
+       varbuf_add_str(vb, " remove-on-upgrade");
++    if (i->remove_if_unmodified)
++      varbuf_add_str(vb, " remove-if-unmodified");
+   }
+   if (flags&fw_printheader)
+     varbuf_add_char(vb, '\n');
+diff --git a/lib/dpkg/fields.c b/lib/dpkg/fields.c
+index 525dc0a15..a67f0bc90 100644
+--- a/lib/dpkg/fields.c
++++ b/lib/dpkg/fields.c
+@@ -355,6 +355,7 @@ f_conffiles(struct pkginfo *pkg, struct pkgbin *pkgbin,
+ {
+   static const char obsolete_str[]= "obsolete";
+   static const char remove_on_upgrade_str[] = "remove-on-upgrade";
++  static const char remove_if_unmodified_str[] = "remove-if-unmodified";
+   struct conffile **lastp;
+ 
+   lastp = &pkgbin->conffiles;
+@@ -363,7 +364,7 @@ f_conffiles(struct pkginfo *pkg, struct pkgbin *pkgbin,
+     const char *endent, *endfn, *hashstart;
+     char *newptr;
+     int c, namelen, hashlen;
+-    bool obsolete, remove_on_upgrade;
++    bool obsolete, remove_on_upgrade, remove_if_unmodified;
+ 
+     c= *value++;
+     if (c == '\n') continue;
+@@ -381,6 +382,12 @@ f_conffiles(struct pkginfo *pkg, struct pkgbin *pkgbin,
+       conffvalue_lastword(value, endfn, endent, &hashstart, &hashlen, &endfn,
+                           ps);
+ 
++    remove_if_unmodified = (hashlen == sizeof(remove_if_unmodified_str) - 1 &&
++                         memcmp(hashstart, remove_if_unmodified_str, hashlen) == 0);
++    if (remove_if_unmodified)
++      conffvalue_lastword(value, endfn, endent, &hashstart, &hashlen, &endfn,
++                          ps);
++
+     obsolete= (hashlen == sizeof(obsolete_str)-1 &&
+                memcmp(hashstart, obsolete_str, hashlen) == 0);
+     if (obsolete)
+@@ -405,6 +412,7 @@ f_conffiles(struct pkginfo *pkg, struct pkgbin *pkgbin,
+     newlink->hash= newptr;
+     newlink->obsolete= obsolete;
+     newlink->remove_on_upgrade = remove_on_upgrade;
++    newlink->remove_if_unmodified = remove_if_unmodified;
+     newlink->next =NULL;
+     *lastp= newlink;
+     lastp= &newlink->next;
+diff --git a/lib/dpkg/fsys.h b/lib/dpkg/fsys.h
+index ede5cdff8..63256e10a 100644
+--- a/lib/dpkg/fsys.h
++++ b/lib/dpkg/fsys.h
+@@ -85,6 +85,8 @@ enum DPKG_ATTR_ENUM_FLAGS fsys_namenode_flags {
+ 	FNNF_FILTERED			= DPKG_BIT(9),
+ 	/** Conffile removal requested by upgrade. */
+ 	FNNF_RM_CONFF_ON_UPGRADE	= DPKG_BIT(10),
++	/** Conffile removal requested by upgrade if unmodified. */
++	FNNF_RM_CONFF_IF_UNMODIFIED	= DPKG_BIT(11),
+ };
+ 
+ /**
+diff --git a/man/deb-conffiles.pod b/man/deb-conffiles.pod
+index e3a57b189..353c8e9f8 100644
+--- a/man/deb-conffiles.pod
++++ b/man/deb-conffiles.pod
+@@ -39,11 +39,25 @@ not accepted.
+ Files without a flag should exist in the binary package, otherwise L<dpkg(1)>
+ will ignore them.
+ 
+-There is currently only one flag supported, B<remove-on-upgrade>, to mark
+-that a conffile needs to be removed on the next upgrade (since dpkg 1.20.6).
++There are currently two flags supported:
++
++=over
++
++=item B<remove-on-upgrade> (since dpkg 1.20.6)
++
++to mark that a conffile needs to be removed on the next upgrade.
+ These files must not exist in the binary package, as both L<dpkg(1)> and
+ L<dpkg-deb(1)> will not accept building nor processing such binary packages.
+ 
++=item B<remove-if-unmodified> (since dpkg 1.22.7)
++
++to mark that a conffile needs to be removed on the next upgrade if unmodified,
++but left in place if modified.
++These files must not exist in the binary package, as both L<dpkg(1)> and
++L<dpkg-deb(1)> will not accept building nor processing such binary packages.
++
++=back
++
+ =head1 EXAMPLE
+ 
+  %CONFDIR%/alternatives/README
+@@ -51,6 +65,7 @@ L<dpkg-deb(1)> will not accept building nor processing such binary packages.
+  %PKGCONFDIR%/dpkg.cfg
+  %CONFDIR%/logrotate.d/dpkg
+  remove-on-upgrade /etc/some-old-file.conf
++ remove-if-unmodified /etc/old-but-still-supported.conf
+ 
+ =head1 SEE ALSO
+ 
+diff --git a/man/dpkg-maintscript-helper.pod b/man/dpkg-maintscript-helper.pod
+index ee938e911..177e76902 100644
+--- a/man/dpkg-maintscript-helper.pod
++++ b/man/dpkg-maintscript-helper.pod
+@@ -33,7 +33,9 @@ I<command> [I<parameter>...] B<--> I<maint-script-parameter>...
+ 
+ =item B<supports> I<command>
+ 
+-=item B<rm_conffile> I<conffile> [I<prior-version> [I<package>]]
++=item B<rm_conffile> [I<--if-unmodified>] I<conffile> [I<prior-version> [I<package>]]
++
++=item B<rm_conffile_if_unmodified> I<conffile> [I<prior-version> [I<package>]]
+ 
+ =item B<mv_conffile> I<old-conffile> I<new-conffile> [I<prior-version> [I<package>]]
+ 
+@@ -130,7 +132,7 @@ it must explicitly do so and B<dpkg-maintscript-helper> can be used
+ to implement graceful deletion and moving of conffiles within maintainer
+ scripts.
+ 
+-=head2 Removing a conffile
++=head2 Removing an obsolete conffile
+ 
+ B<Note>: This can be replaced in most cases by the C<remove-on-upgrade>
+ flag in F<DEBIAN/conffiles> (since dpkg 1.20.6), see L<deb-conffiles(5)>.
+@@ -165,6 +167,35 @@ If the package upgrade aborts, the B<postrm> reinstalls the original conffile.
+ During purge, the B<postrm> will also delete the
+ B<.dpkg-bak> file kept up to now.
+ 
++=head2 Removing a conffile if unmodified
++
++B<Note>: This can be replaced in most cases by the C<remove-if-unmodified>
++flag in F<DEBIAN/conffiles> (since dpkg 1.22.7), see L<deb-conffiles(5)>.
++
++Sometimes, a package wants to no longer install a conffile in new versions;
++for instance, the conffile might still be supported, but the default version
++is not needed for new installations.
++In this case, the package should remove the conffile from disk, but only if
++the user has not modified it.
++If there are local modifications, they should be preserved.
++If the package upgrade aborts, the conffile should not disappear.
++
++All of this is implemented by putting the following shell snippet in the
++B<preinst>, B<postinst> and B<postrm> maintainer scripts:
++
++=over
++
++Z<>
++ dpkg-maintscript-helper rm_conffile --if-unmodified \
++    I<conffile> I<prior-version> I<package> -- "$@"
++
++=back
++
++I<conffile> is the filename of the conffile to remove.
++
++This uses the same implementation as C<rm_conffile>, but leaves modified
++versions in place rather than renaming them.
++
+ =head2 Renaming a conffile
+ 
+ If a conffile is moved from one location to another, you need to make sure
+@@ -305,11 +336,12 @@ required version of B<dpkg> has been unpacked before.
+ The required version
+ depends on the command used, for B<rm_conffile> and B<mv_conffile>
+ it is 1.15.7.2, for B<symlink_to_dir> and B<dir_to_symlink>
+-it is 1.17.14:
++it is 1.17.14, and for B<rm_conffile_if_unmodified> or the I<--if-unmodified>
++option to B<rm_conffile> it is 1.22.7:
+ 
+ =over
+ 
+- Pre-Depends: dpkg (>= 1.17.14)
++ Pre-Depends: dpkg (>= 1.22.7)
+ 
+ =back
+ 
+@@ -333,6 +365,9 @@ B<supports> command will check if the environment variables as set
+ by dpkg and required by the script are present, and will consider it a
+ failure in case the environment is not sufficient.
+ 
++Note that B<supports rm_conffile_if_unmodified> also indicates the
++availability of the I<--if-unmodified> option to B<rm_conffile>.
++
+ =head1 ENVIRONMENT
+ 
+ =over
+diff --git a/src/deb/build.c b/src/deb/build.c
+index 5da2e76cd..d146434da 100644
+--- a/src/deb/build.c
++++ b/src/deb/build.c
+@@ -272,6 +272,7 @@ check_conffiles(const char *ctrldir, const char *rootdir)
+     char *conffilename = conffilenamebuf;
+     int n;
+     bool remove_on_upgrade = false;
++    bool remove_if_unmodified = false;
+ 
+     n = strlen(conffilename);
+     if (!n)
+@@ -317,6 +318,8 @@ check_conffiles(const char *ctrldir, const char *rootdir)
+ 
+       if (strcmp(flag, "remove-on-upgrade") == 0)
+         remove_on_upgrade = true;
++      else if (strcmp(flag, "remove-if-unmodified") == 0)
++        remove_if_unmodified = true;
+       else
+         ohshit(_("unknown flag '%s' for conffile '%s'"), flag, conffilename);
+     }
+@@ -328,11 +331,11 @@ check_conffiles(const char *ctrldir, const char *rootdir)
+         if ((n > 1) && c_isspace(conffilename[n - 1]))
+           warning(_("conffile filename '%s' contains trailing white spaces"),
+                   conffilename);
+-        if (!remove_on_upgrade)
++        if (!remove_on_upgrade && !remove_if_unmodified)
+           ohshit(_("conffile '%.250s' does not appear in package"), conffilename);
+       } else
+         ohshite(_("conffile '%.250s' is not stattable"), conffilename);
+-    } else if (remove_on_upgrade) {
++    } else if (remove_on_upgrade || remove_if_unmodified) {
+         ohshit(_("conffile '%s' is present but is requested to be removed"),
+                conffilename);
+     } else if (!S_ISREG(controlstab.st_mode)) {
+diff --git a/src/dpkg-maintscript-helper.sh b/src/dpkg-maintscript-helper.sh
+index d799aa8fe..b8b3cb329 100755
+--- a/src/dpkg-maintscript-helper.sh
++++ b/src/dpkg-maintscript-helper.sh
+@@ -27,6 +27,12 @@
+ ## Functions to remove an obsolete conffile during upgrade
+ ##
+ rm_conffile() {
++  local IF_UNMODIFIED=
++  if [ "$1" = "--if-unmodified" ]; then
++    IF_UNMODIFIED="$1"
++    shift
++  fi
++
+   local CONFFILE="$1"
+   local LASTVERSION="$2"
+   local PACKAGE="$3"
+@@ -63,13 +69,13 @@ rm_conffile() {
+   preinst)
+     if [ "$1" = "install" -o "$1" = "upgrade" ] && [ -n "$2" ] &&
+        dpkg --compare-versions -- "$2" le-nl "$LASTVERSION"; then
+-      prepare_rm_conffile "$CONFFILE" "$PACKAGE"
++      prepare_rm_conffile $IF_UNMODIFIED "$CONFFILE" "$PACKAGE"
+     fi
+     ;;
+   postinst)
+     if [ "$1" = "configure" ] && [ -n "$2" ] &&
+        dpkg --compare-versions -- "$2" le-nl "$LASTVERSION"; then
+-      finish_rm_conffile "$CONFFILE"
++      finish_rm_conffile $IF_UNMODIFIED "$CONFFILE"
+     fi
+     ;;
+   postrm)
+@@ -81,7 +87,7 @@ rm_conffile() {
+     if [ "$1" = "abort-install" -o "$1" = "abort-upgrade" ] &&
+        [ -n "$2" ] &&
+        dpkg --compare-versions -- "$2" le-nl "$LASTVERSION"; then
+-      abort_rm_conffile "$CONFFILE" "$PACKAGE"
++      abort_rm_conffile $IF_UNMODIFIED "$CONFFILE" "$PACKAGE"
+     fi
+     ;;
+   *)
+@@ -91,6 +97,12 @@ rm_conffile() {
+ }
+ 
+ prepare_rm_conffile() {
++  local IF_UNMODIFIED=
++  if [ "$1" = "--if-unmodified" ]; then
++    IF_UNMODIFIED="$1"
++    shift
++  fi
++
+   local CONFFILE="$1"
+   local PACKAGE="$2"
+ 
+@@ -102,16 +114,24 @@ prepare_rm_conffile() {
+   old_md5sum="$(dpkg-query -W -f='${Conffiles}' "$PACKAGE" | \
+     sed -n -e "\\'^ $CONFFILE ' { s/ obsolete$//; s/.* //; p }")"
+   if [ "$md5sum" != "$old_md5sum" ]; then
+-    mv -f "$DPKG_ROOT$CONFFILE" "$DPKG_ROOT$CONFFILE.dpkg-backup"
++    if [ -z "$IF_UNMODIFIED" ]; then
++      mv -f "$DPKG_ROOT$CONFFILE" "$DPKG_ROOT$CONFFILE.dpkg-backup"
++    fi
+   else
+     mv -f "$DPKG_ROOT$CONFFILE" "$DPKG_ROOT$CONFFILE.dpkg-remove"
+   fi
+ }
+ 
+ finish_rm_conffile() {
++  local IF_UNMODIFIED=
++  if [ "$1" = "--if-unmodified" ]; then
++    IF_UNMODIFIED="$1"
++    shift
++  fi
++
+   local CONFFILE="$1"
+ 
+-  if [ -e "$DPKG_ROOT$CONFFILE.dpkg-backup" ]; then
++  if [ -z "$IF_UNMODIFIED" ] && [ -e "$DPKG_ROOT$CONFFILE.dpkg-backup" ]; then
+     echo "Obsolete conffile $DPKG_ROOT$CONFFILE has been modified by you."
+     echo "Saving as $DPKG_ROOT$CONFFILE.dpkg-bak ..."
+     mv -f "$DPKG_ROOT$CONFFILE.dpkg-backup" "$DPKG_ROOT$CONFFILE.dpkg-bak"
+@@ -123,6 +143,12 @@ finish_rm_conffile() {
+ }
+ 
+ abort_rm_conffile() {
++  local IF_UNMODIFIED=
++  if [ "$1" = "--if-unmodified" ]; then
++    IF_UNMODIFIED="$1"
++    shift
++  fi
++
+   local CONFFILE="$1"
+   local PACKAGE="$2"
+ 
+@@ -132,7 +158,7 @@ abort_rm_conffile() {
+     echo "Reinstalling $DPKG_ROOT$CONFFILE that was moved away"
+     mv "$DPKG_ROOT$CONFFILE.dpkg-remove" "$DPKG_ROOT$CONFFILE"
+   fi
+-  if [ -e "$DPKG_ROOT$CONFFILE.dpkg-backup" ]; then
++  if [ -z "$IF_UNMODIFIED" ] && [ -e "$DPKG_ROOT$CONFFILE.dpkg-backup" ]; then
+     echo "Reinstalling $DPKG_ROOT$CONFFILE that was backed-up"
+     mv "$DPKG_ROOT$CONFFILE.dpkg-backup" "$DPKG_ROOT$CONFFILE"
+   fi
+@@ -569,9 +595,12 @@ Usage: $PROGNAME <command> <parameter>... -- <maintainer-script-parameter>...
+ Commands:
+   supports <command>
+         Returns 0 (success) if the given command is supported, 1 otherwise.
+-  rm_conffile <conffile> [<last-version> [<package>]]
++  rm_conffile [--if-unmodified] <conffile> [<last-version> [<package>]]
+         Remove obsolete conffile. Must be called in preinst, postinst and
+-        postrm.
++        postrm. If given --if-unmodified, act as rm_conffile_if_unmodfied.
++  rm_conffile_if_unmodified <conffile> [<last-version> [<package>]]
++        Remove still-supported conffile if unmodified. Must be called in
++        preinst, postinst and postrm.
+   mv_conffile <old-conf> <new-conf> [<last-version> [<package>]]
+         Rename a conffile. Must be called in preinst, postinst and postrm.
+   symlink_to_dir <pathname> <old-symlink-target> [<last-version> [<package>]]
+@@ -615,7 +644,7 @@ shift
+ case "$command" in
+ supports)
+   case "$1" in
+-  rm_conffile|mv_conffile|symlink_to_dir|dir_to_symlink)
++  rm_conffile|rm_conffile_if_unmodified|mv_conffile|symlink_to_dir|dir_to_symlink)
+     code=0
+     ;;
+   *)
+@@ -635,6 +664,9 @@ supports)
+ rm_conffile)
+   rm_conffile "$@"
+   ;;
++rm_conffile_if_unmodified)
++  rm_conffile --if-unmodified "$@"
++  ;;
+ mv_conffile)
+   mv_conffile "$@"
+   ;;
+diff --git a/src/main/archives.c b/src/main/archives.c
+index fa703f048..f33d514ca 100644
+--- a/src/main/archives.c
++++ b/src/main/archives.c
+@@ -240,7 +240,9 @@ md5hash_prev_conffile(struct pkginfo *pkg, char *oldhash, const char *oldname,
+                              &otherpkg->configversion) != 0)
+       continue;
+     for (conff = otherpkg->installed.conffiles; conff; conff = conff->next) {
+-      if (conff->obsolete || conff->remove_on_upgrade)
++      if (conff->obsolete ||
++          conff->remove_on_upgrade ||
++          conff->remove_if_unmodified)
+         continue;
+       if (strcmp(conff->name, namenode->name) == 0)
+         break;
+@@ -682,7 +684,8 @@ tarobject(struct tar_archive *tar, struct tar_entry *ti)
+ 
+   namenode = fsys_hash_find_node(ti->name, FHFF_NONE);
+ 
+-  if (namenode->flags & FNNF_RM_CONFF_ON_UPGRADE)
++  if ((namenode->flags & FNNF_RM_CONFF_ON_UPGRADE) ||
++      (namenode->flags & FNNF_RM_CONFF_IF_UNMODIFIED))
+     ohshit(_("conffile '%s' marked for removal on upgrade, shipped in package"),
+            ti->name);
+ 
+diff --git a/src/main/configure.c b/src/main/configure.c
+index b12b06808..5831447a3 100644
+--- a/src/main/configure.c
++++ b/src/main/configure.c
+@@ -356,7 +356,9 @@ deferred_configure_ghost_conffile(struct pkginfo *pkg, struct conffile *conff)
+ 
+ 		for (otherconff = otherpkg->installed.conffiles; otherconff;
+ 		     otherconff = otherconff->next) {
+-			if (otherconff->obsolete || otherconff->remove_on_upgrade)
++			if (otherconff->obsolete ||
++                            otherconff->remove_on_upgrade ||
++                            otherconff->remove_if_unmodified)
+ 				continue;
+ 
+ 			/* Check if we need to propagate the new hash from
+@@ -652,7 +654,9 @@ deferred_configure(struct pkginfo *pkg)
+ 		 * ‘*.dpkg-new’ no longer exists we assume that we've
+ 		 * already processed this one. */
+ 		for (conff = pkg->installed.conffiles; conff; conff = conff->next) {
+-			if (conff->obsolete || conff->remove_on_upgrade)
++			if (conff->obsolete ||
++                            conff->remove_on_upgrade ||
++                            conff->remove_if_unmodified)
+ 				continue;
+ 			deferred_configure_conffile(pkg, conff);
+ 		}
+diff --git a/src/main/help.c b/src/main/help.c
+index 59e730e1c..8774dd677 100644
+--- a/src/main/help.c
++++ b/src/main/help.c
+@@ -196,7 +196,9 @@ dir_has_conffiles(struct fsys_namenode *file, struct pkginfo *pkg)
+         pkg_name(pkg, pnaw_always));
+   namelen = strlen(file->name);
+   for (conff= pkg->installed.conffiles; conff; conff= conff->next) {
+-      if (conff->obsolete || conff->remove_on_upgrade)
++      if (conff->obsolete ||
++          conff->remove_on_upgrade ||
++          conff->remove_if_unmodified)
+         continue;
+       if (strncmp(file->name, conff->name, namelen) == 0 &&
+           strlen(conff->name) > namelen && conff->name[namelen] == '/') {
+diff --git a/src/main/unpack.c b/src/main/unpack.c
+index 20d30c6c8..0708b437a 100644
+--- a/src/main/unpack.c
++++ b/src/main/unpack.c
+@@ -386,6 +386,9 @@ deb_parse_conffiles(const struct pkginfo *pkg, const char *control_conffiles,
+       if (strcmp(flag, "remove-on-upgrade") == 0) {
+         confflags |= FNNF_RM_CONFF_ON_UPGRADE;
+         confflags &= ~FNNF_NEW_CONFF;
++      } else if (strcmp(flag, "remove-if-unmodified") == 0) {
++        confflags |= FNNF_RM_CONFF_IF_UNMODIFIED;
++        confflags &= ~FNNF_NEW_CONFF;
+       } else {
+         if (c_isspace(flag[0]))
+           warning(_("line with conffile filename '%s' has leading white spaces"),
+@@ -657,15 +660,17 @@ pkg_remove_conffile_on_upgrade(struct pkginfo *pkg, struct fsys_namenode *nameno
+   }
+ 
+   /* Otherwise, preserve the modified conffile. */
+-  varbuf_rollback(&cdrext_state);
+-  varbuf_add_str(&cdrext, DPKGOLDEXT);
++  if (namenode->flags & FNNF_RM_CONFF_ON_UPGRADE) {
++      varbuf_rollback(&cdrext_state);
++      varbuf_add_str(&cdrext, DPKGOLDEXT);
+ 
+-  printf(_("Obsolete conffile '%s' has been modified by you.\n"), cdr.buf);
+-  printf(_("Saving as %s ...\n"), cdrext.buf);
+-  if (rename(cdr.buf, cdrext.buf) < 0)
+-    warning(_("%s: cannot rename obsolete conffile '%s' to '%s': %s"),
+-            pkg_name(pkg, pnaw_nonambig),
+-            cdr.buf, cdrext.buf, strerror(errno));
++      printf(_("Obsolete conffile '%s' has been modified by you.\n"), cdr.buf);
++      printf(_("Saving as %s ...\n"), cdrext.buf);
++      if (rename(cdr.buf, cdrext.buf) < 0)
++        warning(_("%s: cannot rename obsolete conffile '%s' to '%s': %s"),
++                pkg_name(pkg, pnaw_nonambig),
++                cdr.buf, cdrext.buf, strerror(errno));
++  }
+ }
+ 
+ static void
+@@ -687,7 +692,8 @@ pkg_remove_old_files(struct pkginfo *pkg,
+     debug(dbg_conffdetail, "%s: removing conffile '%s' for %s?", __func__,
+           cfile->namenode->name, pkg_name(pkg, pnaw_always));
+ 
+-    if (!(cfile->namenode->flags & FNNF_RM_CONFF_ON_UPGRADE))
++    if (!(cfile->namenode->flags & FNNF_RM_CONFF_ON_UPGRADE) &&
++        !(cfile->namenode->flags & FNNF_RM_CONFF_IF_UNMODIFIED))
+       continue;
+ 
+     pkg_remove_conffile_on_upgrade(pkg, cfile->namenode);
+@@ -922,6 +928,8 @@ pkg_update_fields(struct pkginfo *pkg, struct fsys_namenode_queue *newconffiles)
+     newiconff->obsolete = !!(cfile->namenode->flags & FNNF_OBS_CONFF);
+     newiconff->remove_on_upgrade = !!(
+         cfile->namenode->flags & FNNF_RM_CONFF_ON_UPGRADE);
++    newiconff->remove_if_unmodified = !!(
++        cfile->namenode->flags & FNNF_RM_CONFF_IF_UNMODIFIED);
+     *iconffileslastp = newiconff;
+     iconffileslastp = &newiconff->next;
+   }
+diff --git a/tests/t-conffile-declarative-removal/Makefile b/tests/t-conffile-declarative-removal/Makefile
+index 0d0e77b86..d74adb2ab 100644
+--- a/tests/t-conffile-declarative-removal/Makefile
++++ b/tests/t-conffile-declarative-removal/Makefile
+@@ -22,45 +22,64 @@ test-case:
+ 	$(DPKG_INSTALL) pkg-conffile-v1.deb
+ 	test -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed"
+ 	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed.dpkg-old"
++	test -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed-if-unmodified"
++	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed-if-unmodified.dpkg-old"
+ 	$(DPKG_INSTALL) pkg-conffile-v2.deb
+ 	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed"
+ 	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed.dpkg-old"
++	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed-if-unmodified"
++	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed-if-unmodified.dpkg-old"
+ 
+ 	# Reset.
+ 	$(DPKG_PURGE) pkg-conffile
+ 	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed"
+ 	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed.dpkg-old"
++	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed-if-unmodified"
++	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed-if-unmodified.dpkg-old"
+ 
+ 	# Unmodified case; but force it to happen via two invocations.
+ 	$(DPKG_INSTALL) pkg-conffile-v1.deb
+ 	test -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed"
+ 	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed.dpkg-old"
++	test -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed-if-unmodified"
++	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed-if-unmodified.dpkg-old"
+ 	$(DPKG_UNPACK) pkg-conffile-v2.deb
+ 	# The old conffile is removed during unpack.
+ 	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed"
+ 	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed.dpkg-old"
++	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed-if-unmodified"
++	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed-if-unmodified.dpkg-old"
+ 	# After configure, the file is still removed.
+ 	$(DPKG_CONFIGURE) pkg-conffile
+ 	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed"
+ 	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed.dpkg-old"
++	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed-if-unmodified"
++	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed-if-unmodified.dpkg-old"
+ 
+ 	# Reset.
+ 	$(DPKG_PURGE) pkg-conffile
+ 	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed"
+ 	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed.dpkg-old"
++	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed-if-unmodified"
++	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed-if-unmodified.dpkg-old"
+ 
+-	# Modified; should store .dpkg-old.
++	# Modified; should store .dpkg-old for remove-on-upgrade, or leave in place for remove-if-unmodified.
+ 	$(DPKG_INSTALL) pkg-conffile-v1.deb
+ 	test -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed"
+ 	echo "modify this" >"$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed"
++	test -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed-if-unmodified"
++	echo "modify this" >"$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed-if-unmodified"
+ 	$(DPKG_INSTALL) pkg-conffile-v2.deb
+ 	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed"
+ 	test -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed.dpkg-old"
++	test -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed-if-unmodified"
++	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed-if-unmodified.dpkg-old"
+ 
+ 	# Reset.
+ 	$(DPKG_PURGE) pkg-conffile
+ 	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed"
+ 	$(RM) "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed.dpkg-old"
++	test ! -f "$(DPKG_INSTDIR)/test-dir/test-conffile-to-be-removed-if-unmodified"
+ 
+ 	# Queue a remove on upgrade, and move ownership.
+ 	$(DPKG_INSTALL) pkg-conffile-v1.deb
+diff --git a/tests/t-conffile-declarative-removal/pkg-conffile-v1/DEBIAN/conffiles b/tests/t-conffile-declarative-removal/pkg-conffile-v1/DEBIAN/conffiles
+index c4138c4fa..4627abe1a 100644
+--- a/tests/t-conffile-declarative-removal/pkg-conffile-v1/DEBIAN/conffiles
++++ b/tests/t-conffile-declarative-removal/pkg-conffile-v1/DEBIAN/conffiles
+@@ -1 +1,2 @@
+ /test-dir/test-conffile-to-be-removed
++/test-dir/test-conffile-to-be-removed-if-unmodified
+diff --git a/tests/t-conffile-declarative-removal/pkg-conffile-v1/test-dir/test-conffile-to-be-removed-if-unmodified b/tests/t-conffile-declarative-removal/pkg-conffile-v1/test-dir/test-conffile-to-be-removed-if-unmodified
+new file mode 100644
+index 000000000..e69de29bb
+diff --git a/tests/t-conffile-declarative-removal/pkg-conffile-v2/DEBIAN/conffiles b/tests/t-conffile-declarative-removal/pkg-conffile-v2/DEBIAN/conffiles
+index 587753be1..58fee74b1 100644
+--- a/tests/t-conffile-declarative-removal/pkg-conffile-v2/DEBIAN/conffiles
++++ b/tests/t-conffile-declarative-removal/pkg-conffile-v2/DEBIAN/conffiles
+@@ -1 +1,2 @@
+ remove-on-upgrade /test-dir/test-conffile-to-be-removed
++remove-if-unmodified /test-dir/test-conffile-to-be-removed-if-unmodified
+diff --git a/tests/t-conffile-obsolete/Makefile b/tests/t-conffile-obsolete/Makefile
+index 55d9477f5..3ed7d6267 100644
+--- a/tests/t-conffile-obsolete/Makefile
++++ b/tests/t-conffile-obsolete/Makefile
+@@ -6,27 +6,39 @@ test-case:
+ 	$(DPKG_INSTALL) pkg-conff-obsolete-0.deb
+ 	$(DPKG_INSTALL) pkg-conff-obsolete-1.deb
+ 	test -f '$(DPKG_INSTDIR)/test-conffile'
++	test -f '$(DPKG_INSTDIR)/test-conffile-2'
+ 	$(DPKG_PURGE) pkg-conff-obsolete
+ 	test ! -f '$(DPKG_INSTDIR)/test-conffile'
++	test ! -f '$(DPKG_INSTDIR)/test-conffile-2'
+ 	# Unmodified conffile is autoremoved for the user
+ 	$(DPKG_INSTALL) pkg-conff-obsolete-0.deb
+ 	$(DPKG_UNPACK) pkg-conff-obsolete-2.deb
+ 	test -f '$(DPKG_INSTDIR)/test-conffile.dpkg-remove'
+ 	test ! -f '$(DPKG_INSTDIR)/test-conffile.dpkg-backup'
++	test -f '$(DPKG_INSTDIR)/test-conffile-2.dpkg-remove'
++	test ! -f '$(DPKG_INSTDIR)/test-conffile-2.dpkg-backup'
+ 	$(DPKG_CONFIGURE) pkg-conff-obsolete
+ 	test ! -f '$(DPKG_INSTDIR)/test-conffile'
+ 	test ! -f '$(DPKG_INSTDIR)/test-conffile.dpkg-bak'
+ 	test ! -f '$(DPKG_INSTDIR)/test-conffile.dpkg-backup'
+ 	test ! -f '$(DPKG_INSTDIR)/test-conffile.dpkg-remove'
++	test ! -f '$(DPKG_INSTDIR)/test-conffile-2'
++	test ! -f '$(DPKG_INSTDIR)/test-conffile-2.dpkg-bak'
++	test ! -f '$(DPKG_INSTDIR)/test-conffile-2.dpkg-backup'
++	test ! -f '$(DPKG_INSTDIR)/test-conffile-2.dpkg-remove'
+ 	$(DPKG_PURGE) pkg-conff-obsolete
+-	# Modified conffile is moved away in .dpkg-bak for the user
++	# Modified conffile 1 is moved away in .dpkg-bak for the user
+ 	$(DPKG_INSTALL) pkg-conff-obsolete-0.deb
+ 	$(BEROOT) sh -c "echo foo >>'$(DPKG_INSTDIR)/test-conffile'"
++	$(BEROOT) sh -c "echo foo >>'$(DPKG_INSTDIR)/test-conffile-2'"
+ 	$(DPKG_INSTALL) pkg-conff-obsolete-2.deb
+ 	test ! -f '$(DPKG_INSTDIR)/test-conffile'
+ 	test -f '$(DPKG_INSTDIR)/test-conffile.dpkg-bak'
++	test -f '$(DPKG_INSTDIR)/test-conffile-2'
++	test ! -f '$(DPKG_INSTDIR)/test-conffile-2.dpkg-bak'
+ 	$(DPKG_PURGE) pkg-conff-obsolete
+ 	test ! -f '$(DPKG_INSTDIR)/test-conffile.dpkg-bak'
++	test ! -f '$(DPKG_INSTDIR)/test-conffile-2'
+ 	# Abort-upgrade restores the to-be-removed conffile
+ 	$(DPKG_INSTALL) pkg-conff-obsolete-0.deb
+ 	$(BEROOT) touch '$(DPKG_INSTDIR)/fail-preinst'
+@@ -36,6 +48,10 @@ test-case:
+ 	test ! -f '$(DPKG_INSTDIR)/test-conffile.dpkg-remove'
+ 	test ! -f '$(DPKG_INSTDIR)/test-conffile.dpkg-bak'
+ 	test ! -f '$(DPKG_INSTDIR)/test-conffile.dpkg-backup'
++	test -f '$(DPKG_INSTDIR)/test-conffile-2'
++	test ! -f '$(DPKG_INSTDIR)/test-conffile-2.dpkg-remove'
++	test ! -f '$(DPKG_INSTDIR)/test-conffile-2.dpkg-bak'
++	test ! -f '$(DPKG_INSTDIR)/test-conffile-2.dpkg-backup'
+ 
+ test-clean:
+ 	$(DPKG_PURGE) pkg-conff-obsolete
+diff --git a/tests/t-conffile-obsolete/pkg-conff-obsolete-0/DEBIAN/conffiles b/tests/t-conffile-obsolete/pkg-conff-obsolete-0/DEBIAN/conffiles
+index 4fad7e9dc..fa95b58e0 100644
+--- a/tests/t-conffile-obsolete/pkg-conff-obsolete-0/DEBIAN/conffiles
++++ b/tests/t-conffile-obsolete/pkg-conff-obsolete-0/DEBIAN/conffiles
+@@ -1 +1,2 @@
+ /test-conffile
++/test-conffile-2
+diff --git a/tests/t-conffile-obsolete/pkg-conff-obsolete-0/test-conffile-2 b/tests/t-conffile-obsolete/pkg-conff-obsolete-0/test-conffile-2
+new file mode 100644
+index 000000000..6fbc8b586
+--- /dev/null
++++ b/tests/t-conffile-obsolete/pkg-conff-obsolete-0/test-conffile-2
+@@ -0,0 +1 @@
++test init
+diff --git a/tests/t-conffile-obsolete/pkg-conff-obsolete-2/DEBIAN/postinst b/tests/t-conffile-obsolete/pkg-conff-obsolete-2/DEBIAN/postinst
+index c6b0782d4..54d282e02 100755
+--- a/tests/t-conffile-obsolete/pkg-conff-obsolete-2/DEBIAN/postinst
++++ b/tests/t-conffile-obsolete/pkg-conff-obsolete-2/DEBIAN/postinst
+@@ -2,3 +2,6 @@
+ if dpkg-maintscript-helper supports rm_conffile; then
+     dpkg-maintscript-helper rm_conffile /test-conffile 0 -- "$@"
+ fi
++if dpkg-maintscript-helper supports rm_conffile_if_unmodified; then
++    dpkg-maintscript-helper rm_conffile --if-unmodified /test-conffile-2 0 -- "$@"
++fi
+diff --git a/tests/t-conffile-obsolete/pkg-conff-obsolete-2/DEBIAN/postrm b/tests/t-conffile-obsolete/pkg-conff-obsolete-2/DEBIAN/postrm
+index c6b0782d4..54d282e02 100755
+--- a/tests/t-conffile-obsolete/pkg-conff-obsolete-2/DEBIAN/postrm
++++ b/tests/t-conffile-obsolete/pkg-conff-obsolete-2/DEBIAN/postrm
+@@ -2,3 +2,6 @@
+ if dpkg-maintscript-helper supports rm_conffile; then
+     dpkg-maintscript-helper rm_conffile /test-conffile 0 -- "$@"
+ fi
++if dpkg-maintscript-helper supports rm_conffile_if_unmodified; then
++    dpkg-maintscript-helper rm_conffile --if-unmodified /test-conffile-2 0 -- "$@"
++fi
+diff --git a/tests/t-conffile-obsolete/pkg-conff-obsolete-2/DEBIAN/preinst b/tests/t-conffile-obsolete/pkg-conff-obsolete-2/DEBIAN/preinst
+index c0e592b0e..0dd3eeb26 100755
+--- a/tests/t-conffile-obsolete/pkg-conff-obsolete-2/DEBIAN/preinst
++++ b/tests/t-conffile-obsolete/pkg-conff-obsolete-2/DEBIAN/preinst
+@@ -2,6 +2,9 @@
+ if dpkg-maintscript-helper supports rm_conffile; then
+     dpkg-maintscript-helper rm_conffile /test-conffile 0 -- "$@"
+ fi
++if dpkg-maintscript-helper supports rm_conffile_if_unmodified; then
++    dpkg-maintscript-helper rm_conffile --if-unmodified /test-conffile-2 0 -- "$@"
++fi
+ 
+ if [ -e "$DPKG_ROOT/fail-preinst" ]; then
+     exit 1
+-- 
+2.45.1
+

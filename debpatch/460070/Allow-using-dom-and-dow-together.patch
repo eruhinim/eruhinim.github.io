@@ -1,0 +1,133 @@
+Description: Allow using day-of-month and day-of-week together
+ by prepending a `&&' token (surrounded by whitespace) to the
+ dow field in order to take into account both dom and dow, from
+ the standardised default of matching either of them.
+ .
+ For symmetry, an `||' is also allowed at the same place, useful
+ mainly to serve as a reminder of this unintuitive behavior.
+Bug-Debian: https://bugs.debian.org/460070
+Last-Update: 2023-01-02
+Index: cron/cron.c
+===================================================================
+--- cron.orig/cron.c
++++ cron/cron.c
+@@ -336,6 +336,8 @@ find_jobs(vtime, db, doWild, doNonWild)
+ 	 * on Sundays;  '* * 1,15 * *' will run *only* the 1st and 15th.  this
+ 	 * is why we keep 'e->dow_star' and 'e->dom_star'.  yes, it's bizarre.
+ 	 * like many bizarre things, it's the standard.
++	 * We add as an extension the syntax '* * 1,15 * && Sun' to run only
++	 * on the 1st and 15th that are Sundays.
+ 	 */
+ 	for (u = db->head;  u != NULL;  u = u->next) {
+ 		for (e = u->crontab;  e != NULL;  e = e->next) {
+@@ -345,7 +347,7 @@ find_jobs(vtime, db, doWild, doNonWild)
+ 			if (bit_test(e->minute, minute) &&
+ 			    bit_test(e->hour, hour) &&
+ 			    bit_test(e->month, month) &&
+-			    ( ((e->flags & DOM_STAR) || (e->flags & DOW_STAR))
++			    ( ((e->flags & DOM_STAR) || (e->flags & (DOW_STAR | DOW_AND)))
+ 			      ? (bit_test(e->dow,dow) && bit_test(e->dom,dom))
+ 			      : (bit_test(e->dow,dow) || bit_test(e->dom,dom)))) {
+ 				if ((doNonWild && !(e->flags & (MIN_STAR|HR_STAR)))
+Index: cron/cron.h
+===================================================================
+--- cron.orig/cron.h
++++ cron/cron.h
+@@ -190,6 +190,7 @@ typedef	struct _entry {
+ #define	WHEN_REBOOT	0x04
+ #define	MIN_STAR	0x08
+ #define	HR_STAR		0x10
++#define	DOW_AND		0x20
+ } entry;
+ 
+ 			/* the crontab database will be a list of the
+Index: cron/crontab.5
+===================================================================
+--- cron.orig/crontab.5
++++ cron/crontab.5
+@@ -216,8 +216,13 @@ field matches the current time.  For exa
+ .br
+ ``30 4 1,15 * 5''
+ would cause a command to be run at 4:30 am on the 1st and 15th of each
+-month, plus every Friday.  One can, however, achieve the desired result
+-by adding a test to the command (see the last example in EXAMPLE CRON FILE
++month, plus every Friday.  To allow running it the 1st and 15th of each
++month
++.I only when they are Friday
++this cron allows prepending a ``&&'' token before the day of week to get
++that behavior (for symmetry, it is also possible to prepend a ``||'',
++with the above default behavior).  Alternatively, one can add a test for
++the date into the command (see the last example in EXAMPLE CRON FILE
+ below).
+ .PP
+ Instead of the first five fields, one of eight special strings may appear:
+@@ -273,7 +278,8 @@ MAILTO=paul
+ 0 */4 1 * mon   echo "run every 4th hour on the 1st and on every Monday"
+ 0 0 */2 * sun   echo "run at midn on every Sunday that's an uneven date"
+ # Run on every second Saturday of the month
+-0 4 8\-14 * *    test $(date +\e%u) \-eq 6 && echo "2nd Saturday"
++0 4 8\-14 * && sat    echo "2nd Saturday"
++0 4 8\-14 *     *     test $(date +\e%u) \-eq 6 && echo "2nd Saturday"
+ .fi
+ 
+ .PP
+Index: cron/entry.c
+===================================================================
+--- cron.orig/entry.c
++++ cron/entry.c
+@@ -85,6 +85,8 @@ load_entry(file, error_func, pw, envp)
+ 	 *	minutes hours doms months dows cmd\n
+ 	 *   system crontab (/etc/crontab):
+ 	 *	minutes hours doms months dows USERNAME cmd\n
++	 *
++	 * optionally: '&&' or '||' (surrounded by whitespace) before dows
+ 	 */
+ 
+ 	ecode_e	ecode = e_none;
+@@ -218,6 +220,46 @@ load_entry(file, error_func, pw, envp)
+ 
+ 		if (ch == '*')
+ 			e->flags |= DOW_STAR;
++
++		if (ch == '&') {
++			e->flags |= DOW_AND;
++			ch = get_char(file);
++			if (ch != '&') {
++				ecode = e_dow;
++				goto eof;
++			}
++
++			ch = get_char(file);
++			if (ch != '\t' && ch != ' ') {
++				ecode = e_dow;
++				goto eof;
++			}
++			Skip_Blanks(ch, file);
++
++			if (ch == EOF) {
++				ecode = e_dow;
++				goto eof;
++			}
++		} else if (ch == '|') {
++			ch = get_char(file);
++			if (ch != '|') {
++				ecode = e_dow;
++				goto eof;
++			}
++
++			ch = get_char(file);
++			if (ch != '\t' && ch != ' ') {
++				ecode = e_dow;
++				goto eof;
++			}
++			Skip_Blanks(ch, file);
++
++			if (ch == EOF) {
++				ecode = e_dow;
++				goto eof;
++			}
++		}
++
+ 		ch = get_list(e->dow, FIRST_DOW, LAST_DOW,
+ 			      DowNames, ch, file);
+ 		if (ch == EOF) {

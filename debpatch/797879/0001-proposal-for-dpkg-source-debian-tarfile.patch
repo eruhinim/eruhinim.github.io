@@ -1,0 +1,293 @@
+>From 5f12e7d29e7741d67443379db0ea50307abc00bd Mon Sep 17 00:00:00 2001
+From: Johannes 'josch' Schauer <josch@mister-muffin.de>
+Date: Thu, 3 Sep 2015 12:15:38 +0200
+Subject: [PATCH] proposal for dpkg-source --debian-tarfile
+
+---
+ man/dpkg-source.1                        | 13 ++++++++++
+ scripts/Dpkg/Source/Package.pm           | 33 ++++++++++++++++++++++++
+ scripts/Dpkg/Source/Package/V1.pm        |  4 +++
+ scripts/Dpkg/Source/Package/V2.pm        | 34 +++++++++++++++++++++++++
+ scripts/Dpkg/Source/Package/V3/Bzr.pm    |  4 +++
+ scripts/Dpkg/Source/Package/V3/Custom.pm |  4 +++
+ scripts/Dpkg/Source/Package/V3/Git.pm    |  4 +++
+ scripts/Dpkg/Source/Package/V3/Native.pm |  4 +++
+ scripts/dpkg-source.pl                   | 43 +++++++++++++++++++++-----------
+ 9 files changed, 128 insertions(+), 15 deletions(-)
+
+diff --git a/man/dpkg-source.1 b/man/dpkg-source.1
+index 1276753..08a4eac 100644
+--- a/man/dpkg-source.1
++++ b/man/dpkg-source.1
+@@ -121,6 +121,19 @@ This command can take supplementary parameters depending on the source format.
+ It will error out for formats where this operation doesn't mean anything.
+ 
+ .TP
++.RI "\fB\-\-debian-tarfile\fP \fIfilename\fP.dsc [\fIpath\fP]"
++Extracts the \fB./debian\fP packaging directory of a given source package and
++sends it to standard output in
++.B tar
++format. The \fB./debian\fP directory component will be part of all files in the
++output. Together with
++.BR tar (1)
++this can be used to extract a particular packaging file from the source package
++without unpacking the whole source package first.
++For source formats >= 2.0, this action never requires the upstream source.
++For source format 1.0, this action always requires the upstream source.
++
++.TP
+ .BR \-? ", " \-\-help
+ Show the usage message and exit.
+ .TP
+diff --git a/scripts/Dpkg/Source/Package.pm b/scripts/Dpkg/Source/Package.pm
+index 60ba3e7..91369bc 100644
+--- a/scripts/Dpkg/Source/Package.pm
++++ b/scripts/Dpkg/Source/Package.pm
+@@ -540,6 +540,39 @@ sub do_extract {
+           'source package; use one of the subclasses';
+ }
+ 
++=item $p->debian_tarfile()
++
++Extracts the debian directory of the source package as a tar file to
++standard output.
++
++=cut
++
++sub debian_tarfile {
++    my $self = shift;
++
++    my ($ok, $error) = version_check($self->{fields}{'Version'});
++    if (not $ok) {
++        if ($self->{options}{ignore_bad_version}) {
++            warning($error);
++        } else {
++            error($error);
++        }
++    }
++
++    # Try extract
++    eval { $self->do_debian_tarfile() };
++    if ($@) {
++        run_exit_handlers();
++        die $@;
++    }
++
++}
++
++sub do_debian_tarfile {
++    croak 'Dpkg::Source::Package does not know how to extract a ' .
++          'debian directory; use one of the subclasses';
++}
++
+ # Function used specifically during creation of a source package
+ 
+ sub before_build {
+diff --git a/scripts/Dpkg/Source/Package/V1.pm b/scripts/Dpkg/Source/Package/V1.pm
+index db81962..412c532 100644
+--- a/scripts/Dpkg/Source/Package/V1.pm
++++ b/scripts/Dpkg/Source/Package/V1.pm
+@@ -173,6 +173,10 @@ sub do_extract {
+     }
+ }
+ 
++sub do_debian_tarfile {
++	error(g_('cannot extract debian directory from source format 1.0'));
++}
++
+ sub can_build {
+     my ($self, $dir) = @_;
+ 
+diff --git a/scripts/Dpkg/Source/Package/V2.pm b/scripts/Dpkg/Source/Package/V2.pm
+index 99fab9c..15d586e 100644
+--- a/scripts/Dpkg/Source/Package/V2.pm
++++ b/scripts/Dpkg/Source/Package/V2.pm
+@@ -195,6 +195,40 @@ sub do_extract {
+         unless $self->{options}{skip_patches};
+ }
+ 
++sub do_debian_tarfile {
++    my $self = shift;
++
++    my ($debianfile, %seen);
++    my $re_ext = compression_get_file_extension_regex();
++    my $basename = $self->get_basename();
++    my $basenamerev = $self->get_basename(1);
++    foreach my $file ($self->get_files()) {
++        my $uncompressed = $file;
++        $uncompressed =~ s/\.$re_ext$/.*/;
++        $uncompressed =~ s/\.$re_ext\.asc$/.*.asc/;
++        error(g_('duplicate files in %s source package: %s'), 'v2.0',
++              $uncompressed) if $seen{$uncompressed};
++        $seen{$uncompressed} = 1;
++        if ($file =~ /^\Q$basename\E\.orig\.tar\.$re_ext$/) {
++        } elsif ($file =~ /^\Q$basename\E\.orig\.tar\.$re_ext\.asc$/) {
++        } elsif ($file =~ /^\Q$basename\E\.orig-([[:alnum:]-]+)\.tar\.$re_ext$/) {
++        } elsif ($file =~ /^\Q$basename\E\.orig-([[:alnum:]-]+)\.tar\.$re_ext\.asc$/) {
++        } elsif ($file =~ /^\Q$basenamerev\E\.debian\.tar\.$re_ext$/) {
++            $debianfile = $file;
++        } else {
++            error(g_('unrecognized file for a %s source package: %s'),
++            'v2.0', $file);
++        }
++    }
++    info(g_('unpacking %s'), $debianfile);
++    my $dscdir = $self->{basedir};
++	my $fh = Dpkg::Compression::FileHandle->new(filename => "$dscdir$debianfile");
++	while(<$fh>) {
++		print;
++	}
++	close $fh;
++}
++
+ sub get_autopatch_name {
+     return 'zz_debian-diff-auto';
+ }
+diff --git a/scripts/Dpkg/Source/Package/V3/Bzr.pm b/scripts/Dpkg/Source/Package/V3/Bzr.pm
+index 6cf8fae..790e98f 100644
+--- a/scripts/Dpkg/Source/Package/V3/Bzr.pm
++++ b/scripts/Dpkg/Source/Package/V3/Bzr.pm
+@@ -208,4 +208,8 @@ sub do_extract {
+     chdir $old_cwd or syserr(g_("unable to chdir to '%s'"), $old_cwd);
+ }
+ 
++sub do_debian_tarfile {
++	error(g_('cannot extract debian directory from source format 3.0 (bzr)'));
++}
++
+ 1;
+diff --git a/scripts/Dpkg/Source/Package/V3/Custom.pm b/scripts/Dpkg/Source/Package/V3/Custom.pm
+index 4895897..8dd8de1 100644
+--- a/scripts/Dpkg/Source/Package/V3/Custom.pm
++++ b/scripts/Dpkg/Source/Package/V3/Custom.pm
+@@ -39,6 +39,10 @@ sub do_extract {
+     error(g_("Format '3.0 (custom)' is only used to create source packages"));
+ }
+ 
++sub do_debian_tarfile {
++	error(g_("Format '3.0 (custom)' is only used to create source packages"));
++}
++
+ sub can_build {
+     my ($self, $dir) = @_;
+ 
+diff --git a/scripts/Dpkg/Source/Package/V3/Git.pm b/scripts/Dpkg/Source/Package/V3/Git.pm
+index 97b7aff..21b1b98 100644
+--- a/scripts/Dpkg/Source/Package/V3/Git.pm
++++ b/scripts/Dpkg/Source/Package/V3/Git.pm
+@@ -233,4 +233,8 @@ sub do_extract {
+     sanity_check($newdirectory);
+ }
+ 
++sub do_debian_tarfile {
++	error(g_('cannot extract debian directory from source format 3.0 (git)'));
++}
++
+ 1;
+diff --git a/scripts/Dpkg/Source/Package/V3/Native.pm b/scripts/Dpkg/Source/Package/V3/Native.pm
+index ea38c27..1146bdc 100644
+--- a/scripts/Dpkg/Source/Package/V3/Native.pm
++++ b/scripts/Dpkg/Source/Package/V3/Native.pm
+@@ -64,6 +64,10 @@ sub do_extract {
+     $tar->extract($newdirectory);
+ }
+ 
++sub do_debian_tarfile {
++	error(g_('cannot extract debian directory from source format 3.0 (native)'));
++}
++
+ sub can_build {
+     my ($self, $dir) = @_;
+ 
+diff --git a/scripts/dpkg-source.pl b/scripts/dpkg-source.pl
+index 9aeec13..ccd04ea 100755
+--- a/scripts/dpkg-source.pl
++++ b/scripts/dpkg-source.pl
+@@ -91,6 +91,8 @@ while (@ARGV && $ARGV[0] =~ m/^-/) {
+         setopmode('after-build');
+     } elsif ($arg eq '--commit') {
+         setopmode('commit');
++    } elsif ($arg eq '--debian-tarfile') {
++        setopmode('debian-tarfile');
+     } elsif ($arg eq '--print-format') {
+         setopmode('print-format');
+ 	report_options(info_fh => \*STDERR); # Avoid clutter on STDOUT
+@@ -441,15 +443,17 @@ if ($options{opmode} =~ /^(build|print-format|(before|after)-build|commit)$/) {
+ 		       substvars => $substvars);
+     exit(0);
+ 
+-} elsif ($options{opmode} eq 'extract') {
++} elsif ($options{opmode} =~ /^(extract|debian-tarfile)$/) {
+ 
+     # Check command line
+     unless (scalar(@ARGV)) {
+         usageerr(g_('--%s needs at least one argument, the .dsc'),
+                  $options{opmode});
+     }
+-    if (scalar(@ARGV) > 2) {
++    if ($options{opmode} eq 'extract' && scalar(@ARGV) > 2) {
+         usageerr(g_('--%s takes no more than two arguments'), $options{opmode});
++    } elsif ($options{opmode} eq 'debian-tarfile' && scalar(@ARGV) > 1) {
++        usageerr(g_('--%s takes no more than one argument'), $options{opmode});
+     }
+     my $dsc = shift(@ARGV);
+     if (-d $dsc) {
+@@ -464,16 +468,6 @@ if ($options{opmode} =~ /^(build|print-format|(before|after)-build|commit)$/) {
+     # Parse command line options
+     $srcpkg->parse_cmdline_options(@cmdline_options);
+ 
+-    # Decide where to unpack
+-    my $newdirectory = $srcpkg->get_basename();
+-    $newdirectory =~ s/_/-/g;
+-    if (@ARGV) {
+-	$newdirectory = File::Spec->catdir(shift(@ARGV));
+-	if (-e $newdirectory) {
+-	    error(g_('unpack target exists: %s'), $newdirectory);
+-	}
+-    }
+-
+     # Various checks before unpacking
+     unless ($options{no_check}) {
+         if ($srcpkg->is_signed()) {
+@@ -488,9 +482,25 @@ if ($options{opmode} =~ /^(build|print-format|(before|after)-build|commit)$/) {
+         $srcpkg->check_checksums();
+     }
+ 
+-    # Unpack the source package (delegated to Dpkg::Source::Package::*)
+-    info(g_('extracting %s in %s'), $srcpkg->{fields}{'Source'}, $newdirectory);
+-    $srcpkg->extract($newdirectory);
++    if ($options{opmode} eq 'extract') {
++	# Decide where to unpack
++	my $newdirectory = $srcpkg->get_basename();
++	$newdirectory =~ s/_/-/g;
++	if (@ARGV) {
++	    $newdirectory = File::Spec->catdir(shift(@ARGV));
++	    if (-e $newdirectory) {
++		error(g_('unpack target exists: %s'), $newdirectory);
++	    }
++	}
++
++	# Unpack the source package (delegated to Dpkg::Source::Package::*)
++	info(g_('extracting %s in %s'), $srcpkg->{fields}{'Source'}, $newdirectory);
++	$srcpkg->extract($newdirectory);
++    } elsif ($options{opmode} eq 'debian-tarfile') {
++	# Extract the debian subdirectory (delegated to Dpkg::Source::Package::*)
++	info(g_('extracting ./debian directory content from %s'), $srcpkg->{fields}{'Source'});
++	$srcpkg->debian_tarfile();
++    }
+ 
+     exit(0);
+ }
+@@ -539,6 +549,9 @@ sub usage {
+                            extract source package.
+   -b, --build <dir>        build source package.
+       --print-format <dir> print the format to be used for the source package.
++      --debian-tarfile <filename.dsc>
++                           extract the debian subdirectory of the source
++                           package.
+       --commit [<dir> [<patch-name>]]
+                            store upstream changes in a new patch.')
+     . "\n\n" . g_(
+-- 
+2.1.4
+

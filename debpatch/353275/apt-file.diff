@@ -1,0 +1,170 @@
+--- /usr/bin/apt-file	2006-11-15 01:43:42.000000000 +1100
++++ apt-file	2007-01-25 11:07:09.000000000 +1100
+@@ -112,31 +112,34 @@
+ 
+     my ($cmd, $dest);
+ 
+-    open(SOURCE, "< $file") || error "Can't open $file";
+-    while(<SOURCE>) {
+-	next if /^\s*(?:$|\#|(?:deb-|rpm-))/xo;
+-	chomp;
+-	my $line = $_;
+-	debug "got \'$line\'";
+-	$line =~ s/([^\/])\#.*$/$1/o;
+-	$line =~ s/^(\S+\s+)\[\S+\]/$1/o;
+-	$line =~ s/\s+/ /go;
+-	$line =~ s/^\s+//o;
+-
+-	# CDROM entry
+-	if (@tmp = $line =~ m/^([^\[]*)\[([^\]]*)\](.*)$/o) {
+-	    $tmp[1] =~ s/ /_/g;
+-	    $line = $tmp[0].'['.$tmp[1].']'.$tmp[2];
+-	}
++    my @files = ref $file ? @$file : [ $file ];
++
++    foreach $file (@files) {
++	open(SOURCE, "< $file") || error "Can't open $file";
++	while(<SOURCE>) {
++	    next if /^\s*(?:$|\#|(?:deb-|rpm-))/xo;
++	    chomp;
++	    my $line = $_;
++	    debug "got \'$line\'";
++	    $line =~ s/([^\/])\#.*$/$1/o;
++	    $line =~ s/^(\S+\s+)\[\S+\]/$1/o;
++	    $line =~ s/\s+/ /go;
++	    $line =~ s/^\s+//o;
++
++	    # CDROM entry
++	    if (@tmp = $line =~ m/^([^\[]*)\[([^\]]*)\](.*)$/o) {
++		$tmp[1] =~ s/ /_/g;
++		$line = $tmp[0].'['.$tmp[1].']'.$tmp[2];
++	    }
+ 
+-	# Handle $(ARCH) in sources.list
+-	$line =~ s/\$\(ARCH\)/$Conf->{arch}/g;
+-	debug "kept \'$line\'";
+-
+-	my( $pkg, $uri, $dist, @extra) = split /\s+/, $line;
+-	$uri =~ s/\/+$//;
+-	my($scheme, $user, $passwd, $host, $port, $path, $query,
+-	   $fragment) =
++	    # Handle $(ARCH) in sources.list
++	    $line =~ s/\$\(ARCH\)/$Conf->{arch}/g;
++	    debug "kept \'$line\'";
++
++	    my( $pkg, $uri, $dist, @extra) = split /\s+/, $line;
++	    $uri =~ s/\/+$//;
++	    my($scheme, $user, $passwd, $host, $port, $path, $query,
++	       $fragment) =
+ 	       $uri =~
+ 	       m|^
+ 	       (?:([^:/?\#]+):)?           # scheme
+@@ -155,45 +158,46 @@
+ 
+ #	print "$scheme, $user, $passwd, $host, $port, $path, $query, $fragment\n";
+ 
+-	my $fetch=[];
+-
+-	foreach (@extra) {
+-	    push @$fetch,  m/(.*?)\/(?:.*)/o ? "$dist/$1" : "$dist";
+-	}
++	    my $fetch=[];
+ 
+-	foreach (@{(unique $fetch)}) {
+-	    if (!defined $Conf->{"${scheme}"}) {
+-		warning "Don't know how to handle $scheme";
+-		next;
++	    foreach (@extra) {
++		push @$fetch,  m/(.*?)\/(?:.*)/o ? "$dist/$1" : "$dist";
+ 	    }
+-	    $dist = $_;
+-	    $cmd = find_command( $Conf, $scheme );
++
++	    foreach (@{(unique $fetch)}) {
++		if (!defined $Conf->{"${scheme}"}) {
++		    warning "Don't know how to handle $scheme";
++		    next;
++		}
++		$dist = $_;
++		$cmd = find_command( $Conf, $scheme );
+ #	    $cmd = $Conf->{"${scheme}"};
+-	    die "Could not find suitable command for $scheme" unless $cmd;
+-	    $dest = $Conf->{destination};
+-	    my $cache = $Conf->{cache};
+-	    my $arch = $Conf->{arch};
+-	    my $cdrom = $Conf->{cdrom_mount};
+-	    foreach my $var (qw/host port user passwd path dist pkg
+-			     cache arch uri cdrom/) {
+-		map {
+-		    $_ =~ s{<$var(?:\|(.+?))?>}{
+-			defined eval "\$$var" ? eval "\$$var" :
++		die "Could not find suitable command for $scheme" unless $cmd;
++		$dest = $Conf->{destination};
++		my $cache = $Conf->{cache};
++		my $arch = $Conf->{arch};
++		my $cdrom = $Conf->{cdrom_mount};
++		foreach my $var (qw/host port user passwd path dist pkg
++				 cache arch uri cdrom/) {
++		    map {
++			$_ =~ s{<$var(?:\|(.+?))?>}{
++			    defined eval "\$$var" ? eval "\$$var" :
+ 			    defined $1 ? $1 : "";
+-		    }gsex;
+-		} ($cmd, $dest)
+-	    }
+-	    $dest =~ s/(\/|_)+/_/go;
+-	    $cmd =~ s/<dest>/$dest/g;
+-	    my $hash;
+-	    foreach (qw/host port user passwd path dist pkg uri line
+-		     dest cmd/) {
+-		$hash->{$_} = eval "\$$_";
+-	    }
+-	    push @$ret, $hash;
+-	};
++			}gsex;
++		    } ($cmd, $dest)
++		}
++		$dest =~ s/(\/|_)+/_/go;
++		$cmd =~ s/<dest>/$dest/g;
++		my $hash;
++		foreach (qw/host port user passwd path dist pkg uri line
++			 dest cmd/) {
++		    $hash->{$_} = eval "\$$_";
++		}
++		push @$ret, $hash;
++	    };
++	}
++	close SOURCE;
+     }
+-    close SOURCE;
+     return $ret;
+ }
+ 
+@@ -376,8 +380,16 @@
+ 
+     $_config->init;
+     $Conf->{arch} ||= $_config->{'APT::Architecture'};
+-    $Conf->{sources_list} ||=  $_config->{'Dir'} .
+-	$_config->{'Dir::Etc'} . $_config->{'Dir::Etc::sourcelist'};
++    $Conf->{sources_list} = [
++			     $Conf->{sources_list} ?
++			     $Conf->{sources_list} :
++			     (
++			      $_config->{'Dir'} . $_config->{'Dir::Etc'} .
++			      $_config->{'Dir::Etc::sourcelist'},
++			      glob($_config->{'Dir'} . $_config->{'Dir::Etc'} .
++				   $_config->{'Dir::Etc::sourceparts'} .
++				   '/*.list'))
++    ];
+     $Conf->{cache} ||= $_config->{'Dir'} . $_config->{'Dir::Cache'} . 'apt-file';
+     $Conf->{cache} =~ s/\/\s*$//;
+     $Conf->{cdrom_mount} ||= $_config->{'Acquire::cdrom::Mount'} ||
+@@ -407,7 +419,7 @@
+     print_help($Conf->{help}-1) if defined $Conf->{help};
+ 
+     my $sources = parse_sources_list $Conf->{sources_list};
+-    error "No valid sources in $Conf->{sources_list}" if ! defined
++    error "No valid sources in @{$Conf->{sources_list}}" if ! defined
+ 	$sources;
+ 
+     $actions->{$Conf->{action}}->($sources);

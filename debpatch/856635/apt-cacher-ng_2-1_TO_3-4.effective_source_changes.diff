@@ -1,0 +1,2120 @@
+diff -Nru apt-cacher-ng-2/include/acfg.h apt-cacher-ng-3/include/acfg.h
+--- apt-cacher-ng-2/include/acfg.h	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/include/acfg.h	2017-03-19 14:23:30.000000000 +0100
+@@ -10,11 +10,8 @@
+ // 1757961
+ #define ACNG_DEF_PORT "3142"
+ 
+-#define ACFG_REDIRMAX_DEFAULT 5
+-
+ namespace acng
+ {
+-static const int RESERVED_DEFVAL = -4223;
+ 
+ struct ltstring {
+ 	bool operator()(const mstring &s1, const mstring &s2) const {
+@@ -26,6 +23,9 @@
+ 
+ namespace cfg
+ {
++static const int RESERVED_DEFVAL = -4223;
++
++static const int REDIRMAX_DEFAULT = 5;
+ 
+ extern mstring cachedir, logdir, confdir, fifopath, user, group, pidfile, suppdir,
+ reportpage, vfilepat, pfilepat, wfilepat, agentname, adminauth, adminauthB64,
+@@ -40,6 +40,7 @@
+ exporigin, logxff, oldupdate, recompbz2, nettimeout, updinterval, forwardsoap, dirperms, fileperms,
+ maxtempdelay, redirmax, vrangeops, stucksecs, persistoutgoing, pipelinelen, exsupcount,
+ optproxytimeout, patrace, maxdlspeed, maxredlsize, nsafriendly, trackfileuse, exstarttradeoff;
++extern int allocspace;
+ 
+ // processed config settings
+ extern const tHttpUrl* GetProxyInfo();
+diff -Nru apt-cacher-ng-2/include/acsyscap.h.in apt-cacher-ng-3/include/acsyscap.h.in
+--- apt-cacher-ng-2/include/acsyscap.h.in	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/include/acsyscap.h.in	2017-03-19 14:23:30.000000000 +0100
+@@ -20,6 +20,7 @@
+ #cmakedefine HAVE_SYS_MOUNT_H
+ #cmakedefine HAVE_SYS_VFS_H
+ #cmakedefine HAVE_SSL
++#cmakedefine HAVE_SSL_HOST_VALIDATION
+ #cmakedefine HAVE_TOMCRYPT
+ #cmakedefine HAVE_SD_NOTIFY
+ #cmakedefine HAVE_LINUX_EVENTFD
+diff -Nru apt-cacher-ng-2/include/cacheman.h apt-cacher-ng-3/include/cacheman.h
+--- apt-cacher-ng-2/include/cacheman.h	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/include/cacheman.h	2017-03-19 14:23:30.000000000 +0100
+@@ -31,9 +31,6 @@
+ static cmstring sIndex("Index");
+ static cmstring sslIndex("/Index");
+ 
+-static cmstring sfxXzBz2GzLzma[] = { ".xz", ".bz2", ".gz", ".lzma"};
+-static cmstring sfxXzBz2GzLzmaNone[] = { ".xz", ".bz2", ".gz", ".lzma", ""};
+-
+ bool CompDebVerLessThan(cmstring &s1, cmstring s2);
+ extern time_t m_gMaintTimeNow;
+ 
+@@ -174,17 +171,7 @@
+ 	virtual void MarkObsolete(cmstring&) {};
+ 
+ 	// for compressed map of special stuff
+-	inline mstring AddLookupGetKey(cmstring &sFilePathRel, cmstring& errorReason)
+-	{
+-		unsigned id = m_pathMemory.size();
+-		auto it = m_pathMemory.find(sFilePathRel);
+-		if(it==m_pathMemory.end())
+-			m_pathMemory[sFilePathRel] = {errorReason, id};
+-		else
+-			id = it->second.id;
+-		char buf[30];
+-		return mstring(buf, snprintf(buf, sizeof(buf), " name=\"kf\" value=\"%x\"", id));
+-	}
++	mstring AddLookupGetKey(cmstring &sFilePathRel, cmstring& errorReason);
+ 
+ 	// stuff in those directories must be managed by some top-level index files
+ 	// whitelist patterns do not apply there!
+diff -Nru apt-cacher-ng-2/include/conn.h apt-cacher-ng-3/include/conn.h
+--- apt-cacher-ng-2/include/conn.h	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/include/conn.h	2017-03-19 14:23:30.000000000 +0100
+@@ -17,20 +17,20 @@
+ class job;
+ class header;
+ 
+-class con;
+-typedef SHARED_PTR<con> tConPtr;
++class conn;
++typedef SHARED_PTR<conn> tConPtr;
+ 
+-class con // : public tRunable
++class conn // : public tRunable
+ {
+    public:
+-      con(int fdId, const char *client);
+-      virtual ~con();
++      conn(int fdId, const char *client);
++      virtual ~conn();
+       
+       void WorkLoop();
+       
+    private:
+-	   con& operator=(const con&);// { /* ASSERT(!"Don't copy con objects"); */ };
+-	   con(const con&);// { /* ASSERT(!"Don't copy con objects"); */ };
++	   conn& operator=(const conn&);// { /* ASSERT(!"Don't copy con objects"); */ };
++	   conn(const conn&);// { /* ASSERT(!"Don't copy con objects"); */ };
+ 
+ 	      //! Terminate the connection descriptors gracefully
+ 	      void ShutDown();
+diff -Nru apt-cacher-ng-2/include/dlcon.h apt-cacher-ng-3/include/dlcon.h
+--- apt-cacher-ng-2/include/dlcon.h	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/include/dlcon.h	2017-03-19 14:23:30.000000000 +0100
+@@ -52,7 +52,8 @@
+ 
+         bool AddJob(tFileItemPtr m_pItem, const tHttpUrl *pForcedUrl,
+         		const cfg::tRepoData *pRepoDesc,
+-        		cmstring *sPatSuffix, LPCSTR reqHead);
++        		cmstring *sPatSuffix, LPCSTR reqHead,
++				int nMaxRedirection);
+ 
+         mstring m_sXForwardedFor;
+ 
+diff -Nru apt-cacher-ng-2/include/expiration.h apt-cacher-ng-3/include/expiration.h
+--- apt-cacher-ng-2/include/expiration.h	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/include/expiration.h	2017-03-19 14:23:30.000000000 +0100
+@@ -27,6 +27,7 @@
+ protected:
+ 
+ 	std::unordered_map<mstring,std::map<mstring,tDiskFileInfo>> m_trashFile2dir2Info;
++	tStrVec m_oversizedFiles;
+ 
+ 	void RemoveAndStoreStatus(bool bPurgeNow);
+ 	void LoadPreviousData(bool bForceInsert);
+@@ -58,6 +59,7 @@
+ 
+ 	void HandleDamagedFiles();
+ 	void ListExpiredFiles();
++	void TrimFiles();
+ };
+ 
+ }
+diff -Nru apt-cacher-ng-2/include/fileitem.h apt-cacher-ng-3/include/fileitem.h
+--- apt-cacher-ng-2/include/fileitem.h	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/include/fileitem.h	2017-03-19 14:23:30.000000000 +0100
+@@ -96,6 +96,7 @@
+ 	FiStatus m_status;
+ 	mstring m_sPathRel;
+ 	time_t m_nTimeDlStarted, m_nTimeDlDone;
++	virtual int Truncate2checkedSize() {return 0;};
+ 
+ private:
+ 	// helper data for global registration control. Access is synchronized by the global lock,
+@@ -111,6 +112,7 @@
+ 	inline fileitem_with_storage(cmstring &s) {m_sPathRel=s;};
+ 	inline fileitem_with_storage(cmstring &s, int nUsers) {m_sPathRel=s; usercount=nUsers; };
+ 	virtual ~fileitem_with_storage();
++        int Truncate2checkedSize() override;
+ 	// send helper like wrapper for sendfile. Just declare virtual here to make it better customizable later.
+ 	virtual ssize_t SendData(int confd, int filefd, off_t &nSendPos, size_t nMax2SendNow) override;
+ 	virtual bool DownloadStartedStoreHeader(const header & h, size_t hDataLen,
+@@ -155,9 +157,9 @@
+ 	inline tFileItemPtr getFiPtr() {return m_ptr;}
+ 	inline operator bool() const {return (bool) m_ptr;}
+ 
++	tFileItemPtr m_ptr;
+ 
+ private:
+-	tFileItemPtr m_ptr;
+ 	void Unreg();
+ 
+ 	fileItemMgmt(const fileItemMgmt &src);
+diff -Nru apt-cacher-ng-2/include/job.h apt-cacher-ng-3/include/job.h
+--- apt-cacher-ng-2/include/job.h	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/include/job.h	2017-03-19 14:23:30.000000000 +0100
+@@ -12,7 +12,7 @@
+ namespace acng
+ {
+ 
+-class con;
++class conn;
+ 
+ class job {
+ 
+@@ -37,7 +37,7 @@
+ 	   	STATE_FINISHJOB
+ 	   } eJobState;
+ 
+-      job(header *h, con *pParent);
++      job(header *h, conn *pParent);
+       ~job();
+       //  __attribute__((externally_visible))  
+       
+@@ -51,7 +51,7 @@
+    private:
+       
+ 	  int m_filefd;
+-	  con *m_pParentCon;
++	  conn *m_pParentCon;
+       
+       bool m_bChunkMode;
+       bool m_bClientWants2Close;
+diff -Nru apt-cacher-ng-2/include/maintenance.h apt-cacher-ng-3/include/maintenance.h
+--- apt-cacher-ng-2/include/maintenance.h	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/include/maintenance.h	2017-03-19 14:23:30.000000000 +0100
+@@ -6,9 +6,11 @@
+ #include "sockio.h"
+ #include "acbuf.h"
+ 
++static const std::string sBRLF("<br>\n");
++
+ #ifdef DEBUG
+-#define MTLOGDEBUG(x) { SendFmt << x << "\n<br>\n"; }
+-#define MTLOGASSERT(x, y) {if(!(x)) SendFmt << "<div class=\"ERROR\">" << y << "</div>\n<br>\n";}
++#define MTLOGDEBUG(x) { SendFmt << x << sBRLF; }
++#define MTLOGASSERT(x, y) {if(!(x)) SendFmt << "<div class=\"ERROR\">" << y << "</div>\n" << sBRLF;}
+ //#define MTLOGVERIFY(x, y) MTLOGASSERT(x, y)
+ #else
+ #define MTLOGASSERT(x, y) {}
+@@ -127,6 +129,11 @@
+ 	static tSpecialRequest* MakeMaintWorker(const tRunParms& parms);
+ };
+ 
++std::string to_base36(unsigned int val);
++static const string relKey("/Release"), inRelKey("/InRelease");
++static cmstring sfxXzBz2GzLzma[] = { ".xz", ".bz2", ".gz", ".lzma"};
++static cmstring sfxXzBz2GzLzmaNone[] = { ".xz", ".bz2", ".gz", ".lzma", ""};
++static cmstring sfxMiscRelated[] = { "", ".xz", ".bz2", ".gz", ".lzma", ".gpg", ".diff/Index"};
+ }
+ 
+ #endif /*MAINTENANCE_H_*/
+diff -Nru apt-cacher-ng-2/include/meta.h apt-cacher-ng-3/include/meta.h
+--- apt-cacher-ng-2/include/meta.h	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/include/meta.h	2017-03-19 14:23:30.000000000 +0100
+@@ -19,6 +19,7 @@
+ #include <cstdio>
+ #include <ctime>
+ #include <cstring>
++#include <functional>
+ 
+ #include <fcntl.h>
+ #include <pthread.h>
+@@ -40,6 +41,13 @@
+ #define EMPLACE_PAIR_COMPAT(M,K,V) (M).emplace(K,V)
+ #endif
+ 
++// little STFU helper
++#if __GNUC__ >= 7
++#define __just_fall_through [[fallthrough]]
++#else
++#define __just_fall_through
++#endif
++
+ namespace acng
+ {
+ 
+@@ -288,7 +296,7 @@
+ }
+ 
+ mstring offttosH(off_t n);
+-
++mstring offttosHdotted(off_t n);
+ tStrDeq ExpandFilePattern(cmstring& pattern, bool bSorted=false, bool bQuiet=false);
+ 
+ //void MakeAbsolutePath(mstring &dirToFix, const mstring &reldir);
+@@ -439,7 +447,7 @@
+ #define AC_UNLIKELY(x) x
+ #endif
+ 
+-// shortcut for the non-invasive lookup and copy of stuff from mapps
++// shortcut for the non-invasive lookup and copy of stuff from maps
+ #define ifThereStoreThere(x,y,z) { auto itFind = (x).find(y); if(itFind != (x).end()) z = itFind->second; }
+ #define ifThereStoreThereAndBreak(x,y,z) { auto itFind = (x).find(y); if(itFind != (x).end()) { z = itFind->second; break; } }
+ 
+diff -Nru apt-cacher-ng-2/include/showinfo.h apt-cacher-ng-3/include/showinfo.h
+--- apt-cacher-ng-2/include/showinfo.h	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/include/showinfo.h	2017-03-19 14:23:30.000000000 +0100
+@@ -23,8 +23,7 @@
+ 
+ 	// uses fallback lookup map, can be feed with data in subclass constructor
+ 	virtual void SendProp(cmstring &key);
+-	// XXX: could make this virtual and customizable, if needed
+-	int CheckCondition(LPCSTR key, size_t len); // 0: true, 1: false, <0: unknown condition
++	virtual int CheckCondition(LPCSTR key, size_t len); // 0: true, 1: false, <0: unknown condition
+ 
+ private:
+ 	tMarkupFileSend(const tMarkupFileSend&) =delete;
+@@ -43,9 +42,12 @@
+ 	std::set<unsigned> files;
+ 	tSS sHidParms;
+ 	mstring sVisualMode; // Truncat or Delet
++	tStrDeq extraFiles;
+ public:
+ 	tDeleter(const tRunParms& parms, cmstring& vmode);
+ 	virtual void SendProp(cmstring &key) override;
++	//virtual int CheckCondition(LPCSTR key, size_t len) override; // 0: true, 1: false, <0: unknown condition
++
+ };
+ 
+ struct tShowInfo : public tMarkupFileSend
+diff -Nru apt-cacher-ng-2/source/CMakeLists.txt apt-cacher-ng-3/source/CMakeLists.txt
+--- apt-cacher-ng-2/source/CMakeLists.txt	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/source/CMakeLists.txt	2017-03-19 14:23:30.000000000 +0100
+@@ -1,45 +1,16 @@
+-PROJECT(ACNG CXX C)
+-
+-# sources to strip from the globed list, to be added as needed
+-LIST(APPEND MAINSRCS
+-        "${CMAKE_CURRENT_SOURCE_DIR}/apt-cacher.cc"
+-        "${CMAKE_CURRENT_SOURCE_DIR}/acngtool.cc"
+-)
+-LIST(APPEND SHAREDSRCS
+-        "${CMAKE_CURRENT_SOURCE_DIR}/acbuf.cc"
+-        "${CMAKE_CURRENT_SOURCE_DIR}/acfg.cc"
+-        "${CMAKE_CURRENT_SOURCE_DIR}/dirwalk.cc"
+-        "${CMAKE_CURRENT_SOURCE_DIR}/dlcon.cc"
+-        "${CMAKE_CURRENT_SOURCE_DIR}/tcpconnect.cc"
+-        "${CMAKE_CURRENT_SOURCE_DIR}/header.cc"
+-        "${CMAKE_CURRENT_SOURCE_DIR}/acfg_defaults.cc"
+-        "${CMAKE_CURRENT_SOURCE_DIR}/meta.cc"
+-        "${CMAKE_CURRENT_SOURCE_DIR}/filereader.cc"
+-        "${CMAKE_CURRENT_SOURCE_DIR}/aclogger.cc"
+-        "${CMAKE_CURRENT_SOURCE_DIR}/fileitem.cc"
+-        "${CMAKE_CURRENT_SOURCE_DIR}/filelocks.cc"
+-        "${CMAKE_CURRENT_SOURCE_DIR}/caddrinfo.cc"
+-        "${CMAKE_CURRENT_SOURCE_DIR}/fileio.cc"
+-)
+-
+-# remaining srcs, only for apt-cacher-ng
+-FILE(GLOB SRCS "${CMAKE_CURRENT_SOURCE_DIR}/*.cc")
+-list(SORT SRCS)
+-list(REMOVE_ITEM SRCS ${MAINSRCS})
+-list(REMOVE_ITEM SRCS ${SHAREDSRCS})
++set(SHAREDSRCS acbuf.cc acfg.cc acfg_defaults.cc aclogger.cc caddrinfo.cc dirwalk.cc dlcon.cc fileio.cc fileitem.cc filelocks.cc filereader.cc header.cc meta.cc tcpconnect.cc)
++set(ACNG_SRCS apt-cacher.cc bgtask.cc cacheman.cc cleaner.cc conn.cc conserver.cc expiration.cc job.cc lockable.cc maintenance.cc mirror.cc pkgimport.cc rfc2553emu.cc showinfo.cc)
+ 
+ ADD_LIBRARY(acngstuff OBJECT ${SHAREDSRCS})
+-SET_TARGET_PROPERTIES(acngstuff PROPERTIES COMPILE_FLAGS "${ACNG_CXXFLAGS_COMMON} ${lsd_CFLAGS}")
++SET_TARGET_PROPERTIES(acngstuff PROPERTIES COMPILE_FLAGS "${ACNG_COMPFLAGS} ${ACNG_CXXFLAGS} ${CFLAGS_DAEMON} ${CFLAGS_PTHREAD}")
+ 
+-ADD_EXECUTABLE(apt-cacher-ng $<TARGET_OBJECTS:acngstuff> ${SRCS} apt-cacher.cc)
+-TARGET_LINK_LIBRARIES(apt-cacher-ng ${BaseNetworkLibs} ${ServerLibs} ${CompLibs} ${SSL_LIB_LIST} ${lsd_LDFLAGS} ${EXTRA_LIBS_ACNG})
+-# I'd like this method more but apparently LINK_FLAGS is always prepended, no way to append it
+-#SET_TARGET_PROPERTIES(apt-cacher-ng PROPERTIES LINK_FLAGS "${lsd_LDFLAGS}")
+-SET_TARGET_PROPERTIES(apt-cacher-ng PROPERTIES COMPILE_FLAGS "${ACNG_CXXFLAGS_COMMON} ${lsd_CFLAGS}")
++ADD_EXECUTABLE(apt-cacher-ng $<TARGET_OBJECTS:acngstuff> ${ACNG_SRCS} apt-cacher.cc $<TARGET_OBJECTS:osslcompat>)
++TARGET_LINK_LIBRARIES(apt-cacher-ng ${BaseNetworkLibs} ${ServerLibs} ${CompLibs} ${SSL_LIB_LIST} ${LDFLAGS_DAEMON} ${CMAKE_THREAD_LIBS_INIT} ${EXTRA_LIBS_ACNG})
++SET_TARGET_PROPERTIES(apt-cacher-ng PROPERTIES COMPILE_FLAGS "${ACNG_COMPFLAGS} ${ACNG_CXXFLAGS} ${CFLAGS_DAEMON} ${CFLAGS_PTHREAD}")
+ INSTALL(TARGETS apt-cacher-ng DESTINATION ${SBINDIR})
+ 
+-ADD_EXECUTABLE(acngtool acngtool.cc $<TARGET_OBJECTS:acngstuff>)
+-SET_TARGET_PROPERTIES(acngtool PROPERTIES COMPILE_FLAGS "${ACNG_CXXFLAGS_COMMON}")
+-TARGET_LINK_LIBRARIES(acngtool ${BaseNetworkLibs} ${CompLibs} ${SSL_LIB_LIST} ${EXTRA_LIBS_ACNGTOOL})
++ADD_EXECUTABLE(acngtool acngtool.cc $<TARGET_OBJECTS:acngstuff> $<TARGET_OBJECTS:osslcompat>)
++SET_TARGET_PROPERTIES(acngtool PROPERTIES COMPILE_FLAGS "${ACNG_COMPFLAGS} ${ACNG_CXXFLAGS} ${CFLAGS_PTHREAD}")
++TARGET_LINK_LIBRARIES(acngtool ${BaseNetworkLibs} ${CompLibs} ${SSL_LIB_LIST} ${CMAKE_THREAD_LIBS_INIT} ${EXTRA_LIBS_ACNGTOOL})
+ INSTALL(TARGETS acngtool DESTINATION ${LIBDIR})
+ 
+diff -Nru apt-cacher-ng-2/source/acfg.cc apt-cacher-ng-3/source/acfg.cc
+--- apt-cacher-ng-2/source/acfg.cc	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/source/acfg.cc	2017-03-19 14:23:30.000000000 +0100
+@@ -158,7 +158,9 @@
+ 		,{  "MaxInresponsiveDlSize",             &maxredlsize,      nullptr,    10, false}
+ 		,{  "OptProxyCheckInterval",             &optProxyCheckInt, nullptr,    10, false}
+ 		,{  "TrackFileUse",		             	 &trackfileuse,		nullptr,    10, false}
+-		// octal base interpretation of UNIX file permissions
++        ,{  "ReserveSpace",                      &allocspace, 		nullptr ,   10, false}
++
++        // octal base interpretation of UNIX file permissions
+ 		,{  "DirPerms",                          &dirperms,         nullptr,    8, false}
+ 		,{  "FilePerms",                         &fileperms,        nullptr,    8, false}
+ 
+@@ -1186,7 +1188,7 @@
+    }
+ 
+    if(redirmax == RESERVED_DEFVAL)
+-	   redirmax = forcemanaged ? 0 : ACFG_REDIRMAX_DEFAULT;
++	   redirmax = forcemanaged ? 0 : REDIRMAX_DEFAULT;
+ 
+    if(!persistoutgoing)
+ 	   pipelinelen = 1;
+diff -Nru apt-cacher-ng-2/source/acfg_defaults.cc apt-cacher-ng-3/source/acfg_defaults.cc
+--- apt-cacher-ng-2/source/acfg_defaults.cc	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/source/acfg_defaults.cc	2017-03-19 14:23:30.000000000 +0100
+@@ -135,6 +135,8 @@
+ 
+ std::atomic_bool degraded(false);
+ 
++int allocspace = 1024*1024;
++
+ }
+ 
+ }
+diff -Nru apt-cacher-ng-2/source/aclogger.cc apt-cacher-ng-3/source/aclogger.cc
+--- apt-cacher-ng-2/source/aclogger.cc	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/source/aclogger.cc	2017-03-19 14:23:30.000000000 +0100
+@@ -242,6 +242,7 @@
+ 
+ void close(bool bReopen)
+ {
++	// let's try to store a snapshot of the current stats
+ 	auto snapIn = offttos(totalIn.exchange(0));
+ 	auto snapOut = offttos(totalOut.exchange(0));
+ 	timeval tp;
+@@ -250,8 +251,9 @@
+ 			+ acng::offttos(tp.tv_sec) + "." + acng::ltos(tp.tv_usec);
+ 	auto outLinkPath = CACHE_BASE + cfg::privStoreRelQstatsSfx + "/o/"
+ 			+ acng::offttos(tp.tv_sec) + "." + acng::ltos(tp.tv_usec);
+-	symlink(snapIn.c_str(), inLinkPath.c_str());
+-	symlink(snapOut.c_str(), outLinkPath.c_str());
++	ignore_value(symlink(snapIn.c_str(), inLinkPath.c_str()));
++	ignore_value(symlink(snapOut.c_str(), outLinkPath.c_str()));
++
+ 
+ 	if(!logIsEnabled)
+ 		return;
+diff -Nru apt-cacher-ng-2/source/acngtool.cc apt-cacher-ng-3/source/acngtool.cc
+--- apt-cacher-ng-2/source/acngtool.cc	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/source/acngtool.cc	2017-03-19 14:23:30.000000000 +0100
+@@ -270,7 +270,7 @@
+ {
+ 	std::string path;
+ 	time_t lastDate;
+-	off_t size;
++	blkcnt_t blocks;
+ 	// for prio.queue, oldest shall be on top
+ 	bool operator<(const pkgEntry &other) const
+ 	{
+@@ -294,10 +294,10 @@
+ 	std::priority_queue<pkgEntry/*, vector<pkgEntry>, cmpLessDate */ > delQ;
+ 	std::unordered_map<string, pair<time_t,off_t> > related;
+ 
+-	off_t totalSize = 0;
++	blkcnt_t totalBlocks = 0;
+ 
+ 	IFileHandler::FindFiles(cfg::cachedir,
+-			[&delQ, &totalSize, &related, &incIfiles](cmstring & path, const struct stat& finfo) -> bool
++			[&delQ, &totalBlocks, &related, &incIfiles](cmstring & path, const struct stat& finfo) -> bool
+ 			{
+ 		// reference date used in the prioqueue heap
+ 		auto dateLatest = max(finfo.st_ctim.tv_sec, finfo.st_mtim.tv_sec);
+@@ -314,26 +314,15 @@
+ 			otherName = path + ".head";
+ 		}
+ 		auto ftype = rex::GetFiletype(pkgPath);
+-		switch(ftype)
+-		{
+-		case rex::eMatchType::FILE_VOLATILE:
+-		case rex::eMatchType::FILE_SPECIAL_VOLATILE:
+-			if(!incIfiles)
+-				return true;
+-			break;
+-		// case rechecks::eMatchType::FILE_WHITELIST:
+-		default:
++		if((ftype==rex::FILE_SPECIAL_VOLATILE || ftype == rex::FILE_VOLATILE) && !incIfiles)
+ 			return true;
+-		case rex::eMatchType::FILE_SOLID:
+-		case rex::eMatchType::FILE_SPECIAL_SOLID:
+-			break; // ok
+-		}
++		// anything else is considered junk
+ 
+ 		auto other = related.find(otherName);
+ 		if(other == related.end())
+ 		{
+ 			// the related file will appear soon
+-			related.insert(make_pair(path, make_pair(dateLatest, finfo.st_size)));
++			related.insert(make_pair(path, make_pair(dateLatest, finfo.st_blocks)));
+ 			return true;
+ 		}
+ 		// care only about stamps on .head files (track mode)
+@@ -341,11 +330,11 @@
+ 		if( (cfg::trackfileuse && !isHead) || (!cfg::trackfileuse && isHead))
+ 			dateLatest = other->second.first;
+ 
+-		auto bothSize = (finfo.st_size + other->second.second);
++		auto bothBlocks = (finfo.st_blocks + other->second.second);
+ 		related.erase(other);
+ 
+-		totalSize += bothSize;
+-		delQ.push({pkgPath, dateLatest, bothSize});
++		totalBlocks += bothBlocks;
++		delQ.push({pkgPath, dateLatest, bothBlocks});
+ 
+ 		return true;
+ 			}
+@@ -356,12 +345,27 @@
+ 		delQ.push({kv.first, kv.second.first, kv.second.second});
+ 	related.clear();
+ 
++	auto foundSizeString = offttosHdotted(totalBlocks*512);
++	blkcnt_t wantedBlocks = wantedSize / 512;
++
++	if(totalBlocks < wantedBlocks)
++	{
++		if(verbose)
++			cout << "Requested size smaller than current size, nothing to do." << endl;
++		return 0;
++	}
++
+ 	if(verbose)
+-		cout << "Found " << totalSize << " bytes of relevant data, reducing to " << wantedSize << endl;
++	{
++		cout << "Found " << foundSizeString << " bytes of relevant data, reducing to "
++		<< offttosHdotted(wantedSize) << " (~"<< (wantedBlocks*100/totalBlocks) << "%)"
++		<< endl;
++	}
+ 	while(!delQ.empty())
+ 	{
+-		bool todel = (totalSize > wantedSize);
+-		totalSize -= delQ.top().size;
++		bool todel = (totalBlocks > wantedBlocks);
++		if(todel)
++			totalBlocks -= delQ.top().blocks;
+ 		const char *msg = 0;
+ 		if(verbose || dryrun)
+ 			msg = (todel ? "Delete: " : "Keep: " );
+@@ -375,6 +379,11 @@
+ 		}
+ 		delQ.pop();
+ 	}
++	if(verbose)
++	{
++		cout << "New size: " << offttosHdotted(totalBlocks*512) << " (before: "
++		<< foundSizeString << ")" << endl;
++	}
+ 	return 0;
+ }
+ 
+@@ -1028,7 +1037,7 @@
+ 	dlcon dl(true, nullptr, pDlconFac);
+ 
+ 	auto fi=fac->Create();
+-	dl.AddJob(fi, &url, nullptr, nullptr, 0);
++	dl.AddJob(fi, &url, nullptr, nullptr, 0, cfg::REDIRMAX_DEFAULT);
+ 	dl.WorkLoop();
+ 	auto fistatus = fi->GetStatus();
+ 	header hh = fi->GetHeader();
+diff -Nru apt-cacher-ng-2/source/apt-cacher.cc apt-cacher-ng-3/source/apt-cacher.cc
+--- apt-cacher-ng-2/source/apt-cacher.cc	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/source/apt-cacher.cc	2017-03-19 14:23:30.000000000 +0100
+@@ -233,7 +233,7 @@
+ 		 */
+ 		handle_sigbus();
+ 		log::flush();
+-		//no break
++		__just_fall_through;
+ 	case (SIGTERM):
+ 	case (SIGINT):
+ 	case (SIGQUIT): {
+diff -Nru apt-cacher-ng-2/source/bgtask.cc apt-cacher-ng-3/source/bgtask.cc
+--- apt-cacher-ng-2/source/bgtask.cc	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/source/bgtask.cc	2017-03-19 14:23:30.000000000 +0100
+@@ -49,8 +49,18 @@
+ cmstring GetFooter()
+ {
+         return mstring("<hr><address>Server: ") + cfg::agentname
+-                + "&nbsp;&nbsp;|&nbsp;&nbsp;<a href=\"https://flattr.com/thing/51105/Apt-Cacher-NG\">Flattr this!"
+-                "</a>&nbsp;&nbsp;|&nbsp;&nbsp;<a href=\"http://www.unix-ag.uni-kl.de/~bloch/acng/\">Apt-Cacher NG homepage</a></address>";
++                + "&nbsp;&nbsp;|&nbsp;&nbsp;<a\nhref=\"https://flattr.com/thing/51105/Apt-Cacher-NG\">Flattr this!"
++                "</a>&nbsp;&nbsp;|&nbsp;&nbsp;<a\nhref=\"http://www.unix-ag.uni-kl.de/~bloch/acng/\">Apt-Cacher NG homepage</a></address>";
++}
++
++std::string to_base36(unsigned int val)
++{
++	static std::string base36 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
++	std::string result;
++	do {
++		result.insert(0, 1, base36[val % 36]);
++	} while (val /= 36);
++	return result;
+ }
+ 
+ /*
+@@ -234,7 +244,7 @@
+ 					SendFmtRemote << err.first << ": <label>"
+ 							<< err.second.msg
+ 							<<  "<input type=\"checkbox\" name=\"kf\" value=\""
+-							<< tSS::hex << err.second.id << tSS::dec
++							<< to_base36(err.second.id)
+ 							<< "\"</label>" << hendl;
+ 				}
+ 
+@@ -313,14 +323,21 @@
+ {
+ 	mstring ret;
+ 	tSS buf;
+-	//auto hm = m_delCboxFilter.size();
++
++	// add the recent command, then the file records
++
++	auto addLine = [&buf](unsigned id, cmstring& s)
++		{
++		unsigned len=s.size();
++		buf.add((const char*) &id, sizeof(id))
++				.add((const char*) &len, sizeof(len))
++				.add(s.data(), s.length());
++		};
++	// don't care about the ID, compression will solve it
++	addLine(0, m_parms.cmd);
+ 	for(const auto& kv: m_pathMemory)
+-	{
+-		unsigned len=kv.first.size();
+-		buf.add((const char*) &kv.second.id, sizeof(kv.second.id))
+-		.add((const char*) &len, sizeof(len))
+-		.add(kv.first.data(), kv.first.length());
+-	}
++		addLine(kv.second.id, kv.first);
++
+ 	unsigned uncompSize=buf.size();
+ 	tSS gzBuf;
+ 	uLongf gzSize = compressBound(buf.size())+32; // extra space for length header
+@@ -330,8 +347,7 @@
+ 	if(Z_OK == compress((Bytef*) gzBuf.wptr(), &gzSize,
+ 			(const Bytef*)buf.rptr(), buf.size()))
+ 	{
+-		ret = "<input type=\"hidden\" name=\"blob\" value=\"";
+-//		ret += BytesToHexString((const uint8_t*) gzBuf.wptr(), (unsigned short) gzSize);
++		ret = "<input type=\"hidden\" name=\"blob\"\nvalue=\"";
+ 		ret += EncodeBase64(gzBuf.rptr(), (unsigned short) gzSize+sizeof(uncompSize));
+ 		ret += "\">";
+ 		return ret;
+diff -Nru apt-cacher-ng-2/source/cacheman.cc apt-cacher-ng-3/source/cacheman.cc
+--- apt-cacher-ng-2/source/cacheman.cc	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/source/cacheman.cc	2017-03-19 14:23:30.000000000 +0100
+@@ -29,8 +29,8 @@
+ #include <unistd.h>
+ 
+ #ifdef DEBUG
+-#define DEBUGIDX
+ #warning enable, and it will spam a lot!
++//#define DEBUGIDX
+ //#define DEBUGSPAM
+ #endif
+ 
+@@ -44,7 +44,7 @@
+ static cmstring dis("/binary-");
+ static cmstring oldStylei18nIdx("/i18n/Index");
+ static cmstring diffIdxSfx(".diff/Index");
+-static const string relKey("/Release"), inRelKey("/InRelease");
++
+ time_t m_gMaintTimeNow=0;
+ 
+ static cmstring sPatchCombinedRel("_actmp/combined.diff");
+@@ -413,7 +413,7 @@
+ 		}
+ 	}
+ 
+-	m_pDlcon->AddJob(pFi, pResolvedDirectUrl, pRepoDesc, &sRemoteSuffix, 0);
++	m_pDlcon->AddJob(pFi, pResolvedDirectUrl, pRepoDesc, &sRemoteSuffix, 0, cfg::REDIRMAX_DEFAULT);
+ 
+ 	m_pDlcon->WorkLoop();
+ 	if (pFi->WaitForFinish(nullptr) == fileitem::FIST_COMPLETE
+@@ -806,7 +806,7 @@
+ 
+ #ifdef DEBUG_FLAGS
+ 	bool nix = stmiss!=fromRel.find("debrep/dists/squeeze/non-free/binary-amd64/");
+-	SendFmt<<"Replacing "<<toRel<<" with " << fromRel <<  "<br>\n";
++	SendFmt<<"Replacing "<<toRel<<" with " << fromRel <<  sBRLF;
+ #endif
+ 
+ 	if(!infoFrom)
+@@ -1447,7 +1447,7 @@
+ 		auto dbgDump = [&](const char *msg, int pfx) {
+ 			tSS printBuf;
+ 			printBuf << "#########################################################################<br>\n"
+-					<< "## " <<  msg  << "<br>\n"
++					<< "## " <<  msg  << sBRLF
+ 					<< "#########################################################################<br>\n";
+ 			for(const auto& cp : idxGroups)
+ 			{
+@@ -1469,6 +1469,13 @@
+ 
+ 	MTLOGDEBUG("<br><br><b>STARTING ULTIMATE INTELLIGENCE</b><br><br>");
+ 
++	if(m_bSkipIxUpdate)
++	{
++		SendFmt << "<span class=\"ERROR\">"
++				"Warning: Online Activity is disabled, some update errors might be not recoverable without it"
++				"<br></span>\n";
++	}
++
+ 	// this runs early with the state that is present on disk, before updating any file,
+ 	// since it deals with the "reality" in the cache
+ 
+@@ -2167,7 +2174,7 @@
+ 
+ 		//bool bNix=(it->first.find("experimental/non-free/binary-amd64/Packages.xz") != stmiss);
+ 
+-		SendChunk(string("Parsing metadata in ")+path2att.first+"<br>\n");
++		SendChunk(string("Parsing metadata in ")+path2att.first+sBRLF);
+ 
+ 		if( ! ParseAndProcessMetaFile(pkgHandler, path2att.first, itype))
+ 		{
+@@ -2176,7 +2183,7 @@
+ 				m_nErrorCount++;
+ 				SendChunk("<span class=\"ERROR\">An error occurred while reading this file, some contents may have been ignored.</span>\n");
+ 				AddDelCbox(path2att.first, "Index data processing error");
+-				SendChunk("<br>\n");
++				SendChunk(sBRLF);
+ 			}
+ 			continue;
+ 		}
+@@ -2211,9 +2218,24 @@
+ }
+ void cacheman::TellCount(unsigned nCount, off_t nSize)
+ {
+-	SendFmt << "<br>\n" << nCount <<" package file(s) marked "
++	SendFmt << sBRLF << nCount <<" package file(s) marked "
+ 			"for removal in few days. Estimated disk space to be released: "
+-			<< offttosH(nSize) << ".<br>\n<br>\n";
++			<< offttosH(nSize) << "." << sBRLF << sBRLF;
++}
++
++mstring cacheman::AddLookupGetKey(cmstring &sFilePathRel, cmstring& errorReason)
++{
++	unsigned id = m_pathMemory.size();
++	auto it = m_pathMemory.find(sFilePathRel);
++	if(it==m_pathMemory.end())
++		m_pathMemory[sFilePathRel] = {errorReason, id};
++	else
++		id = it->second.id;
++
++	mstring ret(WITHLEN(" name=\"kf\" value=\""));
++	ret +=to_base36(id);
++	ret += "\"";
++	return ret;
+ }
+ 
+ void cacheman::PrintStats(cmstring &title)
+@@ -2337,6 +2359,7 @@
+ bool cacheman::ProcessByHashReleaseFileRestoreFiles(cmstring& releasePathRel, cmstring& stripPrefix)
+ {
+ 	int errors = 0;
++
+ 	return ParseAndProcessMetaFile([this, &errors, &stripPrefix](const tRemoteFileInfo &entry) -> void
+ 	{
+ 		// ignore, those files are empty and are likely to report false positives
+@@ -2372,7 +2395,8 @@
+ 		if(!wantedState || (wantedState.st_size != entry.fpr.size
+ 				&& (contentMatch = entry.fpr.CheckFile(solidPathAbs))))
+ 		{
+-			SendFmt << "Restoring virtual file " << wantedPathRel
++			if(m_bVerbose)
++				SendFmt << "Restoring virtual file " << wantedPathRel
+ 					<< " (equal to " << solidPathRel << ")" << hendl;
+ 
+ 			// return with increased count if error happens
+@@ -2381,17 +2405,29 @@
+ 			header h;
+ 			// load by-hash header, check URL, rewrite URL, copy the stuff over
+ 			if(!h.LoadFromFile(SABSPATH(solidPathRel) + ".head") || ! h.h[header::XORIG])
++				{
++				if(m_bVerbose)
++					SendFmt << "Couldn't read" << SABSPATH(solidPathRel) << ".head<br>";
+ 				return;
++				}
+ 			string origin(h.h[header::XORIG]);
+ 			tStrPos pos = origin.rfind("by-hash/");
+ 			if(pos == stmiss)
+-				return;
++			{
++			if(m_bVerbose)
++				SendFmt << SABSPATH(solidPathRel) << " is not from by-hash folder<br>";
++			return;
++			}
+ 			h.set(header::XORIG, origin.substr(0, pos) + entry.sFileName);
+ 			// most servers report crap type on by-hash files, use generic one
+ 			h.set(header::CONTENT_TYPE, "octet/stream");
+ 			//	should be ok				h.set(header::CONTENT_LENGTH, entry.fpr.size)
+ 			if(!Inject(solidPathRel, wantedPathRel, false, &h, false))
+-				return;
++			{
++			if(m_bVerbose)
++				SendChunk("Couldn't install<br>");
++			return;
++			}
+ 			auto& flags = SetFlags(wantedPathRel);
+ 			if(flags.vfile_ondisk)
+ 				flags.uptodate = true;
+@@ -2416,7 +2452,9 @@
+ 		// path relative to cache folder
+ 		if(!ProcessByHashReleaseFileRestoreFiles(snapPathInXstore, srcPrefix))
+ 		{
+-			SendFmt << "Error at " << snapPathInXstore << hendl;
++			SendFmt << "There were error(s) processing " << snapPathInXstore << ", ignoring..."<< hendl;
++			if(!m_bVerbose)
++				SendChunk("Enable verbosity to see more");
+ 			return ret;
+ 		}
+ #ifdef DEBUGIDX
+diff -Nru apt-cacher-ng-2/source/cleaner.cc apt-cacher-ng-3/source/cleaner.cc
+--- apt-cacher-ng-2/source/cleaner.cc	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/source/cleaner.cc	2017-03-19 14:23:30.000000000 +0100
+@@ -98,7 +98,7 @@
+ 
+ 		if(time_nextcand <= now || time_nextcand < 1)
+ 		{
+-			log::err(tSS() << "ERROR: looping bug candidate on " << what
++			log::err(tSS() << "ERROR: looping bug candidate on " << (int) what
+ 					<< ", value: " << time_nextcand);
+ 			time_nextcand=GetTime()+60;
+ 		}
+diff -Nru apt-cacher-ng-2/source/conn.cc apt-cacher-ng-3/source/conn.cc
+--- apt-cacher-ng-2/source/conn.cc	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/source/conn.cc	2017-03-19 14:23:30.000000000 +0100
+@@ -23,7 +23,7 @@
+ namespace acng
+ {
+ 
+-con::con(int fdId, const char *c) :
++conn::conn(int fdId, const char *c) :
+ 			m_confd(fdId),
+ 			m_bStopActivity(false),
+ 			m_dlerthr(0),
+@@ -41,7 +41,7 @@
+ 
+ };
+ 
+-con::~con() {
++conn::~conn() {
+ 	LOGSTART("con::~con (Destroying connection...)");
+ 	termsocket(m_confd);
+ 
+@@ -196,7 +196,7 @@
+ }
+ }
+ 
+-void con::WorkLoop() {
++void conn::WorkLoop() {
+ 
+ 	LOGSTART("con::WorkLoop");
+ 
+@@ -401,7 +401,7 @@
+ 	return nullptr;
+ }
+ 
+-bool con::SetupDownloader(const char *pszOrigin)
++bool conn::SetupDownloader(const char *pszOrigin)
+ {
+ 	if (m_pDlClient)
+ 		return true;
+@@ -440,7 +440,7 @@
+ 	return false;
+ }
+ 
+-void con::LogDataCounts(cmstring & sFile, const char *xff, off_t nNewIn,
++void conn::LogDataCounts(cmstring & sFile, const char *xff, off_t nNewIn,
+ 		off_t nNewOut, bool bAsError)
+ {
+ 	string sClient;
+@@ -462,7 +462,7 @@
+ }
+ 
+ // sends the stats to logging and replaces file/client identities with the new context
+-void con::writeAnotherLogRecord(const mstring &pNewFile, const mstring &pNewClient)
++void conn::writeAnotherLogRecord(const mstring &pNewFile, const mstring &pNewClient)
+ {
+ 		log::transfer(fileTransferIn, fileTransferOut, logClient, logFile, m_bLogAsError);
+ 		fileTransferIn = fileTransferOut = 0;
+diff -Nru apt-cacher-ng-2/source/conserver.cc apt-cacher-ng-3/source/conserver.cc
+--- apt-cacher-ng-2/source/conserver.cc	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/source/conserver.cc	2017-03-19 14:23:30.000000000 +0100
+@@ -50,7 +50,7 @@
+ vector<int> g_vecSocks;
+ 
+ base_with_condition g_ThreadPoolCondition;
+-list<con*> g_freshConQueue;
++list<conn*> g_freshConQueue;
+ int g_nStandbyThreads(0);
+ int g_nAllConThreadCount(0);
+ bool bTerminationMode(false);
+@@ -62,7 +62,7 @@
+ void * ThreadAction(void *)
+ {
+ 	lockuniq g(g_ThreadPoolCondition);
+-	list<con*> & Qu = g_freshConQueue;
++	list<conn*> & Qu = g_freshConQueue;
+ 
+ 	while (true)
+ 	{
+@@ -72,7 +72,7 @@
+ 		if (bTerminationMode)
+ 			break;
+ 
+-		con *c=Qu.front();
++		conn *c=Qu.front();
+ 		Qu.pop_front();
+ 
+ 		g_nStandbyThreads--;
+@@ -111,7 +111,7 @@
+ inline bool SpawnThreadsAsNeeded()
+ {
+ 	lockguard g(g_ThreadPoolCondition);
+-	list<con*> & Qu = g_freshConQueue;
++	list<conn*> & Qu = g_freshConQueue;
+ 
+ 	// check the kill-switch
+ 	if(g_nAllConThreadCount+1>=cfg::tpthreadmax || bTerminationMode)
+@@ -141,7 +141,7 @@
+ 		szClientName="";
+ 	
+ 	USRDBG( "Client name: " << szClientName);
+-	con *c(nullptr);
++	conn *c(nullptr);
+ 
+ 	{
+ 		// thread pool control, and also see Shutdown(), protect from
+@@ -157,7 +157,7 @@
+ 
+ 		try
+ 		{
+-			c = new con(fd, szClientName);
++			c = new conn(fd, szClientName);
+ 			if (!c)
+ 			{
+ #ifdef NO_EXCEPTIONS
+diff -Nru apt-cacher-ng-2/source/dlcon.cc apt-cacher-ng-3/source/dlcon.cc
+--- apt-cacher-ng-2/source/dlcon.cc	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/source/dlcon.cc	2017-03-19 14:23:30.000000000 +0100
+@@ -456,7 +456,7 @@
+ 
+ 		for (;;) // returned by explicit error (or get-more) return
+ 		{
+-			ldbg("switch: " << m_DlState);
++			ldbg("switch: " << (int)m_DlState);
+ 
+ 			if (STATE_GETHEADER == m_DlState ||  STATE_REGETHEADER == m_DlState)
+ 			{
+@@ -711,7 +711,8 @@
+ 
+ bool dlcon::AddJob(tFileItemPtr m_pItem, const tHttpUrl *pForcedUrl,
+ 		const cfg::tRepoData *pBackends,
+-		cmstring *sPatSuffix, LPCSTR reqHead)
++		cmstring *sPatSuffix, LPCSTR reqHead,
++		int nMaxRedirection)
+ {
+ 	if(!pForcedUrl)
+ 	{
+@@ -729,8 +730,7 @@
+ 	LOGSTART2("dlcon::EnqJob", todo->m_remoteUri.ToURI(false));
+ */
+ 	m_qNewjobs.emplace_back(
+-			make_shared<tDlJob>(this, m_pItem, pForcedUrl, pBackends, sPatSuffix,
+-							m_bManualMode ? ACFG_REDIRMAX_DEFAULT : cfg::redirmax));
++			make_shared<tDlJob>(this, m_pItem, pForcedUrl, pBackends, sPatSuffix,nMaxRedirection));
+ 
+ 	m_qNewjobs.back()->ExtractCustomHeaders(reqHead);
+ 
+@@ -912,7 +912,7 @@
+ #endif
+ 			))
+ 		{
+-       if(cfg::maxdlspeed != RESERVED_DEFVAL)
++       if(cfg::maxdlspeed != cfg::RESERVED_DEFVAL)
+        {
+           auto nCntNew=g_nDlCons.load();
+           if(m_nLastDlCount != nCntNew)
+diff -Nru apt-cacher-ng-2/source/expiration.cc apt-cacher-ng-3/source/expiration.cc
+--- apt-cacher-ng-2/source/expiration.cc	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/source/expiration.cc	2017-03-19 14:23:30.000000000 +0100
+@@ -435,11 +435,15 @@
+ 
+ 			if (bPurgeNow || TIMEEXPIRED(dir_props.second.nLostAt))
+ 			{
+-				SendFmt << "Removing " << sPathRel << "<br>\n";
+ 
+ #ifdef ENABLED
+-				::unlink(sPathAbs.c_str());
+-				::unlink((sPathAbs + ".head").c_str());
++				SendFmt << "Removing " << sPathRel;
++				if(::unlink(sPathAbs.c_str()))
++					SendChunk(tErrnoFmter("<span class=\"ERROR\"> [ERROR] ")+"</span>");
++				SendFmt << sBRLF << "Removing " << sPathRel << ".head";
++				if(::unlink((sPathAbs + ".head").c_str()))
++					SendChunk(tErrnoFmter("<span class=\"ERROR\"> [ERROR] ")+"</span>");
++				SendChunk(sBRLF);
+ 				::rmdir(SZABSPATH(dir_props.first));
+ #endif
+ 			}
+@@ -448,7 +452,7 @@
+ 				SendFmt << "Tagging " << sPathRel;
+ 				if (m_bVerbose)
+ 					SendFmt << " (t-" << (m_gMaintTimeNow - desc.nLostAt) / 3600 << "h)";
+-				SendChunk("<br>\n");
++				SendChunk(sBRLF);
+ 
+ 				nCount++;
+ 				tagSpace += desc.fpr.size;
+@@ -497,7 +501,9 @@
+ 		{
+ 			SendFmt << "Expiration suppressed due to costs-vs.-benefit considerations "
+ 					"(see exStartTradeOff setting, " << offttosH(haveIncomming) <<
+-					" vs. " << offttosH(cfg::exstarttradeoff) << "\n";
++					" vs. " << offttosH(cfg::exstarttradeoff)
++					<< " (<a href=\"" << this->m_parms.cmd << "&ignoreTradeOff=iTO\">Override this check now</a>)"
++					<< sBRLF;
+ 			return;
+ 		}
+ 	}
+@@ -514,7 +520,7 @@
+ #if 0 //def DEBUG
+ 	for(auto& i: m_trashFile2dir2Info)
+ 	{
+-		SendFmt << "<br>File: " << i.first <<"<br>\n";
++		SendFmt << "<br>File: " << i.first <<sBRLF;
+ 		for(auto& j: i.second)
+ 			 SendFmt << "Dir: " << j.first << " [ "<<j.second.fpr.size << " / " << j.second.nLostAt << " ]<br>\n";
+ 	}
+@@ -571,6 +577,8 @@
+ 
+ 	DelTree(CACHE_BASE+"_actmp");
+ 
++	TrimFiles();
++
+ 	PrintStats("Allocated disk space");
+ 
+ 	SendChunk("<br>Done.<br>");
+@@ -629,7 +637,7 @@
+ 					continue;
+ 
+ 				cnt++;
+-				this->SendChunk(rel + "<br>\n");
++				this->SendChunk(rel + sBRLF);
+ 				nSpace += sz;
+ 
+ 				sz = GetFileSize(abspath + ".head", -2);
+@@ -649,6 +657,38 @@
+ 	return;
+ }
+ 
++void expiration::TrimFiles()
++{
++	if(m_oversizedFiles.empty())
++		return;
++	auto now=GetTime();
++	SendFmt << "<b>Trimming cache files (" << m_oversizedFiles.size() <<")</b>" << sBRLF;
++	for(const auto& fil: m_oversizedFiles)
++	{
++		// still there and not changed?
++		Cstat stinfo(fil);
++		if(!stinfo)
++			continue;
++		if(now - 86400 > stinfo.st_mtim.tv_sec)
++		{
++//			SendFmt << "let's truncate " << fil << " to " << stinfo.st_size << "<br>";
++			// it's unlikely to be accessed but better protect it
++			fileItemMgmt item;
++			item.PrepareRegisteredFileItemWithStorage(fil, true);
++			if(!item)
++				continue;
++			lockguard g(item.m_ptr.get());
++			off_t nix;
++			if(item.m_ptr->GetStatusUnlocked(nix) >= fileitem::FIST_DLGOTHEAD)
++				continue;
++
++			if(0 != truncate(fil.c_str(), stinfo.st_size))
++				SendFmt << "Error at " << fil << " (" << tErrnoFmter() << ")" << sBRLF;
++
++		}
++	}
++}
++
+ void expiration::HandleDamagedFiles()
+ {
+ 	filereader f;
+@@ -665,17 +705,17 @@
+ 
+ 			if(this->m_parms.type == workExPurgeDamaged)
+ 			{
+-				SendFmt << "Removing " << s << "<br>\n";
++				SendFmt << "Removing " << s << sBRLF;
+ 				unlink(SZABSPATH(s));
+ 				unlink(SZABSPATH(s+".head"));
+ 			}
+ 			else if(this->m_parms.type == workExTruncDamaged)
+ 			{
+-				SendFmt << "Truncating " << s << "<br>\n";
++				SendFmt << "Truncating " << s << sBRLF;
+ 				ignore_value(truncate(SZABSPATH(s), 0));
+ 			}
+ 			else
+-				SendFmt << s << "<br>\n";
++				SendFmt << s << sBRLF;
+ 		}
+ 	return;
+ }
+@@ -702,7 +742,7 @@
+ 		SendChunk(WITHLEN("Removing deprecated files...<br>\n"));
+ 		for(const auto &s: m_killBill)
+ 		{
+-			SendChunk(s+"<br>\n");
++			SendChunk(s+sBRLF);
+ 			::unlink(SZABSPATH(s));
+ 		}
+ 	}
+@@ -719,6 +759,27 @@
+ 		return false;
+ 
+ 	ProgTell();
++	auto diffMoreThan = [&stinfo](blkcnt_t diff){
++		return stinfo.st_blocks > diff && stinfo.st_size/512 < (stinfo.st_blocks - diff);
++	};
++
++	// detect invisible holes at the end of files (side effect of properly incorrect hidden allocation)
++	// allow some tolerance of about 10kb, should cover all page alignment effects
++	if(diffMoreThan(20))
++	{
++		auto now=GetTime();
++		if(now - 86400 > stinfo.st_mtim.tv_sec)
++		{
++			m_oversizedFiles.emplace_back(sPathAbs);
++
++			// don't spam unless the user wants it and the size is really large
++			if(m_bVerbose || diffMoreThan(40))
++			{
++				SendFmt << "Trailing allocated space on " << sPathAbs << " (" << stinfo.st_blocks <<
++						" blocks, expected: ~" << (stinfo.st_size/512  + 1) <<"), will be trimmed later<br>";
++			}
++		}
++	}
+ 
+ 	string sPathRel(sPathAbs, CACHE_BASE_LEN);
+ 	DBGQLOG(sPathRel);
+diff -Nru apt-cacher-ng-2/source/fileitem.cc apt-cacher-ng-3/source/fileitem.cc
+--- apt-cacher-ng-2/source/fileitem.cc	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/source/fileitem.cc	2017-03-19 14:23:30.000000000 +0100
+@@ -26,7 +26,9 @@
+ mstring sReplDir("_altStore" SZPATHSEP);
+ 
+ static tFiGlobMap mapItems;
++#ifndef MINIBUILD
+ static acmutex mapItemsMx;
++#endif
+ 
+ header const & fileitem::GetHeaderUnlocked()
+ {
+@@ -42,27 +44,28 @@
+ }
+ 
+ fileitem::fileitem() :
+-	m_nIncommingCount(0),
+-	m_nSizeSeen(0),
+-	m_nRangeLimit(-1),
+-	m_bCheckFreshness(true),
+-	m_bHeadOnly(false),
+-	m_bAllowStoreData(true),
+-	m_nSizeChecked(0),
+-	m_filefd(-1),
+-	m_nDlRefsCount(0),
+-	usercount(0),
+-	m_status(FIST_FRESH),
+-	m_nTimeDlStarted(0),
+-	m_nTimeDlDone(END_OF_TIME),
+-	m_globRef(mapItems.end())
++			m_nIncommingCount(0),
++			m_nSizeSeen(0),
++			m_nRangeLimit(-1),
++			m_bCheckFreshness(true),
++			m_bHeadOnly(false),
++			m_bAllowStoreData(true),
++			m_nSizeChecked(0),
++			m_filefd(-1),
++			m_nDlRefsCount(0),
++			usercount(0),
++			m_status(FIST_FRESH),
++			m_nTimeDlStarted(0),
++			m_nTimeDlDone(END_OF_TIME),
++			m_globRef(mapItems.end())
+ {
+ }
+ 
+ fileitem::~fileitem()
+ {
+ 	//setLockGuard;
+-//	m_head.clear();
++	//	m_head.clear();
++	Truncate2checkedSize();
+ 	checkforceclose(m_filefd);
+ }
+ 
+@@ -75,13 +78,13 @@
+ void fileitem::DecDlRefCount(const string &sReason)
+ {
+ 	setLockGuard;
+-	
++
+ 	notifyAll();
+ 
+ 	m_nDlRefsCount--;
+ 	if(m_nDlRefsCount>0)
+ 		return; // someone will care...
+-	
++
+ 	// ... otherwise: the last downloader disappeared, needing to tell observers
+ 
+ 	if (m_status<FIST_COMPLETE)
+@@ -94,6 +97,7 @@
+ 		if (cfg::debug&log::LOG_MORE)
+ 			log::misc(string("Download of ")+m_sPathRel+" aborted");
+ 	}
++	Truncate2checkedSize();
+ 	checkforceclose(m_filefd);
+ }
+ 
+@@ -111,7 +115,7 @@
+ 
+ 	ldbg("Opening " << m_sPathRel);
+ 	int fd=open(SZABSPATH(m_sPathRel), O_RDONLY);
+-	
++
+ #ifdef HAVE_FADVISE
+ 	// optional, experimental
+ 	if(fd>=0)
+@@ -149,14 +153,14 @@
+ 
+ 	m_status=FIST_INITED;
+ 	m_bCheckFreshness = bCheckFreshness;
+-	
++
+ 	cmstring sPathAbs(CACHE_BASE+m_sPathRel);
+ 
+ 	if(m_head.LoadFromFile(sPathAbs+".head") >0 && m_head.type==header::ANSWER )
+ 	{
+ 		if(200 != m_head.getStatus())
+ 			goto error_clean;
+-		
++
+ 
+ 		LOG("good head");
+ 
+@@ -184,14 +188,14 @@
+ 			if(pContLen)
+ 			{
+ 				off_t nContLen=atoofft(pContLen); // if it's 0 then we assume it's 0
+-				
++
+ 				// file larger than it could ever be?
+ 				if(nContLen < m_nSizeSeen)
+ 					goto error_clean;
+ 
+ 
+ 				LOG("Content-Length has a sane range");
+-				
++
+ 				m_nSizeChecked=m_nSizeSeen;
+ 
+ 				// is it complete? and 0 value also looks weird, try to verify later
+@@ -212,15 +216,15 @@
+ 		if(!bCheckFreshness)
+ 			m_nSizeSeen=GetFileSize(sPathAbs, 0);
+ 	}
+-	LOG("resulting status: " << m_status);
++	LOG("resulting status: " << (int) m_status);
+ 	return m_status;
+ 
+ 	error_clean:
+-			::unlink((sPathAbs+".head").c_str());
+-			m_head.clear();
+-			m_nSizeSeen=0;
+-			m_status=FIST_INITED;
+-			return m_status; // unuseable, to be redownloaded
++	::unlink((sPathAbs+".head").c_str());
++	m_head.clear();
++	m_nSizeSeen=0;
++	m_status=FIST_INITED;
++	return m_status; // unuseable, to be redownloaded
+ }
+ 
+ bool fileitem::CheckUsableRange_unlocked(off_t nRangeLastByte)
+@@ -259,8 +263,8 @@
+ 	cmstring sPathAbs(SABSPATH(m_sPathRel));
+ 	cmstring sPathHead(sPathAbs+".head");
+ 	// header allowed to be lost in process...
+-//	if(unlink(sPathHead.c_str()))
+-//		::ignore_value(::truncate(sPathHead.c_str(), 0));
++	//	if(unlink(sPathHead.c_str()))
++	//		::ignore_value(::truncate(sPathHead.c_str(), 0));
+ 	acng::ignore_value(::truncate(sPathAbs.c_str(), 0));
+ 	Cstat stf(sPathAbs);
+ 	if(stf && stf.st_size>0)
+@@ -273,8 +277,8 @@
+ 	h.del(header::XFORWARDEDFOR);
+ 	h.del(header::CONTENT_RANGE);
+ 	h.StoreToFile(sPathHead);
+-//	if(0==stat(sPathHead.c_str(), &stf) && stf.st_size >0)
+-//		return false; // that's weird too, header still exists with real size
++	//	if(0==stat(sPathHead.c_str(), &stf) && stf.st_size >0)
++	//		return false; // that's weird too, header still exists with real size
+ 	m_head.clear();
+ 	m_nSizeSeen=m_nSizeChecked=0;
+ 
+@@ -324,7 +328,7 @@
+ 		m_bAllowStoreData=false;
+ 		m_head.frontLine=mstring("HTTP/1.1 ")+x;
+ 		m_head.set(header::XORIG, h.h[header::XORIG]);
+-	    m_status=FIST_DLERROR; m_nTimeDlDone=GetTime();
++		m_status=FIST_DLERROR; m_nTimeDlDone=GetTime();
+ 		_LogWithErrno(x, m_sPathRel);
+ 	};
+ 
+@@ -335,7 +339,7 @@
+ 
+ 	setLockGuard;
+ 
+-	USRDBG( "Download started, storeHeader for " << m_sPathRel << ", current status: " << m_status);
++	USRDBG( "Download started, storeHeader for " << m_sPathRel << ", current status: " << (int) m_status);
+ 	
+ 	if(m_status >= FIST_COMPLETE)
+ 	{
+@@ -346,7 +350,7 @@
+ 	// conflict with another thread's download attempt? Deny, except for a forced restart
+ 	if (m_status > FIST_DLPENDING && !bForcedRestart)
+ 		return false;
+-	
++
+ 	if(m_bCheckFreshness)
+ 		m_nTimeDlStarted = GetTime();
+ 
+@@ -354,7 +358,7 @@
+ 
+ 	// optional optimization: hints for the filesystem resp. kernel
+ 	off_t hint_start(0), hint_length(0);
+-	
++
+ 	// status will change, most likely... ie. return withError action
+ 	notifyAll();
+ 
+@@ -362,13 +366,14 @@
+ 	string sHeadPath=sPathAbs + ".head";
+ 
+ 	auto withErrorAndKillFile = [&](LPCSTR x)
+-	{
++			{
+ 		SETERROR(x);
+ 		if(m_filefd>=0)
+ 		{
+ #if _POSIX_SYNCHRONIZED_IO > 0
+ 			fsync(m_filefd);
+ #endif
++			Truncate2checkedSize();
+ 			forceclose(m_filefd);
+ 		}
+ 
+@@ -379,7 +384,7 @@
+ 		m_status=FIST_DLERROR;
+ 		m_nTimeDlDone=GetTime();
+ 		return false;
+-	};
++			};
+ 
+ 	int serverStatus = h.getStatus();
+ #if 0
+@@ -443,7 +448,7 @@
+ 		int n=sscanf(p, "bytes " OFF_T_FMT "-" OFF_T_FMT "/" OFF_T_FMT, &myfrom, &myto, &mylen);
+ 		if(n<=0)
+ 			n=sscanf(p, "bytes=" OFF_T_FMT "-" OFF_T_FMT "/" OFF_T_FMT, &myfrom, &myto, &mylen);
+-		
++
+ 		ldbg("resuming? n: "<< n << " und myfrom: " <<myfrom << 
+ 				" und myto: " << myto << " und mylen: " << mylen);
+ 		if(n!=3  // check for nonsense
+@@ -456,7 +461,7 @@
+ 		}
+ 
+ 		m_nSizeChecked=myfrom;
+-		
++
+ 		hint_start=myfrom;
+ 		hint_length=mylen;
+ 
+@@ -468,7 +473,10 @@
+ 
+ 		// target opened before? close it, will reopen&seek later
+ 		if (bForcedRestart)
++		{
++			Truncate2checkedSize();
+ 			checkforceclose(m_filefd);
++		}
+ 
+ 		// special optimization; if "-1 trick" was used then maybe don't reopen that file for writing later
+ 		if(m_bCheckFreshness && pNextData && m_nSizeSeen == mylen && m_nSizeChecked == mylen-1)
+@@ -506,7 +514,7 @@
+ 		}
+ 		else
+ 		{
+-		// -> kill cached file ASAP
++			// -> kill cached file ASAP
+ 			m_bAllowStoreData=false;
+ 			m_head.copy(h, header::XORIG);
+ 			return withErrorAndKillFile("503 Server disagrees on file size, cleaning up");
+@@ -546,15 +554,15 @@
+ 
+ 		// First opening the file to be sure that it can be written. Header storage is the critical point,
+ 		// every error after that leads to full cleanup to not risk inconsistent file contents 
+-		
++
+ 		int flags = O_WRONLY | O_CREAT | O_BINARY;
+ 		struct stat stbuf;
+-				
++
+ 		mkbasedir(sPathAbs);
+ 
+ 		m_filefd=open(sPathAbs.c_str(), flags, cfg::fileperms);
+ 		ldbg("file opened?! returned: " << m_filefd);
+-		
++
+ 		// self-recovery from cache poisoned with files with wrong permissions
+ 		if (m_filefd<0)
+ 		{
+@@ -565,11 +573,11 @@
+ 				{
+ 					if(0!=rename(temp.c_str(), sPathAbs.c_str()))
+ 						return withError("503 Cannot rename files");
+-					
++
+ 					// be sure about that
+ 					if(0!=stat(sPathAbs.c_str(), &stbuf) || stbuf.st_size!=m_nSizeSeen)
+ 						return withError("503 Cannot copy file parts, filesystem full?");
+-					
++
+ 					m_filefd=open(sPathAbs.c_str(), flags, cfg::fileperms);
+ 					ldbg("file opened after copying around: ");
+ 				}
+@@ -584,7 +592,7 @@
+ 				ldbg("file force-opened?! returned: " << m_filefd);
+ 			}
+ 		}
+-		
++
+ 		if (m_filefd<0)
+ 		{
+ 			tErrnoFmter efmt("503 Cache storage error - ");
+@@ -594,22 +602,22 @@
+ 			return withError(efmt.c_str());
+ #endif
+ 		}
+-		
++
+ 		if(0!=fstat(m_filefd, &stbuf) || !S_ISREG(stbuf.st_mode))
+ 			return withErrorAndKillFile("503 Not a regular file");
+ 
+ 		// this makes sure not to truncate file while it's mmaped
+ 		auto tempLock = TFileShrinkGuard::Acquire(stbuf);
+-		
++
+ 		// crop, but only if the new size is smaller. MUST NEVER become larger (would fill with zeros)
+-		if(m_nSizeChecked <= m_nSizeSeen)
++		if(m_nSizeSeen != 0 && m_nSizeChecked <= m_nSizeSeen)
+ 		{
+-			if(0==ftruncate(m_filefd, m_nSizeChecked))
+-      {
++			if(0==Truncate2checkedSize())
++			{
+ #if ( (_POSIX_C_SOURCE >= 199309L || _XOPEN_SOURCE >= 500) && _POSIX_SYNCHRONIZED_IO > 0)
+ 				fdatasync(m_filefd);
+ #endif
+-      }
++			}
+ 			else
+ 				return withErrorAndKillFile("503 Cannot change file size");
+ 		}
+@@ -617,29 +625,31 @@
+ 			return withErrorAndKillFile("503 Internal error on size checking");
+ 		// else... nothing to fix since the expectation==reality
+ 
+-		falloc_helper(m_filefd, hint_start, hint_length);
+-    /*
+-     * double-check the docs, this is probably not relevant for writting
++		//	falloc_helper(m_filefd, hint_start, hint_length);
++		if(m_nSizeSeen < (off_t) cfg::allocspace)
++			falloc_helper(m_filefd, 0, min(hint_start+hint_length, (off_t)cfg::allocspace));
++		/*
++		 * double-check the docs, this is probably not relevant for writting
+ #ifdef HAVE_FADVISE
+ 	// optional, experimental
+ 		posix_fadvise(m_filefd, hint_start, hint_length, POSIX_FADV_SEQUENTIAL);
+ #endif
+-*/
++		 */
+ 		ldbg("Storing header as "+sHeadPath);
+ 		int count=m_head.StoreToFile(sHeadPath);
+ 
+ 		if(count<0)
+ 			return withErrorAndKillFile( (-count!=ENOSPC
+ 					? "503 Cache storage error" : "503 OUT OF DISK SPACE"));
+-			
++
+ 		// double-check the sane state
+ 		if(0!=fstat(m_filefd, &stbuf) || stbuf.st_size!=m_nSizeChecked)
+ 			return withErrorAndKillFile("503 Inconsistent file state");
+-			
++
+ 		if(m_nSizeChecked!=lseek(m_filefd, m_nSizeChecked, SEEK_SET))
+ 			return withErrorAndKillFile("503 IO error, positioning");
+ 	}
+-	
++
+ 	m_status=FIST_DLGOTHEAD;
+ 	return true;
+ }
+@@ -648,19 +658,19 @@
+ {
+ 	setLockGuard;
+ 
+-	LOGSTART2("fileitem::StoreFileData", "status: " << m_status << ", size: " << size);
++	LOGSTART2("fileitem::StoreFileData", "status: " <<  (int) m_status << ", size: " << size);
+ 
+ 	// something might care, most likely... also about BOUNCE action
+ 	notifyAll();
+ 
+ 	m_nIncommingCount+=size;
+-	
++
+ 	if(m_status > FIST_COMPLETE || m_status < FIST_DLGOTHEAD)
+ 	{
+-		ldbg("StoreFileData rejected, status: " << m_status)
++		ldbg("StoreFileData rejected, status: " << (int) m_status)
+ 		return false;
+ 	}
+-	
++
+ 	if (size==0)
+ 	{
+ 		if(FIST_COMPLETE == m_status)
+@@ -744,7 +754,7 @@
+ 	{
+ 		if(m_ptr->m_status < fileitem::FIST_COMPLETE && m_ptr->m_status != fileitem::FIST_INITED)
+ 		{
+-			ldbg("usercount dropped to zero while downloading?: " << m_ptr->m_status);
++			ldbg("usercount dropped to zero while downloading?: " << (int) m_ptr->m_status);
+ 		}
+ 
+ 		// some file items will be held ready for some time
+@@ -860,7 +870,7 @@
+ }
+ 
+ 
+-// this method is supposed to be awaken periodically and detect items with ref count manipulated by
++// this method is supposed to be awaken periodically and detects items with ref count manipulated by
+ // the request storm prevention mechanism. Items shall be be dropped after some time if no other
+ // thread but us is using them.
+ time_t fileItemMgmt::BackgroundCleanup()
+@@ -940,7 +950,7 @@
+ 		{
+ 			fmt << "\t" << item.second->m_sPathRel
+ 					<< "\n\tDlRefCount: " << item.second->m_nDlRefsCount
+-					<< "\n\tState: " << item.second->m_status
++					<< "\n\tState: " << (int)  item.second->m_status
+ 					<< "\n\tFilePos: " << item.second->m_nIncommingCount << " , "
+ 					<< item.second->m_nRangeLimit << " , "
+ 					<< item.second->m_nSizeChecked << " , "
+@@ -954,6 +964,8 @@
+ 
+ fileitem_with_storage::~fileitem_with_storage()
+ {
++	Truncate2checkedSize();
++
+ 	if(startsWith(m_sPathRel, sReplDir))
+ 	{
+ 		::unlink(SZABSPATH(m_sPathRel));
+@@ -961,6 +973,13 @@
+ 	}
+ }
+ 
++int fileitem_with_storage::Truncate2checkedSize()
++{
++	if(m_filefd == -1 || m_nSizeChecked<0)
++		return -1;
++	return ftruncate(m_filefd, m_nSizeChecked);
++}
++
+ // special file? When it's rewritten from start, save the old version instead
+ int fileitem_with_storage::MoveRelease2Sidestore()
+ {
+diff -Nru apt-cacher-ng-2/source/job.cc apt-cacher-ng-3/source/job.cc
+--- apt-cacher-ng-2/source/job.cc	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/source/job.cc	2017-03-19 14:23:30.000000000 +0100
+@@ -90,7 +90,7 @@
+ 	{
+ 		lockuniq g(this);
+ 
+-		LOGSTART2("tPassThroughFitem::StoreFileData", "status: " << m_status);
++		LOGSTART2("tPassThroughFitem::StoreFileData", "status: " << (int) m_status);
+ 
+ 		// something might care, most likely... also about BOUNCE action
+ 		notifyAll();
+@@ -202,7 +202,7 @@
+ 	header & HeadRef() { return m_head; }
+ };
+ 
+-job::job(header *h, con *pParent) :
++job::job(header *h, conn *pParent) :
+ 	m_filefd(-1),
+ 	m_pParentCon(pParent),
+ 	m_bChunkMode(CHUNKDEFAULT),
+@@ -276,25 +276,6 @@
+ 		}
+ 		return;
+ 	}
+-/*
+-	// simplified version, just converts a string into a page
+-	class bufferitem : public tPassThroughFitem, private string
+-	{
+-	public:
+-		bufferitem(const string &sId, const string &sData)
+-		: tPassThroughFitem(sId), string(sData)
+-		{
+-			status = FIST_COMPLETE;
+-			m_pData=c_str();
+-			m_nConsumable=length();
+-			m_nSizeChecked=m_nConsumable;
+-			m_head.frontLine.assign(_SZ2PS("HTTP/1.1 200 OK"));
+-			m_head.set(header::CONTENT_LENGTH, length());
+-			m_head.set(header::CONTENT_TYPE, _SZ2PS("text/html") );
+-			m_head.type=header::ANSWER;
+-		}
+-	};
+-*/
+ 
+ 	if(S_ISDIR(stbuf.st_mode))
+ 	{
+@@ -622,7 +603,7 @@
+        goto report_degraded;
+     
+     fistate = m_pItem.getFiPtr()->Setup(bForceFreshnessChecks);
+-	LOG("Got initial file status: " << fistate);
++	LOG("Got initial file status: " << (int) fistate);
+ 
+ 	if (bPtMode && fistate != fileitem::FIST_COMPLETE)
+ 		fistate = _SwitchToPtItem();
+@@ -688,7 +669,8 @@
+ 					if (m_pParentCon->m_pDlClient->AddJob(m_pItem.getFiPtr(),
+ 							bHaveRedirects ? nullptr : &theUrl, repoMapping.repodata,
+ 							bHaveRedirects ? &repoMapping.sRestPath : nullptr,
+-									(LPCSTR) ( bPtMode ? headBuf : nullptr)))
++									(LPCSTR) ( bPtMode ? headBuf : nullptr),
++							cfg::redirmax))
+ 				{
+ 					ldbg("Download job enqueued for " << m_sFileLoc);
+ 				}
+@@ -712,9 +694,7 @@
+     return ;
+ 
+ report_notallowed:
+-	SetErrorResponse((tSS() << "403 Forbidden file type or location: " << sReqPath).c_str(),
+-			nullptr, "403 Forbidden file type or location");
+-//    USRDBG( sRawUriPath + " -- ACCESS FORBIDDEN");
++	SetErrorResponse("403 Forbidden file type or location");
+     return ;
+ 
+ report_offlineconf:
+@@ -732,12 +712,6 @@
+ report_invport:
+ 	SetErrorResponse("403 Configuration error (confusing proxy mode) or prohibited port (see AllowUserPorts)");
+     return ;
+-/*
+-report_doubleproxy:
+-	SetErrorResponse("403 URL seems to be made for proxy but contains apt-cacher-ng port. "
+-    		"Inconsistent apt configuration?");
+-    return ;
+-*/
+ }
+ 
+ #define THROW_ERROR(x) { if(m_nAllDataCount) return R_DISCON; SetErrorResponse(x); return R_AGAIN; }
+@@ -766,7 +740,7 @@
+ 		{
+ 			fistate=m_pItem.getFiPtr()->GetStatusUnlocked(nGoodDataSize);
+ 			
+-			LOG(fistate);
++			LOG((int) fistate);
+ 			if (fistate > fileitem::FIST_COMPLETE)
+ 			{
+ 				const header &h = m_pItem.getFiPtr()->GetHeaderUnlocked();
+@@ -795,7 +769,7 @@
+ 				break;
+ 			}
+ 			// or wait for the dl source to get data at the position we need to start from
+-			LOG("sendstate: " << fistate << " , sendpos: " << m_nSendPos << nGoodDataSize);
++			LOG("sendstate: " << (int) fistate << " , sendpos: " << m_nSendPos << nGoodDataSize);
+ 			if(fistate==fileitem::FIST_COMPLETE || (m_nSendPos < nGoodDataSize && fistate>=fileitem::FIST_DLGOTHEAD))
+ 				break;
+ 			
+@@ -816,6 +790,8 @@
+ 		ASSERT(!"no FileItem assigned and no sensible way to continue");
+ 		return R_DISCON;
+ 	}
++#define returnSomething(msg) { LOG(msg); if(m_bClientWants2Close) return R_DISCON; \
++		LOG("Reporting job done"); return R_DONE; };
+ 
+ 	for(;;) // left by returning
+ 	{
+@@ -849,7 +825,7 @@
+ 					if(!IsValidFD(m_filefd)) THROW_ERROR("503 IO error");
+ 
+ 					m_state=m_bChunkMode ? STATE_SEND_CHUNK_HEADER : STATE_SEND_PLAIN_DATA;
+-					ldbg("next state will be: " << m_state);
++					ldbg("next state will be: " << (int) m_state);
+ 					continue;
+ 				}
+ 				case(STATE_SEND_PLAIN_DATA):
+@@ -940,7 +916,7 @@
+ 						m_sendbuf.drop(r);
+ 						if(m_sendbuf.empty())
+ 						{
+-							USRDBG("Returning to last state, " << m_backstate);
++							USRDBG("Returning to last state, " << (int) m_backstate);
+ 							m_state=m_backstate;
+ 							continue;
+ 						}
+@@ -951,24 +927,13 @@
+ 					}
+ 					return R_AGAIN;
+ 				}
+-				
+ 				case(STATE_ALLDONE):
+-					LOG("State: STATE_ALLDONE?");
+-				// no break
++				returnSomething("STATE_ALLDONE?");
+ 				case (STATE_ERRORCONT):
+-					LOG("or STATE_ERRORCONT?");
+-				// no break
++				returnSomething("STATE_ERRORCONT?");
+ 				case(STATE_FINISHJOB):
+-					LOG("or STATE_FINISHJOB");
+-					{
+-						if(m_bClientWants2Close)
+-							return R_DISCON;
+-						LOG("Reporting job done")
+-						return R_DONE;
+-					}
+-					break;
++				returnSomething("STATE_FINISHJOB?");
+ 				case(STATE_TODISCON):
+-						// no break
+ 				default:
+ 					return R_DISCON;
+ 			}
+diff -Nru apt-cacher-ng-2/source/meta.cc apt-cacher-ng-3/source/meta.cc
+--- apt-cacher-ng-2/source/meta.cc	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/source/meta.cc	2017-03-19 14:23:30.000000000 +0100
+@@ -656,6 +656,9 @@
+ 	unsigned char_count=0;
+ 	char alphabet[65] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+ 	string out;
++	//int newLineAfter = textWidth * 3 / 4;
++	//int linePos=0;
++
+ 	for(auto p=data; p<data+len; ++p)
+ 	{
+ 		uint8_t c=*p;
+@@ -681,6 +684,13 @@
+ 		}
+ 		else
+ 			bits <<= 8;
++/*
++		if(newLineAfter > 0 && linePos++ >= newLineAfter)
++		{
++			linePos = 0;
++			out+='\n';
++		}
++		*/
+ 	}
+ 	if (char_count != 0)
+ 	{
+@@ -792,6 +802,9 @@
+ 	return mstring(buf, len);
+ }
+ 
++/**
++ * Human friendly presentation of numbers, with units and only few bytes after comma
++ */
+ mstring offttosH(off_t n)
+ {
+ 	LPCSTR  pref[]={"", " KiB", " MiB", " GiB", " TiB", " PiB", " EiB"};
+@@ -807,6 +820,17 @@
+ 	return "INF";
+ }
+ 
++mstring offttosHdotted(off_t n)
++{
++	mstring ret(to_string(n));
++	auto pos = ret.size()-1;
++	for(unsigned i=1; pos > 0; ++i, --pos)
++		if(0 == i%3)
++			ret.insert(pos, ".");
++	return ret;
++}
++
++
+ //template<typename charp>
+ off_t strsizeToOfft(const char *sizeString) // XXX: if needed... charp sizeString, charp *next)
+ {
+diff -Nru apt-cacher-ng-2/source/showinfo.cc apt-cacher-ng-3/source/showinfo.cc
+--- apt-cacher-ng-2/source/showinfo.cc	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/source/showinfo.cc	2017-03-19 14:23:30.000000000 +0100
+@@ -137,6 +137,8 @@
+ 		return;
+ 	}
+ 
++	auto del = (m_parms.type == workDELETE);
++
+ 	mstring params(m_parms.cmd, qpos+1);
+ 	mstring blob;
+ 	for(tSplitWalk split(&params, "&"); split.Next();)
+@@ -145,7 +147,7 @@
+ 		if(startsWithSz(tok, "kf="))
+ 		{
+ 			char *end(0);
+-			auto val = strtoul(tok.c_str()+3, &end, 16);
++			auto val = strtoul(tok.c_str()+3, &end, 36);
+ 			if(*end == 0 || *end=='&')
+ #ifdef COMPATGCC47                           
+ 				files.insert(val);
+@@ -157,11 +159,14 @@
+ 			tok.swap(blob);
+ 	}
+ 	sHidParms << "<input type=\"hidden\" name=\"blob\" value=\"";
+-	sHidParms.append(blob.data()+5, blob.size()-5);
++	if(!blob.empty())
++		sHidParms.append(blob.data()+5, blob.size()-5);
+ 	sHidParms <<  "\">\n";
+ 
+ 	tStrDeq filePaths;
+ 	acbuf buf;
++	mstring redoLink;
++
+ #ifdef HAVE_DECB64 // this page isn't accessible with crippled configuration anyway
+ 	if (!blob.empty())
+ 	{
+@@ -195,7 +200,9 @@
+ 		buf.drop(sizeof(unsigned));
+ 		if(slen > buf.size()) // looks fishy
+ 			return;
+-		if(ContHas(files, id))
++		if(redoLink.empty()) // don't care about id in the first line
++			redoLink.assign(buf.rptr(), slen);
++		else if(ContHas(files, id))
+ 			filePaths.emplace_back(buf.rptr(), slen);
+ 		buf.drop(slen);
+ 	}
+@@ -211,32 +218,74 @@
+ 		}
+ 	}
+ 
++	// XXX: this is wasting some CPU cycles but is good enough for this case
++	for (const auto& path : filePaths)
++	{
++		mstring bname(path);
++		for(const auto& sfx: sfxXzBz2GzLzma)
++			if(endsWith(path, sfx))
++				bname = path.substr(0, path.size()-sfx.size());
++		auto tryAdd=[this,&bname,&path](cmstring& sfx)
++				{
++					auto cand = bname+sfx;
++					if(cand == path || ::access(SZABSPATH(cand), F_OK))
++						return;
++					extraFiles.push_back(cand);
++				};
++		for(const auto& sfx: sfxMiscRelated)
++			tryAdd(sfx);
++		if(endsWith(path, relKey))
++			tryAdd(path.substr(0, path.size()-relKey.size())+inRelKey);
++		if(endsWith(path, inRelKey))
++			tryAdd(path.substr(0, path.size()-inRelKey.size())+relKey);
++	}
++
++
+ 	if (m_parms.type == workDELETECONFIRM || m_parms.type == workTRUNCATECONFIRM)
+ 	{
+ 		for (const auto& path : filePaths)
+ 			sHidParms << html_sanitize(path) << "<br>\n";
+ 		for (const auto& pathId : files)
+-			sHidParms << "<input type=\"hidden\" name=\"kf\" value=\"" << tSS::fmtflags::hex
+-					<< pathId << "\">\n" << tSS::fmtflags::dec;
++			sHidParms << "<input type=\"hidden\" name=\"kf\" value=\"" <<
++			to_base36(pathId) << "\">\n";
++		if(m_parms.type == workDELETECONFIRM && !extraFiles.empty())
++		{
++			sHidParms << sBRLF << "<b>Extra files found</b>" << sBRLF
++					<< "<p>It's recommended to delete the related files (see below) as well, otherwise "
++					<< "the removed files might be resurrected by recovery mechanisms later.<p>"
++					<< "<input type=\"checkbox\" name=\"cleanRelated\" value=\"1\" checked=\"checked\">"
++					<< "Yes, please remove all related files<p>Example list:<p>";
++			for (const auto& path : extraFiles)
++				sHidParms << path << sBRLF;
++		}
+ 	}
+ 	else
+ 	{
+-		auto del = (m_parms.type == workDELETE);
+ 		for (const auto& path : filePaths)
+ 		{
+-			for (auto suf :
+-			{ "", ".head" })
+-			{
+-				sHidParms << (del ? "Deleting " : "Truncating ") << path << suf << "<br>\n";
+-				auto p = cfg::cacheDirSlash + path + suf;
+-				int r = del ? unlink(p.c_str()) : truncate(p.c_str(), 0);
+-				if (r && errno != ENOENT)
++			auto doFile=[this, &del](cmstring& path)
++					{
++				for (auto suf : { "", ".head" })
+ 				{
+-					tErrnoFmter ferrno("<span class=\"ERROR\">[ error: ");
+-					sHidParms << ferrno << " ]</span><br>\n";
++					sHidParms << (del ? "Deleting " : "Truncating ") << path << suf << "<br>\n";
++					auto p = cfg::cacheDirSlash + path + suf;
++					int r = del ? unlink(p.c_str()) : truncate(p.c_str(), 0);
++					if (r && errno != ENOENT)
++					{
++						tErrnoFmter ferrno("<span class=\"ERROR\">[ error: ");
++						sHidParms << ferrno << " ]</span>" << sBRLF;
++					}
++					if(!del)
++						break;
+ 				}
+-			}
++			};
++			doFile(path);
++			if(StrHas(m_parms.cmd, "cleanRelated="))
++				for (const auto& path : extraFiles)
++					doFile(path);
++
+ 		}
++		sHidParms << "<br><a href=\""<< redoLink << "\">Repeat the last action</a><br>" << sBRLF;
+ 	}
+ }
+ 
+diff -Nru apt-cacher-ng-2/source/tcpconnect.cc apt-cacher-ng-3/source/tcpconnect.cc
+--- apt-cacher-ng-2/source/tcpconnect.cc	2016-11-22 21:32:02.000000000 +0100
++++ apt-cacher-ng-3/source/tcpconnect.cc	2017-03-19 14:23:30.000000000 +0100
+@@ -42,6 +42,12 @@
+ #include <openssl/x509_vfy.h>
+ #include <openssl/x509v3.h>
+ #endif
++#ifndef HAVE_SSL_HOST_VALIDATION
++extern "C"
++{
++#include "oldssl-workaround/openssl_hostname_validation.h"
++}
++#endif
+ 
+ namespace acng
+ {
+@@ -51,7 +57,7 @@
+ 
+ tcpconnect::tcpconnect(cfg::tRepoData::IHookHandler *pObserver) : m_pStateObserver(pObserver)
+ {
+-	if(cfg::maxdlspeed != RESERVED_DEFVAL)
++	if(cfg::maxdlspeed != cfg::RESERVED_DEFVAL)
+ 		dl_con_factory::g_nconns.fetch_add(1);
+ 	if(pObserver)
+ 		pObserver->OnAccess();
+@@ -61,7 +67,7 @@
+ {
+ 	LOGSTART("tcpconnect::~tcpconnect, terminating outgoing connection class");
+ 	Disconnect();
+-	if(cfg::maxdlspeed != RESERVED_DEFVAL)
++	if(cfg::maxdlspeed != cfg::RESERVED_DEFVAL)
+ 		dl_con_factory::g_nconns.fetch_add(-1);
+ #ifdef HAVE_SSL
+ 	if(m_ctx)
+@@ -483,16 +489,28 @@
+ bool tcpconnect::SSLinit(mstring &sErr, cmstring &sHostname, cmstring &sPort)
+ {
+ 	SSL * ssl(nullptr);
+-	int hret(0);
+-	LPCSTR perr(0);
+ 	mstring ebuf;
+ 
++	auto withSslError = [&sErr](const char *perr)
++					{
++		sErr="500 SSL error: ";
++		sErr+=(perr?perr:"Generic SSL failure");
++		return false;
++					};
++	auto withLastSslError = [&withSslError]()
++						{
++		return withSslError(ERR_reason_error_string(ERR_get_error()));
++						};
++	auto withRetCode = [&withSslError, &ssl](int hret)
++				{
++		return withSslError(ERR_reason_error_string(SSL_get_error(ssl, hret)));
++				};
++
+ 	// cleaned up in the destructor on EOL
+ 	if(!m_ctx)
+ 	{
+ 		m_ctx = SSL_CTX_new(SSLv23_client_method());
+-		if (!m_ctx)
+-			goto ssl_init_fail;
++		if (!m_ctx) return withLastSslError();
+ 
+ 		SSL_CTX_load_verify_locations(m_ctx,
+ 				cfg::cafile.empty() ? nullptr : cfg::cafile.c_str(),
+@@ -500,17 +518,18 @@
+ 	}
+ 
+ 	ssl = SSL_new(m_ctx);
+-	if(!ssl)
+-		goto ssl_init_fail;
++	if (!m_ctx) return withLastSslError();
+ 
+ 	// for SNI
+ 	SSL_set_tlsext_host_name(ssl, sHostname.c_str());
+ 
+ 	{
++#ifdef HAVE_SSL_HOST_VALIDATION
+ 		auto param = SSL_get0_param(ssl);
+ 		/* Enable automatic hostname checks */
+ 		X509_VERIFY_PARAM_set_hostflags(param, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+ 		X509_VERIFY_PARAM_set1_host(param, sHostname.c_str(), 0);
++#endif
+ 		/* Configure a non-zero callback if desired */
+ 		SSL_set_verify(ssl, SSL_VERIFY_PEER, 0);
+ 	}
+@@ -521,8 +540,8 @@
+  			| SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER
+  			| SSL_MODE_ENABLE_PARTIAL_WRITE);
+ 
+- 	if((hret=SSL_set_fd(ssl, m_conFd)) != 1)
+- 		goto ssl_init_fail_retcode;
++ 	auto hret=SSL_set_fd(ssl, m_conFd);
++ 	if(hret != 1) return withRetCode(hret);
+ 
+  	while(true)
+  	{
+@@ -530,7 +549,7 @@
+  		if(hret == 1 )
+  			break;
+  		if(hret == 0)
+- 			goto ssl_init_fail_retcode;
++ 			return withRetCode(hret);
+ 
+ 		fd_set rfds, wfds;
+ 		FD_ZERO(&rfds);
+@@ -544,35 +563,26 @@
+  			FD_SET(m_conFd, &wfds);
+  			break;
+  		default:
+- 			goto ssl_init_fail_retcode;
++ 			return withRetCode(hret);
+  		}
+  		struct timeval tv;
+  		tv.tv_sec = cfg::nettimeout;
+  		tv.tv_usec = 0;
+ 		int nReady=select(m_conFd+1, &rfds, &wfds, nullptr, &tv);
+-		if(!nReady)
+-		{
+-			perr="Socket timeout";
+-			goto ssl_init_fail;
+-		}
++		if(!nReady) return withSslError("Socket timeout");
+ 		if (nReady<0)
+ 		{
+ #ifndef MINIBUILD
+ 			ebuf=tErrnoFmter("Socket error");
+-			perr=ebuf.c_str();
++			return withSslError(ebuf.c_str());
+ #else
+-			perr="Socket error";
++			return withSslError("Socket error");
+ #endif
+-			goto ssl_init_fail;
+ 		}
+  	}
+ 
+  	m_bio = BIO_new(BIO_f_ssl());
+- 	if(!m_bio)
+- 	{
+- 		perr="IO initialization error";
+- 		goto ssl_init_fail;
+- 	}
++ 	if(!m_bio) return withSslError("IO initialization error");
+  	// not sure we need it but maybe the handshake can access this data
+  	BIO_set_conn_hostname(m_bio, sHostname.c_str());
+  	BIO_set_conn_port(m_bio, sPort.c_str());
+@@ -584,27 +594,28 @@
+ 
+ 	if(!cfg::nsafriendly)
+ 	{
++		X509* server_cert = nullptr;
+ 		hret=SSL_get_verify_result(ssl);
+ 		if( hret != X509_V_OK)
+-		{
+-			perr=X509_verify_cert_error_string(hret);
+-			goto ssl_init_fail;
++			return withSslError(X509_verify_cert_error_string(hret));
++		server_cert = SSL_get_peer_certificate(ssl);
++		if(server_cert)
++		{
++			// XXX: maybe extract the real name to a buffer and report it additionally?
++			// X509_NAME_oneline(X509_get_subject_name (server_cert), cert_str, sizeof (cert_str));
++#ifndef HAVE_SSL_HOST_VALIDATION
++			auto hcResult=validate_hostname(sHostname.c_str(), server_cert);
++			X509_free(server_cert);
++			if(hcResult != HostnameValidationResult::MatchFound)
++				return withSslError("Incorrect remote certificate configuration");
++#else
++			X509_free(server_cert);
++#endif
+ 		}
++		else // The handshake was successful although the server did not provide a certificate
++			return withSslError("Incompatible remote certificate");
+ 	}
+-
+ 	return true;
+-
+-	ssl_init_fail_retcode:
+-
+-	perr=ERR_reason_error_string(SSL_get_error(ssl, hret));
+-
+-	ssl_init_fail:
+-
+-	if(!perr)
+-		perr=ERR_reason_error_string(ERR_get_error());
+-	sErr="500 SSL error: ";
+-	sErr+=(perr?perr:"Generic SSL failure");
+-	return false;
+ }
+ 
+ //! Global initialization helper (might be non-reentrant)

@@ -1,0 +1,104 @@
+From d8ce1baa5be3d6fb7bd8bb5e53af189525273b4a Mon Sep 17 00:00:00 2001
+From: Christoph Goehre <christoph.goehre@gmx.de>
+Date: Tue, 17 Feb 2009 20:50:05 +0100
+Subject: [PATCH] If mtime of existing debfile changed, update database
+
+---
+ ftparchive/cachedb.cc |   14 +++++++++-----
+ ftparchive/cachedb.h  |    4 ++--
+ ftparchive/writer.cc  |    4 ++--
+ 3 files changed, 13 insertions(+), 9 deletions(-)
+
+diff --git a/ftparchive/cachedb.cc b/ftparchive/cachedb.cc
+index 8de3a0b..d65d6bc 100644
+--- a/ftparchive/cachedb.cc
++++ b/ftparchive/cachedb.cc
+@@ -102,9 +102,9 @@ bool CacheDB::OpenFile()
+ // ---------------------------------------------------------------------
+ /* This gets the size from the database if it's there.  If we need
+  * to look at the file, also get the mtime from the file. */
+-bool CacheDB::GetFileStat()
++bool CacheDB::GetFileStat(bool doStat)
+ {
+-	if ((CurStat.Flags & FlSize) == FlSize)
++	if (!doStat && (CurStat.Flags & FlSize) == FlSize)
+ 	{
+ 		/* Already worked out the file size */
+ 	}
+@@ -162,7 +162,7 @@ bool CacheDB::GetCurStat()
+ // ---------------------------------------------------------------------
+ bool CacheDB::GetFileInfo(string FileName, bool DoControl, bool DoContents,
+ 				bool GenContentsOnly, 
+-				bool DoMD5, bool DoSHA1, bool DoSHA256)
++				bool DoMD5, bool DoSHA1, bool DoSHA256, bool checkMtime)
+ {
+ 	this->FileName = FileName;
+ 
+@@ -171,14 +171,18 @@ bool CacheDB::GetFileInfo(string FileName, bool DoControl, bool DoContents,
+ 		return false;
+    }   
+    OldStat = CurStat;
+-	
+-	if (GetFileStat() == false)
++
++	if (GetFileStat(checkMtime) == false)
+ 	{
+ 		delete Fd;
+ 		Fd = NULL;
+ 		return false;	
+ 	}
+ 
++    /* if mtime changed, update CurStat from disk */
++    if (checkMtime && OldStat.mtime != CurStat.mtime)
++        CurStat.Flags = FlSize;
++
+ 	Stats.Bytes += CurStat.FileSize;
+ 	Stats.Packages++;
+ 
+diff --git a/ftparchive/cachedb.h b/ftparchive/cachedb.h
+index c10f41e..5af371e 100644
+--- a/ftparchive/cachedb.h
++++ b/ftparchive/cachedb.h
+@@ -63,7 +63,7 @@ class CacheDB
+       return true;
+    }
+    bool OpenFile();
+-   bool GetFileStat();
++   bool GetFileStat(bool doStat);
+    bool GetCurStat();
+    bool LoadControl();
+    bool LoadContents(bool GenOnly);
+@@ -125,7 +125,7 @@ class CacheDB
+    
+    bool SetFile(string FileName,struct stat St,FileFd *Fd);
+    bool GetFileInfo(string FileName, bool DoControl, bool DoContents,
+-		   bool GenContentsOnly, bool DoMD5, bool DoSHA1, bool DoSHA256);
++		   bool GenContentsOnly, bool DoMD5, bool DoSHA1, bool DoSHA256, bool checkMtime);
+    bool Finish();   
+    
+    bool Clean();
+diff --git a/ftparchive/writer.cc b/ftparchive/writer.cc
+index 9d248ab..b5d47ab 100644
+--- a/ftparchive/writer.cc
++++ b/ftparchive/writer.cc
+@@ -359,7 +359,7 @@ bool FTWScanner::SetExts(string Vals)
+ bool PackagesWriter::DoPackage(string FileName)
+ {      
+    // Pull all the data we need form the DB
+-   if (Db.GetFileInfo(FileName, true, DoContents, true, DoMD5, DoSHA1, DoSHA256) 
++   if (Db.GetFileInfo(FileName, true, DoContents, true, DoMD5, DoSHA1, DoSHA256, true)
+ 		  == false)
+    {
+       return false;
+@@ -736,7 +736,7 @@ ContentsWriter::ContentsWriter(string DB) :
+    determine what the package name is. */
+ bool ContentsWriter::DoPackage(string FileName,string Package)
+ {
+-   if (!Db.GetFileInfo(FileName, Package.empty(), true, false, false, false, false))
++   if (!Db.GetFileInfo(FileName, Package.empty(), true, false, false, false, false, true))
+    {
+       return false;
+    }
+-- 
+1.5.6.5
+

@@ -1,0 +1,255 @@
+diff -Nru debhelper-7.2.14ubuntu1/debian/changelog debhelper-7.2.14ubuntu2/debian/changelog
+--- debhelper-7.2.14ubuntu1/debian/changelog	2009-06-01 22:51:40.000000000 -0700
++++ debhelper-7.2.14ubuntu2/debian/changelog	2009-07-06 15:39:53.000000000 -0700
+@@ -1,3 +1,11 @@
++debhelper (7.2.14ubuntu2) UNRELEASED; urgency=low
++
++  * New command, dh_installupstart, which installs job files for use with
++    upstart and provides compatibility symlinks in /etc/init.d for sysv-rc
++    implementations.
++
++ -- Steve Langasek <steve.langasek@ubuntu.com>  Tue, 23 Jun 2009 15:10:19 +0100
++
+ debhelper (7.2.14ubuntu1) karmic; urgency=low
+ 
+   * Merge with Debian unstable (lp: #379950). Remaining Ubuntu changes:
+diff -Nru debhelper-7.2.14ubuntu1/debian/copyright debhelper-7.2.14ubuntu2/debian/copyright
+--- debhelper-7.2.14ubuntu1/debian/copyright	2009-05-14 12:23:08.000000000 -0700
++++ debhelper-7.2.14ubuntu2/debian/copyright	2009-06-24 19:51:55.000000000 -0700
+@@ -54,3 +54,7 @@
+ Files: dh_bugfiles
+ Copyright: Modestas Vainius <modestas@vainius.eu>
+ License: GPL-2+
++
++Files: dh_installupstart
++Copyright: 1997-2008 Joey Hess <joeyh@debian.org>, 2009 Canonical Ltd.
++License: GPL-3
+diff -Nru debhelper-7.2.14ubuntu1/dh debhelper-7.2.14ubuntu2/dh
+--- debhelper-7.2.14ubuntu1/dh	2009-05-18 09:48:34.000000000 -0700
++++ debhelper-7.2.14ubuntu2/dh	2009-07-06 15:38:35.000000000 -0700
+@@ -236,6 +236,7 @@
+ 	dh_installemacsen
+ 	dh_installifupdown
+ 	dh_installinfo
++	dh_installupstart
+ 	dh_installinit
+ 	dh_installmenu
+ 	dh_installmime
+diff -Nru debhelper-7.2.14ubuntu1/dh_installupstart debhelper-7.2.14ubuntu2/dh_installupstart
+--- debhelper-7.2.14ubuntu1/dh_installupstart	1969-12-31 16:00:00.000000000 -0800
++++ debhelper-7.2.14ubuntu2/dh_installupstart	2009-06-24 19:51:22.000000000 -0700
+@@ -0,0 +1,214 @@
++#!/usr/bin/perl -w
++
++=head1 NAME
++
++dh_installupstart - install upstart jobs into package build directories
++
++=cut
++
++use strict;
++use Debian::Debhelper::Dh_Lib;
++
++=head1 SYNOPSIS
++
++B<dh_installupstart> [S<I<debhelper options>>] [B<--name=>I<name>] [B<-n>] [B<-R>] [B<-r>] [B<-d>] [S<B<--> I<params>>]
++
++=head1 DESCRIPTION
++
++dh_installupstart is a debhelper program that is responsible for installing
++upstart job files into package build directories, and providing compatibility
++handling for non-upstart systems.
++
++It also automatically generates the postinst and postrm and prerm commands
++needed to set up the compatibility symlinks in /etc/rc*.d/ and to start and
++stop the init scripts.
++
++If a file named debian/package.upstart exists, then it is installed into
++etc/init/package.conf in the package build directory, with "package" replaced
++by the package name.
++
++=head1 OPTIONS
++
++=over 4
++
++=item B<-n>, B<--noscripts>
++
++Do not modify postinst/postrm/prerm scripts.
++
++=item B<-o>, B<--onlyscripts>
++
++Only modify postinst/postrm/prerm scripts, do not actually install any
++upstart job files. May be useful if the upstart job file is shipped and/or
++installed by upstream in a way that doesn't make it easy to let
++dh_installupstart find it.
++
++=item B<-R>, B<--restart-after-upgrade>
++
++Do not stop the upstart job until after the package upgrade has been
++completed. This is different than the default behavior, which stops the
++service in the prerm, and starts it again in the postinst.
++
++This can be useful for daemons that should not have a possibly long
++downtime during upgrade. But you should make sure that the daemon will not
++get confused by the package being upgraded while it's running before using
++this option.
++
++=item B<-r>, B<--no-restart-on-upgrade>
++
++Do not stop upstart job on upgrade.
++
++=item B<--no-start>
++
++Do not start the upstart job on install or upgrade, or stop it on removal.
++Only call update-rc.d. Useful for rcS scripts.
++
++=item B<-d>, B<--remove-d>
++
++Remove trailing "d" from the name of the package, and use the result for the
++filename the upstart job file is installed as in etc/init/ . This may be
++useful for daemons with names ending in "d".
++
++=item B<-u>I<params> B<--update-rcd-params=>I<params>
++
++=item B<--> I<params>
++
++Pass "params" to L<update-rc.d(8)>. If not specified, "defaults" will be
++passed to L<update-rc.d(8)>.
++
++=item B<--name=>I<name>
++
++Install the upstart job file using the filename I<name> instead of the
++default filename, which is the package name. When this parameter is used,
++dh_installupstart looks for and installs a file named
++debian/package.name.upstart, instead of the usual debian/package.upstart.
++
++=item B<--error-handler=>I<function>
++
++Call the named shell function if running the init script fails. The
++function should be provided in the prerm and postinst scripts, before the
++#DEBHELPER# token.
++
++=back
++
++=head1 NOTES
++
++Note that this command is not idempotent. L<dh_prep(1)> should be called
++between invocations of this command. Otherwise, it may cause multiple
++instances of the same text to be added to maintainer scripts.
++
++=cut
++
++init(options => {
++	"r" => \$dh{R_FLAG},
++	"no-restart-on-upgrade" => \$dh{R_FLAG},
++	"no-start" => \$dh{NO_START},
++	"R|restart-after-upgrade" => \$dh{RESTART_AFTER_UPGRADE},
++	"update-rcd-params=s", => \$dh{U_PARAMS},
++	"remove-d" => \$dh{D_FLAG},
++});
++
++foreach my $package (@{$dh{DOPACKAGES}}) {
++	my $tmp=tmpdir($package);
++
++	# Figure out what filename to install it as.
++	my $jobfile;
++	if (defined $dh{NAME}) {
++		$jobfile=$dh{NAME};
++	}
++	elsif ($dh{D_FLAG}) {
++		# -d on the command line sets D_FLAG. We will 
++		# remove a trailing 'd' from the package name and 
++		# use that as the name.
++		$jobfile=$package;
++		if ($jobfile=~m/(.*)d$/) {
++			$jobfile=$1;
++		}
++		else {
++			warning("\"$package\" has no final d' in its name, but -d was specified.");
++		}
++	}       
++	else {
++		$jobfile=$package;
++	}       
++	
++	my $job=pkgfile($package,$jobfile) || pkgfile($package,"upstart");
++
++	if ($job ne '' || $dh{ONLYSCRIPTS}) {
++		if (! $dh{ONLYSCRIPTS}) {
++			if (! -d "$tmp/etc/init") {
++				doit("install","-d","$tmp/etc/init");
++			}
++		
++			doit("install","-p","-m644",$job,"$tmp/etc/init/$jobfile.conf");
++		}
++		
++		# ensures that our /etc/init.d/ symlink points to a valid
++		# implementation
++		addsubstvar($package, "misc:Depends", "upstart-job");
++
++		if (! -d "$tmp/etc/init.d") {
++			doit("install","-d","$tmp/etc/init.d");
++		}
++		doit("ln","-s","/lib/init/upstart-job","$tmp/etc/init.d/$jobfile");
++
++		# This is set by the -u "foo" command line switch, it's
++		# the parameters to pass to update-rc.d. If not set,
++		# we have to say "defaults".
++		my $params='';
++		if (defined($dh{U_PARAMS})) {
++			$params=join(' ',@{$dh{U_PARAMS}});
++		}	
++		if ($params eq '') {
++			$params="defaults";
++		}
++
++		if (! $dh{NOSCRIPTS}) {
++			if (! $dh{NO_START}) {
++				if ($dh{RESTART_AFTER_UPGRADE}) {
++					# update-rc.d, and restart (or
++					# start if new install) script
++					autoscript($package,"postinst", "postinst-init-restart",
++						"s/#SCRIPT#/$jobfile/;s/#INITPARMS#/$params/;s/#ERROR_HANDLER#/$dh{ERROR_HANDLER}/");
++				}
++				else {
++					# update-rc.d, and start script
++					autoscript($package,"postinst", "postinst-init",
++						"s/#SCRIPT#/$jobfile/;s/#INITPARMS#/$params/;s/#ERROR_HANDLER#/$dh{ERROR_HANDLER}/");
++				}
++			
++				if ($dh{R_FLAG} || $dh{RESTART_AFTER_UPGRADE}) {
++					# stops script only on remove
++					autoscript($package,"prerm","prerm-init-norestart",
++						"s/#SCRIPT#/$jobfile/;s/#INITPARMS#/$params/;s/#ERROR_HANDLER#/$dh{ERROR_HANDLER}/");
++				}
++				else {
++					# always stops script
++					autoscript($package,"prerm","prerm-init",
++						"s/#SCRIPT#/$jobfile/;s/#INITPARMS#/$params/;s/#ERROR_HANDLER#/$dh{ERROR_HANDLER}/");
++				}
++			}
++			else {
++				# just update-rc.d
++				autoscript($package,"postinst", "postinst-init-nostart",
++					"s/#SCRIPT#/$jobfile/;s/#INITPARMS#/$params/;s/#ERROR_HANDLER#/$dh{ERROR_HANDLER}/");
++			}
++
++			# removes rc.d links
++			autoscript($package,"postrm","postrm-init",
++				"s/#SCRIPT#/$jobfile/;s/#INITPARMS#/$params/;s/#ERROR_HANDLER#/$dh{ERROR_HANDLER}/");
++		}
++	}
++}
++
++=head1 SEE ALSO
++
++L<debhelper(7)>
++
++This program is a part of debhelper.
++
++=head1 AUTHORS
++
++Joey Hess <joeyh@debian.org>
++Steve Langasek <steve.langasek@canonical.com>
++
++=cut

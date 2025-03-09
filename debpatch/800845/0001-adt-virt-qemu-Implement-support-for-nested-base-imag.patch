@@ -1,0 +1,109 @@
+From 9909a0449237e821237fcfcf3d9a94d35208c121 Mon Sep 17 00:00:00 2001
+From: Christian Seiler <christian@iwakd.de>
+Date: Thu, 3 Mar 2016 22:10:27 +0100
+Subject: [PATCH] adt-virt-qemu: Implement support for nested base images.
+
+This adds initial support for nested base images to be passed into the
+test environment, so that nested VMs may be used in tests.
+
+A read-only copy of the first image without the overlay is passed to
+the VM with a hardware serial number BASEIMAGE. adt-virt-qemu installs
+udev rules that create a symbolic link /dev/baseimage for that drive
+the first time the testbed is booted. Also, the symlink priority for
+that drive is lowered, because the same file system UUIDs will be
+present on both the first drive and the readonly baseimage drive.
+
+Closes: #800845
+---
+ debian/changelog             |  4 ++++
+ virt-subproc/adt-virt-qemu   | 29 +++++++++++++++++++++++++++++
+ virt-subproc/adt-virt-qemu.1 |  5 +++++
+ 3 files changed, 38 insertions(+)
+
+diff --git a/debian/changelog b/debian/changelog
+index 36ee620..85a5571 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,5 +1,6 @@
+ autopkgtest (3.19.4) UNRELEASED; urgency=medium
+ 
++  [ Martin Pitt ]
+   * setup-commands/setup-testbed: Ensure that removing cruft does not remove
+     cloud-init. (LP: #1539126)
+   * setup-commands/setup-testbed: Purge lxd and lxc.
+@@ -14,6 +15,9 @@ autopkgtest (3.19.4) UNRELEASED; urgency=medium
+     lxc-start-ephemeral got deprecated by that. This now supports reboots in
+     ephemeral mode.
+ 
++  [ Christian Seiler ]
++  * adt-virt-qemu: Implement support for nested base images. (Closes: #800845)
++
+  -- Martin Pitt <mpitt@debian.org>  Tue, 23 Feb 2016 18:21:51 +0100
+ 
+ autopkgtest (3.19.3) unstable; urgency=medium
+diff --git a/virt-subproc/adt-virt-qemu b/virt-subproc/adt-virt-qemu
+index 965e3e8..e11ab14 100755
+--- a/virt-subproc/adt-virt-qemu
++++ b/virt-subproc/adt-virt-qemu
+@@ -175,6 +175,34 @@ def login_tty_and_setup_shell():
+     term.send(b'\nexit\n')
+     VirtSubproc.expect(term, b'\nlogout', 10)
+ 
++def setup_baseimage():
++    '''setup /dev/baseimage in VM'''
++
++    term = VirtSubproc.get_unix_socket(os.path.join(workdir, 'ttyS1'))
++
++    # Setup udev rules for /dev/baseimage; set link_priority to -1024 so
++    # that the duplicate UUIDs of the partitions will have no effect.
++    term.send(b'''mkdir -p -m 0755 /etc/udev/rules.d ; printf '# Created by adt-virt-qemu\\n%s\\n%s\\n' 'KERNEL=="vd*[!0-9]", ENV{ID_SERIAL}=="BASEIMAGE", OPTIONS+="link_priority=-1024", SYMLINK+="baseimage", MODE="0664"' 'KERNEL=="vd*[0-9]",  ENV{ID_SERIAL}=="BASEIMAGE", OPTIONS+="link_priority=-1024"' > /etc/udev/rules.d/61-baseimage.rules\n''')
++    VirtSubproc.expect(term, b'#', 10)
++    # Reload udev to make sure the rules take effect (udev only auto-
++    # rereads rules every 3 seconds)
++    term.send(b'udevadm control -R\n')
++    VirtSubproc.expect(term, b'#', 60)
++    # Update the initramfs to include the new udev rules (to support
++    # reboots properly)
++    term.send(b'update-initramfs -k all -u\n')
++    VirtSubproc.expect(term, b'#', 60)
++
++    monitor = VirtSubproc.get_unix_socket(os.path.join(workdir, 'monitor'))
++
++    # Add the base image as an additional drive
++    monitor.send(('drive_add 0 file=%s,if=none,readonly=on,serial=BASEIMAGE,id=drive-baseimage\n' % args.image[0]).encode())
++    VirtSubproc.expect(monitor, b'(qemu)', 10)
++    monitor.send(b'device_add virtio-blk-pci,drive=drive-baseimage,id=virtio-baseimage\n')
++    VirtSubproc.expect(monitor, b'(qemu)', 10)
++
++    term.send(b'udevadm settle --exit-if-exists=/dev/baseimage\n')
++    VirtSubproc.expect(term, b'#', 10)
+ 
+ def setup_shared(shared_dir):
+     '''Set up shared dir'''
+@@ -501,6 +529,7 @@ def hook_open():
+             # files; let QEMU run with the deleted inode
+             os.unlink(overlay)
+         setup_shell()
++        setup_baseimage()
+         setup_shared(shareddir)
+         setup_config(shareddir)
+         make_auxverb(shareddir)
+diff --git a/virt-subproc/adt-virt-qemu.1 b/virt-subproc/adt-virt-qemu.1
+index 81bb11f..2de5e3e 100644
+--- a/virt-subproc/adt-virt-qemu.1
++++ b/virt-subproc/adt-virt-qemu.1
+@@ -26,6 +26,11 @@ does
+ the given images, but will instead create a temporary overlay for the
+ primary image, and add all other images as read-only.
+ 
++The first image without the overlay is always added as an additional
++read-only hard drive, which will be available for tests as
++.IR /dev/baseimage .
++This allows for tests that require nested VMs to reuse the same image.
++
+ .SH REQUIREMENTS
+ .B adt-virt-qemu
+ assumes that you have already prepared a suitable Debian based QEMU image (see
+-- 
+2.1.4
+

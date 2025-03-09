@@ -1,0 +1,80 @@
+From a19f5668aa6d2e98423eb08ac9da9c57332bc8ad Mon Sep 17 00:00:00 2001
+From: Ivo De Decker <ivodd@debian.org>
+Date: Fri, 21 Dec 2018 17:03:19 +0100
+Subject: [PATCH 2/3] Add PkgSourceVersion substvars.
+
+Proof of concept implementation for substvars that can be used for
+dependencies between binary packages from the same source, using provides.
+These dependencies will be satisfied by the initial build and every subsequent
+binNMU, as long as they are built from the same source version.
+
+This defines the substvar dh:ProvidePkgSourceVersion and
+dh:DepPkgSourceVersion:$pkgvar for every package $pkgvar built from the same
+source.
+
+When the substvar dh:ProvidePkgSourceVersion is added to the Provides: of a
+package pkg1, other packages from the same source can depends on
+dh:DepPkgSourceVersion:pkg1.
+---
+ dh_gencontrol | 38 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 38 insertions(+)
+
+diff --git a/dh_gencontrol b/dh_gencontrol
+index b65ee595..6b688e94 100755
+--- a/dh_gencontrol
++++ b/dh_gencontrol
+@@ -83,6 +83,42 @@ sub ensure_substvars_are_present {
+ 	return 1;
+ }
+ 
++
++sub get_pkg_provides{
++	my ($pkgname) = @_;
++
++	my $sourceversion = get_source_version($pkgname);
++	if ($sourceversion !~ /:/) {
++		$sourceversion = "0:".$sourceversion;
++	}
++	# only use characters acceptable in a package name
++	$sourceversion =~ s/~/--/g;
++	# this only guarantees a unique name because we add zero epoch above
++	$sourceversion =~ s/:/-/g;
++
++	# the exact name of the provides is not meant to be a stable API
++	my $provide = "dh-provides-$sourceversion-$pkgname";
++	return $provide;
++}
++
++sub add_pkg_sv_substvars {
++	my ($package) = @_;
++	addsubstvar($package, "dh:ProvidePkgSourceVersion", get_pkg_provides($package));
++
++	my @allpackages=getpackages();
++	foreach my $pkg (@allpackages) {
++		my $pkgvar = $pkg;
++		# from man deb-substvars:
++		# substvars can only contain alphanumerics, hyphens and colons
++		# from policy 5.6.1:
++		# package names can lower case letters (a-z), digits (0-9), plus (+)
++		# and minus (-) signs, and periods (.)
++		$pkgvar =~ s/\+/--/g;
++		$pkgvar =~ s/\./:/g;
++		addsubstvar($package, "dh:DepPkgSourceVersion:$pkgvar", get_pkg_provides($pkg));
++	}
++}
++
+ on_pkgs_in_parallel {
+ 	foreach my $package (@_) {
+ 		my $tmp=tmpdir($package);
+@@ -90,6 +126,8 @@ on_pkgs_in_parallel {
+ 		my $dbgsym_info_dir = "debian/.debhelper/${package}";
+ 		my $dbgsym_tmp = dbgsym_tmpdir($package);
+ 
++		add_pkg_sv_substvars($package);
++
+ 		my $substvars="debian/${ext}substvars";
+ 
+ 		my $changelog=pkgfile($package,'changelog');
+-- 
+2.11.0
+

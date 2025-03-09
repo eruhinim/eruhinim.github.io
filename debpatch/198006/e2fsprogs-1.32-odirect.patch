@@ -1,0 +1,120 @@
+diff -ru e2fsprogs-1.32.maint/configure.in e2fsprogs-1.32/configure.in
+--- e2fsprogs-1.32.maint/configure.in	Sat Nov  9 10:48:10 2002
++++ e2fsprogs-1.32/configure.in	Wed Jun 18 17:41:55 2003
+@@ -549,6 +549,21 @@
+    AC_DEFINE(HAVE_LSEEK64_PROTOTYPE)
+ fi
+ dnl
++dnl Check if we have O_DIRECT defined in <fnctl.h>
++dnl
++AC_MSG_CHECKING(for O_DIRECT in fcntl.h)
++AC_CACHE_VAL(e2fsprogs_cv_have_o_direct,
++	AC_TRY_COMPILE(
++	[#define _GNU_SOURCE
++#include <fcntl.h>],
++	 [open("/", O_RDONLY|O_DIRECT);],
++	 [e2fsprogs_cv_have_o_direct=yes],
++	 [e2fsprogs_cv_have_o_direct=no]))
++AC_MSG_RESULT($e2fsprogs_cv_have_o_direct)
++if test "x$e2fsprogs_cv_have_o_direct" = xyes; then
++    AC_DEFINE(HAVE_O_DIRECT)
++fi
++dnl
+ dnl Word sizes...
+ dnl
+ if test "$cross_compiling" = yes -a "$ac_cv_sizeof_long" = ""; then
+diff -ru e2fsprogs-1.32.maint/misc/badblocks.c e2fsprogs-1.32/misc/badblocks.c
+--- e2fsprogs-1.32.maint/misc/badblocks.c	Tue Oct 15 07:33:33 2002
++++ e2fsprogs-1.32/misc/badblocks.c	Wed Jun 18 18:24:34 2003
+@@ -29,6 +29,8 @@
+  * 			 list.  (Work done by David Beattie)
+  */
+ 
++#define _GNU_SOURCE /* for O_DIRECT */
++
+ #include <errno.h>
+ #include <fcntl.h>
+ #ifdef HAVE_GETOPT_H
+@@ -239,7 +241,7 @@
+ 		ext2fs_badblocks_list_iterate (bb_iter, &next_bad);
+ 	} while (next_bad && next_bad < from_count);
+ 
+-	blkbuf = malloc (blocks_at_once * block_size);
++	blkbuf = valloc (blocks_at_once * block_size);
+ 	if (!blkbuf)
+ 	{
+ 		com_err (program_name, ENOMEM, _("while allocating buffers"));
+@@ -308,7 +310,7 @@
+ 	static unsigned char pattern[] = {0xaa, 0x55, 0xff, 0x00};
+ 	unsigned int bb_count = 0;
+ 
+-	buffer = malloc (2 * block_size);
++	buffer = valloc (2 * block_size);
+ 	if (!buffer)
+ 	{
+ 		com_err (program_name, ENOMEM, _("while allocating buffers"));
+@@ -415,7 +417,7 @@
+ 		ext2fs_badblocks_list_iterate (bb_iter, &next_bad);
+ 	} while (next_bad && next_bad < from_count);
+ 
+-	blkbuf = malloc (3 * blocks_at_once * block_size);
++	blkbuf = valloc (3 * blocks_at_once * block_size);
+ 	test_record = malloc (blocks_at_once*sizeof(struct saved_blk_record));
+ 	if (!blkbuf || !test_record) {
+ 		com_err(program_name, ENOMEM, _("while allocating buffers"));
+@@ -785,6 +787,55 @@
+ 		}
+ 	} else
+ 		host_dev = dev;
++#if HAVE_O_DIRECT
++	/* Try to turn on direct I/O and test if it works */
++	if (block_size % 1024 != 0) {
++	    /* All kernel versions require at least 1kiB aligned buffers */
++	    if (v_flag) {
++		com_err(program_name, 0, 
++			_("block size not multiple of 512, "
++			  "disabling direct I/O"));
++	    }
++	} else {
++	    int flags;
++	    char *buf = NULL;
++	    
++	    flags = fcntl(dev, F_GETFL);
++	    if (flags == -1) {
++		if (v_flag) {
++		    com_err (program_name, errno,
++			     _("while trying to retrieve flags"));
++		}
++		goto no_direct_io;
++	    }
++	    if (fcntl(dev, F_SETFL, flags|O_DIRECT) == -1) {
++		if (v_flag) {
++		    com_err(program_name, errno,
++			    _("while trying to set O_DIRECT flag"));
++		}
++		goto no_direct_io;
++	    }
++	    buf = valloc(block_size);
++	    if (buf == NULL) {
++		com_err(program_name, ENOMEM, _("while allocating buffers"));
++		exit (1);
++	    }
++	    if (read(dev, buf, block_size) != block_size) {
++	    no_direct_io:
++		fcntl(dev, F_SETFL, flags);
++		if (v_flag) {
++		    com_err(program_name, 0, 
++			    _("cannot enable direct I/O on %s"), device_name);
++		}
++	    } else if (v_flag) {
++		com_err(program_name, 0, _("direct I/O enabled on %s"), 
++			device_name);
++	    }
++	    if (buf != NULL) {
++		free(buf);
++	    }
++	}
++#endif /* HAVE_O_DIRECT */
+ 	if (input_file) {
+ 		if (strcmp (input_file, "-") == 0)
+ 			in = stdin;

@@ -1,0 +1,135 @@
+diff --git a/dcut b/dcut
+index 07bd74d..86f54f8 100755
+--- a/dcut
++++ b/dcut
+@@ -40,6 +40,7 @@ USAGE = """Usage: %s [options] [host] command [, command]
+    -k keyid Use this keyid for signing.
+    -O file Write commands to file.
+    -U file Upload specified commands file (presently no checks).
++   -i changes_file Upload commands file to remove package from UploadQueue
+  Supported commands: mv, rm
+    (No paths or command-line options allowed on ftp-master.)
+ """%(sys.argv[0])
+@@ -94,11 +95,11 @@ def getoptions():
+       if options['debug']: print "D: Couldn't guess uploader"
+   # parse command line arguments
+   (opts, arguments) = dputhelper.getopt(sys.argv[1:],
+-                            'c:dDhsvm:k:PU:O:',
++                            'c:dDhsvm:k:PU:O:i:',
+                             ['config=', 'debug',
+                              'help', 'simulate', 'version','host=',
+                              'maintainteraddress=', 'keyid=',
+-                             'passive', 'upload=', 'output='
++                             'passive', 'upload=', 'output=', 'input='
+                              ])
+ 
+   for (option, arg) in opts:
+@@ -127,6 +128,8 @@ def getoptions():
+       options['filetocreate'] = arg
+     elif option=='--host':
+       options['host'] = arg
++    elif option in ('-i', '--input'):
++      options['changes'] = arg
+     else:
+       print >> sys.stderr, "%s internal error: Option %s, argument %s unknown"%(
+               progname,option,arg)
+@@ -139,8 +142,8 @@ def getoptions():
+ 
+     
+   # we don't create command files without uploader
+-  if not options['uploader'] and not options['filetoupload']:
+-    print  >> sys.stderr, "%s error: command file cannot be create without maintainer email"%progname
++  if not options['uploader'] and (options['filetoupload'] or options['changes']):
++    print  >> sys.stderr, "%s error: command file cannot be created without maintainer email"%progname
+     print  >> sys.stderr, '%s        please set $DEBEMAIL, $EMAIL or use the "-m" option'%(len(progname)*' ')
+     sys.exit(1)
+     
+@@ -333,6 +336,10 @@ def dcut():
+         print 'Error: I\'m insisting on the .commands extension, which'
+         print '       "%s" doesnt seem to have.'%filename
+       # TV-TODO: check file to be readable?
++    elif options['changes']:
++      parse_changes = dput['parse_changes']
++      removecommands = create_commands(options, config, parse_changes)
++      filename = write_commands(removecommands, options, config, tempdir)
+     else:
+       commands = parse_queuecommands(arguments,options,config)
+       filename = write_commands(commands, options, config, tempdir)
+@@ -350,6 +357,26 @@ def dcut():
+         os.unlink(filename)
+       os.rmdir(tempdir)
+ 
++# Parses a .changes file and returns commands to remove files named in it
++def create_commands(options, config, parse_changes):
++  changes_file = options['changes']
++  if options['debug']:
++    print "D: Parsing changes file (%s) for files to remove" % changes_file
++  try:
++    chg_fd = open(changes_file, 'r')
++  except IOError:
++    print "Can't open changes file: %s" % changes_file
++    sys.exit(1)
++  the_changes = parse_changes(chg_fd)
++  chg_fd.close
++  removecommands = []
++  for file in the_changes.dict['files'].split('\n'):
++    fn = string.split(file)[4] # filename only
++    rm = 'rm --searchdirs ' + fn
++    if options['debug']: print "D: Will remove %s with '%s'" % (fn, rm)
++    removecommands.append(rm)
++  return removecommands
++
+ if __name__=="__main__":
+   try:
+     dcut()
+diff --git a/dcut.1 b/dcut.1
+index 4bbc444..10cf76b 100644
+--- a/dcut.1
++++ b/dcut.1
+@@ -95,7 +95,7 @@ The program uses the environment variables DEBEMAIL or EMAIL and
+ DEBFULLNAME to populate the uploader field. Also, environment variables
+ may be used in search of a suitable place for temporary files.
+ 
+-.SH EXAMPLE
++.SH EXAMPLES
+ To upload a GPG signed commands file that removes dput_0.9.2.33_all.deb
+ file from the queue, one would have to do
+ 
+@@ -125,6 +125,37 @@ ztsAoMgw6HjcI9flfmwjgMiapcu379Pu
+ -----END PGP SIGNATURE-----
+ .fi
+ 
++To upload a GPG signed commands file that removes files named in
++dput_0.9.4_i386.changes from the queue, one would have to do
++
++.in +4n
++.nf
++$ dcut --input dput_0.9.4_i386.changes
++.fi
++
++.in
++This creates and uploads a commands file that looks like the following:
++.nf
++
++-----BEGIN PGP SIGNED MESSAGE-----
++Hash: SHA1
++
++Uploader: Foo Bar <foo@bar.org>
++Commands:
++ rm --searchdirs dput_0.9.4.dsc
++ rm --searchdirs dput_0.9.4.tar.gz
++ rm --searchdirs dput_0.9.4_all.deb
++
++
++-----BEGIN PGP SIGNATURE-----
++Version: GnuPG v1.4.9 (GNU/Linux)
++
++iEYEARECAAYKAkisYx0ACgkQ4eu+pS04mIfwLQCg85XVpae/LHLrbvzywcQNt9PS
++ztsAoMgw6HjcI9flfmwjgMiapcu379Pu
++=fjp0
++-----END PGP SIGNATURE-----
++.fi
++
+ .SH LICENSE
+ This program is distributed under the terms of the Gnu General Public
+ License, Version 2 or later.

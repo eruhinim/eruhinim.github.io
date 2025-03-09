@@ -1,0 +1,259 @@
+commit 86c6dae8dfa30f354ef938fefb9cd9fd09b22552
+Author: Chris Lamb <lamby@debian.org>
+Date:   Sun Nov 20 22:03:22 2016 +0100
+
+    Backport "New options to create device and inode-independent archives." to cpio 2.12
+
+--- cpio-2.11+dfsg.orig/src/extern.h
++++ cpio-2.11+dfsg/src/extern.h
+@@ -56,6 +56,8 @@ extern int only_verify_crc_flag;
+ extern int no_abs_paths_flag;
+ extern unsigned int warn_option;
+ extern mode_t newdir_umask;
++extern int renumber_inodes_option;
++extern int ignore_devno_option;
+ 
+ /* Values for warn_option */
+ #define CPIO_WARN_NONE     0
+@@ -172,8 +174,8 @@ void create_all_directories (char *name)
+ void prepare_append (int out_file_des);
+ char *find_inode_file (ino_t node_num,
+ 		       unsigned long major_num, unsigned long minor_num);
+-void add_inode (ino_t node_num, char *file_name,
+-	        unsigned long major_num, unsigned long minor_num);
++struct inode_val *add_inode (ino_t node_num, char *file_name,
++			     unsigned long major_num, unsigned long minor_num);
+ int open_archive (char *file);
+ void tape_offline (int tape_des);
+ void get_next_reel (int tape_des);
+@@ -218,3 +220,5 @@ void delay_set_stat (char const *file_na
+ int repair_delayed_set_stat (struct cpio_file_stat *file_hdr);
+ void apply_delayed_set_stat (void);
+      
++int arf_stores_inode_p (enum archive_format arf);
++
+--- cpio-2.11+dfsg.orig/src/global.c
++++ cpio-2.11+dfsg/src/global.c
+@@ -196,3 +196,7 @@ int (*xstat) ();
+ 
+ /* Which copy operation to perform. (-i, -o, -p) */
+ void (*copy_function) () = 0;
++
++int renumber_inodes_option;
++int ignore_devno_option;
++
+--- cpio-2.11+dfsg.orig/src/main.c
++++ cpio-2.11+dfsg/src/main.c
+@@ -58,7 +58,10 @@ enum cpio_options {
+   DEBUG_OPTION,                  
+   BLOCK_SIZE_OPTION,             
+   TO_STDOUT_OPTION,
+-  EXTRACT_OVER_SYMLINKS
++  EXTRACT_OVER_SYMLINKS,
++  RENUMBER_INODES_OPTION,
++  IGNORE_DEVNO_OPTION,
++  DEVICE_INDEPENDENT_OPTION
+ };
+ 
+ const char *program_authors[] =
+@@ -176,6 +179,13 @@ static struct argp_option options[] = {
+    N_("Append to an existing archive."), GRID+1 },
+   {NULL, 'O', N_("[[USER@]HOST:]FILE-NAME"), 0,
+    N_("Archive filename to use instead of standard output. Optional USER and HOST specify the user and host names in case of a remote archive"), GRID+1 },
++  {"renumber-inodes", RENUMBER_INODES_OPTION, NULL, 0,
++   N_("Renumber inodes") },
++  {"ignore-devno", IGNORE_DEVNO_OPTION, NULL, 0,
++   N_("Don't store device numbers") },
++  {"device-independent", DEVICE_INDEPENDENT_OPTION, NULL, 0,
++   N_("Create device-independent (reproducible) archives") },
++  {"reproducible", 0, NULL, OPTION_ALIAS },
+ #undef GRID
+   
+   /* ********** */
+@@ -438,7 +448,19 @@ crc newc odc bin ustar tar (all-caps als
+ 	error (PAXEXIT_FAILURE, 0, _("Mode already defined"));
+       copy_function = process_copy_pass;
+       break;
+-	  
++
++    case IGNORE_DEVNO_OPTION:
++      ignore_devno_option = 1;
++      break;
++
++    case RENUMBER_INODES_OPTION:
++      renumber_inodes_option = 1;
++      break;
++
++    case DEVICE_INDEPENDENT_OPTION:
++      ignore_devno_option = renumber_inodes_option = 1;
++      break;
++
+     case RSH_COMMAND_OPTION:
+       rsh_command_option = arg;
+       break;
+@@ -581,6 +603,8 @@ process_args (int argc, char *argv[])
+       CHECK_USAGE(xstat != lstat, "--dereference", "--extract");
+       CHECK_USAGE(append_flag, "--append", "--extract");
+       CHECK_USAGE(output_archive_name, "-O", "--extract");
++      CHECK_USAGE(renumber_inodes_option, "--renumber-inodes", "--extract");
++      CHECK_USAGE(ignore_devno_option, "--ignore-devno", "--extract");
+       if (to_stdout_option)
+ 	{
+ 	  CHECK_USAGE(create_dir_flag, "--make-directories", "--to-stdout");
+@@ -636,6 +660,9 @@ process_args (int argc, char *argv[])
+ 	archive_format = arf_binary;
+       if (output_archive_name)
+ 	archive_name = output_archive_name;
++
++      if (!arf_stores_inode_p (archive_format))
++	renumber_inodes_option = ignore_devno_option = 0;
+     }
+   else
+     {
+@@ -661,6 +688,9 @@ process_args (int argc, char *argv[])
+       CHECK_USAGE(no_abs_paths_flag, "--absolute-pathnames",
+ 		  "--pass-through");
+       CHECK_USAGE(to_stdout_option, "--to-stdout", "--pass-through");
++      CHECK_USAGE(renumber_inodes_option, "--renumber-inodes",
++		  "--pass-through");
++      CHECK_USAGE(ignore_devno_option, "--ignore-devno", "--pass-through");
+       
+       directory_name = argv[index];
+     }
+--- cpio-2.11+dfsg.orig/src/util.c
++++ cpio-2.11+dfsg/src/util.c
+@@ -686,6 +686,7 @@ struct inode_val
+   ino_t inode;
+   unsigned long major_num;
+   unsigned long minor_num;
++  ino_t trans_inode;
+   char *file_name;
+ };
+ 
+@@ -709,8 +710,8 @@ inode_val_compare (const void *val1, con
+          && ival1->minor_num == ival2->minor_num;
+ }
+ 
+-char *
+-find_inode_file (ino_t node_num, unsigned long major_num,
++static struct inode_val *
++find_inode_val (ino_t node_num, unsigned long major_num,
+ 		 unsigned long minor_num)
+ {
+   struct inode_val sample;
+@@ -722,32 +723,78 @@ find_inode_file (ino_t node_num, unsigne
+   sample.inode = node_num;
+   sample.major_num = major_num;
+   sample.minor_num = minor_num;
+-  ival = hash_lookup (hash_table, &sample);
++  return hash_lookup (hash_table, &sample);
++}
++
++char *
++find_inode_file (ino_t node_num, unsigned long major_num,
++		 unsigned long minor_num)
++{
++  struct inode_val *ival = find_inode_val (node_num, major_num, minor_num);
+   return ival ? ival->file_name : NULL;
+ }
+ 
+ /* Associate FILE_NAME with the inode NODE_NUM.  (Insert into hash table.)  */
+ 
+-void
++static ino_t next_inode;
++
++struct inode_val *
+ add_inode (ino_t node_num, char *file_name, unsigned long major_num,
+ 	   unsigned long minor_num)
+ {
+   struct inode_val *temp;
+-  struct inode_val *e;
++  struct inode_val *e = NULL;
+   
+   /* Create new inode record.  */
+   temp = (struct inode_val *) xmalloc (sizeof (struct inode_val));
+   temp->inode = node_num;
+   temp->major_num = major_num;
+   temp->minor_num = minor_num;
+-  temp->file_name = xstrdup (file_name);
++  temp->file_name = file_name ? xstrdup (file_name) : NULL;
++
++  if (renumber_inodes_option)
++    temp->trans_inode = next_inode++;
++  else
++    temp->trans_inode = temp->inode;
+ 
+   if (!((hash_table
+ 	 || (hash_table = hash_initialize (0, 0, inode_val_hasher,
+ 					   inode_val_compare, 0)))
+ 	&& (e = hash_insert (hash_table, temp))))
+     xalloc_die ();
+-  /* FIXME: e is not used */
++  return e;
++}
++
++static ino_t
++get_inode_and_dev (struct cpio_file_stat *hdr, struct stat *st)
++{
++  if (renumber_inodes_option)
++    {
++      if (st->st_nlink > 1)
++	{
++	  struct inode_val *ival = find_inode_val (st->st_ino,
++						   major (st->st_dev),
++						   minor (st->st_dev));
++	  if (!ival)
++	    ival = add_inode (st->st_ino, NULL,
++			      major (st->st_dev), minor (st->st_dev));
++	  hdr->c_ino = ival->trans_inode;
++	}
++      else
++	hdr->c_ino = next_inode++;
++    }
++  else
++    hdr->c_ino = st->st_ino;
++  if (ignore_devno_option)
++    {
++      hdr->c_dev_maj = 0;
++      hdr->c_dev_min = 0;
++    }
++  else
++    {
++      hdr->c_dev_maj = major (st->st_dev);
++      hdr->c_dev_min = minor (st->st_dev);
++    }
+ }
+ 
+ 
+@@ -1217,9 +1264,8 @@ sparse_write (int fildes, char *buf, uns
+ void
+ stat_to_cpio (struct cpio_file_stat *hdr, struct stat *st)
+ {
+-  hdr->c_dev_maj = major (st->st_dev);
+-  hdr->c_dev_min = minor (st->st_dev);
+-  hdr->c_ino = st->st_ino;
++  get_inode_and_dev (hdr, st);
++
+   /* For POSIX systems that don't define the S_IF macros,
+      we can't assume that S_ISfoo means the standard Unix
+      S_IFfoo bit(s) are set.  So do it manually, with a
+@@ -1618,3 +1664,19 @@ cpio_create_dir (struct cpio_file_stat *
+   return 0;
+ }
+ 
++/* Return true if the archive format ARF stores inode numbers */
++int
++arf_stores_inode_p (enum archive_format arf)
++{
++  switch (arf)
++    {
++    case arf_tar:
++    case arf_ustar:
++      return 0;
++
++    default:
++      break;
++    }
++  return 1;
++}
++  

@@ -1,0 +1,46 @@
+From: Sergei Golovan <sgolovan@debian.org>
+Date: Wed, 05 Feb 2025 15:47:06 +0300
+Subject: [PATCH] mips/mm: Revert converting to using lock_mm_and_find_vma()
+ The patch reverts 4bce37a68ff884e821a02a731897a8119e0c37b7 and
+ adapts the code to the changes in the expand_stack() prototype
+ using examples from 8d7071af890768438c14db6172cc8f9f4d04e184
+ .
+ Hopefully, this should fix #1093200, #1093859, #1087809, #1086028
+Bug: https://lore.kernel.org/all/mvmplxraqmd.fsf@suse.de/T/
+
+--- a/arch/mips/Kconfig
++++ b/arch/mips/Kconfig
+@@ -97,7 +97,6 @@
+ 	select HAVE_VIRT_CPU_ACCOUNTING_GEN if 64BIT || !SMP
+ 	select IRQ_FORCED_THREADING
+ 	select ISA if EISA
+-	select LOCK_MM_AND_FIND_VMA
+ 	select MODULES_USE_ELF_REL if MODULES
+ 	select MODULES_USE_ELF_RELA if MODULES && 64BIT
+ 	select PERF_USE_VMALLOC
+--- a/arch/mips/mm/fault.c
++++ b/arch/mips/mm/fault.c
+@@ -100,13 +100,22 @@
+ 
+ 	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, address);
+ retry:
+-	vma = lock_mm_and_find_vma(mm, address, regs);
++	mmap_read_lock(mm);
++	vma = find_vma(mm, address);
++	if (!vma)
++		goto bad_area;
++	if (vma->vm_start <= address)
++		goto good_area;
++	if (!(vma->vm_flags & VM_GROWSDOWN))
++		goto bad_area;
++	vma = expand_stack(mm, address);
+ 	if (!vma)
+ 		goto bad_area_nosemaphore;
+ /*
+  * Ok, we have a good vm_area for this memory access, so
+  * we can handle it..
+  */
++good_area:
+ 	si_code = SEGV_ACCERR;
+ 
+ 	if (write) {

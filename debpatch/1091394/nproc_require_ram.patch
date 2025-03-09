@@ -1,0 +1,294 @@
+--- coreutils-9.5.orig/src/nproc.c
++++ coreutils-9.5/src/nproc.c
+@@ -23,6 +23,7 @@
+ 
+ #include "system.h"
+ #include "nproc.h"
++#include "physmem.h"
+ #include "quote.h"
+ #include "xdectoint.h"
+ 
+@@ -34,13 +35,17 @@
+ enum
+ {
+   ALL_OPTION = CHAR_MAX + 1,
+-  IGNORE_OPTION
++  ASSUME_OPTION,
++  IGNORE_OPTION,
++  REQUIRE_RAM_OPTION
+ };
+ 
+ static struct option const longopts[] =
+ {
+   {"all", no_argument, nullptr, ALL_OPTION},
++  {"assume", required_argument, nullptr, ASSUME_OPTION},
+   {"ignore", required_argument, nullptr, IGNORE_OPTION},
++  {"require-mem", required_argument, nullptr, REQUIRE_RAM_OPTION},
+   {GETOPT_HELP_OPTION_DECL},
+   {GETOPT_VERSION_OPTION_DECL},
+   {nullptr, 0, nullptr, 0}
+@@ -61,7 +66,9 @@
+ "), stdout);
+       fputs (_("\
+       --all      print the number of installed processors\n\
++      --assume=N  assume the given number of processors before applying limits\n\
+       --ignore=N  if possible, exclude N processing units\n\
++      --require-mem=M  reduce emitted processes to accommodate the given RAM per processor\n\
+ "), stdout);
+ 
+       fputs (HELP_OPTION_DESCRIPTION, stdout);
+@@ -74,7 +81,8 @@
+ int
+ main (int argc, char **argv)
+ {
+-  unsigned long nproc, ignore = 0;
++  unsigned long nproc = 0, ignore = 0;
++  double require_ram = 0;
+   initialize_main (&argc, &argv);
+   set_program_name (argv[0]);
+   setlocale (LC_ALL, "");
+@@ -100,10 +108,19 @@
+           mode = NPROC_ALL;
+           break;
+ 
++	case ASSUME_OPTION:
++	  nproc = xdectoumax (optarg, 1, ULONG_MAX, "", _("invalid number"), 0);
++	  break;
++
+         case IGNORE_OPTION:
+           ignore = xdectoumax (optarg, 0, ULONG_MAX, "", _("invalid number"),0);
+           break;
+ 
++        case REQUIRE_RAM_OPTION:
++          require_ram = xdectoumax (optarg, 1, UINTMAX_MAX, "kKmMGTPEZYRQ0",
++                                    _("invalid number"), 0);
++          break;
++
+         default:
+           usage (EXIT_FAILURE);
+         }
+@@ -115,13 +132,23 @@
+       usage (EXIT_FAILURE);
+     }
+ 
+-  nproc = num_processors (mode);
++  if (nproc == 0)
++    nproc = num_processors (mode);
+ 
+   if (ignore < nproc)
+     nproc -= ignore;
+   else
+     nproc = 1;
+ 
++  if (require_ram > 0)
++    {
++      double c = physmem_claimable(1.0) / require_ram;
++      if (c < 1.0)
++        nproc = 1;
++      else if (c < nproc)
++        nproc = c;
++    }
++
+   printf ("%lu\n", nproc);
+ 
+   return EXIT_SUCCESS;
+--- coreutils-9.5.orig/lib/physmem.c
++++ coreutils-9.5/lib/physmem.c
+@@ -22,25 +22,28 @@
+ 
+ #include "physmem.h"
+ 
++#include <fcntl.h>
++#include <stdio.h>
+ #include <unistd.h>
+ 
+-#if HAVE_SYS_PSTAT_H
++#if HAVE_SYS_PSTAT_H /* HP-UX */
+ # include <sys/pstat.h>
+ #endif
+ 
+-#if HAVE_SYS_SYSMP_H
++#if HAVE_SYS_SYSMP_H /* IRIX */
+ # include <sys/sysmp.h>
+ #endif
+ 
+ #if HAVE_SYS_SYSINFO_H
++/* Linux, AIX, HP-UX, IRIX, OSF/1, Solaris, Cygwin, Android */
+ # include <sys/sysinfo.h>
+ #endif
+ 
+-#if HAVE_MACHINE_HAL_SYSINFO_H
++#if HAVE_MACHINE_HAL_SYSINFO_H /* OSF/1 */
+ # include <machine/hal_sysinfo.h>
+ #endif
+ 
+-#if HAVE_SYS_TABLE_H
++#if HAVE_SYS_TABLE_H /* OSF/1 */
+ # include <sys/table.h>
+ #endif
+ 
+@@ -51,13 +54,16 @@
+ #endif
+ 
+ #if HAVE_SYS_SYSCTL_H && !(defined __GLIBC__ && defined __linux__)
++/* Linux/musl, macOS, *BSD, IRIX, Minix */
+ # include <sys/sysctl.h>
+ #endif
+ 
+-#if HAVE_SYS_SYSTEMCFG_H
++#if HAVE_SYS_SYSTEMCFG_H /* AIX */
+ # include <sys/systemcfg.h>
+ #endif
+ 
++#include "full-read.h"
++
+ #ifdef _WIN32
+ 
+ # define WIN32_LEAN_AND_MEAN
+@@ -203,11 +209,84 @@
+   return 64 * 1024 * 1024;
+ }
+ 
+-/* Return the amount of physical memory available.  */
++#if defined __linux__
++
++/* Get the amount of free memory and of inactive file cache memory, and
++   return 0.  Upon failure, return -1.  */
++static int
++get_meminfo (unsigned long long *mem_free_p,
++             unsigned long long *mem_inactive_file_p)
++{
++  /* While the sysinfo() system call returns mem_total, mem_free, and a few
++     other numbers, the only way to get mem_inactive_file is by reading
++     /proc/meminfo.  */
++  int fd = open ("/proc/meminfo", O_RDONLY);
++  if (fd >= 0)
++    {
++      char buf[4096];
++      size_t buf_size = full_read (fd, buf, sizeof (buf));
++      close (fd);
++      if (buf_size > 0)
++        {
++          char *buf_end = buf + buf_size;
++          unsigned long long mem_free = 0;
++          unsigned long long mem_inactive_file = 0;
++
++          /* Iterate through the lines.  */
++          char *line = buf;
++          for (;;)
++            {
++              char *p;
++              for (p = line; p < buf_end; p++)
++                if (*p == '\n')
++                  break;
++              if (p == buf_end)
++                break;
++              *p = '\0';
++              if (sscanf (line, "MemFree: %llu kB", &mem_free) == 1)
++                {
++                  mem_free *= 1024;
++                }
++              if (sscanf (line, "Inactive(file): %llu kB", &mem_inactive_file) == 1)
++                {
++                  mem_inactive_file *= 1024;
++                }
++              line = p + 1;
++            }
++          if (mem_free > 0 && mem_inactive_file > 0)
++            {
++              *mem_free_p = mem_free;
++              *mem_inactive_file_p = mem_inactive_file;
++              return 0;
++            }
++        }
++    }
++  return -1;
++}
++
++#endif
++
++/* Return the amount of physical memory that can be claimed, with a given
++   aggressivity.  */
+ double
+-physmem_available (void)
++physmem_claimable (double aggressivity)
+ {
+ #if defined _SC_AVPHYS_PAGES && defined _SC_PAGESIZE
++# if defined __linux__
++  /* On Linux, sysconf (_SC_AVPHYS_PAGES) returns the amount of "free" memory.
++     The Linux memory management system attempts to keep only a small amount
++     of memory (something like 5% to 10%) as free, because memory is better
++     used in the file cache.
++     We compute the "claimable" memory as
++       (free memory) + aggressivity * (inactive memory in the file cache).  */
++  if (aggressivity > 0.0)
++    {
++      unsigned long long mem_free;
++      unsigned long long mem_inactive_file;
++      if (get_meminfo (&mem_free, &mem_inactive_file) == 0)
++        return (double) mem_free + aggressivity * (double) mem_inactive_file;
++    }
++# endif
+   { /* This works on linux-gnu, kfreebsd-gnu, solaris2, and cygwin.  */
+     double pages = sysconf (_SC_AVPHYS_PAGES);
+     double pagesize = sysconf (_SC_PAGESIZE);
+@@ -312,6 +391,12 @@
+   return physmem_total () / 4;
+ }
+ 
++/* Return the amount of physical memory available.  */
++double
++physmem_available (void)
++{
++  return physmem_claimable (0.0);
++}
+ 
+ #if DEBUG
+ 
+--- coreutils-9.5.orig/lib/physmem.h
++++ coreutils-9.5/lib/physmem.h
+@@ -20,7 +20,35 @@
+ #ifndef PHYSMEM_H_
+ # define PHYSMEM_H_ 1
+ 
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++
++/* Returns the total amount of physical memory.
++   This value is more or less a hard limit for the working set.  */
+ double physmem_total (void);
++
++/* Returns the amount of physical memory available.
++   This value is the amount of memory the application can use without hindering
++   any other process (assuming that no other process increases its memory
++   usage).  */
+ double physmem_available (void);
+ 
++/* Returns the amount of physical memory that can be claimed, with a given
++   aggressivity.
++   For AGGRESSIVITY == 0.0, the result is like physmem_available (): the amount
++   of memory the application can use without hindering any other process.
++   For AGGRESSIVITY == 1.0, the result is the amount of memory the application
++   can use, while causing memory shortage to other processes, but without
++   bringing the machine into an out-of-memory state.
++   Values in between, for example AGGRESSIVITY == 0.5, are a reasonable middle
++   ground.  */
++double physmem_claimable (double aggressivity);
++
++
++#ifdef __cplusplus
++}
++#endif
++
+ #endif /* PHYSMEM_H_ */
+--- coreutils-9.5.orig/m4/physmem.m4
++++ coreutils-9.5/m4/physmem.m4
+@@ -1,4 +1,5 @@
+-# physmem.m4 serial 12
++# physmem.m4
++# serial 12
+ dnl Copyright (C) 2002-2003, 2005-2006, 2008-2024 Free Software Foundation,
+ dnl Inc.
+ dnl This file is free software; the Free Software Foundation

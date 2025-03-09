@@ -1,0 +1,891 @@
+diff --git a/cfengine3-3.9.1/cf-key/cf-key-functions.c b/cfengine3-3.9.1/cf-key/cf-key-functions.c
+index 7c53ee5..5287b2c 100644
+--- a/cfengine3-3.9.1/cf-key/cf-key-functions.c
++++ b/cfengine3-3.9.1/cf-key/cf-key-functions.c
+@@ -48,6 +48,7 @@ RSA *LoadPublicKey(const char *filename)
+ {
+     FILE *fp;
+     RSA *key;
++    const BIGNUM *n, *e;
+ 
+     fp = safe_fopen(filename, "r");
+     if (fp == NULL)
+@@ -69,7 +70,9 @@ RSA *LoadPublicKey(const char *filename)
+ 
+     fclose(fp);
+ 
+-    if (BN_num_bits(key->e) < 2 || !BN_is_odd(key->e))
++    RSA_get0_key(key, &n, &e, NULL);
++
++    if (BN_num_bits(e) < 2 || !BN_is_odd(e))
+     {
+         Log(LOG_LEVEL_ERR, "Error while reading public key '%s' - RSA Exponent is too small or not odd. (BN_num_bits: %s)",
+             filename, GetErrorStr());
+diff --git a/cfengine3-3.9.1/cf-serverd/server_classic.c b/cfengine3-3.9.1/cf-serverd/server_classic.c
+index 5e610da..f50dc01 100644
+--- a/cfengine3-3.9.1/cf-serverd/server_classic.c
++++ b/cfengine3-3.9.1/cf-serverd/server_classic.c
+@@ -569,6 +569,7 @@ static void SetConnectionData(ServerConnectionState *conn, char *buf)
+ static int CheckStoreKey(ServerConnectionState *conn, RSA *key)
+ {
+     RSA *savedkey;
++    const BIGNUM *key_n, *key_e, *savedkey_n, *savedkey_e;
+ 
+     const char *udigest = KeyPrintableHash(ConnectionInfoKey(conn->conn_info));
+     assert(udigest != NULL);
+@@ -579,7 +580,10 @@ static int CheckStoreKey(ServerConnectionState *conn, RSA *key)
+             "A public key was already known from %s/%s - no trust required",
+             conn->hostname, conn->ipaddr);
+ 
+-        if ((BN_cmp(savedkey->e, key->e) == 0) && (BN_cmp(savedkey->n, key->n) == 0))
++        RSA_get0_key(key, &key_n, &key_e, NULL);
++        RSA_get0_key(savedkey, &savedkey_n, &savedkey_e, NULL);
++
++        if ((BN_cmp(savedkey_e, key_e) == 0) && (BN_cmp(savedkey_n, key_n) == 0))
+         {
+             Log(LOG_LEVEL_VERBOSE,
+                 "The public key identity was confirmed as %s@%s",
+@@ -772,6 +776,7 @@ char iscrypt, enterprise_field;
+ 
+ /* proposition C2 - Receive client's public key modulus */
+ RSA *newkey = RSA_new();
++BIGNUM *newkey_n, *newkey_e;
+ {
+ 
+     int len_n = ReceiveTransaction(conn->conn_info, recvbuffer, NULL);
+@@ -783,7 +788,7 @@ RSA *newkey = RSA_new();
+         return false;
+     }
+ 
+-    if ((newkey->n = BN_mpi2bn(recvbuffer, len_n, NULL)) == NULL)
++    if ((newkey_n = BN_mpi2bn(recvbuffer, len_n, NULL)) == NULL)
+     {
+         Log(LOG_LEVEL_ERR, "Authentication failure: "
+             "private decrypt of received public key modulus failed "
+@@ -804,16 +809,19 @@ RSA *newkey = RSA_new();
+         return false;
+     }
+ 
+-    if ((newkey->e = BN_mpi2bn(recvbuffer, len_e, NULL)) == NULL)
++    if ((newkey_e = BN_mpi2bn(recvbuffer, len_e, NULL)) == NULL)
+     {
+         Log(LOG_LEVEL_ERR, "Authentication failure: "
+             "private decrypt of received public key exponent failed "
+             "(%s)", CryptoLastErrorString());
++        BN_free(newkey_n);
+         RSA_free(newkey);
+         return false;
+     }
+ }
+ 
++RSA_set0_key(newkey, newkey_n, newkey_e, NULL);
++
+ /* Compute and store hash of the client's public key. */
+ {
+     Key *key = KeyNew(newkey, CF_DEFAULT_DIGEST);
+@@ -891,18 +899,21 @@ RSA *newkey = RSA_new();
+ 
+ /* proposition S4, S5 - If the client doesn't have our public key, send it. */
+ {
++    const BIGNUM *n, *e;
+     if (iscrypt != 'y')
+     {
+         Log(LOG_LEVEL_DEBUG, "Sending server's public key");
+ 
+         char bignum_buf[CF_BUFSIZE] = { 0 };
+ 
++        RSA_get0_key(PUBKEY, &n, &e, NULL);
++
+         /* proposition S4  - conditional */
+-        int len_n = BN_bn2mpi(PUBKEY->n, bignum_buf);
++        int len_n = BN_bn2mpi(n, bignum_buf);
+         SendTransaction(conn->conn_info, bignum_buf, len_n, CF_DONE);
+ 
+         /* proposition S5  - conditional */
+-        int len_e = BN_bn2mpi(PUBKEY->e, bignum_buf);
++        int len_e = BN_bn2mpi(e, bignum_buf);
+         SendTransaction(conn->conn_info, bignum_buf, len_e, CF_DONE);
+     }
+ }
+diff --git a/cfengine3-3.9.1/cf-serverd/server_common.c b/cfengine3-3.9.1/cf-serverd/server_common.c
+index 64e04a4..e4e01e2 100644
+--- a/cfengine3-3.9.1/cf-serverd/server_common.c
++++ b/cfengine3-3.9.1/cf-serverd/server_common.c
+@@ -557,7 +557,7 @@ void CfEncryptGetFile(ServerFileGetState *args)
+     unsigned char iv[32] =
+         { 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8 };
+     int blocksize = CF_BUFSIZE - 4 * CF_INBAND_OFFSET;
+-    EVP_CIPHER_CTX ctx;
++    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+     char *key, enctype;
+     struct stat sb;
+     ConnectionInfo *conn_info = args->conn->conn_info;
+@@ -581,7 +581,7 @@ void CfEncryptGetFile(ServerFileGetState *args)
+         FailedTransfer(conn_info);
+     }
+ 
+-    EVP_CIPHER_CTX_init(&ctx);
++    EVP_CIPHER_CTX_init(ctx);
+ 
+     if ((fd = safe_open(filename, O_RDONLY)) == -1)
+     {
+@@ -630,20 +630,20 @@ void CfEncryptGetFile(ServerFileGetState *args)
+ 
+             if (n_read > 0)
+             {
+-                EVP_EncryptInit_ex(&ctx, CfengineCipher(enctype), NULL, key, iv);
++                EVP_EncryptInit_ex(ctx, CfengineCipher(enctype), NULL, key, iv);
+ 
+-                if (!EVP_EncryptUpdate(&ctx, out, &cipherlen, sendbuffer, n_read))
++                if (!EVP_EncryptUpdate(ctx, out, &cipherlen, sendbuffer, n_read))
+                 {
+                     FailedTransfer(conn_info);
+-                    EVP_CIPHER_CTX_cleanup(&ctx);
++                    EVP_CIPHER_CTX_free(ctx);
+                     close(fd);
+                     return;
+                 }
+ 
+-                if (!EVP_EncryptFinal_ex(&ctx, out + cipherlen, &finlen))
++                if (!EVP_EncryptFinal_ex(ctx, out + cipherlen, &finlen))
+                 {
+                     FailedTransfer(conn_info);
+-                    EVP_CIPHER_CTX_cleanup(&ctx);
++                    EVP_CIPHER_CTX_free(ctx);
+                     close(fd);
+                     return;
+                 }
+@@ -654,7 +654,7 @@ void CfEncryptGetFile(ServerFileGetState *args)
+                 if (SendTransaction(conn_info, out, cipherlen + finlen, CF_DONE) == -1)
+                 {
+                     Log(LOG_LEVEL_VERBOSE, "Send failed in GetFile. (send: %s)", GetErrorStr());
+-                    EVP_CIPHER_CTX_cleanup(&ctx);
++                    EVP_CIPHER_CTX_free(ctx);
+                     close(fd);
+                     return;
+                 }
+@@ -666,14 +666,14 @@ void CfEncryptGetFile(ServerFileGetState *args)
+                 {
+                     Log(LOG_LEVEL_VERBOSE, "Send failed in GetFile. (send: %s)", GetErrorStr());
+                     close(fd);
+-                    EVP_CIPHER_CTX_cleanup(&ctx);
++                    EVP_CIPHER_CTX_free(ctx);
+                     return;
+                 }
+             }
+         }
+     }
+ 
+-    EVP_CIPHER_CTX_cleanup(&ctx);
++    EVP_CIPHER_CTX_free(ctx);
+     close(fd);
+ }
+ 
+diff --git a/cfengine3-3.9.1/configure.ac b/cfengine3-3.9.1/configure.ac
+index 44abcb4..07100c1 100644
+--- a/cfengine3-3.9.1/configure.ac
++++ b/cfengine3-3.9.1/configure.ac
+@@ -422,7 +422,7 @@ fi
+ 
+ CF3_WITH_LIBRARY(openssl, [
+    AC_CHECK_LIB(crypto, RSA_generate_key_ex, [], [])
+-   AC_CHECK_LIB(ssl, SSL_library_init, [], [])
++   AC_CHECK_LIB(ssl, SSL_free, [], [])
+    AC_CHECK_DECLS([SSL_CTX_clear_options], [], [], [[#include <openssl/ssl.h>]])
+    AC_CHECK_HEADERS([openssl/opensslv.h], [], [AC_MSG_ERROR(Cannot find OpenSSL)])
+ 
+diff --git a/cfengine3-3.9.1/debian/control b/cfengine3-3.9.1/debian/control
+index 7dace0f..2c44bff 100644
+--- a/cfengine3-3.9.1/debian/control
++++ b/cfengine3-3.9.1/debian/control
+@@ -2,7 +2,7 @@ Source: cfengine3
+ Section: admin
+ Priority: optional
+ Maintainer: Antonio Radici <antonio@debian.org>
+-Build-Depends: debhelper (>= 7.0.50), autotools-dev, libssl1.0-dev | libssl-dev (<< 1.1),
++Build-Depends: debhelper (>= 7.0.50), autotools-dev, libssl-dev,
+  flex, bison, libpcre3-dev, dh-autoreconf, libvirt-dev, libacl1-dev,
+  liblmdb-dev, default-libmysqlclient-dev, libxml2-dev, quilt, libpam0g-dev
+ Standards-Version: 3.9.8
+diff --git a/cfengine3-3.9.1/libcfnet/client_code.c b/cfengine3-3.9.1/libcfnet/client_code.c
+index e44ec17..26f85fd 100644
+--- a/cfengine3-3.9.1/libcfnet/client_code.c
++++ b/cfengine3-3.9.1/libcfnet/client_code.c
+@@ -537,7 +537,7 @@ int EncryptCopyRegularFileNet(const char *source, const char *dest, off_t size,
+     unsigned char iv[32] =
+         { 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8 };
+     long n_read_total = 0;
+-    EVP_CIPHER_CTX crypto_ctx;
++    EVP_CIPHER_CTX *crypto_ctx = EVP_CIPHER_CTX_new();
+ 
+     snprintf(cfchangedstr, 255, "%s%s", CF_CHANGEDSTR1, CF_CHANGEDSTR2);
+ 
+@@ -566,7 +566,7 @@ int EncryptCopyRegularFileNet(const char *source, const char *dest, off_t size,
+     }
+ 
+     workbuf[0] = '\0';
+-    EVP_CIPHER_CTX_init(&crypto_ctx);
++    EVP_CIPHER_CTX_init(crypto_ctx);
+ 
+     snprintf(in, CF_BUFSIZE - CF_PROTO_OFFSET, "GET dummykey %s", source);
+     cipherlen = EncryptString(conn->encryption_type, in, out, conn->session_key, strlen(in) + 1);
+@@ -615,16 +615,16 @@ int EncryptCopyRegularFileNet(const char *source, const char *dest, off_t size,
+             return false;
+         }
+ 
+-        EVP_DecryptInit_ex(&crypto_ctx, CfengineCipher(CfEnterpriseOptions()), NULL, conn->session_key, iv);
++        EVP_DecryptInit_ex(crypto_ctx, CfengineCipher(CfEnterpriseOptions()), NULL, conn->session_key, iv);
+ 
+-        if (!EVP_DecryptUpdate(&crypto_ctx, workbuf, &plainlen, buf, cipherlen))
++        if (!EVP_DecryptUpdate(crypto_ctx, workbuf, &plainlen, buf, cipherlen))
+         {
+             close(dd);
+             free(buf);
+             return false;
+         }
+ 
+-        if (!EVP_DecryptFinal_ex(&crypto_ctx, workbuf + plainlen, &finlen))
++        if (!EVP_DecryptFinal_ex(crypto_ctx, workbuf + plainlen, &finlen))
+         {
+             close(dd);
+             free(buf);
+@@ -646,7 +646,7 @@ int EncryptCopyRegularFileNet(const char *source, const char *dest, off_t size,
+             free(buf);
+             unlink(dest);
+             close(dd);
+-            EVP_CIPHER_CTX_cleanup(&crypto_ctx);
++            EVP_CIPHER_CTX_free(crypto_ctx);
+             return false;
+         }
+     }
+@@ -663,13 +663,13 @@ int EncryptCopyRegularFileNet(const char *source, const char *dest, off_t size,
+         free(buf);
+         unlink(dest);
+         close(dd);
+-        EVP_CIPHER_CTX_cleanup(&crypto_ctx);
++        EVP_CIPHER_CTX_free(crypto_ctx);
+         return false;
+     }
+ 
+     close(dd);
+     free(buf);
+-    EVP_CIPHER_CTX_cleanup(&crypto_ctx);
++    EVP_CIPHER_CTX_free(crypto_ctx);
+     return true;
+ }
+ 
+@@ -695,7 +695,6 @@ int CopyRegularFileNet(const char *source, const char *dest, off_t size,
+     const int buf_size = 2048;
+ 
+     off_t n_read_total = 0;
+-    EVP_CIPHER_CTX crypto_ctx;
+ 
+     /* We encrypt only for CLASSIC protocol. The TLS protocol is always over
+      * encrypted layer, so it does not support encrypted (S*) commands. */
+@@ -837,7 +836,6 @@ int CopyRegularFileNet(const char *source, const char *dest, off_t size,
+             unlink(dest);
+             close(dd);
+             FlushFileStream(conn->conn_info->sd, size - n_read_total);
+-            EVP_CIPHER_CTX_cleanup(&crypto_ctx);
+             return false;
+         }
+ 
+diff --git a/cfengine3-3.9.1/libcfnet/client_protocol.c b/cfengine3-3.9.1/libcfnet/client_protocol.c
+index f230c51..83a083b 100644
+--- a/cfengine3-3.9.1/libcfnet/client_protocol.c
++++ b/cfengine3-3.9.1/libcfnet/client_protocol.c
+@@ -179,6 +179,7 @@ static bool SetSessionKey(AgentConnection *conn)
+ {
+     BIGNUM *bp;
+     int session_size = CfSessionKeySize(conn->encryption_type);
++    unsigned char *buf;
+ 
+     bp = BN_new();
+ 
+@@ -196,7 +197,9 @@ static bool SetSessionKey(AgentConnection *conn)
+         return false;
+     }
+ 
+-    conn->session_key = (unsigned char *) bp->d;
++    buf = malloc(BN_num_bytes(bp));
++    BN_bn2bin(bp, buf);
++    conn->session_key = buf;
+     return true;
+ }
+ 
+@@ -208,6 +211,8 @@ int AuthenticateAgent(AgentConnection *conn, bool trust_key)
+     int encrypted_len, nonce_len = 0, len, session_size;
+     bool need_to_implicitly_trust_server;
+     char enterprise_field = 'c';
++    const BIGNUM *pubkey_n, *pubkey_e;
++    BIGNUM *newkey_n, *newkey_e;
+ 
+     if (PRIVKEY == NULL || PUBKEY == NULL)
+     {
+@@ -293,13 +298,15 @@ int AuthenticateAgent(AgentConnection *conn, bool trust_key)
+ /*Send the public key - we don't know if server has it */
+ /* proposition C2 */
+ 
++    RSA_get0_key(PUBKEY, &pubkey_n, &pubkey_e, NULL);
++
+     memset(sendbuffer, 0, CF_EXPANDSIZE);
+-    len = BN_bn2mpi(PUBKEY->n, sendbuffer);
++    len = BN_bn2mpi(pubkey_n, sendbuffer);
+     SendTransaction(conn->conn_info, sendbuffer, len, CF_DONE);        /* No need to encrypt the public key ... */
+ 
+ /* proposition C3 */
+     memset(sendbuffer, 0, CF_EXPANDSIZE);
+-    len = BN_bn2mpi(PUBKEY->e, sendbuffer);
++    len = BN_bn2mpi(pubkey_e, sendbuffer);
+     SendTransaction(conn->conn_info, sendbuffer, len, CF_DONE);
+ 
+ /* check reply about public key - server can break conn_info here */
+@@ -432,7 +439,7 @@ int AuthenticateAgent(AgentConnection *conn, bool trust_key)
+             return false;
+         }
+ 
+-        if ((newkey->n = BN_mpi2bn(in, len, NULL)) == NULL)
++        if ((newkey_n = BN_mpi2bn(in, len, NULL)) == NULL)
+         {
+             Log(LOG_LEVEL_ERR,
+                 "Private key decrypt failed. (BN_mpi2bn: %s)",
+@@ -451,7 +458,7 @@ int AuthenticateAgent(AgentConnection *conn, bool trust_key)
+             return false;
+         }
+ 
+-        if ((newkey->e = BN_mpi2bn(in, len, NULL)) == NULL)
++        if ((newkey_e = BN_mpi2bn(in, len, NULL)) == NULL)
+         {
+             Log(LOG_LEVEL_ERR,
+                 "Public key decrypt failed. (BN_mpi2bn: %s)",
+@@ -460,6 +467,8 @@ int AuthenticateAgent(AgentConnection *conn, bool trust_key)
+             return false;
+         }
+ 
++        RSA_set0_key(newkey, newkey_n, newkey_e, NULL);
++
+         server_pubkey = RSAPublicKey_dup(newkey);
+         RSA_free(newkey);
+     }
+diff --git a/cfengine3-3.9.1/libcfnet/tls_generic.c b/cfengine3-3.9.1/libcfnet/tls_generic.c
+index a53a2e0..6065e64 100644
+--- a/cfengine3-3.9.1/libcfnet/tls_generic.c
++++ b/cfengine3-3.9.1/libcfnet/tls_generic.c
+@@ -88,12 +88,6 @@ static int CompareCertToRSA(X509 *cert, RSA *rsa_key)
+             TLSErrorString(ERR_get_error()));
+         goto ret1;
+     }
+-    if (EVP_PKEY_type(cert_pkey->type) != EVP_PKEY_RSA)
+-    {
+-        Log(LOG_LEVEL_ERR,
+-            "Received key of unknown type, only RSA currently supported!");
+-        goto ret2;
+-    }
+ 
+     RSA *cert_rsa_key = EVP_PKEY_get1_RSA(cert_pkey);
+     if (cert_rsa_key == NULL)
+@@ -300,13 +294,6 @@ int TLSVerifyPeer(ConnectionInfo *conn_info, const char *remoteip, const char *u
+         retval = -1;
+         goto ret2;
+     }
+-    if (EVP_PKEY_type(received_pubkey->type) != EVP_PKEY_RSA)
+-    {
+-        Log(LOG_LEVEL_ERR,
+-            "Received key of unknown type, only RSA currently supported!");
+-        retval = -1;
+-        goto ret3;
+-    }
+ 
+     RSA *remote_key = EVP_PKEY_get1_RSA(received_pubkey);
+     if (remote_key == NULL)
+diff --git a/cfengine3-3.9.1/libpromises/crypto.c b/cfengine3-3.9.1/libpromises/crypto.c
+index ac7e78f..493ee28 100644
+--- a/cfengine3-3.9.1/libpromises/crypto.c
++++ b/cfengine3-3.9.1/libpromises/crypto.c
+@@ -220,11 +220,16 @@ bool LoadSecretKeys(void)
+         fclose(fp);
+     }
+ 
+-    if (NULL != PUBKEY
+-        && ((BN_num_bits(PUBKEY->e) < 2) || (!BN_is_odd(PUBKEY->e))))
++    if (NULL != PUBKEY)
+     {
+-        Log(LOG_LEVEL_ERR, "The public key RSA exponent is too small or not odd");
+-        return false;
++        const BIGNUM *n, *e;
++        RSA_get0_key(PUBKEY, &n, &e, NULL);
++
++        if ((BN_num_bits(e) < 2) || (!BN_is_odd(e)))
++        {
++            Log(LOG_LEVEL_ERR, "The public key RSA exponent is too small or not odd");
++            return false;
++        }
+     }
+ 
+     return true;
+@@ -366,12 +371,16 @@ RSA *HavePublicKey(const char *username, const char *ipaddress, const char *dige
+ 
+     fclose(fp);
+ 
+-    if ((BN_num_bits(newkey->e) < 2) || (!BN_is_odd(newkey->e)))
+     {
+-        Log(LOG_LEVEL_ERR, "RSA Exponent too small or not odd for key: %s",
+-            newname);
+-        RSA_free(newkey);
+-        return NULL;
++        const BIGNUM *n, *e;
++        RSA_get0_key(newkey, &n, &e, NULL);
++        if ((BN_num_bits(e) < 2) || (!BN_is_odd(e)))
++        {
++            Log(LOG_LEVEL_ERR, "RSA Exponent too small or not odd for key: %s",
++                newname);
++            RSA_free(newkey);
++            return NULL;
++        }
+     }
+ 
+     return newkey;
+@@ -437,28 +446,28 @@ int EncryptString(char type, const char *in, char *out, unsigned char *key, int
+     int cipherlen = 0, tmplen;
+     unsigned char iv[32] =
+         { 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8 };
+-    EVP_CIPHER_CTX ctx;
++    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+ 
+     if (key == NULL)
+         ProgrammingError("EncryptString: session key == NULL");
+ 
+-    EVP_CIPHER_CTX_init(&ctx);
+-    EVP_EncryptInit_ex(&ctx, CfengineCipher(type), NULL, key, iv);
++    EVP_CIPHER_CTX_init(ctx);
++    EVP_EncryptInit_ex(ctx, CfengineCipher(type), NULL, key, iv);
+ 
+-    if (!EVP_EncryptUpdate(&ctx, out, &cipherlen, in, plainlen))
++    if (!EVP_EncryptUpdate(ctx, out, &cipherlen, in, plainlen))
+     {
+-        EVP_CIPHER_CTX_cleanup(&ctx);
++        EVP_CIPHER_CTX_free(ctx);
+         return -1;
+     }
+ 
+-    if (!EVP_EncryptFinal_ex(&ctx, out + cipherlen, &tmplen))
++    if (!EVP_EncryptFinal_ex(ctx, out + cipherlen, &tmplen))
+     {
+-        EVP_CIPHER_CTX_cleanup(&ctx);
++        EVP_CIPHER_CTX_free(ctx);
+         return -1;
+     }
+ 
+     cipherlen += tmplen;
+-    EVP_CIPHER_CTX_cleanup(&ctx);
++    EVP_CIPHER_CTX_free(ctx);
+     return cipherlen;
+ }
+ 
+@@ -469,33 +478,33 @@ int DecryptString(char type, const char *in, char *out, unsigned char *key, int
+     int plainlen = 0, tmplen;
+     unsigned char iv[32] =
+         { 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8 };
+-    EVP_CIPHER_CTX ctx;
++    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+ 
+     if (key == NULL)
+         ProgrammingError("DecryptString: session key == NULL");
+ 
+-    EVP_CIPHER_CTX_init(&ctx);
+-    EVP_DecryptInit_ex(&ctx, CfengineCipher(type), NULL, key, iv);
++    EVP_CIPHER_CTX_init(ctx);
++    EVP_DecryptInit_ex(ctx, CfengineCipher(type), NULL, key, iv);
+ 
+-    if (!EVP_DecryptUpdate(&ctx, out, &plainlen, in, cipherlen))
++    if (!EVP_DecryptUpdate(ctx, out, &plainlen, in, cipherlen))
+     {
+         Log(LOG_LEVEL_ERR, "Failed to decrypt string");
+-        EVP_CIPHER_CTX_cleanup(&ctx);
++        EVP_CIPHER_CTX_free(ctx);
+         return -1;
+     }
+ 
+-    if (!EVP_DecryptFinal_ex(&ctx, out + plainlen, &tmplen))
++    if (!EVP_DecryptFinal_ex(ctx, out + plainlen, &tmplen))
+     {
+         unsigned long err = ERR_get_error();
+ 
+         Log(LOG_LEVEL_ERR, "Failed to decrypt at final of cipher length %d. (EVP_DecryptFinal_ex: %s)", cipherlen, ERR_error_string(err, NULL));
+-        EVP_CIPHER_CTX_cleanup(&ctx);
++        EVP_CIPHER_CTX_free(ctx);
+         return -1;
+     }
+ 
+     plainlen += tmplen;
+ 
+-    EVP_CIPHER_CTX_cleanup(&ctx);
++    EVP_CIPHER_CTX_free(ctx);
+ 
+     return plainlen;
+ }
+diff --git a/cfengine3-3.9.1/libpromises/files_hashes.c b/cfengine3-3.9.1/libpromises/files_hashes.c
+index aab5a65..150b338 100644
+--- a/cfengine3-3.9.1/libpromises/files_hashes.c
++++ b/cfengine3-3.9.1/libpromises/files_hashes.c
+@@ -40,7 +40,7 @@
+ void HashFile(const char *filename, unsigned char digest[EVP_MAX_MD_SIZE + 1], HashMethod type)
+ {
+     FILE *file;
+-    EVP_MD_CTX context;
++    EVP_MD_CTX *context = EVP_MD_CTX_new();
+     int len, md_len;
+     unsigned char buffer[1024];
+     const EVP_MD *md = NULL;
+@@ -53,14 +53,15 @@ void HashFile(const char *filename, unsigned char digest[EVP_MAX_MD_SIZE + 1], H
+     {
+         md = EVP_get_digestbyname(HashNameFromId(type));
+ 
+-        EVP_DigestInit(&context, md);
++        EVP_DigestInit(context, md);
+ 
+         while ((len = fread(buffer, 1, 1024, file)))
+         {
+-            EVP_DigestUpdate(&context, buffer, len);
++            EVP_DigestUpdate(context, buffer, len);
+         }
+ 
+-        EVP_DigestFinal(&context, digest, &md_len);
++        EVP_DigestFinal(context, digest, &md_len);
++        EVP_MD_CTX_free(context);
+ 
+         /* Digest length stored in md_len */
+         fclose(file);
+@@ -71,7 +72,7 @@ void HashFile(const char *filename, unsigned char digest[EVP_MAX_MD_SIZE + 1], H
+ 
+ void HashString(const char *buffer, int len, unsigned char digest[EVP_MAX_MD_SIZE + 1], HashMethod type)
+ {
+-    EVP_MD_CTX context;
++    EVP_MD_CTX *context = EVP_MD_CTX_new();
+     const EVP_MD *md = NULL;
+     int md_len;
+ 
+@@ -89,10 +90,11 @@ void HashString(const char *buffer, int len, unsigned char digest[EVP_MAX_MD_SIZ
+         {
+             Log(LOG_LEVEL_INFO, "Digest type %s not supported by OpenSSL library", HashNameFromId(type));
+         }
+-        else if (EVP_DigestInit(&context, md))
++        else if (EVP_DigestInit(context, md))
+         {
+-            EVP_DigestUpdate(&context, (unsigned char *) buffer, (size_t) len);
+-            EVP_DigestFinal(&context, digest, &md_len);
++            EVP_DigestUpdate(context, (unsigned char *) buffer, (size_t) len);
++            EVP_DigestFinal(context, digest, &md_len);
++            EVP_MD_CTX_free(context);
+         }
+         else
+         {
+@@ -108,23 +110,25 @@ void HashString(const char *buffer, int len, unsigned char digest[EVP_MAX_MD_SIZ
+ 
+ void HashPubKey(RSA *key, unsigned char digest[EVP_MAX_MD_SIZE + 1], HashMethod type)
+ {
+-    EVP_MD_CTX context;
++    EVP_MD_CTX *context = EVP_MD_CTX_new();
+     const EVP_MD *md = NULL;
+     int md_len, i, buf_len, actlen;
+     unsigned char *buffer;
++    const BIGNUM *n, *e;
++    RSA_get0_key(key, &n, &e, NULL);
+ 
+-    if (key->n)
++    if (n)
+     {
+-        buf_len = (size_t) BN_num_bytes(key->n);
++        buf_len = (size_t) BN_num_bytes(n);
+     }
+     else
+     {
+         buf_len = 0;
+     }
+ 
+-    if (key->e)
++    if (e)
+     {
+-        if (buf_len < (i = (size_t) BN_num_bytes(key->e)))
++        if (buf_len < (i = (size_t) BN_num_bytes(e)))
+         {
+             buf_len = i;
+         }
+@@ -146,13 +150,14 @@ void HashPubKey(RSA *key, unsigned char digest[EVP_MAX_MD_SIZE + 1], HashMethod
+             Log(LOG_LEVEL_INFO, "Digest type %s not supported by OpenSSL library", HashNameFromId(type));
+         }
+ 
+-        EVP_DigestInit(&context, md);
++        EVP_DigestInit(context, md);
+ 
+-        actlen = BN_bn2bin(key->n, buffer);
+-        EVP_DigestUpdate(&context, buffer, actlen);
+-        actlen = BN_bn2bin(key->e, buffer);
+-        EVP_DigestUpdate(&context, buffer, actlen);
+-        EVP_DigestFinal(&context, digest, &md_len);
++        actlen = BN_bn2bin(n, buffer);
++        EVP_DigestUpdate(context, buffer, actlen);
++        actlen = BN_bn2bin(e, buffer);
++        EVP_DigestUpdate(context, buffer, actlen);
++        EVP_DigestFinal(context, digest, &md_len);
++        EVP_MD_CTX_free(context);
+         break;
+     }
+ 
+diff --git a/cfengine3-3.9.1/libpromises/generic_agent.c b/cfengine3-3.9.1/libpromises/generic_agent.c
+index d396b0d..b806c1a 100644
+--- a/cfengine3-3.9.1/libpromises/generic_agent.c
++++ b/cfengine3-3.9.1/libpromises/generic_agent.c
+@@ -1146,16 +1146,17 @@ static bool GeneratePolicyReleaseIDFromTree(char *release_id_out, size_t out_siz
+     }
+ 
+     // fallback, produce some pseudo sha1 hash
+-    EVP_MD_CTX crypto_ctx;
+-    EVP_DigestInit(&crypto_ctx, EVP_get_digestbyname(HashNameFromId(GENERIC_AGENT_CHECKSUM_METHOD)));
++    EVP_MD_CTX *crypto_ctx = EVP_MD_CTX_new();
++    EVP_DigestInit(crypto_ctx, EVP_get_digestbyname(HashNameFromId(GENERIC_AGENT_CHECKSUM_METHOD)));
+ 
+     bool success = HashDirectoryTree(policy_dir,
+                                      (const char *[]) { ".cf", ".dat", ".txt", ".conf", ".mustache", ".json", ".yaml", NULL},
+-                                     &crypto_ctx);
++                                     crypto_ctx);
+ 
+     int md_len;
+     unsigned char digest[EVP_MAX_MD_SIZE + 1] = { 0 };
+-    EVP_DigestFinal(&crypto_ctx, digest, &md_len);
++    EVP_DigestFinal(crypto_ctx, digest, &md_len);
++    EVP_MD_CTX_free(crypto_ctx);
+ 
+     HashPrintSafe(release_id_out, out_size, digest,
+                   GENERIC_AGENT_CHECKSUM_METHOD, false);
+diff --git a/cfengine3-3.9.1/libpromises/locks.c b/cfengine3-3.9.1/libpromises/locks.c
+index 206f9c5..61b078c 100644
+--- a/cfengine3-3.9.1/libpromises/locks.c
++++ b/cfengine3-3.9.1/libpromises/locks.c
+@@ -510,7 +510,7 @@ void PromiseRuntimeHash(const Promise *pp, const char *salt, unsigned char diges
+ {
+     static const char PACK_UPIFELAPSED_SALT[] = "packageuplist";
+ 
+-    EVP_MD_CTX context;
++    EVP_MD_CTX *context = EVP_MD_CTX_new();
+     int md_len;
+     const EVP_MD *md = NULL;
+     Rlist *rp;
+@@ -521,29 +521,29 @@ void PromiseRuntimeHash(const Promise *pp, const char *salt, unsigned char diges
+ 
+     md = EVP_get_digestbyname(HashNameFromId(type));
+ 
+-    EVP_DigestInit(&context, md);
++    EVP_DigestInit(context, md);
+ 
+ // multiple packages (promisers) may share same package_list_update_ifelapsed lock
+     if ( (!salt) || strcmp(salt, PACK_UPIFELAPSED_SALT) )
+     {
+-        EVP_DigestUpdate(&context, pp->promiser, strlen(pp->promiser));
++        EVP_DigestUpdate(context, pp->promiser, strlen(pp->promiser));
+     }
+ 
+     if (pp->comment)
+     {
+-        EVP_DigestUpdate(&context, pp->comment, strlen(pp->comment));
++        EVP_DigestUpdate(context, pp->comment, strlen(pp->comment));
+     }
+ 
+     if (pp->parent_promise_type && pp->parent_promise_type->parent_bundle)
+     {
+         if (pp->parent_promise_type->parent_bundle->ns)
+         {
+-            EVP_DigestUpdate(&context, pp->parent_promise_type->parent_bundle->ns, strlen(pp->parent_promise_type->parent_bundle->ns));
++            EVP_DigestUpdate(context, pp->parent_promise_type->parent_bundle->ns, strlen(pp->parent_promise_type->parent_bundle->ns));
+         }
+ 
+         if (pp->parent_promise_type->parent_bundle->name)
+         {
+-            EVP_DigestUpdate(&context, pp->parent_promise_type->parent_bundle->name, strlen(pp->parent_promise_type->parent_bundle->name));
++            EVP_DigestUpdate(context, pp->parent_promise_type->parent_bundle->name, strlen(pp->parent_promise_type->parent_bundle->name));
+         }
+     }
+ 
+@@ -551,7 +551,7 @@ void PromiseRuntimeHash(const Promise *pp, const char *salt, unsigned char diges
+ 
+     if (salt)
+     {
+-        EVP_DigestUpdate(&context, salt, strlen(salt));
++        EVP_DigestUpdate(context, salt, strlen(salt));
+     }
+ 
+     if (pp->conlist)
+@@ -560,7 +560,7 @@ void PromiseRuntimeHash(const Promise *pp, const char *salt, unsigned char diges
+         {
+             Constraint *cp = SeqAt(pp->conlist, i);
+ 
+-            EVP_DigestUpdate(&context, cp->lval, strlen(cp->lval));
++            EVP_DigestUpdate(context, cp->lval, strlen(cp->lval));
+ 
+             // don't hash rvals that change (e.g. times)
+             doHash = true;
+@@ -582,13 +582,13 @@ void PromiseRuntimeHash(const Promise *pp, const char *salt, unsigned char diges
+             switch (cp->rval.type)
+             {
+             case RVAL_TYPE_SCALAR:
+-                EVP_DigestUpdate(&context, cp->rval.item, strlen(cp->rval.item));
++                EVP_DigestUpdate(context, cp->rval.item, strlen(cp->rval.item));
+                 break;
+ 
+             case RVAL_TYPE_LIST:
+                 for (rp = cp->rval.item; rp != NULL; rp = rp->next)
+                 {
+-                    EVP_DigestUpdate(&context, RlistScalarValue(rp), strlen(RlistScalarValue(rp)));
++                    EVP_DigestUpdate(context, RlistScalarValue(rp), strlen(RlistScalarValue(rp)));
+                 }
+                 break;
+ 
+@@ -598,18 +598,18 @@ void PromiseRuntimeHash(const Promise *pp, const char *salt, unsigned char diges
+ 
+                 fp = (FnCall *) cp->rval.item;
+ 
+-                EVP_DigestUpdate(&context, fp->name, strlen(fp->name));
++                EVP_DigestUpdate(context, fp->name, strlen(fp->name));
+ 
+                 for (rp = fp->args; rp != NULL; rp = rp->next)
+                 {
+                     switch (rp->val.type)
+                     {
+                     case RVAL_TYPE_SCALAR:
+-                        EVP_DigestUpdate(&context, RlistScalarValue(rp), strlen(RlistScalarValue(rp)));
++                        EVP_DigestUpdate(context, RlistScalarValue(rp), strlen(RlistScalarValue(rp)));
+                         break;
+ 
+                     case RVAL_TYPE_FNCALL:
+-                        EVP_DigestUpdate(&context, RlistFnCallValue(rp)->name, strlen(RlistFnCallValue(rp)->name));
++                        EVP_DigestUpdate(context, RlistFnCallValue(rp)->name, strlen(RlistFnCallValue(rp)->name));
+                         break;
+ 
+                     default:
+@@ -625,7 +625,8 @@ void PromiseRuntimeHash(const Promise *pp, const char *salt, unsigned char diges
+         }
+     }
+ 
+-    EVP_DigestFinal(&context, digest, &md_len);
++    EVP_DigestFinal(context, digest, &md_len);
++    EVP_MD_CTX_free(context);
+ 
+ /* Digest length stored in md_len */
+ }
+diff --git a/cfengine3-3.9.1/libutils/hash.c b/cfengine3-3.9.1/libutils/hash.c
+index fbb0865..ca01634 100644
+--- a/cfengine3-3.9.1/libutils/hash.c
++++ b/cfengine3-3.9.1/libutils/hash.c
+@@ -204,21 +204,24 @@ Hash *HashNewFromKey(const RSA *rsa, HashMethod method)
+     unsigned char *buffer = NULL;
+     int buffer_length = 0;
+     int actual_length = 0;
++    const BIGNUM *n, *e;
+ 
+-    if (rsa->n)
++    RSA_get0_key(rsa, &n, &e, NULL);
++
++    if (n)
+     {
+-        buffer_length = (size_t) BN_num_bytes(rsa->n);
++        buffer_length = (size_t) BN_num_bytes(n);
+     }
+     else
+     {
+         buffer_length = 0;
+     }
+ 
+-    if (rsa->e)
++    if (e)
+     {
+-        if (buffer_length < (size_t) BN_num_bytes(rsa->e))
++        if (buffer_length < (size_t) BN_num_bytes(e))
+         {
+-            buffer_length = (size_t) BN_num_bytes(rsa->e);
++            buffer_length = (size_t) BN_num_bytes(e);
+         }
+     }
+     md = EVP_get_digestbyname(CF_DIGEST_TYPES[method]);
+@@ -231,9 +234,9 @@ Hash *HashNewFromKey(const RSA *rsa, HashMethod method)
+     context = EVP_MD_CTX_create();
+     EVP_DigestInit_ex(context, md, NULL);
+     buffer = xmalloc(buffer_length);
+-    actual_length = BN_bn2bin(rsa->n, buffer);
++    actual_length = BN_bn2bin(n, buffer);
+     EVP_DigestUpdate(context, buffer, actual_length);
+-    actual_length = BN_bn2bin(rsa->e, buffer);
++    actual_length = BN_bn2bin(e, buffer);
+     EVP_DigestUpdate(context, buffer, actual_length);
+     EVP_DigestFinal_ex(context, hash->digest, &md_len);
+     EVP_MD_CTX_destroy(context);
+diff --git a/cfengine3-3.9.1/libutils/hashes.c b/cfengine3-3.9.1/libutils/hashes.c
+index f3dc855..c23cac9 100644
+--- a/cfengine3-3.9.1/libutils/hashes.c
++++ b/cfengine3-3.9.1/libutils/hashes.c
+@@ -47,18 +47,19 @@ int FileChecksum(const char *filename, unsigned char digest[EVP_MAX_MD_SIZE + 1]
+             return 0;
+         }
+ 
+-        EVP_MD_CTX context;
+-        EVP_DigestInit(&context, md);
++        EVP_MD_CTX *context = EVP_MD_CTX_new();
++        EVP_DigestInit(context, md);
+ 
+         int len = 0;
+         unsigned char buffer[1024];
+         while ((len = fread(buffer, 1, 1024, file)))
+         {
+-            EVP_DigestUpdate(&context, buffer, len);
++            EVP_DigestUpdate(context, buffer, len);
+         }
+ 
+         unsigned int md_len = 0;
+-        EVP_DigestFinal(&context, digest, &md_len);
++        EVP_DigestFinal(context, digest, &md_len);
++        EVP_MD_CTX_free(context);
+         fclose(file);
+ 
+         return md_len;
+diff --git a/cfengine3-3.9.1/tests/unit/Makefile.am b/cfengine3-3.9.1/tests/unit/Makefile.am
+index 9f7bfee..a067527 100644
+--- a/cfengine3-3.9.1/tests/unit/Makefile.am
++++ b/cfengine3-3.9.1/tests/unit/Makefile.am
+@@ -394,18 +394,6 @@ mon_load_test_LDADD = ../../libpromises/libpromises.la libtest.la
+ mon_processes_test_SOURCES = mon_processes_test.c ../../cf-monitord/mon.h ../../cf-monitord/mon_processes.c
+ mon_processes_test_LDADD = ../../libpromises/libpromises.la libtest.la
+ 
+-# tls_generic_test uses stub functions interposition which does not work (yet)
+-# under OS X. Another way of stubbing functions from libpromises is needed.
+-if !XNU
+-check_PROGRAMS += tls_generic_test
+-tls_generic_test_SOURCES = tls_generic_test.c
+-tls_generic_test_LDADD = libtest.la \
+-	../../libutils/libutils.la \
+-	../../libpromises/libpromises.la \
+-	../../libcfnet/libcfnet.la \
+-	../../cf-serverd/libcf-serverd.la
+-endif
+-
+ version_test_SOURCES = version_test.c
+ 
+ hash_test_SOURCES = hash_test.c
+diff --git a/cfengine3-3.9.1/tests/unit/crypto_symmetric_test.c b/cfengine3-3.9.1/tests/unit/crypto_symmetric_test.c
+index 65463fd..57eaa27 100644
+--- a/cfengine3-3.9.1/tests/unit/crypto_symmetric_test.c
++++ b/cfengine3-3.9.1/tests/unit/crypto_symmetric_test.c
+@@ -30,11 +30,11 @@ static void test_cipher_init(void)
+ {
+     unsigned char key[] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+     unsigned char iv[] = {1,2,3,4,5,6,7,8};
+-    EVP_CIPHER_CTX ctx;
++    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+ 
+-    EVP_CIPHER_CTX_init(&ctx);
+-    EVP_EncryptInit_ex(&ctx, EVP_bf_cbc(), NULL, key, iv);
+-    EVP_CIPHER_CTX_cleanup(&ctx);
++    EVP_CIPHER_CTX_init(ctx);
++    EVP_EncryptInit_ex(ctx, EVP_bf_cbc(), NULL, key, iv);
++    EVP_CIPHER_CTX_free(ctx);
+ }
+ 
+ static void test_symmetric_encrypt(void)

@@ -1,0 +1,780 @@
+From f21d13e51bf0b2d390fc475e71dde6e42404e6fb Mon Sep 17 00:00:00 2001
+From: David Paleino <dapal@debian.org>
+Date: Sat, 10 Apr 2010 17:57:06 +0200
+Subject: [PATCH] debsnap: complete rewrite in Perl, use snapshot-dev.d.o and JSON
+
+---
+ debian/changelog         |    7 +-
+ debian/control           |    5 +-
+ debian/lintian.overrides |    4 +-
+ debian/postinst          |   10 +--
+ scripts/debsnap.1        |   37 +-----
+ scripts/debsnap.pl       |  273 ++++++++++++++++++++++++++++++++++++++
+ scripts/debsnap.sh       |  324 ----------------------------------------------
+ 7 files changed, 289 insertions(+), 371 deletions(-)
+ create mode 100755 scripts/debsnap.pl
+ delete mode 100755 scripts/debsnap.sh
+
+diff --git a/debian/changelog b/debian/changelog
+index 4ff6410..857c779 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,9 +1,14 @@
+ devscripts (2.10.63) unreleased; urgency=low
+ 
++  [ Christoph Berg ]
+   * debcheckout: inject extra slash in "hg ssh://hg.debian.org//" URLs so
+     paths are not based in the user's $HOME.
+ 
+- -- Christoph Berg <myon@debian.org>  Fri, 09 Apr 2010 21:31:24 +0200
++  [ David Paleino ]
++  * debsnap: rewritten from scratch in Perl, use snapshot-dev.debian.org
++    and its JSON API (Closes: #530416)
++
++ -- David Paleino <dapal@debian.org>  Sat, 10 Apr 2010 17:22:18 +0200
+ 
+ devscripts (2.10.62) unstable; urgency=low
+ 
+diff --git a/debian/control b/debian/control
+index 7b0ec4f..332f9f6 100644
+--- a/debian/control
++++ b/debian/control
+@@ -20,7 +20,7 @@ Recommends: at, curl | wget, dctrl-tools, debian-keyring, debian-maintainers,
+  libyaml-syck-perl, lintian, lsb-release, bsd-mailx | mailx | mailutils, 
+  man-db, patch, patchutils, ssh-client, strace, unzip, wdiff, www-browser,
+  subversion | cvs | darcs | svk | tla | bzr | git-core | mercurial, lzma,
+- xz-utils, sensible-utils
++ xz-utils, sensible-utils, libjson-perl
+ Suggests: build-essential, cvs-buildpackage, devscripts-el, gnuplot,
+  libfile-desktopentry-perl, libnet-smtp-ssl-perl (>= 1.01-2), mutt,
+  svn-buildpackage, w3m
+@@ -72,7 +72,8 @@ Description: scripts to make the life of a Debian Package maintainer easier
+     the rest of the package to be present; can sign the pair remotely
+     or fetch the pair from a remote machine for signing [gnupg,
+     debian-keyring, ssh-client]
+-  - debsnap: grab packages from http://snapshot.debian.net [wget]
++  - debsnap: grab packages from http://snapshot.debian.org [libwww-perl,
++    libjson-perl]
+   - debuild: wrapper to build a package without having to su or worry
+     about how to invoke dpkg to build using fakeroot.  Also deals
+     with common environment problems, umask etc. [fakeroot,
+diff --git a/debian/lintian.overrides b/debian/lintian.overrides
+index ee56ff8..646f453 100644
+--- a/debian/lintian.overrides
++++ b/debian/lintian.overrides
+@@ -1,2 +1,2 @@
+-# "debsnap: grab packages from http://snapshot.debian.net" isn't a homepage
+-devscripts: description-possibly-contains-homepage http://snapshot.debian.net
++# "debsnap: grab packages from http://snapshot.debian.org" isn't a homepage
++devscripts: description-possibly-contains-homepage http://snapshot.debian.org
+diff --git a/debian/postinst b/debian/postinst
+index b4cad25..0227377 100644
+--- a/debian/postinst
++++ b/debian/postinst
+@@ -632,15 +632,7 @@ EOF
+ # DEBSNAP_VERBOSE=no
+ #
+ # The base URL of the archive to download from
+-# DEBSNAP_BASE_URL=http://snapshot.debian.net/archive
+-#
+-# A sed regexp to transform pool/<component>/f/foo into the desired layout
+-# default: make the directory from pool/<component>/f/foo to pool/f/foo
+-# DEBSNAP_CLEAN_REGEX="s@\([^/]*\)/[^/]*/\(.*\)@\1/\2@"
+-#
+-# Where the Sources.gz lives, subdirectory of DEBSNAP_BASE_URL/<clean dir>/
+-# default: DEBSNAP_BASE_URL/<clean dir>/source/Sources.gz
+-# DEBSNAP_SOURCES_GZ_PATH=source/Sources.gz
++# DEBSNAP_BASE_URL=http://snapshot-dev.debian.org
+ 
+ ##### debdiff option added in 2.10.45
+ #
+diff --git a/scripts/debsnap.1 b/scripts/debsnap.1
+index 6394c17..cae8597 100644
+--- a/scripts/debsnap.1
++++ b/scripts/debsnap.1
+@@ -71,32 +71,9 @@ Set a default path for the destination directory.  If unset
+ 
+ .TP
+ .B DEBSNAP_BASE_URL
+-The base url for the snapshots archive.  This is the root of a directory tree
+-such as \fIpool/<initial>/<package>/\fP under which a \fISources.gz\fP may be
+-found, and the root for the location of the packages specified in the
+-\fISources.gz\fP file found there.
+-
+-If unset this defaults to \fIhttp://snapshot.debian.net/archive/\fP
+-
+-.TP
+-.B DEBSNAP_CLEAN_REGEX
+-A sed regular expression to transform the directory returned by
+-`\fBapt\-cache showsrc\fP \fIpackage\fP \fB| grep ^Directory\fP` to a suitable
+-path to be put between \fBDEBSNAP_BASE_URL\fP and \fBDEBSNAP_SOURCES_GZ_PATH\fP.
+-
+-If unset it will default to s@\e([^/]*\e)/[^/]*/\e(\&.*\e)@\e1/\e2@
+-.br
+-i.e. it transforms \fIpool/<component>/<initial>/<package>\fP into
+-\fIpool/<initial>/<package>\fP
+-
+-.TP
+-.B DEBSNAP_SOURCES_GZ_PATH
+-The final path to the \fISources.gz\fP file.  This is appended after the
+-\fBDEBSNAP_BASE_URL\fP and the path modified by \fBDEBSNAP_CLEAN_REGEX\fP to
+-locate the \fISources.gz\fP file for the package to download.
+-
+-If unset it will default to \fIsource/Sources.gz\fP
++The base url for the snapshots archive.
+ 
++If unset this defaults to \fIhttp://snapshot-dev.debian.org\fP
+ 
+ .SH EXIT STATUS
+ \fBdebsnap\fP will return an exit status of 0 if all operations succeeded,
+@@ -105,7 +82,6 @@ but operations otherwise succeeded as expected.  In some cases packages may
+ fail to be downloaded because they are no longer available on the snapshot
+ mirror, so any caller should expect this may occur in normal use.
+ 
+-
+ .SH FILES
+ .TP
+ .I /etc/devscripts.conf
+@@ -114,20 +90,16 @@ Global devscripts configuration options.  Will override hardcoded defaults.
+ .I ~/.devscripts
+ Per\-user configuration options.  Will override any global configuration.
+ 
+-
+ .SH SEE ALSO
+ .BR devscripts (1),
+ .BR devscripts.conf (5),
+ .BR git-debimport (1)
+ 
+-
+ .SH AUTHORS
+-David Paleino <d.paleino@gmail.com>
+-.br
+-Ron Lee <ron@debian.org>
++David Paleino <dapal@debian.org>
+ 
+ .SH COPYRIGHT
+-Copyright \(co 2009 David Paleino, Ron Lee
++Copyright \(co 2010 David Paleino
+ 
+ Permission is granted to copy, distribute and/or modify this document under
+ the terms of the GNU General Public License, Version 3 or (at your option)
+@@ -136,7 +108,6 @@ any later version published by the Free Software Foundation.
+ On Debian systems, the complete text of the GNU General Public License can
+ be found in \fI/usr/share/common\-licenses/GPL\fP.
+ 
+-
+ .SH BUGS
+ .SS Reporting bugs
+ The program is part of the devscripts package.  Please report bugs using
+diff --git a/scripts/debsnap.pl b/scripts/debsnap.pl
+new file mode 100755
+index 0000000..d015e6d
+--- /dev/null
++++ b/scripts/debsnap.pl
+@@ -0,0 +1,273 @@
++#!/usr/bin/perl -w
++
++# Copyright © 2010, David Paleino <d.paleino@gmail.com>,
++#
++# This program is free software: you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation, either version 3 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++use strict;
++use warnings;
++
++use LWP::Simple;
++use JSON -support_by_pp;
++use File::Basename;
++use File::Path qw/remove_tree/;
++
++my $progname = basename($0);
++my $modified_conf_msg = '';
++my %config_vars = ();
++my $force_actions = 0;
++
++my $numshifts = 0;
++
++my $package = '';
++my $pkgversion = '';
++my $destdir = '';
++
++sub fatal($;$);
++sub verbose($);
++
++sub version
++{
++    print <<"EOF";
++This is $progname, from the Debian devscripts package, version ###VERSION###
++This code is copyright 2010 by David Paleino <dapal\@debian.org>.
++This program comes with ABSOLUTELY NO WARRANTY.
++You are free to redistribute this code under the terms of the GNU
++General Public License v3 or, at your option, any later version.
++EOF
++    exit 0;
++}
++
++sub usage
++{
++    print <<"EOF";
++$progname [options] <package name> [package version]
++
++Automatically downloads packages from snapshot.debian.net
++
++The following options are supported:
++    -h, --help                          Shows this help message
++    --version                           Shows information about version
++    -v, --verbose                       Be verbose
++    -d <destination directory>,
++    --destdir=<destination directory>   Directory for retrieved packages
++                                        Default is ./source-<package name>
++    -f, --force                         Force overwriting an existing
++                                        destdir
++
++Default settings modified by devscripts configuration files or command-line
++options:
++$modified_conf_msg
++EOF
++    exit 0;
++}
++
++sub fetch_json_page
++{
++    my ($json_url) = @_;
++
++    # download the json page:
++    verbose "Getting json $json_url\n";
++    my $content = get $json_url;
++    my $json = new JSON;
++
++    # these are some nice json options to relax restrictions a bit:
++    my $json_text = $json->allow_nonref->utf8->relaxed->escape_slash->loose->allow_singlequote->allow_barekey->decode($content);
++
++    return $json_text;
++}
++
++sub read_conf
++{
++    # Most of the code in this sub has been stol^Wadapted from debuild.pl
++
++    my @config_files = ('/etc/devscripts.conf', '~/.devscripts');
++    %config_vars = (
++        'DEBSNAP_VERBOSE' => 'no',
++        'DEBSNAP_DESTDIR' => '',
++        'DEBSNAP_BASE_URL' => 'http://snapshot-dev.debian.org',
++    );
++
++    my %config_default = %config_vars;
++    my $shell_cmd;
++
++    # Set defaults
++    $shell_cmd .= qq[unset `set | grep "^DEBSNAP_" | cut -d= -f1`;\n];
++    foreach my $var (keys %config_vars) {
++        $shell_cmd .= qq[$var="$config_vars{$var}";\n];
++    }
++
++    $shell_cmd .= 'for file in ' . join(" ",@config_files) . "; do\n";
++    $shell_cmd .= '[ -f $file ] && . $file; done;' . "\n";
++
++    # Read back values
++    foreach my $var (keys %config_vars) { $shell_cmd .= "echo \$$var;\n" }
++
++    # print STDERR "Running shell command:\n$shell_cmd";
++    my $shell_out = `/bin/bash -c '$shell_cmd'`;
++    # print STDERR "Shell output:\n${shell_out}End shell output\n";
++    my @othervars;
++    (@config_vars{keys %config_vars}, @othervars) = split /\n/, $shell_out, -1;
++
++    # Check validity
++    $config_vars{'DEBSNAP_VERBOSE'} =~ /^(yes|no)$/
++    or $config_vars{'DEBSNAP_VERBOSE'} = 'no';
++
++    # Lastly, command-line options have priority
++    while (my $arg=shift) {
++        my $opt = '';
++        $numshifts++;
++
++        $arg =~/^(-v|--verbose)$/ and $config_vars{DEBSNAP_VERBOSE} = 'yes';
++
++        if ($arg =~/^(-d|--destdir)$/) {
++            $opt = shift;
++            unless (defined ($opt) and ($opt !~ /^-.*$/)) {
++                fatal "$arg requires an argument,\nrun $progname --help for usage information.";
++            }
++            $config_vars{DEBSNAP_DESTDIR} = $opt;
++        }
++        elsif ($arg =~/^--destdir=(.*)$/) {
++            $arg = '--destdir';
++            $opt = $1;
++            $config_vars{DEBSNAP_DESTDIR} = $opt;
++        }
++
++        $arg =~ /^(-f|--force)$/ and $force_actions = 1;
++
++        $arg =~ /^(-h|--help)$/ and usage();
++        $arg eq '--version' and version();
++
++        $arg eq '--' and last;
++        $arg !~ /^-.*$/ and unshift(@ARGV, $arg), last;
++    }
++
++    foreach my $var (sort keys %config_vars) {
++        if ($config_vars{$var} ne $config_default{$var}) {
++            $modified_conf_msg .= "  $var=$config_vars{$var}\n";
++        }
++    }
++
++    $modified_conf_msg ||= "  (none)\n";
++    chomp $modified_conf_msg;
++}
++
++sub fatal($;$)
++{
++    my ($pack, $file, $line);
++    ($pack, $file, $line) = caller();
++    my $msg = shift;
++    ($msg = "$progname: fatal error at line $line:\n$msg\n") =~ tr/\0//d;
++    $msg =~ s/\n\n$/\n/;
++
++    my $code = shift;
++    if (defined $code) {
++        $! = $code;
++    }
++    else {
++        $! = 1;
++    }
++
++    die $msg;
++}
++
++sub verbose($)
++{
++    (my $msg = "@_\n") =~ tr/\0//d;
++    $msg =~ s/\n\n$/\n/;
++    print "$msg" if $config_vars{DEBSNAP_VERBOSE} eq 'yes';
++}
++
++###
++# Main program
++###
++read_conf(@ARGV);
++# TODO: check if something less hacky can be done.
++if (@ARGV) {
++    splice(@ARGV, 0, $numshifts);
++
++    $package = shift;
++    $pkgversion = shift;
++} else {
++    usage();
++}
++$package eq '' and usage();
++$pkgversion ||= '';
++
++# TODO: more compact version?
++if ($config_vars{DEBSNAP_DESTDIR}) {
++    $destdir = $config_vars{DEBSNAP_DESTDIR};
++}
++else {
++    $destdir = "source-$package";
++}
++
++my $baseurl = "$config_vars{DEBSNAP_BASE_URL}/mr/package/$package/";
++if (-d $destdir) {
++    if ($force_actions) {
++        my $verbose = 1 if $config_vars{DEBSNAP_VERBOSE} eq 'yes';
++        remove_tree($destdir, { verbose => $verbose });
++        mkdir($destdir);
++    }
++    else {
++        fatal "Destination dir $destdir already exists.\nPlease (re)move it first, or use --force to overwrite.";
++    }
++}
++else {
++    mkdir($destdir);
++}
++
++eval {
++    my $json_text = fetch_json_page($baseurl);
++    # iterate over each available version in the JSON structure:
++    foreach my $version(@{$json_text->{result}}){
++        if ($pkgversion) {
++            next if $version->{version} ne $pkgversion;
++        }
++
++        my $src_json = fetch_json_page("http://snapshot-dev.debian.org/mr/package/$package/$version->{version}/srcfiles");
++
++        foreach my $file(@{$src_json->{result}}){
++            my $hash = $file->{hash};
++            my $file = fetch_json_page("http://snapshot-dev.debian.org/mr/file/$hash/info")->{result}[0];
++
++            #my %file_hash = ();
++            #$file_hash{path} = $file->{path};
++            #$file_hash{run} = $file->{run};
++            #$file_hash{name} = $file->{name};
++            #$file_hash{size} = $file->{size};
++            #while (my($k, $v) = each (%file_hash)){
++            #    print "$k => $v\n";
++            #}
++
++            my $file_url = "http://snapshot-dev.debian.org/file/$hash";
++            verbose "Getting file $file->{name}: $file_url";
++            eval {
++                getstore($file_url, "$destdir/$file->{name}");
++            };
++            if ($@) {
++                fatal("$@", 2);
++            }
++
++            # http://snapshot-dev.debian.org/file/7b4d5b2f24af4b5a299979134bc7f6d7b1eaf875
++            # http://snapshot-dev.debian.org/mr/file/7b4d5b2f24af4b5a299979134bc7f6d7b1eaf875/info
++            # "result": [{"path": "/pool/main/p/p0f", "run": "20070806T000000Z", "archive_name": "debian", "name": "p0f_2.0.8.orig.tar.gz", "size": 136877}]
++        }
++    }
++};
++
++# catch crashes:
++if($@){
++    fatal "$@";
++}
+diff --git a/scripts/debsnap.sh b/scripts/debsnap.sh
+deleted file mode 100755
+index c555868..0000000
+--- a/scripts/debsnap.sh
++++ /dev/null
+@@ -1,324 +0,0 @@
+-#!/bin/bash
+-
+-# Copyright © 2009, David Paleino <d.paleino@gmail.com>,
+-#                   Ron <ron@debian.org>
+-#
+-# This program is free software: you can redistribute it and/or modify
+-# it under the terms of the GNU General Public License as published by
+-# the Free Software Foundation, either version 3 of the License, or
+-# (at your option) any later version.
+-#
+-# This program is distributed in the hope that it will be useful,
+-# but WITHOUT ANY WARRANTY; without even the implied warranty of
+-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-# GNU General Public License for more details.
+-#
+-# You should have received a copy of the GNU General Public License
+-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+-#
+-# Thanks to Ron Lee and Patrick Schoenfeld for helping during
+-# the development process! :)
+-
+-#set -x
+-set -e
+-
+-##
+-# Rationale for variables naming:
+-# DEBSNAP_FOO : means it directly comes from the config file, which can be edited by the user
+-# foo         : means we assigned it, also combining data coming from the user
+-##
+-
+-OPTS=$(getopt -ao d:fvh --long destdir:,force,verbose,version,help -n $0 -- "$@")
+-if [ $? -ne 0 ]; then
+-	echo "Terminating." >&2
+-	exit 1
+-fi
+-eval set -- "$OPTS"
+-
+-PROGNAME="$(basename $0)"
+-
+-version() {
+-	echo \
+-"This is $PROGNAME, from the Debian devscripts package, version ###VERSION###
+-This code is copyright 2009 by David Paleino <d.paleino@gmail.com> and
+-Ron <ron@debian.org> -- all rights reserved.
+-This program comes with ABSOLUTELY NO WARRANTY.
+-You are free to redistribute this code under the terms of the GNU
+-General Public License v3 or, at your option, any later version."
+-	exit 0
+-}
+-
+-usage() {
+-	cat 1>&2 <<EOF
+-$PROGNAME [options] <package name> [package version]
+-
+-  Automatically downloads packages from snapshot.debian.net
+-
+-  The following options are supported:
+-  -h, --help                          Shows this help message
+-  --version                           Shows information about version
+-  -v, --verbose                       Be verbose
+-  -d <destination directory>,
+-  --destdir <destination directory>   Directory for retrieved packages
+-                                      Default is ./source-<package name>
+-  -f, --force                         Force overwriting an existing
+-                                      destdir
+-
+-EOF
+-	exit 0
+-}
+-
+-debug() {
+-	if [ "$DEBSNAP_VERBOSE" = "yes" ]; then
+-		echo "$@"
+-	fi
+-}
+-
+-start_download() {
+-	quiet="$1"
+-	destdir="$2"
+-	package="$3"
+-	version="$4"
+-	directory="$5"
+-	suffix="$6"
+-
+-	dsc="$DEBSNAP_BASE_URL/$directory/${package}_$version.dsc"
+-	diff="$DEBSNAP_BASE_URL/$directory/${package}_$version.diff.gz"
+-	orig="$DEBSNAP_BASE_URL/$directory/${package}_$upversion.$suffix"
+-
+-	printf "Downloading %s... " $version
+-	[ -n "$quiet" ] || echo
+-
+-	# I don't really like dget's output with missing files :)
+-#	( cd sources / ; \
+-#	dget -d --quiet $base_url/$directory/${package}_$version.dsc )
+-
+-	# the "continue" annidated here mean "go to the next stanza of Sources.gz"
+-	if ! wget $quiet -P "$destdir" -nH -nc "$dsc"; then
+-		echo "missing .dsc."
+-		debug "Url: $dsc"
+-		return 1
+-	else
+-		if ! wget $quiet -P "$destdir" -nH -nc "$orig"; then
+-			echo "missing .$suffix."
+-			debug "Url: $orig"
+-			return 1
+-		else
+-			if [ "$suffix" = "orig.tar.gz" ]; then
+-				if ! wget $quiet -P "$destdir" -nH -nc "$diff"; then
+-					echo "missing .diff.gz."
+-					debug "Url: $diff"
+-					return 1
+-				else
+-					echo "done."
+-				fi
+-			else
+-				echo "done."
+-			fi
+-		fi
+-	fi
+-}
+-
+-# these are our defaults
+-DEFAULT_DEBSNAP_VERBOSE=no
+-DEFAULT_DEBSNAP_DESTDIR=
+-DEFAULT_DEBSNAP_BASE_URL=http://snapshot.debian.net/archive
+-DEFAULT_DEBSNAP_CLEAN_REGEX="s@\([^/]*\)/[^/]*/\(.*\)@\1/\2@"
+-DEFAULT_DEBSNAP_SOURCES_GZ_PATH=source/Sources.gz
+-VARS="DEBSNAP_VERBOSE DEBSNAP_DESTDIR DEBSNAP_BASE_URL DEBSNAP_CLEAN_REGEX DEBSNAP_SOURCES_GZ_PATH"
+-
+-# read configuration from devscripts
+-eval $(
+-	set +e
+-	for var in $VARS; do
+-		eval "$var=\$DEFAULT_$var"
+-	done
+-	[ -r "/etc/devscripts.conf" ] && . /etc/devscripts.conf
+-	[ -r "~/.devscripts" ] && . ~/.devscripts
+-	set | egrep "^(DEBSNAP|DEVSCRIPTS)_"
+-)
+-
+-# sanitize variables
+-case "$DEBSNAP_VERBOSE" in
+-	yes|no) ;;
+-	*) DEBSNAP_VERBOSE=no ;;
+-esac
+-
+-while true; do
+-	case "$1" in
+-		-v|--verbose)
+-			DEBSNAP_VERBOSE=yes
+-			shift
+-			;;
+-		-d|--destdir)
+-			DEBSNAP_DESTDIR="$2"
+-			shift 2
+-			;;
+-		-f|--force)
+-			force_overwrite=yes
+-			shift
+-			;;
+-		--version)
+-			version
+-			shift
+-			;;
+-		-h|--help)
+-			usage
+-			shift
+-			;;
+-		--)
+-			shift
+-			break
+-			;;
+-		*)
+-			echo "Internal error in option parsing." >&2
+-			;;
+-	esac
+-done
+-
+-package="$1"
+-_version="${2//*:/}"    # remove the Epoch
+-
+-if [ -z "$package" ]; then
+-	usage
+-fi
+-
+-if [ "$DEBSNAP_VERBOSE" = "yes" ]; then
+-	echo "Using these values:"
+-	for var in $VARS; do
+-		eval "echo $var=\$$var"
+-	done
+-	echo "Requested package: $package"
+-	if [ -z "$_version" ]; then
+-		echo "Requested version: all"
+-	else
+-		echo "Requested version: $_version"
+-	fi
+-else
+-	quiet="--quiet"
+-fi
+-
+-source_pkg=$(apt-cache showsrc $package | grep -m1 ^Package | cut -f2 -d\ )
+-cache_dir=$(apt-cache showsrc $package | grep -m1 ^Directory | cut -f2 -d\ )
+-
+-# make it pool/f/foo from pool/<section>/f/foo
+-clean_dir=$(echo "$cache_dir" | sed -e "$DEBSNAP_CLEAN_REGEX")
+-
+-[ -n "$DEBSNAP_DESTDIR" ] || DEBSNAP_DESTDIR="source-$source_pkg"
+-if [ "$DEBSNAP_DESTDIR" != "." ]; then
+-	if [ -d "$DEBSNAP_DESTDIR" ]; then
+-		if [ -z "$force_overwrite" ]; then
+-			echo "Destination dir $DEBSNAP_DESTDIR already exists."
+-			echo "Please (re)move it first, or use --force to overwrite."
+-			exit 1
+-		fi
+-		echo "Removing exiting destination dir $DEBSNAP_DESTDIR as requested."
+-		rm -rf "$DEBSNAP_DESTDIR"
+-	fi
+-	mkdir -p "$DEBSNAP_DESTDIR"
+-fi
+-
+-
+-# download the Sources.gz
+-tmpdir=$(mktemp -d -t $PROGNAME.XXXXXXXX)
+-trap "rm -rf \"$tmpdir\"; exit 1" 0 SIGHUP SIGINT SIGTERM
+-sources_url="$DEBSNAP_BASE_URL/$clean_dir/$DEBSNAP_SOURCES_GZ_PATH"
+-sources_path="$tmpdir/Sources.gz"
+-
+-echo -n "Downloading Sources.gz... "
+-[ -n "$quiet" ] || echo
+-
+-if ! wget $quiet "$sources_url" -O "$sources_path"; then
+-	echo "failed."
+-	debug "Url: $sources_url"
+-	exit 1
+-else
+-	echo "done."
+-fi
+-
+-while read field value
+-do
+-	case $field in
+-		Package:)
+-			if [ "$value" != "$source_pkg" ]; then
+-				echo "Source package names not matching! Exiting."
+-				exit 1
+-			fi
+-			have_package=yes
+-			;;
+-		Version:)
+-			if [ -n "$version" ]; then
+-				echo "Version already set. Exiting."
+-				exit 1
+-			else
+-				# remove the Epoch
+-				version=${value//*:/}
+-				# remove everything after a -
+-				upversion=${version%-*}
+-				if [ "$upversion" = "$version" ]; then
+-					# this is a native package, so the original tarball has 
+-					# just "tar.gz" as suffix.
+-					suffix="tar.gz"
+-				else
+-					# this is not a native package, use "orig.tar.gz"
+-					suffix="orig.tar.gz"
+-				fi
+-			fi
+-			;;
+-		Directory:)
+-			if [ -n "$directory" ]; then
+-				echo "Directory already set. Exiting."
+-				exit 1
+-			else
+-				directory=$value
+-			fi
+-			;;
+-		"")
+-			# the blank line always comes last (unless it comes first)
+-			# bail out with errors if directory and version are not set,
+-			# (but only if we have seen a Package line already).
+-			if [ -z "$have_package" ]; then
+-				echo "No Package name before empty Sources.gz line. Skipping stanza."
+-			elif [ -z "$version" ] || [ -z "$directory" ]; then
+-				echo "Couldn't parse version/directory. Skipping stanza."
+-				debug "Version: $version"
+-				debug "Directory: $directory"
+-#				exit 1
+-			else
+-				# if the user requested a specific version,
+-				# skip the download step until we find it,
+-				# then break from the loop and let the outer
+-				# call deal with this case for us.
+-				if [ -z "$_version" ]; then
+-					if ! start_download "$quiet" "$DEBSNAP_DESTDIR" \
+-					                    "$package" "$version"      \
+-					                    "$directory" "$suffix"; then
+-						# Keep trying if some files were missing,
+-						# but report that to the caller at exit.
+-						missing_package=yes
+-					fi
+-				elif [ "$_version" = "$version" ]; then
+-					break
+-				fi
+-			fi
+-			have_package=
+-			version=
+-			directory=
+-			;;
+-	esac
+-done < <(zcat "$sources_path")
+-
+-# We need this if there isn't an empty line following the last (or only) stanza
+-# and we also perform the download here if just a single version was requested.
+-if [ -n "$version" ] && [ -n "$directory" ]; then
+-	if ! start_download "$quiet" "$DEBSNAP_DESTDIR" "$package" \
+-	                    "$version" "$directory" "$suffix"; then
+-		missing_package=yes
+-	fi
+-fi
+-
+-# Disable the trap on exit so we can take back control of the exit code
+-trap - 0
+-rm -rf "$tmpdir"
+-
+-[ -z "$missing_package" ] || exit 2
+-- 
+1.7.0.4
+

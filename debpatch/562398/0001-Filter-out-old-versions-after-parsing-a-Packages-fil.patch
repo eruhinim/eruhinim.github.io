@@ -1,0 +1,163 @@
+From 64d06247e4fdb35fd7f33eb7020ec84584e23b42 Mon Sep 17 00:00:00 2001
+From: John Wright <john@johnwright.org>
+Date: Sun, 2 May 2010 22:15:11 -0600
+Subject: [PATCH] Filter out old versions after parsing a Packages file
+
+The previous behavior favored packages showing up later in the Packages
+file rather than packages with later versions, and wound up putting
+multiple entries for the same package in the di_packages list.  This
+patch ensures a new di_package is created for each stanza, and then
+filters out all but the latest versions before returning the di_packages
+pointer.
+
+There's a small memory leak for each di_slist_node corresponding to an
+old package version.  It can't be helped, as far as I can tell, because
+of how the memory for those are allocated (using mem_chunk).  The bulk
+of the memory used for those is freed, just not the di_slist_node glue.
+
+This patch also fixes a bug in di_hash_table_insert, where the key was
+not being reset after potentially destroying the old key and changing
+the value for a key (which may contain the key itself).
+---
+ include/debian-installer/packages.h |    4 ++
+ src/hash.c                          |    1 +
+ src/packages.c                      |   69 +++++++++++++++++++++++++++++++++++
+ src/packages_parser.c               |    8 +++-
+ 4 files changed, 80 insertions(+), 2 deletions(-)
+
+diff --git a/include/debian-installer/packages.h b/include/debian-installer/packages.h
+index c5e4576..0d7dd1c 100644
+--- a/include/debian-installer/packages.h
++++ b/include/debian-installer/packages.h
+@@ -71,6 +71,10 @@ void di_packages_append_package (di_packages *packages, di_package *package, di_
+ di_package *di_packages_get_package (di_packages *packages, const char *name, size_t n);
+ di_package *di_packages_get_package_new (di_packages *packages, di_packages_allocator *allocator, char *name, size_t n);
+ 
++di_hash_table *di_packages_get_latest_map (di_packages *packages);
++void di_packages_filter_older_versions(di_packages *packages);
++void di_packages_update_hash_table(di_packages *packages);
++
+ di_slist *di_packages_resolve_dependencies (di_packages *packages, di_slist *list, di_packages_allocator *allocator);
+ di_slist *di_packages_resolve_dependencies_array (di_packages *packages, di_package **array, di_packages_allocator *allocator);
+ void di_packages_resolve_dependencies_mark (di_packages *packages);
+diff --git a/src/hash.c b/src/hash.c
+index 302ea5a..78a2f5d 100644
+--- a/src/hash.c
++++ b/src/hash.c
+@@ -192,6 +192,7 @@ void di_hash_table_insert (di_hash_table *hash_table, void *key, void *value)
+     if (hash_table->value_destroy_func)
+       hash_table->value_destroy_func ((*node)->value);
+ 
++    (*node)->key = key;
+     (*node)->value = value;
+   }
+   else
+diff --git a/src/packages.c b/src/packages.c
+index 699f82c..e0f9d59 100644
+--- a/src/packages.c
++++ b/src/packages.c
+@@ -164,6 +164,75 @@ di_package *di_packages_get_package_new (di_packages *packages, di_packages_allo
+   return ret;
+ }
+ 
++di_hash_table *di_packages_get_latest_map (di_packages *packages)
++{
++  di_slist_node *node;
++  di_package *package, *latest_package;
++  di_package_version *this_version = NULL, *latest_version = NULL;
++  di_hash_table *latest = di_hash_table_new (di_rstring_hash, di_rstring_equal);
++
++  for (node = packages->list.head; node; node = node->next) {
++    package = node->data;
++    latest_package = di_hash_table_lookup(latest, &package->key);
++    this_version = latest_version = NULL;
++
++    /* With missing or broken versions, just take the last-added package */
++    if (!latest_package ||
++        !package->version || !latest_package->version ||
++        !(this_version = di_package_version_parse (package)) ||
++        !(latest_version = di_package_version_parse (latest_package)) ||
++        di_package_version_compare (this_version, latest_version) > 0)
++    {
++      di_hash_table_insert (latest, &package->key, package);
++      di_free (this_version);
++      di_free (latest_version);
++    }
++  }
++
++  return latest;
++}
++
++void di_packages_filter_older_versions (di_packages *packages)
++{
++  di_slist_node *node, *last_node;
++  di_package *package, *latest_package;
++  di_hash_table *latest = di_packages_get_latest_map (packages);
++
++  /* Remove non-latest packages from the list */
++  last_node = NULL;
++  for (node = packages->list.head; node; node = node->next) {
++    package = node->data;
++    latest_package = di_hash_table_lookup (latest, &package->key);
++    if (package != latest_package) {
++      /* Remove it from the list */
++      if (last_node)
++        last_node->next = node->next;
++      else
++        packages->list.head = node->next;
++
++      if (!node->next)
++        packages->list.bottom = last_node;
++
++      di_package_destroy(package);
++    }
++    else
++      last_node = node;
++  }
++
++  di_hash_table_destroy (latest);
++}
++
++void di_packages_update_hash_table (di_packages *packages)
++{
++  di_slist_node *node;
++  di_package *package;
++
++  for (node = packages->list.head; node; node = node->next) {
++    package = node->data;
++    di_hash_table_insert (packages->table, &package->key, package);
++  }
++}
++
+ bool di_packages_resolve_dependencies_recurse (di_packages_resolve_dependencies_check *r, di_package *package, di_package *dependend_package)
+ {
+   di_slist_node *node;
+diff --git a/src/packages_parser.c b/src/packages_parser.c
+index 5b4ccbd..24f303d 100644
+--- a/src/packages_parser.c
++++ b/src/packages_parser.c
+@@ -182,6 +182,9 @@ di_packages *di_packages_special_read_file (const char *file, di_packages_alloca
+ 
+   di_parser_info_free (info);
+ 
++  di_packages_filter_older_versions (data.packages);
++  di_packages_update_hash_table (data.packages);
++
+   return data.packages;
+ }
+ 
+@@ -240,8 +243,9 @@ void di_packages_parser_read_name (data, fip, field_modifier, value, user_data)
+   void *user_data;
+ {
+   internal_di_package_parser_data *parser_data = user_data;
+-  di_package *p;
+-  p = di_packages_get_package_new (parser_data->packages, parser_data->allocator, value->string, value->size);
++  di_package *p = di_package_alloc (parser_data->allocator);
++  p->key.string = di_stradup (value->string, value->size);
++  p->key.size = value->size;
+   p->type = di_package_type_real_package;
+   di_slist_append_chunk (&parser_data->packages->list, p, parser_data->allocator->slist_node_mem_chunk);
+   *data = p;
+-- 
+1.6.5
+

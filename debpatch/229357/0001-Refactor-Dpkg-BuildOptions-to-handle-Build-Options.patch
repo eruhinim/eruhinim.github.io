@@ -1,0 +1,461 @@
+From 1ebeff797bc36c91e50f02c6d32cba094e827add Mon Sep 17 00:00:00 2001
+From: Raphael Hertzog <hertzog@debian.org>
+Date: Sun, 6 Jul 2008 22:03:27 +0200
+Subject: [PATCH] Refactor Dpkg::BuildOptions to handle Build-Options field
+
+* scripts/Dpkg/BuildOptions.pm: complete rewrite of the module
+to handle various sources of build options: some options are auto-set
+based on the standards version, then the maintainer can define options
+with the Build-Options field in debian/control and last the builder
+can use DEB_BUILD_OPTIONS to override everything. Some options are
+meant to be exported through DEB_BUILD_OPTIONS and some are not.
+* scripts/t/300_Dpkg_BuildOptions.t: adjust test suite for the new module
+* scripts/dpkg-buildpackage.pl: adjust to use the new Dpkg::BuildOptions
+API.
+* scripts/Dpkg/Fields.pm, scripts/Dpkg/Source/Package.pm: add the new
+Build-Options field as a valid field in the source section of
+debian/control (and in .dsc files).
+---
+ scripts/Dpkg/BuildOptions.pm      |  257 +++++++++++++++++++++++++++++++++----
+ scripts/Dpkg/Fields.pm            |    2 +-
+ scripts/Dpkg/Source/Package.pm    |    5 +-
+ scripts/dpkg-buildpackage.pl      |   10 +-
+ scripts/t/300_Dpkg_BuildOptions.t |   61 +++++----
+ 5 files changed, 273 insertions(+), 62 deletions(-)
+
+diff --git a/scripts/Dpkg/BuildOptions.pm b/scripts/Dpkg/BuildOptions.pm
+index 9d6741b..5b2acdd 100644
+--- a/scripts/Dpkg/BuildOptions.pm
++++ b/scripts/Dpkg/BuildOptions.pm
+@@ -5,51 +5,252 @@ use warnings;
+ 
+ use Dpkg::Gettext;
+ use Dpkg::ErrorHandling qw(warning);
++use Dpkg::Control;
++use Dpkg::Version qw(compare_versions);
+ 
+-sub parse {
+-    my ($env) = @_;
++# Define behavior for known options:
++# export -> the option is meant to be exported in DEB_BUILD_OPTIONS
++# valued -> the option can have a value
++# check_value_rx -> if defined, a regex to check the value, invalid value
++#                   will lead to the option being discarded
++# min_standards_version -> if the s-v field is >= to the version given,
++#                          the option is auto-enabled
++our %OPTIONS = (
++    noopt => {
++        export => 1,
++        valued => 0,
++    },
++    nostrip => {
++        export => 1,
++        valued => 0,
++    },
++    nocheck => {
++        export => 1,
++        valued => 0,
++    },
++    parallel => {
++        export => 1,
++        valued => 1,
++        check_value_rx => qr/^-?\d+$/,
++    },
++);
+ 
+-    $env ||= $ENV{DEB_BUILD_OPTIONS};
++=head1 NAME
+ 
+-    unless ($env) { return {}; }
++Dpkg::BuildOptions - handle build options from debian/control and environment
+ 
+-    my %opts;
++=head1 DESCRIPTION
+ 
+-    foreach (split(/\s+/, $env)) {
+-	unless (/^([a-z][a-z0-9_-]*)(=(\S*))?$/) {
+-            warning(_g("invalid flag in DEB_BUILD_OPTIONS: %s"), $_);
+-            next;
++It provides an object to analyze and manipulate build options as defined
++by combining information provided by the debian/control file and by the
++DEB_BUILD_OPTIONS environment variable.
++
++=head1 FUNCTIONS
++
++=over 4
++
++=item $b = Dpkg::BuildOptions($file)
++
++Create a new Dpkg::BuildOptions object. The $file parameter is simply
++forwarded to Dpkg::Control->new($file). If undef, it will simply use
++debian/control by default.
++
++=cut
++sub new {
++    my ($this, $ctl_file) = @_;
++    my $class = ref($this) || $this;
++    my $self = {
++        'opts' => {},
++        'control' => Dpkg::Control->new($ctl_file),
++    };
++    bless $self, $class;
++    $self->parse_options();
++    return $self;
++}
++
++=item $b->reset()
++
++Forget all options already parsed. Start afresh.
++
++=cut
++sub reset {
++    my ($self) = @_;
++    $self->{'opts'} = {};
++}
++
++=item $b->parse_options()
++
++Do a full parse of options, including the Build-Options field in
++debian/control and the DEB_BUILD_OPTIONS variable.
++
++=cut
++sub parse_options {
++    my ($self) = @_;
++    $self->parse_standards_version();
++    $self->parse_field();
++    $self->parse_env();
++}
++
++=item $b->parse_standards_version()
++
++Update the options based on the current value of the Standards-Version
++field.
++
++=cut
++sub parse_standards_version {
++    my ($self, $sv) = @_;
++
++    my $src = $self->{'control'}->get_source();
++    $sv = $src->{'Standards-Version'} unless defined $sv;
++    return unless $sv;
++
++    foreach my $opt (keys %OPTIONS) {
++        my $min_sv = $OPTIONS{$opt}{'min_standards_version'};
++        next unless defined $min_sv;
++        if (compare_versions($sv, '>=', $min_sv)) {
++            $self->{'opts'}{$opt} = { %{$OPTIONS{$opt}} };
+         }
++    }
++}
++
++=item $b->parse_field()
++
++Update the options based on the value of the Build-Options field in the
++associated Dpkg::Control object. It will also define some options based
++on the value of the Standards-Version field.
++
++=cut
++sub parse_field {
++    my ($self, $field) = @_;
++    my $src = $self->{'control'}->get_source();
++    $field = $src->{'Build-Options'} unless defined $field;
++    $self->_parse($field, 'field');
++}
++
++=item $b->parse_env()
++
++Update the options based on the value of DEB_BUILD_OPTIONS environment
++variable.
++
++=cut
++sub parse_env {
++    my ($self, $env) = @_;
++    $env = $ENV{'DEB_BUILD_OPTIONS'} unless defined $env;
++    $self->_parse($env, 'env');
++}
+ 
+-	my ($k, $v) = ($1, $3 || '');
++=item my $env = $b->export
+ 
+-	# Sanity checks
+-	if ($k =~ /^(noopt|nostrip|nocheck)$/ && length($v)) {
+-	    $v = '';
+-	} elsif ($k eq 'parallel' && $v !~ /^-?\d+$/) {
+-	    next;
+-	}
++Export the current set of build options in the DEB_BUILD_OPTIONS
++environment variable. Only options that are meant to be exported
++will be included. For convenience, the return value also contains the
++new value of the variable.
+ 
+-	$opts{$k} = $v;
++=cut
++sub export {
++    my ($self) = @_;
++    my @flags;
++    foreach my $opt (sort keys %{$self->{'opts'}}) {
++        my $o = $self->{'opts'}{$opt};
++        if ($o->{'export'}) {
++            if ($o->{'value'}) {
++                push @flags, "$opt=" . $o->{'value'};
++            } else {
++                push @flags, $opt;
++            }
++        }
+     }
++    my $env = join(" ", @flags);
++    $ENV{'DEB_BUILD_OPTIONS'} = $env;
++    return $env;
++}
++
++=item $b->has($option)
+ 
+-    return \%opts;
++Return true if the option is defined, false otherwise.
++
++=cut
++sub has {
++    my ($self, $opt) = @_;
++    return exists $self->{'opts'}{$opt};
+ }
+ 
++=item $b->get($option)
++
++Return the current value of the option if it has any.
++
++=cut
++sub get {
++    my ($self, $opt) = @_;
++    return $self->{'opts'}{$opt}{'value'};
++}
++
++=item $b->set($option, $value)
++
++Add a new option or overwrite the current one.
++
++=cut
+ sub set {
+-    my ($opts, $overwrite) = @_;
+-    $overwrite = 1 if not defined($overwrite);
++    my ($self, $opt, $val) = @_;
++    $self->{'opts'}{$opt}{'value'} = $val || '';
++    $self->{'opts'}{$opt}{'source'} = 'code';
++}
+ 
+-    my $new = {};
+-    $new = parse() unless $overwrite;
+-    while (my ($k, $v) = each %$opts) {
+-        $new->{$k} = $v;
+-    }
++## Non-public interface below
++sub _parse {
++    my ($self, $value, $source) = @_;
++    return unless $value;
+ 
+-    my $env = join(" ", map { $new->{$_} ? $_ . "=" . $new->{$_} : $_ } sort keys %$new);
++    foreach (split(/\s+/, $value)) {
++	unless (/^([a-z][a-z0-9_-]*)(?:=(\S*))?$/) {
++            warning(_g("invalid flag in %s: %s"), $source eq "field" ?
++                    "Build-Options" : "DEB_BUILD_OPTIONS", $_);
++            next;
++        }
++	my ($k, $v) = ($1, $2 || '');
+ 
+-    $ENV{DEB_BUILD_OPTIONS} = $env;
+-    return $env;
++        if ($k =~ /^no-(.*)$/) {
++            # Disable an option
++            delete $self->{'opts'}{$1};
++            next;
++        }
++
++        # Define an (new) option
++        my %o;
++        if (exists $OPTIONS{$k}) {
++            %o = %{$OPTIONS{$k}};
++        } elsif ($source eq "field") {
++            $o{'export'} = 0; # Unknown options from B-O: are not exported
++        }
++        if ($source eq "env") {
++            $o{'export'} = 1; # All options from environment are exported
++        }
++        $o{'source'} = $source;
++        $o{'value'} = $v;
++
++        # Check/sanitize the option
++        if (defined($o{'valued'})) {
++            if (defined($o{'check_value_rx'})) {
++                unless ($v =~ $o{'check_value_rx'}) {
++                    warning(_g("discarding build option %s due to " .
++                            "invalid value: %s"), $k, $v);
++                    next;
++                }
++            }
++            $o{'value'} = '' unless $o{'valued'};
++        }
++
++        # Store it
++        $self->{'opts'}{$k} = \%o;
++    }
+ }
+ 
++=back
++
++=head1 AUTHOR
++
++Raphael Hertzog <hertzog@debian.org>.
++
++=cut
++
+ 1;
+diff --git a/scripts/Dpkg/Fields.pm b/scripts/Dpkg/Fields.pm
+index 6504a1f..cb7325e 100644
+--- a/scripts/Dpkg/Fields.pm
++++ b/scripts/Dpkg/Fields.pm
+@@ -15,7 +15,7 @@ our %EXPORT_TAGS = ('list' => [qw(%control_src_fields %control_pkg_fields
+ # Some variables (list of fields)
+ our %control_src_fields;
+ our %control_pkg_fields;
+-$control_src_fields{$_} = 1 foreach (qw(Bugs Dm-Upload-Allowed
++$control_src_fields{$_} = 1 foreach (qw(Bugs Build-Options Dm-Upload-Allowed
+     Homepage Origin Maintainer Priority Section Source Standards-Version
+     Uploaders Vcs-Browser Vcs-Arch Vcs-Bzr Vcs-Cvs Vcs-Darcs Vcs-Git Vcs-Hg
+     Vcs-Mtn Vcs-Svn));
+diff --git a/scripts/Dpkg/Source/Package.pm b/scripts/Dpkg/Source/Package.pm
+index 2ba8479..2b785dc 100644
+--- a/scripts/Dpkg/Source/Package.pm
++++ b/scripts/Dpkg/Source/Package.pm
+@@ -89,8 +89,9 @@ _darcs
+ # Private stuff
+ my @dsc_fields = (qw(Format Source Binary Architecture Version Origin
+ 		     Maintainer Uploaders Dm-Upload-Allowed Homepage
+-		     Standards-Version Vcs-Browser Vcs-Arch Vcs-Bzr
+-		     Vcs-Cvs Vcs-Darcs Vcs-Git Vcs-Hg Vcs-Mtn Vcs-Svn),
++                     Standards-Version Build-Options Vcs-Browser Vcs-Arch
++                     Vcs-Bzr Vcs-Cvs Vcs-Darcs Vcs-Git Vcs-Hg Vcs-Mtn
++                     Vcs-Svn),
+                   @src_dep_fields,
+                   qw(Checksums-Md5 Checksums-Sha1 Checksums-Sha256 Files));
+ 
+diff --git a/scripts/dpkg-buildpackage.pl b/scripts/dpkg-buildpackage.pl
+index 93d72a1..f335477 100755
+--- a/scripts/dpkg-buildpackage.pl
++++ b/scripts/dpkg-buildpackage.pl
+@@ -244,20 +244,20 @@ if ($signcommand) {
+     }
+ }
+ 
+-my $build_opts = Dpkg::BuildOptions::parse();
++my $build_opts = Dpkg::BuildOptions->new();
+ if ($parallel) {
+-    $parallel = $build_opts->{parallel} if (defined $build_opts->{parallel});
++    $parallel = $build_opts->get("parallel") if $build_opts->has("parallel");
+     $ENV{MAKEFLAGS} ||= '';
+     if ($parallel eq '-1') {
+ 	$ENV{MAKEFLAGS} .= " -j";
+     } else {
+ 	$ENV{MAKEFLAGS} .= " -j$parallel";
+     }
+-    $build_opts->{parallel} = $parallel;
+-    Dpkg::BuildOptions::set($build_opts);
++    $build_opts->set("parallel", $parallel);
+ }
++$build_opts->export();
+ 
+-my $default_flags = defined $build_opts->{noopt} ? "-g -O0" : "-g -O2";
++my $default_flags = $build_opts->has("noopt") ? "-g -O0" : "-g -O2";
+ my %flags = ( CPPFLAGS => '',
+ 	      CFLAGS   => $default_flags,
+ 	      CXXFLAGS => $default_flags,
+diff --git a/scripts/t/300_Dpkg_BuildOptions.t b/scripts/t/300_Dpkg_BuildOptions.t
+index dc43acd..0ad5fc1 100644
+--- a/scripts/t/300_Dpkg_BuildOptions.t
++++ b/scripts/t/300_Dpkg_BuildOptions.t
+@@ -1,12 +1,28 @@
+ # -*- mode: cperl;-*-
+ 
+-use Test::More tests => 6;
++use Test::More tests => 11;
+ 
+ use strict;
+ use warnings;
+ 
+ use_ok('Dpkg::BuildOptions');
+ 
++$Dpkg::BuildOptions::OPTIONS{'test-sv1'} = {
++    export => 1,
++    valued => 0,
++    min_standards_version => '3.0.1',
++};
++$Dpkg::BuildOptions::OPTIONS{'test-sv2'} = {
++    export => 0,
++    valued => 0,
++    min_standards_version => '12.3',
++};
++$Dpkg::BuildOptions::OPTIONS{'test_rx'} = {
++    export => 0,
++    valued => 1,
++    check_value_rx => qr/^\dx\d$/,
++};
++
+ {
+     no warnings;
+     # Disable warnings related to invalid values fed during
+@@ -16,36 +32,29 @@ use_ok('Dpkg::BuildOptions');
+ 
+ $ENV{DEB_BUILD_OPTIONS} = 'noopt foonostripbar parallel=3 bazNOCHECK';
+ 
+-my $dbo = Dpkg::BuildOptions::parse();
+-
+-my %dbo = (
+-	   noopt => '',
+-	   foonostripbar => '',
+-	   parallel => 3,
+-	   );
+-my %dbo2 = (
+-	    no => '',
+-	    opt => '',
+-	    'no-strip' => '',
+-	    nocheck => '',
+-	   );
++my $dbo = Dpkg::BuildOptions->new("/dev/null");
++$dbo->reset();
+ 
++$dbo->parse_standards_version("3.8.0");
++ok($dbo->has("test-sv1"), "test-sv1 is autoset");
++ok(!$dbo->has("test-sv2"), "test-sv2 is not autoset");
+ 
+-is_deeply($dbo, \%dbo, 'parse');
++$dbo->parse_field("test_rx=bla");
++ok(!$dbo->has("test_rx"), "test_rx has been discarded");
+ 
+-$dbo = Dpkg::BuildOptions::parse('no opt no-strip parallel = 5 nocheck');
++$dbo->parse_field("test_rx=4x4");
++ok($dbo->has("test_rx"), "testrx has been set");
++is($dbo->get("test_rx"), "4x4", "value of testrx is correct");
+ 
+-is_deeply($dbo, \%dbo2, 'parse (param)');
++$dbo->set("test-sv2");
++ok($dbo->has("test-sv2"), "test-sv2 has been set");
+ 
+-$dbo->{parallel} = 5;
+-$dbo->{noopt} = '';
++$dbo->parse_env("noopt=1 no-test-sv1 foonostripbar parallel=3 bazNOCHECK pasbon = 2");
+ 
+-my $env = Dpkg::BuildOptions::set($dbo, 1);
++ok(!$dbo->has("test-sv1"), "test-sv1 got removed");
++ok(!$dbo->has("no-test-sv1"), "no-testsv1 doesn't exist");
++is($dbo->get("noopt"), "", "noopt has no value");
+ 
+-is($ENV{DEB_BUILD_OPTIONS}, $env, 'set (return value)');
+-is_deeply(Dpkg::BuildOptions::parse(), $dbo, 'set (env)');
++$dbo->export();
++is($ENV{DEB_BUILD_OPTIONS}, "foonostripbar noopt parallel=3 pasbon", "exported options");
+ 
+-$ENV{DEB_BUILD_OPTIONS} = 'foobar';
+-$dbo = { noopt => '' };
+-$env = Dpkg::BuildOptions::set($dbo, 0);
+-is($env, "foobar noopt", 'set (append)');
+-- 
+1.5.6.2
+

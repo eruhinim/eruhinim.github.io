@@ -1,0 +1,124 @@
+From 36ba9da61db94a8d544ed9b221d84d50755f3b37 Mon Sep 17 00:00:00 2001
+From: Simon McVittie <smcv@debian.org>
+Date: Mon, 16 Jan 2017 10:23:12 +0000
+Subject: [PATCH] Add an option equivalent to sbuild's --extra-repository
+
+This should make it significantly easier to test a group of related
+packages in a local reprepro or similar.
+---
+ lib/adt_testbed.py      | 18 ++++++++++++++++--
+ lib/autopkgtest_args.py |  5 +++++
+ runner/autopkgtest      |  3 ++-
+ runner/autopkgtest.1    | 10 ++++++++++
+ 4 files changed, 33 insertions(+), 3 deletions(-)
+
+diff --git a/lib/adt_testbed.py b/lib/adt_testbed.py
+index d759322..d810f72 100644
+--- a/lib/adt_testbed.py
++++ b/lib/adt_testbed.py
+@@ -46,7 +46,7 @@ timeouts = {'short': 100, 'copy': 300, 'install': 3000, 'test': 10000,
+ class Testbed:
+     def __init__(self, vserver_argv, output_dir, user,
+                  setup_commands=[], setup_commands_boot=[], add_apt_pockets=[],
+-                 copy_files=[]):
++                 copy_files=[], add_apt_sources=[]):
+         self.sp = None
+         self.lastsend = None
+         self.scratch = None
+@@ -63,6 +63,7 @@ class Testbed:
+         self.setup_commands = setup_commands
+         self.setup_commands_boot = setup_commands_boot
+         self.add_apt_pockets = add_apt_pockets
++        self.add_apt_sources = add_apt_sources
+         self.copy_files = copy_files
+         self.initial_kernel_version = None
+         # tests might install a different kernel; [(testname, reboot_marker, kver)]
+@@ -261,7 +262,7 @@ class Testbed:
+     def run_setup_commands(self):
+         '''Run --setup-commmands and --copy'''
+ 
+-        if not self.setup_commands and not self.add_apt_pockets and not self.copy_files:
++        if not self.setup_commands and not self.add_apt_pockets and not self.copy_files and not self.add_apt_sources:
+             return
+ 
+         adtlog.info('@@@@@@@@@@@@@@@@@@@@ test bed setup')
+@@ -269,6 +270,19 @@ class Testbed:
+             adtlog.debug('Copying file %s to testbed %s' % (host, tb))
+             Path(self, host, tb, os.path.isdir(host)).copydown()
+ 
++        self.check_exec(['sh', '-ec', ': > /etc/apt/sources.list.d/autopkgtest-add-apt-sources.list'])
++        for source in self.add_apt_sources:
++            script = '''
++            echo "$1" >> /etc/apt/sources.list.d/autopkgtest-add-apt-sources.list
++            for retry in 1 2 3; do
++                apt-get --no-list-cleanup \\
++                        -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/autopkgtest-add-apt-sources.list \\
++                        -o Dir::Etc::sourceparts=/dev/null \\
++                        update 2>&1 && break || sleep 15
++            done
++            '''
++            self.check_exec(['sh', '-ec', script, 'sh', source])
++
+         # create apt sources for --apt-pocket
+         for pocket in self.add_apt_pockets:
+             pocket = pocket.split('=', 1)[0]  # strip off package list
+diff --git a/lib/autopkgtest_args.py b/lib/autopkgtest_args.py
+index d49fea3..23486f3 100644
+--- a/lib/autopkgtest_args.py
++++ b/lib/autopkgtest_args.py
+@@ -265,6 +265,11 @@ for details.'''
+                          action='append', default=[],
+                          help='Run these commands after --setup-commands, '
+                          'and also every time the testbed is rebooted')
++    g_setup.add_argument('--add-apt-source', action='append',
++                         dest='add_apt_sources',
++                         metavar='"deb http://MIRROR SUITE COMPONENT..."',
++                         default=[],
++                         help='Enable additional apt sources')
+     g_setup.add_argument('--apt-pocket', action='append',
+                          metavar='POCKETNAME[=pkgname,src:srcname,...]',
+                          default=[],
+diff --git a/runner/autopkgtest b/runner/autopkgtest
+index 12edc1d..00fe56e 100755
+--- a/runner/autopkgtest
++++ b/runner/autopkgtest
+@@ -664,7 +664,8 @@ def main():
+                                       setup_commands=opts.setup_commands,
+                                       setup_commands_boot=opts.setup_commands_boot,
+                                       add_apt_pockets=opts.apt_pocket,
+-                                      copy_files=opts.copy)
++                                      copy_files=opts.copy,
++                                      add_apt_sources=getattr(opts, 'add_apt_sources', []))
+         testbed.start()
+         testbed.open()
+         process_actions()
+diff --git a/runner/autopkgtest.1 b/runner/autopkgtest.1
+index a095bbe..9dd4538 100644
+--- a/runner/autopkgtest.1
++++ b/runner/autopkgtest.1
+@@ -242,12 +242,22 @@ lead to an infinite loop). Otherwise, they are just like the
+ This option can be specified multiple times.
+ 
+ .TP
++.BI \-\-add\-apt\-source= "'deb http://MIRROR SUITE COMPONENT...'"
++Add the given apt source to
++.B /etc/apt/sources.list.d
++and update it, before running any \-\-setup\-commands.
++
++This option can be specified multiple times.
++
++.TP
+ .BR --apt-upgrade " | " -U
+ Run
+ .B apt\-get update
+ and
+ .B apt\-get dist-upgrade -y
+ in the testbed before running the tests.
++Any \fB\-\-add\-apt\-source\fR or \fB\-\-apt\-pocket\fR options take effect
++first, so this will upgrade packages from those sources if appropriate.
+ 
+ .TP
+ .BI \-\-apt\-pocket= pocket[=pkgname,src:srcname,...]
+-- 
+2.11.0
+

@@ -1,0 +1,138 @@
+diff -Nru dma-0.0.2010.06.17/debian/changelog dma-0.0.2010.06.17/debian/changelog
+--- dma-0.0.2010.06.17/debian/changelog	2012-08-31 23:05:18.000000000 +0000
++++ dma-0.0.2010.06.17/debian/changelog	2012-11-25 20:20:59.000000000 +0000
+@@ -1,3 +1,11 @@
++dma (0.0.2010.06.17-14.1) unstable; urgency=low
++
++  * Non-maintainer upload.
++  * Fixed 'modifies conffiles (policy 10.7.3): /etc/dma/dma.conf'
++    Closes: #688682
++
++ -- Laszlo Kajan <lkajan@rostlab.org>  Sun, 25 Nov 2012 20:19:16 +0000
++
+ dma (0.0.2010.06.17-14) unstable; urgency=low
+ 
+   * Fix the parsing of multiple comma-separated and bracketed addresses
+diff -Nru dma-0.0.2010.06.17/debian/control dma-0.0.2010.06.17/debian/control
+--- dma-0.0.2010.06.17/debian/control	2012-03-02 23:57:05.000000000 +0000
++++ dma-0.0.2010.06.17/debian/control	2012-11-25 20:53:36.000000000 +0000
+@@ -12,7 +12,8 @@
+ 
+ Package: dma
+ Architecture: any
+-Depends: ${shlibs:Depends}, ${misc:Depends}
++Pre-Depends: dpkg (>= 1.15.7.2)
++Depends: ${shlibs:Depends}, ${misc:Depends}, ucf (>= 0.28)
+ Provides: mail-transport-agent
+ Conflicts: mail-transport-agent
+ Replaces: mail-transport-agent
+diff -Nru dma-0.0.2010.06.17/debian/dma.install dma-0.0.2010.06.17/debian/dma.install
+--- dma-0.0.2010.06.17/debian/dma.install	2009-03-10 12:04:54.000000000 +0000
++++ dma-0.0.2010.06.17/debian/dma.install	2012-11-25 18:45:51.000000000 +0000
+@@ -1,2 +1,3 @@
+ debian/dbounce-simple-safecat usr/bin
+ debian/dbounce-simple-safecat.1 usr/share/man/man1
++dma.conf usr/share/dma
+diff -Nru dma-0.0.2010.06.17/debian/postinst dma-0.0.2010.06.17/debian/postinst
+--- dma-0.0.2010.06.17/debian/postinst	2010-11-17 08:53:09.000000000 +0000
++++ dma-0.0.2010.06.17/debian/postinst	2012-11-25 21:03:09.000000000 +0000
+@@ -3,6 +3,9 @@
+ 
+ set -e
+ 
++# lkajan: resolution of #688682
++dpkg-maintscript-helper rm_conffile /etc/dma/dma.conf "0.0.2010.06.17-14.1~" dma -- "$@"
++
+ . /usr/share/debconf/confmodule
+ db_version 2.0
+ 
+@@ -13,20 +16,34 @@
+     	db_get dma/mailname
+ 	echo "$RET" > /etc/mailname
+ 
++	# lkajan: example is apticron
++	tmpfile="$( mktemp -t dma.conf.XXXXXXXXXX )"
++	chown root:mail "$tmpfile"; chmod 0640 "$tmpfile"
++	# lkajan: preserve changes to old conffile dma.conf (dma.conf.dpkg-backup at this point), if any:
++	if [ -e /etc/dma/dma.conf.dpkg-backup ]; then
++		cp -f /etc/dma/dma.conf.dpkg-backup "$tmpfile";
++	else
++		cp -f /usr/share/dma/dma.conf "$tmpfile";
++	fi
++
+ 	db_get dma/relayhost
+ 	if [ -n "$RET" ]; then
+-		sed -i -re 's@^[[:space:]]*(#+[[:space:]]*)?SMARTHOST([[:space:]]+.*)?$@SMARTHOST '"$RET@" /etc/dma/dma.conf
++		sed -i -re 's@^[[:space:]]*(#+[[:space:]]*)?SMARTHOST([[:space:]]+.*)?$@SMARTHOST '"$RET@" "$tmpfile"
+ 	else
+-		sed -i -re 's@^[[:space:]]*(#+[[:space:]]*)?SMARTHOST([[:space:]]+.*)?$@#SMARTHOST@' /etc/dma/dma.conf
++		sed -i -re 's@^[[:space:]]*(#+[[:space:]]*)?SMARTHOST([[:space:]]+.*)?$@#SMARTHOST@' "$tmpfile"
+ 	fi
+ 
+ 	db_get dma/dbounceprog
+ 	if [ -n "$RET" ]; then
+-		sed -i -re 's/^[[:space:]]*(#+[[:space:]]*)?DBOUNCEPROG([[:space:]]+.*)?$/DBOUNCEPROG '"$RET/" /etc/dma/dma.conf
++		sed -i -re 's/^[[:space:]]*(#+[[:space:]]*)?DBOUNCEPROG([[:space:]]+.*)?$/DBOUNCEPROG '"$RET/" "$tmpfile"
+ 	else
+-		sed -i -re 's/^[[:space:]]*(#+[[:space:]]*)?DBOUNCEPROG([[:space:]]+.*)?$/#DBOUNCEPROG/' /etc/dma/dma.conf
++		sed -i -re 's/^[[:space:]]*(#+[[:space:]]*)?DBOUNCEPROG([[:space:]]+.*)?$/#DBOUNCEPROG/' "$tmpfile"
+ 	fi
+ 
++	ucf --debconf-ok --three-way "$tmpfile" /etc/dma/dma.conf
++	rm -f "$tmpfile"
++	ucfr dma /etc/dma/dma.conf
++
+ 	if dpkg --compare-versions "$2" lt '0.0.2009.07.17-3'; then
+ 		chown root:mail /etc/dma/*
+ 		chmod 640 /etc/dma/*
+diff -Nru dma-0.0.2010.06.17/debian/postrm dma-0.0.2010.06.17/debian/postrm
+--- dma-0.0.2010.06.17/debian/postrm	1970-01-01 00:00:00.000000000 +0000
++++ dma-0.0.2010.06.17/debian/postrm	2012-11-25 21:00:30.000000000 +0000
+@@ -0,0 +1,20 @@
++#!/bin/sh -e
++
++# lkajan: resolution of #688682
++dpkg-maintscript-helper rm_conffile /etc/dma/dma.conf "0.0.2010.06.17-14.1~" dma -- "$@"
++
++case "$1" in
++    purge)
++	if which ucfr >/dev/null; then
++		ucfr --purge dma /etc/dma/dma.conf
++	fi
++	if which ucf >/dev/null; then
++		ucf --purge /etc/dma/dma.conf
++	fi
++	if [ -d /etc/dma ] ; then
++		rm -rf /etc/dma || true
++	fi
++    ;;
++esac
++
++#DEBHELPER#
+diff -Nru dma-0.0.2010.06.17/debian/preinst dma-0.0.2010.06.17/debian/preinst
+--- dma-0.0.2010.06.17/debian/preinst	1970-01-01 00:00:00.000000000 +0000
++++ dma-0.0.2010.06.17/debian/preinst	2012-11-25 20:49:47.000000000 +0000
+@@ -0,0 +1,8 @@
++#!/bin/sh
++
++set -e
++
++# lkajan: resolution of #688682
++dpkg-maintscript-helper rm_conffile /etc/dma/dma.conf "0.0.2010.06.17-14.1~" dma -- "$@"
++
++#DEBHELPER#
+diff -Nru dma-0.0.2010.06.17/debian/rules dma-0.0.2010.06.17/debian/rules
+--- dma-0.0.2010.06.17/debian/rules	2012-08-31 00:17:06.000000000 +0000
++++ dma-0.0.2010.06.17/debian/rules	2012-11-25 18:47:16.000000000 +0000
+@@ -11,7 +11,10 @@
+ 
+ CFLAGS+=	-DNEED_GETPROGNAME -DNEED_REALLOCF -DNEED_STRLCPY
+ 
+-CONFFILES=	auth.conf dma.conf virtusertable
++CONFFILES=	auth.conf virtusertable
++
++# lkajan: installed to /usr/share/dma/ by dh_install, used by d/postinst
++CONFTEMPLATE=	dma.conf
+ 
+ ifneq (,$(filter werror,$(DEB_BUILD_OPTIONS)))
+ 	CFLAGS+=	-Werror

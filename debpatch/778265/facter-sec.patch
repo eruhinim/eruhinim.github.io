@@ -1,0 +1,76 @@
+diff -Naur facter-2.2.0.orig/debian/patches/0002-CVE-2015-1426.patch facter-2.2.0/debian/patches/0002-CVE-2015-1426.patch
+--- facter-2.2.0.orig/debian/patches/0002-CVE-2015-1426.patch	1970-01-01 01:00:00.000000000 +0100
++++ facter-2.2.0/debian/patches/0002-CVE-2015-1426.patch	2015-02-24 00:50:01.541789621 +0100
+@@ -0,0 +1,65 @@
++From e546bc546e7fb23ad6b68fcf2059452df4d320dd Mon Sep 17 00:00:00 2001
++From: Peter Huene <peter.huene@puppetlabs.com>
++Date: Thu, 29 Jan 2015 13:57:32 -0800
++Subject: [PATCH] (FACT-800) Prevent collection of EC2 IAM security metadata.
++
++The EC2 metadata fact was collecting all instance metadata. This
++included potentially sensitive IAM security credentials. This fix
++removes the security credentials from the fact.
++---
++ lib/facter/ec2/rest.rb     |  6 ++++++
++ spec/unit/ec2/rest_spec.rb | 17 +++++++++++++++++
++ 2 files changed, 23 insertions(+)
++
++diff --git a/lib/facter/ec2/rest.rb b/lib/facter/ec2/rest.rb
++index 7495ef0..e00f860 100644
++--- a/lib/facter/ec2/rest.rb
+++++ b/lib/facter/ec2/rest.rb
++@@ -13,6 +13,11 @@ module EC2
++       Errno::ETIMEDOUT,
++     ]
++ 
+++    # Contains metadata keys that should not be collected
+++    FILTERED_KEYS = [
+++      'security-credentials/'
+++    ].freeze
+++
++     class Base
++       def reachable?(retry_limit = 3)
++         timeout = 0.2
++@@ -56,6 +61,7 @@ def fetch(path = '')
++ 
++         keys = fetch_endpoint(path)
++         keys.each do |key|
+++          next if FILTERED_KEYS.include? key
++           if key.match(%r[/$])
++             # If a metadata key is suffixed with '/' then it's a general metadata
++             # resource, so we have to recursively look up all the keys in the given
++diff --git a/spec/unit/ec2/rest_spec.rb b/spec/unit/ec2/rest_spec.rb
++index c635a5e..2994265 100644
++--- a/spec/unit/ec2/rest_spec.rb
+++++ b/spec/unit/ec2/rest_spec.rb
++@@ -114,6 +114,23 @@
++     end
++   end
++ 
+++  it 'filters out IAM security credentials' do
+++    subject.expects(:fetch_endpoint).with('').returns(['iam/'])
+++    subject.expects(:fetch_endpoint).with('iam/').returns(['foo', 'security-credentials/', 'bar/'])
+++    subject.expects(:fetch_endpoint).with('iam/foo').returns(['baz'])
+++    subject.expects(:fetch_endpoint).with('iam/bar/').returns(['baz'])
+++    subject.expects(:fetch_endpoint).with('iam/bar/baz').returns(['foo'])
+++    output = subject.fetch
+++    expect(output).to eq({
+++      'iam' => {
+++        'foo' => 'baz',
+++        'bar' => {
+++          'baz' => 'foo'
+++        }
+++      }
+++    })
+++  end
+++
++   it_behaves_like "an ec2 rest querier"
++ end
++ 
+diff -Naur facter-2.2.0.orig/debian/patches/series facter-2.2.0/debian/patches/series
+--- facter-2.2.0.orig/debian/patches/series	2014-08-26 09:41:37.000000000 +0200
++++ facter-2.2.0/debian/patches/series	2015-02-24 00:51:23.722694842 +0100
+@@ -1 +1,2 @@
+ 0001-Do-not-require-rubygems.patch
++0002-CVE-2015-1426.patch
+\ Kein Zeilenumbruch am Dateiende.

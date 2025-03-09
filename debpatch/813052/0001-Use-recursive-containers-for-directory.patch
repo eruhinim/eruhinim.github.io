@@ -1,0 +1,64 @@
+From c909c3d00d8d49065bf100deda16ae1d3d12ba66 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=A9my=20Bobbio?= <lunar@debian.org>
+Date: Fri, 5 Feb 2016 12:57:55 +0100
+Subject: [PATCH] Use recursive containers for directory
+
+This will prevent detecting renames until we implement fuzzy-matching accross
+containers (#797759) but improves the behavior when searching for matching
+debug packages. Otherwise, we would be looking at all files in the
+tree instead of just the one at the same level as the binary package.
+
+Closes: #813052
+---
+ diffoscope/comparators/directory.py | 16 ++++++----------
+ tests/comparators/test_directory.py |  7 ++++---
+ 2 files changed, 10 insertions(+), 13 deletions(-)
+
+diff --git a/diffoscope/comparators/directory.py b/diffoscope/comparators/directory.py
+index 03713ec..aaf295a 100644
+--- a/diffoscope/comparators/directory.py
++++ b/diffoscope/comparators/directory.py
+@@ -168,15 +168,11 @@ class FilesystemDirectory(object):
+ 
+ class DirectoryContainer(Container):
+     def get_member_names(self):
+-        path = self.source.path
+-        names = []
+-        for root, _, files in os.walk(path):
+-            if root == path:
+-                root = ''
+-            else:
+-                root = root[len(path) + 1:]
+-            names.extend([os.path.join(root, f) for f in files])
+-        return sorted(names)
++        return sorted(os.listdir(self.source.path))
+ 
+     def get_member(self, member_name):
+-        return diffoscope.comparators.specialize(FilesystemFile(os.path.join(self.source.path, member_name), container=self))
++        member_path = os.path.join(self.source.path, member_name)
++        if not os.path.islink(member_path) and os.path.isdir(member_path):
++            return FilesystemDirectory(member_path)
++        else:
++            return diffoscope.comparators.specialize(FilesystemFile(os.path.join(self.source.path, member_name), container=self))
+diff --git a/tests/comparators/test_directory.py b/tests/comparators/test_directory.py
+index d1008f7..9416538 100644
+--- a/tests/comparators/test_directory.py
++++ b/tests/comparators/test_directory.py
+@@ -49,10 +49,11 @@ def differences(tmpdir):
+ 
+ def test_content(differences):
+     output_text(differences[0], print_func=print)
+-    assert differences[0].source1 == 'dir/text'
++    assert differences[0].source1 == 'dir'
++    assert differences[0].details[0].source1 == 'text'
+     expected_diff = open(os.path.join(os.path.dirname(__file__), '../data/text_ascii_expected_diff')).read()
+-    assert differences[0].unified_diff == expected_diff
++    assert differences[0].details[0].unified_diff == expected_diff
+ 
+ def test_stat(differences):
+     output_text(differences[0], print_func=print)
+-    assert 'stat' in differences[0].details[0].source1
++    assert 'stat' in differences[0].details[0].details[0].source1
+-- 
+2.1.4
+

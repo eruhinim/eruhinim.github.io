@@ -1,0 +1,149 @@
+From b827d6845f547ac123e3cbef58b86f57a5037373 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=D0=90=D0=BB=D0=B5=D0=BA=D1=81=D0=B5=D0=B9=20=D0=A8=D0=B8?=
+ =?UTF-8?q?=D0=BB=D0=B8=D0=BD?= <rootlexx@mail.ru>
+Date: Tue, 17 Sep 2019 22:11:30 +0300
+Subject: [PATCH] Search in all available description translations
+
+When multiple translations of package descriptions are available,
+perform search in all of them. It allows using search patterns in
+any of the configured languages.
+
+Previously, only the first available translation was searched. As
+the result, patterns in e.g. English never matched packages which
+had their descriptions translated into local language.
+
+Closes: #490000
+---
+ apt-private/private-search.cc | 73 ++++++++++++++++++++++-------------
+ 1 file changed, 46 insertions(+), 27 deletions(-)
+
+diff --git a/apt-private/private-search.cc b/apt-private/private-search.cc
+index de1b19758..7f7d2b343 100644
+--- a/apt-private/private-search.cc
++++ b/apt-private/private-search.cc
+@@ -94,27 +94,39 @@ static bool FullTextSearch(CommandLine &CmdL)				/*{{{*/
+       if (PkgsDone[P->ID] == true)
+ 	 continue;
+ 
+-      char const * const PkgName = P.Name();
+-      pkgCache::DescIterator Desc = V.TranslatedDescription();
+-      std::string LongDesc = "";
+-      if (Desc.end() == false)
++      std::vector<std::string> PkgDescriptions;
++      if (NamesOnly == false)
+       {
+-	 pkgRecords::Parser &parser = records.Lookup(Desc.FileList());
+-	 LongDesc = parser.LongDesc();
++         for (auto Desc = V.TranslatedDescription(); Desc.end() == false; ++Desc)
++         {
++            pkgRecords::Parser &parser = records.Lookup(Desc.FileList());
++            PkgDescriptions.push_back(parser.LongDesc());
++         }
+       }
+ 
+-      bool all_found = true;
+-      for (std::vector<regex_t>::const_iterator pattern = Patterns.begin();
+-	    pattern != Patterns.end(); ++pattern)
++      bool all_found = false;
++
++      char const * const PkgName = P.Name();
++      for (std::string const &PkgDesc: PkgDescriptions)
+       {
+-	 if (regexec(&(*pattern), PkgName, 0, 0, 0) == 0)
+-	    continue;
+-	 else if (NamesOnly == false && regexec(&(*pattern), LongDesc.c_str(), 0, 0, 0) == 0)
+-	    continue;
+-	 // search patterns are AND, so one failing fails all
+-	 all_found = false;
+-	 break;
++         all_found = true;
++
++         for (std::vector<regex_t>::const_iterator pattern = Patterns.begin();
++              pattern != Patterns.end(); ++pattern)
++         {
++            if (regexec(&(*pattern), PkgName, 0, 0, 0) == 0)
++               continue;
++            else if (NamesOnly == false && regexec(&(*pattern), PkgDesc.c_str(), 0, 0, 0) == 0)
++               continue;
++            // search patterns are AND, so one failing fails all
++            all_found = false;
++            break;
++         }
++
++         if (all_found == true)
++            break;
+       }
++
+       if (all_found == true)
+       {
+ 	 PkgsDone[P->ID] = true;
+@@ -172,6 +184,7 @@ static void LocalitySort(pkgCache::DescFile ** const begin, unsigned long long c
+ struct ExDescFile
+ {
+    pkgCache::DescFile *Df;
++   pkgCache::DescIterator D;
+    pkgCache::VerIterator V;
+    map_id_t ID;
+    ExDescFile() : Df(nullptr), ID(0) {}
+@@ -254,6 +267,7 @@ static bool Search(CommandLine &CmdL)
+ 	 if (D.end() == true)
+ 	    continue;
+ 	 DFList[G->ID].Df = D.FileList();
++	 DFList[G->ID].D = D;
+ 	 DFList[G->ID].V = V;
+ 	 DFList[G->ID].ID = G->ID;
+       }
+@@ -274,6 +288,7 @@ static bool Search(CommandLine &CmdL)
+ 	 if (D.end() == true)
+ 	    continue;
+ 	 DFList[id].Df = D.FileList();
++	 DFList[id].D = D;
+ 	 DFList[id].V = V;
+ 	 DFList[id].ID = id;
+ 
+@@ -290,19 +305,20 @@ static bool Search(CommandLine &CmdL)
+    // Iterate over all the version records and check them
+    for (ExDescFile *J = DFList; J->Df != 0; ++J)
+    {
+-      pkgRecords::Parser &P = Recs.Lookup(pkgCache::DescFileIterator(*Cache,J->Df));
+       size_t const PatternOffset = J->ID * NumPatterns;
+-
+       if (NamesOnly == false)
+       {
+-	 std::string const LongDesc = P.LongDesc();
+-	 for (unsigned I = 0; I < NumPatterns; ++I)
+-	 {
+-	    if (PatternMatch[PatternOffset + I] == true)
+-	       continue;
+-	    else if (regexec(&Patterns[I],LongDesc.c_str(),0,0,0) == 0)
+-	       PatternMatch[PatternOffset + I] = true;
+-	 }
++         for (auto Desc = J->D; Desc.end() == false; ++Desc)
++         {
++            std::string const LongDesc = Recs.Lookup(Desc.FileList()).LongDesc();
++            for (unsigned I = 0; I < NumPatterns; ++I)
++            {
++               if (PatternMatch[PatternOffset + I] == true)
++                  continue;
++               else if (regexec(&Patterns[I], LongDesc.c_str(), 0, 0, 0) == 0)
++                  PatternMatch[PatternOffset + I] = true;
++            }
++         }
+       }
+ 
+       bool matchedAll = true;
+@@ -325,7 +341,10 @@ static bool Search(CommandLine &CmdL)
+ 	    DisplayRecordV1(CacheFile, Recs, J->V, Vf, Start, Length, std::cout);
+ 	 }
+ 	 else
+-	    printf("%s - %s\n",P.Name().c_str(),P.ShortDesc().c_str());
++	 {
++	    pkgRecords::Parser &P = Recs.Lookup(pkgCache::DescFileIterator(*Cache, J->Df));
++	    printf("%s - %s\n", P.Name().c_str(), P.ShortDesc().c_str());
++	 }
+       }
+    }
+    
+-- 
+2.20.1
+

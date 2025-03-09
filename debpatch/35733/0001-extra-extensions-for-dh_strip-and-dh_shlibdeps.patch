@@ -1,0 +1,115 @@
+From f1f1a670677dad6453f5a3e5ac5082360bd35ffa Mon Sep 17 00:00:00 2001
+From: Tzafrir Cohen <tzafrir@debian.org>
+Date: Fri, 25 Jul 2014 08:56:45 +0300
+Subject: [PATCH] extra extensions for dh_strip and dh_shlibdeps
+
+Add an option --add-exten for both dh_strip and dh_shlibdeps that makes
+them look for shared objects of different types.
+
+Closes: #35733
+---
+ dh_shlibdeps |   18 +++++++++++++++++-
+ dh_strip     |   23 +++++++++++++++++++++--
+ 2 files changed, 38 insertions(+), 3 deletions(-)
+
+diff --git a/dh_shlibdeps b/dh_shlibdeps
+index b42c84a..e3e7f7e 100755
+--- a/dh_shlibdeps
++++ b/dh_shlibdeps
+@@ -65,6 +65,14 @@ It tells B<dpkg-shlibdeps> (via its B<-S> parameter) to look first in the packag
+ build directory for the specified package, when searching for libraries,
+ symbol files, and shlibs files.
+ 
++=item B<--add-exten>=>I<extension>
++
++An extra file extension of symbols to look into. By default dh_shlibdeps
++will only check files with the pattern *.so* and files that end with
++.cmxs (OCaml native code shared libraries). However your package may
++have libraries or plugins with a different extension. To add all *.foo
++files, use parameter F<foo>.
++
+ =back
+ 
+ =head1 EXAMPLES
+@@ -93,6 +101,7 @@ init(options => {
+ 	"L|libpackage=s" => \$dh{LIBPACKAGE},
+ 	"dpkg-shlibdeps-params=s", => \$dh{U_PARAMS},
+ 	"l=s", => \$dh{L_PARAMS},
++	"add-exten=s" => \$dh{ADD_EXTEN},
+ });
+ 
+ if (defined $dh{V_FLAG}) {
+@@ -117,7 +126,14 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 	if (defined($dh{EXCLUDE_FIND}) && $dh{EXCLUDE_FIND} ne '') {
+ 		$find_options="! \\( $dh{EXCLUDE_FIND} \\)";
+ 	}
+-	foreach my $file (split(/\n/,`find $tmp -type f \\( -perm /111 -or -name "*.so*" -or -name "*.cmxs" \\) $find_options -print`)) {
++
++	my @find_types = qw/so* cmxs/;
++	if (exists $dh{ADD_EXTEN}) {
++		push @find_types, $dh{ADD_EXTEN};
++	}
++	my $types_str = join '', map {" -or -name \"*.$_\""} @find_types;
++
++	foreach my $file (split(/\n/,`find $tmp -type f \\( -perm /111 $types_str \\) $find_options -print`)) {
+ 		# Prune directories that contain separated debug symbols.
+ 		next if $file=~m!^\Q$tmp\E/usr/lib/debug/(lib|lib64|usr|bin|sbin|opt|dev|emul)/!;
+ 		# TODO this is slow, optimize. Ie, file can run once on
+diff --git a/dh_strip b/dh_strip
+index 516b6f2..9956987 100755
+--- a/dh_strip
++++ b/dh_strip
+@@ -63,6 +63,14 @@ Debug symbols will be retained, but split into an independent
+ file in F<usr/lib/debug/> in the package build directory. B<--dbg-package>
+ is easier to use than this option, but this option is more flexible.
+ 
++=item B<--add-exten>=>I<extension>
++
++An extra file extension of symbols to strip. By default dh_strip will only
++strip files with the pattern *.so* and files that end with .cmxs (OCaml
++native code shared libraries). However your package may have libraries
++or plugins with a different extension. To add all *.foo files, use
++parameter F<foo>.
++
+ =back
+ 
+ =head1 NOTES
+@@ -79,6 +87,7 @@ Debian policy, version 3.0.1
+ 
+ init(options => {
+ 	"keep-debug" => \$dh{K_FLAG},
++	"add-exten=s" => \$dh{ADD_EXTEN},
+ });
+ 
+ # This variable can be used to turn off stripping (see Policy).
+@@ -100,6 +109,17 @@ sub get_file_type {
+ 	return $type;
+ }
+ 
++sub get_extens_regex() {
++	my @extens = qw/so.*? cmxs$/;
++	if (exists $dh{ADD_EXTEN}) {
++		push(@extens, "$dh{ADD_EXTEN}\$");
++	}
++	my $regex = ".*\.(". join('|', @extens) . ")";
++	return qr/$regex/;
++}
++
++my $extens_regex = get_extens_regex();
++
+ # Check if a file is an elf binary, shared library, or static library,
+ # for use by File::Find. It'll fill the following 3 arrays with anything
+ # it finds:
+@@ -118,8 +138,7 @@ sub testfile {
+ 	return if $fn=~m/debug\/.*\.so/;
+ 
+ 	# Does its filename look like a shared library?
+-	# (*.cmxs are OCaml native code shared libraries)
+-	if (m/.*\.(so.*?|cmxs$)/) {
++	if (m/$extens_regex/) {
+ 		# Ok, do the expensive test.
+ 		my $type=get_file_type($_);
+ 		if ($type=~m/.*ELF.*shared.*/) {
+-- 
+1.7.10.4
+

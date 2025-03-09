@@ -1,0 +1,73 @@
+--- debian/acpi-support/etc/acpi/asus-touchpad.sh.orig	2010-12-19 23:32:58.000000000 +0100
++++ debian/acpi-support/etc/acpi/asus-touchpad.sh	2010-12-20 10:06:09.000000000 +0100
+@@ -1,10 +1,19 @@
+ #!/bin/sh
+-[ -f /usr/share/acpi-support/state-funcs ] || exit 0 
+ 
+-. /usr/share/acpi-support/power-funcs
++set -e
+ 
+-if (! test -x /usr/bin/xinput)
+-then
++pff=/usr/share/acpi-support/power-funcs
++[ -f $pff ] || exit 0
++
++atp_error() {
++	logger -t${0##*/} -perr -- $*
++	exit 1
++}
++
++. $pff || atp_error "Sourcing $pff failed"
++
++if ! test -x /usr/bin/xinput; then
++	# FIXME: logging with the text 'Error', but exit status success?
+ logger "Error: Please install package xinput to enable toggling of touchpad devices."
+ exit 0
+ fi
+@@ -13,24 +22,30 @@ fi
+ # to hal (or whatever is replacing hal for such events)
+ getXconsole
+ 
+-XINPUTNUM=`xinput list | grep 'SynPS/2 Synaptics TouchPad' | sed -n -e's/.*id=\([0-9]\+\).*/\1/p'`
++# XXX:	according to man page 'list', 'list-props' and 'set-int-prop' are
++#	options, not arguments.
++XINPUTNUM=$(xinput --list | sed -rne 's#^.*SynPS/2[[:blank:]]+Synaptics[[:blank:]]+TouchPad[[:blank:]]+id=([0-9]+)[[:blank:]]+.*$#\1#p')
++[ "$XINPUTNUM" ] || atp_error "Invalid Synaptics TouchPad id '$XINPUTNUM'"
+ 
+-[ -f /usr/share/acpi-support/state-funcs ] || exit 0
++soff="Synaptics Off"
+ 
+ # get the current state of the touchpad
+-TPSTATUS=`xinput list-props $XINPUTNUM | awk '/Synaptics Off/ { print $NF }'`
+-
+-# if getting the status failed, exit
+-test -z $TPSTATUS && exit 1
+-
+-if [ $TPSTATUS = 0 ]; then
+-   xinput set-int-prop $XINPUTNUM "Synaptics Off" 8 1
+-   if [ -e /sys/class/leds/asus::touchpad/brightness ]; then
+-	echo 0 > /sys/class/leds/asus::touchpad/brightness
+-   fi
++TPSTATUS=`xinput --list-props $XINPUTNUM | awk "/$soff/"'{ print $NF }'`
++case $TPSTATUS in
++	[!01])
++		atp_error "Invalid Synaptics TouchPad status '$TPSTATUS'"
++		;;
++esac
++
++# XXX: '--set-int-prop' deprecated
++xcmd="xinput --set-int-prop $XINPUTNUM '$soff' 8"
++ledf=/sys/class/leds/asus::touchpad/brightness
++if [ $TPSTATUS -eq 0 ]; then
++	eval $xcmd 1 || atp_error "Command '$xcmd 1' failed"
++	[ ! -w $ledf ] || echo 0 >$ledf ||
++		atp_error "Writing 0 to $ledf failed"
+ else
+-   xinput set-int-prop $XINPUTNUM "Synaptics Off" 8 0
+-   if [ -e /sys/class/leds/asus::touchpad/brightness ]; then
+-	echo 1 > /sys/class/leds/asus::touchpad/brightness
+-   fi
++	eval $xcmd 0 || atp_error "Command '$xcmd 0' failed"
++	[ ! -w $ledf ] || echo 1 >$ledf ||
++		atp_error "Writing 0 to $ledf failed"
+ fi

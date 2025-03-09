@@ -1,0 +1,1475 @@
+From 717c910f0070e03732fcaf223f5769ede5d3348c Mon Sep 17 00:00:00 2001
+From: Konstantin Manna <Konstantin.Manna@rwth-aachen.de>
+Date: Sun, 15 Jun 2014 12:25:10 +0200
+Subject: [PATCH] Fix #494964
+
+---
+ apt-pkg/acquire-item.cc                            |   78 ++++++++++----------
+ apt-pkg/acquire.cc                                 |    2 +-
+ apt-pkg/aptconfiguration.cc                        |    4 +-
+ apt-pkg/cdrom.cc                                   |    2 +-
+ apt-pkg/deb/debindexfile.cc                        |    6 +-
+ apt-pkg/deb/debmetaindex.cc                        |    6 +-
+ apt-pkg/edsp/edspsystem.cc                         |    2 +-
+ apt-pkg/indexcopy.cc                               |   10 +--
+ apt-pkg/init.cc                                    |    2 +-
+ apt-pkg/update.cc                                  |    4 +-
+ debian/apt.dirs                                    |    2 +-
+ debian/changelog                                   |    9 ++-
+ doc/apt.conf.5.xml                                 |    2 +-
+ doc/apt_preferences.5.xml                          |    2 +-
+ doc/files.sgml                                     |    2 +-
+ doc/po/apt-doc.pot                                 |    4 +-
+ doc/po/de.po                                       |    8 +-
+ doc/po/es.po                                       |    8 +-
+ doc/po/fr.po                                       |    8 +-
+ doc/po/it.po                                       |    8 +-
+ doc/po/ja.po                                       |    8 +-
+ doc/po/pl.po                                       |    6 +-
+ doc/po/pt.po                                       |    8 +-
+ doc/po/pt_BR.po                                    |    6 +-
+ .../skip-bug-601016-description-translation        |    2 +-
+ test/integration/test-apt-cdrom                    |    4 +-
+ .../test-apt-translation-has-no-packages           |    2 +-
+ .../test-bug-595691-empty-and-broken-archive-files |    2 +-
+ test/integration/test-bug-602412-dequote-redirect  |    2 +-
+ .../test-bug-624218-Translation-file-handling      |   38 +++++-----
+ ...est-bug-633350-do-not-kill-last-char-in-Release |    2 +-
+ ...st-bug-719263-print-uris-removes-authentication |    2 +-
+ test/integration/test-compressed-indexes           |   24 +++---
+ test/integration/test-hashsum-verification         |   10 +--
+ test/integration/test-pdiff-usage                  |   16 ++--
+ test/integration/test-releasefile-valid-until      |    2 +-
+ test/integration/test-releasefile-verification     |   16 ++--
+ .../test-ubuntu-bug-346386-apt-get-update-paywall  |    4 +-
+ ...st-ubuntu-bug-784473-InRelease-one-message-only |    2 +-
+ test/libapt/configuration_test.cc                  |    8 +-
+ test/libapt/getlanguages_test.cc                   |    4 +-
+ 41 files changed, 172 insertions(+), 165 deletions(-)
+
+diff --git a/apt-pkg/acquire-item.cc b/apt-pkg/acquire-item.cc
+index 0178456..5ba36ac 100644
+--- a/apt-pkg/acquire-item.cc
++++ b/apt-pkg/acquire-item.cc
+@@ -234,7 +234,7 @@ pkgAcqSubIndex::pkgAcqSubIndex(pkgAcquire *Owner, string const &URI,
+    /* XXX: Beware: Currently this class does nothing (of value) anymore ! */
+    Debug = _config->FindB("Debug::pkgAcquire::SubIndex",false);
+ 
+-   DestFile = _config->FindDir("Dir::State::lists") + "partial/";
++   DestFile = _config->FindDir("Dir::Cache::lists") + "partial/";
+    DestFile += URItoFileName(URI);
+ 
+    Desc.URI = URI;
+@@ -253,7 +253,7 @@ pkgAcqSubIndex::pkgAcqSubIndex(pkgAcquire *Owner, string const &URI,
+ /* The only header we use is the last-modified header. */
+ string pkgAcqSubIndex::Custom600Headers()
+ {
+-   string Final = _config->FindDir("Dir::State::lists");
++   string Final = _config->FindDir("Dir::Cache::lists");
+    Final += URItoFileName(Desc.URI);
+ 
+    struct stat Buf;
+@@ -298,7 +298,7 @@ void pkgAcqSubIndex::Done(string Message,unsigned long long Size,string Md5Hash,
+ 
+    Item::Done(Message,Size,Md5Hash,Cnf);
+ 
+-   string FinalFile = _config->FindDir("Dir::State::lists")+URItoFileName(Desc.URI);
++   string FinalFile = _config->FindDir("Dir::Cache::lists")+URItoFileName(Desc.URI);
+ 
+    /* Downloaded invalid transindex => Error (LP: #346386) (Closes: #627642) */
+    indexRecords SubIndexParser;
+@@ -355,14 +355,14 @@ pkgAcqDiffIndex::pkgAcqDiffIndex(pkgAcquire *Owner,
+    Desc.ShortDesc = ShortDesc;
+    Desc.URI = URI + ".diff/Index";
+ 
+-   DestFile = _config->FindDir("Dir::State::lists") + "partial/";
++   DestFile = _config->FindDir("Dir::Cache::lists") + "partial/";
+    DestFile += URItoFileName(URI) + string(".DiffIndex");
+ 
+    if(Debug)
+       std::clog << "pkgAcqDiffIndex: " << Desc.URI << std::endl;
+ 
+    // look for the current package file
+-   CurrentPackagesFile = _config->FindDir("Dir::State::lists");
++   CurrentPackagesFile = _config->FindDir("Dir::Cache::lists");
+    CurrentPackagesFile += URItoFileName(RealURI);
+ 
+    // FIXME: this file:/ check is a hack to prevent fetching
+@@ -391,7 +391,7 @@ pkgAcqDiffIndex::pkgAcqDiffIndex(pkgAcquire *Owner,
+ /* The only header we use is the last-modified header. */
+ string pkgAcqDiffIndex::Custom600Headers()
+ {
+-   string Final = _config->FindDir("Dir::State::lists");
++   string Final = _config->FindDir("Dir::Cache::lists");
+    Final += URItoFileName(RealURI) + string(".IndexDiff");
+    
+    if(Debug)
+@@ -576,7 +576,7 @@ void pkgAcqDiffIndex::Done(string Message,unsigned long long Size,string Md5Hash
+    Item::Done(Message,Size,Md5Hash,Cnf);
+ 
+    string FinalFile;
+-   FinalFile = _config->FindDir("Dir::State::lists")+URItoFileName(RealURI);
++   FinalFile = _config->FindDir("Dir::Cache::lists")+URItoFileName(RealURI);
+ 
+    // success in downloading the index
+    // rename the index
+@@ -611,7 +611,7 @@ pkgAcqIndexDiffs::pkgAcqIndexDiffs(pkgAcquire *Owner,
+      available_patches(diffs), ServerSha1(ServerSha1)
+ {
+    
+-   DestFile = _config->FindDir("Dir::State::lists") + "partial/";
++   DestFile = _config->FindDir("Dir::Cache::lists") + "partial/";
+    DestFile += URItoFileName(URI);
+ 
+    Debug = _config->FindB("Debug::pkgAcquire::Diffs",false);
+@@ -650,7 +650,7 @@ void pkgAcqIndexDiffs::Finish(bool allDone)
+    // the file will be cleaned
+    if(allDone) 
+    {
+-      DestFile = _config->FindDir("Dir::State::lists");
++      DestFile = _config->FindDir("Dir::Cache::lists");
+       DestFile += URItoFileName(RealURI);
+ 
+       if(!ExpectedHash.empty() && !ExpectedHash.VerifyFile(DestFile))
+@@ -681,7 +681,7 @@ bool pkgAcqIndexDiffs::QueueNextDiff()					/*{{{*/
+ {
+ 
+    // calc sha1 of the just patched file
+-   string FinalFile = _config->FindDir("Dir::State::lists");
++   string FinalFile = _config->FindDir("Dir::Cache::lists");
+    FinalFile += URItoFileName(RealURI);
+ 
+    FileFd fd(FinalFile, FileFd::ReadOnly);
+@@ -720,7 +720,7 @@ bool pkgAcqIndexDiffs::QueueNextDiff()					/*{{{*/
+    // queue the right diff
+    Desc.URI = RealURI + ".diff/" + available_patches[0].file + ".gz";
+    Desc.Description = Description + " " + available_patches[0].file + string(".pdiff");
+-   DestFile = _config->FindDir("Dir::State::lists") + "partial/";
++   DestFile = _config->FindDir("Dir::Cache::lists") + "partial/";
+    DestFile += URItoFileName(RealURI + ".diff/" + available_patches[0].file);
+ 
+    if(Debug)
+@@ -740,7 +740,7 @@ void pkgAcqIndexDiffs::Done(string Message,unsigned long long Size,string Md5Has
+    Item::Done(Message,Size,Md5Hash,Cnf);
+ 
+    string FinalFile;
+-   FinalFile = _config->FindDir("Dir::State::lists")+URItoFileName(RealURI);
++   FinalFile = _config->FindDir("Dir::Cache::lists")+URItoFileName(RealURI);
+ 
+    // success in downloading a diff, enter ApplyDiff state
+    if(State == StateFetchDiff)
+@@ -797,7 +797,7 @@ pkgAcqIndexMergeDiffs::pkgAcqIndexMergeDiffs(pkgAcquire *Owner,
+      patch(patch),allPatches(allPatches), State(StateFetchDiff)
+ {
+ 
+-   DestFile = _config->FindDir("Dir::State::lists") + "partial/";
++   DestFile = _config->FindDir("Dir::Cache::lists") + "partial/";
+    DestFile += URItoFileName(URI);
+ 
+    Debug = _config->FindB("Debug::pkgAcquire::Diffs",false);
+@@ -808,7 +808,7 @@ pkgAcqIndexMergeDiffs::pkgAcqIndexMergeDiffs(pkgAcquire *Owner,
+ 
+    Desc.URI = RealURI + ".diff/" + patch.file + ".gz";
+    Desc.Description = Description + " " + patch.file + string(".pdiff");
+-   DestFile = _config->FindDir("Dir::State::lists") + "partial/";
++   DestFile = _config->FindDir("Dir::Cache::lists") + "partial/";
+    DestFile += URItoFileName(RealURI + ".diff/" + patch.file);
+ 
+    if(Debug)
+@@ -847,7 +847,7 @@ void pkgAcqIndexMergeDiffs::Done(string Message,unsigned long long Size,string M
+ 
+    Item::Done(Message,Size,Md5Hash,Cnf);
+ 
+-   string const FinalFile = _config->FindDir("Dir::State::lists") + URItoFileName(RealURI);
++   string const FinalFile = _config->FindDir("Dir::Cache::lists") + URItoFileName(RealURI);
+ 
+    if (State == StateFetchDiff)
+    {
+@@ -972,7 +972,7 @@ void pkgAcqIndex::Init(string const &URI, string const &URIDesc, string const &S
+    Decompression = false;
+    Erase = false;
+ 
+-   DestFile = _config->FindDir("Dir::State::lists") + "partial/";
++   DestFile = _config->FindDir("Dir::Cache::lists") + "partial/";
+    DestFile += URItoFileName(URI);
+ 
+    std::string const comprExt = CompressionExtension.substr(0, CompressionExtension.find(' '));
+@@ -993,7 +993,7 @@ void pkgAcqIndex::Init(string const &URI, string const &URIDesc, string const &S
+ /* The only header we use is the last-modified header. */
+ string pkgAcqIndex::Custom600Headers()
+ {
+-   string Final = _config->FindDir("Dir::State::lists");
++   string Final = _config->FindDir("Dir::Cache::lists");
+    Final += URItoFileName(RealURI);
+    if (_config->FindB("Acquire::GzipIndexes",false))
+       Final += ".gz";
+@@ -1022,7 +1022,7 @@ void pkgAcqIndex::Failed(string Message,pkgAcquire::MethodConfig *Cnf)	/*{{{*/
+ 
+    // on decompression failure, remove bad versions in partial/
+    if (Decompression && Erase) {
+-      string s = _config->FindDir("Dir::State::lists") + "partial/";
++      string s = _config->FindDir("Dir::Cache::lists") + "partial/";
+       s.append(URItoFileName(RealURI));
+       unlink(s.c_str());
+    }
+@@ -1077,14 +1077,14 @@ void pkgAcqIndex::Done(string Message,unsigned long long Size,string Hash,
+       }
+        
+       // Done, move it into position
+-      string FinalFile = _config->FindDir("Dir::State::lists");
++      string FinalFile = _config->FindDir("Dir::Cache::lists");
+       FinalFile += URItoFileName(RealURI);
+       Rename(DestFile,FinalFile);
+       chmod(FinalFile.c_str(),0644);
+       
+       /* We restore the original name to DestFile so that the clean operation
+          will work OK */
+-      DestFile = _config->FindDir("Dir::State::lists") + "partial/";
++      DestFile = _config->FindDir("Dir::Cache::lists") + "partial/";
+       DestFile += URItoFileName(RealURI);
+       
+       // Remove the compressed version.
+@@ -1138,13 +1138,13 @@ void pkgAcqIndex::Done(string Message,unsigned long long Size,string Hash,
+ 
+    // If we enable compressed indexes and already have gzip, keep it
+    if (_config->FindB("Acquire::GzipIndexes",false) && compExt == "gz" && !Local) {
+-      string FinalFile = _config->FindDir("Dir::State::lists");
++      string FinalFile = _config->FindDir("Dir::Cache::lists");
+       FinalFile += URItoFileName(RealURI) + ".gz";
+       Rename(DestFile,FinalFile);
+       chmod(FinalFile.c_str(),0644);
+       
+       // Update DestFile for .gz suffix so that the clean operation keeps it
+-      DestFile = _config->FindDir("Dir::State::lists") + "partial/";
++      DestFile = _config->FindDir("Dir::Cache::lists") + "partial/";
+       DestFile += URItoFileName(RealURI) + ".gz";
+       return;
+     }
+@@ -1186,7 +1186,7 @@ pkgAcqIndexTrans::pkgAcqIndexTrans(pkgAcquire *Owner, IndexTarget const *Target,
+ // ---------------------------------------------------------------------
+ string pkgAcqIndexTrans::Custom600Headers()
+ {
+-   string Final = _config->FindDir("Dir::State::lists");
++   string Final = _config->FindDir("Dir::Cache::lists");
+    Final += URItoFileName(RealURI);
+ 
+    struct stat Buf;
+@@ -1232,7 +1232,7 @@ pkgAcqMetaSig::pkgAcqMetaSig(pkgAcquire *Owner,				/*{{{*/
+    MetaIndexURIDesc(MetaIndexURIDesc), MetaIndexShortDesc(MetaIndexShortDesc),
+    MetaIndexParser(MetaIndexParser), IndexTargets(IndexTargets)
+ {
+-   DestFile = _config->FindDir("Dir::State::lists") + "partial/";
++   DestFile = _config->FindDir("Dir::Cache::lists") + "partial/";
+    DestFile += URItoFileName(URI);
+ 
+    // remove any partial downloaded sig-file in partial/. 
+@@ -1246,7 +1246,7 @@ pkgAcqMetaSig::pkgAcqMetaSig(pkgAcquire *Owner,				/*{{{*/
+    Desc.ShortDesc = ShortDesc;
+    Desc.URI = URI;
+       
+-   string Final = _config->FindDir("Dir::State::lists");
++   string Final = _config->FindDir("Dir::Cache::lists");
+    Final += URItoFileName(RealURI);
+    if (RealFileExists(Final) == true)
+    {
+@@ -1268,7 +1268,7 @@ pkgAcqMetaSig::~pkgAcqMetaSig()						/*{{{*/
+    if (QueueCounter == 1 && Status == StatIdle && FileSize == 0 && Complete == false &&
+ 	 LastGoodSig.empty() == false)
+    {
+-      string const Final = _config->FindDir("Dir::State::lists") + URItoFileName(RealURI);
++      string const Final = _config->FindDir("Dir::Cache::lists") + URItoFileName(RealURI);
+       if (RealFileExists(Final) == false && RealFileExists(LastGoodSig) == true)
+ 	 Rename(LastGoodSig, Final);
+    }
+@@ -1326,7 +1326,7 @@ void pkgAcqMetaSig::Done(string Message,unsigned long long Size,string MD5,
+ 									/*}}}*/
+ void pkgAcqMetaSig::Failed(string Message,pkgAcquire::MethodConfig *Cnf)/*{{{*/
+ {
+-   string Final = _config->FindDir("Dir::State::lists") + URItoFileName(RealURI);
++   string Final = _config->FindDir("Dir::Cache::lists") + URItoFileName(RealURI);
+ 
+    // if we get a network error we fail gracefully
+    if(Status == StatTransientNetworkError)
+@@ -1369,7 +1369,7 @@ pkgAcqMetaIndex::pkgAcqMetaIndex(pkgAcquire *Owner,			/*{{{*/
+    Item(Owner), RealURI(URI), SigFile(SigFile), IndexTargets(IndexTargets),
+    MetaIndexParser(MetaIndexParser), AuthPass(false), IMSHit(false)
+ {
+-   DestFile = _config->FindDir("Dir::State::lists") + "partial/";
++   DestFile = _config->FindDir("Dir::Cache::lists") + "partial/";
+    DestFile += URItoFileName(URI);
+ 
+    // Create the item
+@@ -1386,7 +1386,7 @@ pkgAcqMetaIndex::pkgAcqMetaIndex(pkgAcquire *Owner,			/*{{{*/
+ /* The only header we use is the last-modified header. */
+ string pkgAcqMetaIndex::Custom600Headers()
+ {
+-   string Final = _config->FindDir("Dir::State::lists");
++   string Final = _config->FindDir("Dir::Cache::lists");
+    Final += URItoFileName(RealURI);
+    
+    struct stat Buf;
+@@ -1444,7 +1444,7 @@ void pkgAcqMetaIndex::Done(string Message,unsigned long long Size,string Hash,	/
+ 
+    if (Complete == true)
+    {
+-      string FinalFile = _config->FindDir("Dir::State::lists");
++      string FinalFile = _config->FindDir("Dir::Cache::lists");
+       FinalFile += URItoFileName(RealURI);
+       if (SigFile == DestFile)
+ 	 SigFile = FinalFile;
+@@ -1479,7 +1479,7 @@ void pkgAcqMetaIndex::RetrievalDone(string Message)			/*{{{*/
+    IMSHit = StringToBool(LookupTag(Message,"IMS-Hit"),false);
+    if(IMSHit)
+    {
+-      string FinalFile = _config->FindDir("Dir::State::lists");
++      string FinalFile = _config->FindDir("Dir::Cache::lists");
+       FinalFile += URItoFileName(RealURI);
+       if (SigFile == DestFile)
+       {
+@@ -1526,7 +1526,7 @@ void pkgAcqMetaIndex::AuthDone(string Message)				/*{{{*/
+       return;
+ 
+    // Done, move signature file into position
+-   string VerifiedSigFile = _config->FindDir("Dir::State::lists") +
++   string VerifiedSigFile = _config->FindDir("Dir::Cache::lists") +
+       URItoFileName(RealURI) + ".gpg";
+    Rename(SigFile,VerifiedSigFile);
+    chmod(VerifiedSigFile.c_str(),0644);
+@@ -1714,14 +1714,14 @@ void pkgAcqMetaIndex::Failed(string Message,pkgAcquire::MethodConfig * /*Cnf*/)
+    if (AuthPass == true)
+    {
+       // gpgv method failed, if we have a good signature 
+-      string LastGoodSigFile = _config->FindDir("Dir::State::lists").append("partial/").append(URItoFileName(RealURI));
++      string LastGoodSigFile = _config->FindDir("Dir::Cache::lists").append("partial/").append(URItoFileName(RealURI));
+       if (DestFile != SigFile)
+ 	 LastGoodSigFile.append(".gpg");
+       LastGoodSigFile.append(".reverify");
+ 
+       if(FileExists(LastGoodSigFile))
+       {
+-	 string VerifiedSigFile = _config->FindDir("Dir::State::lists") + URItoFileName(RealURI);
++	 string VerifiedSigFile = _config->FindDir("Dir::Cache::lists") + URItoFileName(RealURI);
+ 	 if (DestFile != SigFile)
+ 	    VerifiedSigFile.append(".gpg");
+ 	 Rename(LastGoodSigFile, VerifiedSigFile);
+@@ -1752,7 +1752,7 @@ void pkgAcqMetaIndex::Failed(string Message,pkgAcquire::MethodConfig * /*Cnf*/)
+    /* Always move the meta index, even if gpgv failed. This ensures
+     * that PackageFile objects are correctly filled in */
+    if (FileExists(DestFile)) {
+-      string FinalFile = _config->FindDir("Dir::State::lists");
++      string FinalFile = _config->FindDir("Dir::Cache::lists");
+       FinalFile += URItoFileName(RealURI);
+       /* InRelease files become Release files, otherwise
+        * they would be considered as trusted later on */
+@@ -1787,7 +1787,7 @@ pkgAcqMetaClearSig::pkgAcqMetaClearSig(pkgAcquire *Owner,		/*{{{*/
+    SigFile = DestFile;
+ 
+    // keep the old InRelease around in case of transistent network errors
+-   string const Final = _config->FindDir("Dir::State::lists") + URItoFileName(RealURI);
++   string const Final = _config->FindDir("Dir::Cache::lists") + URItoFileName(RealURI);
+    if (RealFileExists(Final) == true)
+    {
+       string const LastGoodSig = DestFile + ".reverify";
+@@ -1800,7 +1800,7 @@ pkgAcqMetaClearSig::~pkgAcqMetaClearSig()				/*{{{*/
+    // if the file was never queued undo file-changes done in the constructor
+    if (QueueCounter == 1 && Status == StatIdle && FileSize == 0 && Complete == false)
+    {
+-      string const Final = _config->FindDir("Dir::State::lists") + URItoFileName(RealURI);
++      string const Final = _config->FindDir("Dir::Cache::lists") + URItoFileName(RealURI);
+       string const LastGoodSig = DestFile + ".reverify";
+       if (RealFileExists(Final) == false && RealFileExists(LastGoodSig) == true)
+ 	 Rename(LastGoodSig, Final);
+@@ -1812,7 +1812,7 @@ pkgAcqMetaClearSig::~pkgAcqMetaClearSig()				/*{{{*/
+ // FIXME: this can go away once the InRelease file is used widely
+ string pkgAcqMetaClearSig::Custom600Headers()
+ {
+-   string Final = _config->FindDir("Dir::State::lists");
++   string Final = _config->FindDir("Dir::Cache::lists");
+    Final += URItoFileName(RealURI);
+ 
+    struct stat Buf;
+@@ -1832,7 +1832,7 @@ void pkgAcqMetaClearSig::Failed(string Message,pkgAcquire::MethodConfig *Cnf) /*
+    {
+       // Remove the 'old' InRelease file if we try Release.gpg now as otherwise
+       // the file will stay around and gives a false-auth impression (CVE-2012-0214)
+-      string FinalFile = _config->FindDir("Dir::State::lists");
++      string FinalFile = _config->FindDir("Dir::Cache::lists");
+       FinalFile.append(URItoFileName(RealURI));
+       if (FileExists(FinalFile))
+ 	 unlink(FinalFile.c_str());
+diff --git a/apt-pkg/acquire.cc b/apt-pkg/acquire.cc
+index a187a00..e2fccb2 100644
+--- a/apt-pkg/acquire.cc
++++ b/apt-pkg/acquire.cc
+@@ -77,7 +77,7 @@ bool pkgAcquire::Setup(pkgAcquireStatus *Progress, string const &Lock)
+    Log = Progress;
+ 
+    // check for existence and possibly create auxiliary directories
+-   string const listDir = _config->FindDir("Dir::State::lists");
++   string const listDir = _config->FindDir("Dir::Cache::lists");
+    string const partialListDir = listDir + "partial/";
+    string const archivesDir = _config->FindDir("Dir::Cache::Archives");
+    string const partialArchivesDir = archivesDir + "partial/";
+diff --git a/apt-pkg/aptconfiguration.cc b/apt-pkg/aptconfiguration.cc
+index 9982759..7e7350c 100644
+--- a/apt-pkg/aptconfiguration.cc
++++ b/apt-pkg/aptconfiguration.cc
+@@ -137,10 +137,10 @@ std::vector<std::string> const Configuration::getLanguages(bool const &All,
+ 		}
+ 	}
+ 
+-	// Include all Language codes we have a Translation file for in /var/lib/apt/lists
++	// Include all Language codes we have a Translation file for in /var/cache/apt/lists
+ 	// so they will be all included in the Cache.
+ 	std::vector<string> builtin;
+-	DIR *D = opendir(_config->FindDir("Dir::State::lists").c_str());
++	DIR *D = opendir(_config->FindDir("Dir::Cache::lists").c_str());
+ 	if (D != NULL) {
+ 		builtin.push_back("none");
+ 		for (struct dirent *Ent = readdir(D); Ent != 0; Ent = readdir(D)) {
+diff --git a/apt-pkg/cdrom.cc b/apt-pkg/cdrom.cc
+index 93661fb..e4aca36 100644
+--- a/apt-pkg/cdrom.cc
++++ b/apt-pkg/cdrom.cc
+@@ -819,7 +819,7 @@ bool pkgCdrom::Add(pkgCdromStatus *log)					/*{{{*/
+    }
+ 
+    // check for existence and possibly create state directory for copying
+-   string const listDir = _config->FindDir("Dir::State::lists");
++   string const listDir = _config->FindDir("Dir::Cache::lists");
+    string const partialListDir = listDir + "partial/";
+    if (CreateAPTDirectoryIfNeeded(_config->FindDir("Dir::State"), partialListDir) == false &&
+        CreateAPTDirectoryIfNeeded(listDir, partialListDir) == false)
+diff --git a/apt-pkg/deb/debindexfile.cc b/apt-pkg/deb/debindexfile.cc
+index a0dd15c..7ab22de 100644
+--- a/apt-pkg/deb/debindexfile.cc
++++ b/apt-pkg/deb/debindexfile.cc
+@@ -78,7 +78,7 @@ string debSourcesIndex::SourceInfo(pkgSrcRecords::Parser const &Record,
+ /* */
+ pkgSrcRecords::Parser *debSourcesIndex::CreateSrcParser() const
+ {
+-   string SourcesURI = _config->FindDir("Dir::State::lists") + 
++   string SourcesURI = _config->FindDir("Dir::Cache::lists") + 
+       URItoFileName(IndexURI("Sources"));
+    string SourcesURIgzip = SourcesURI + ".gz";
+ 
+@@ -258,7 +258,7 @@ string debPackagesIndex::Info(const char *Type) const
+ /* */
+ inline string debPackagesIndex::IndexFile(const char *Type) const
+ {
+-   string s =_config->FindDir("Dir::State::lists") + URItoFileName(IndexURI(Type));
++   string s =_config->FindDir("Dir::Cache::lists") + URItoFileName(IndexURI(Type));
+    string sgzip = s + ".gz";
+    if (!FileExists(s) && FileExists(sgzip))
+        return sgzip;
+@@ -410,7 +410,7 @@ debTranslationsIndex::debTranslationsIndex(string URI,string Dist,string Section
+ /* */
+ inline string debTranslationsIndex::IndexFile(const char *Type) const
+ {
+-   string s =_config->FindDir("Dir::State::lists") + URItoFileName(IndexURI(Type));
++   string s =_config->FindDir("Dir::Cache::lists") + URItoFileName(IndexURI(Type));
+    string sgzip = s + ".gz";
+    if (!FileExists(s) && FileExists(sgzip))
+        return sgzip;
+diff --git a/apt-pkg/deb/debmetaindex.cc b/apt-pkg/deb/debmetaindex.cc
+index 6fd12ad..8ed650b 100644
+--- a/apt-pkg/deb/debmetaindex.cc
++++ b/apt-pkg/deb/debmetaindex.cc
+@@ -59,7 +59,7 @@ string debReleaseIndex::MetaIndexInfo(const char *Type) const
+ 
+ string debReleaseIndex::MetaIndexFile(const char *Type) const
+ {
+-   return _config->FindDir("Dir::State::lists") +
++   return _config->FindDir("Dir::Cache::lists") +
+       URItoFileName(MetaIndexURI(Type));
+ }
+ 
+@@ -309,13 +309,13 @@ bool debReleaseIndex::IsTrusted() const
+       if(URI.substr(0,strlen("cdrom:")) == "cdrom:")
+ 	 return true;
+ 
+-   string VerifiedSigFile = _config->FindDir("Dir::State::lists") +
++   string VerifiedSigFile = _config->FindDir("Dir::Cache::lists") +
+       URItoFileName(MetaIndexURI("Release")) + ".gpg";
+ 
+    if (FileExists(VerifiedSigFile))
+       return true;
+ 
+-   VerifiedSigFile = _config->FindDir("Dir::State::lists") +
++   VerifiedSigFile = _config->FindDir("Dir::Cache::lists") +
+       URItoFileName(MetaIndexURI("InRelease"));
+ 
+    return FileExists(VerifiedSigFile);
+diff --git a/apt-pkg/edsp/edspsystem.cc b/apt-pkg/edsp/edspsystem.cc
+index 92edb8d..ecbfa03 100644
+--- a/apt-pkg/edsp/edspsystem.cc
++++ b/apt-pkg/edsp/edspsystem.cc
+@@ -69,7 +69,7 @@ bool edspSystem::Initialize(Configuration &Cnf)
+ {
+    Cnf.Set("Dir::State::extended_states", "/dev/null");
+    Cnf.Set("Dir::State::status","/dev/null");
+-   Cnf.Set("Dir::State::lists","/dev/null");
++   Cnf.Set("Dir::Cache::lists","/dev/null");
+ 
+    Cnf.Set("Debug::NoLocking", "true");
+    Cnf.Set("APT::Get::Simulate", "true");
+diff --git a/apt-pkg/indexcopy.cc b/apt-pkg/indexcopy.cc
+index 854ba1b..ec41e40 100644
+--- a/apt-pkg/indexcopy.cc
++++ b/apt-pkg/indexcopy.cc
+@@ -96,7 +96,7 @@ bool IndexCopy::CopyPackages(string CDROM,string Name,vector<string> &List,
+       char S[400];
+       snprintf(S,sizeof(S),"cdrom:[%s]/%s%s",Name.c_str(),
+ 	       (*I).c_str() + CDROM.length(),GetFileName());
+-      string TargetF = _config->FindDir("Dir::State::lists") + "partial/";
++      string TargetF = _config->FindDir("Dir::Cache::lists") + "partial/";
+       TargetF += URItoFileName(S);
+       FileFd Target;
+       if (_config->FindB("APT::CDROM::NoAct",false) == true)
+@@ -212,7 +212,7 @@ bool IndexCopy::CopyPackages(string CDROM,string Name,vector<string> &List,
+       {
+ 	 // Move out of the partial directory
+ 	 Target.Close();
+-	 string FinalF = _config->FindDir("Dir::State::lists");
++	 string FinalF = _config->FindDir("Dir::Cache::lists");
+ 	 FinalF += URItoFileName(S);
+ 	 if (rename(TargetF.c_str(),FinalF.c_str()) != 0)
+ 	    return _error->Errno("rename","Failed to rename");
+@@ -537,7 +537,7 @@ bool SigVerify::CopyMetaIndex(string CDROM, string CDName,		/*{{{*/
+       char S[400];
+       snprintf(S,sizeof(S),"cdrom:[%s]/%s%s",CDName.c_str(),
+ 	       (prefix).c_str() + CDROM.length(),file.c_str());
+-      string TargetF = _config->FindDir("Dir::State::lists");
++      string TargetF = _config->FindDir("Dir::Cache::lists");
+       TargetF += URItoFileName(S);
+ 
+       FileFd Target;
+@@ -703,7 +703,7 @@ bool TranslationsCopy::CopyTranslations(string CDROM,string Name,	/*{{{*/
+       char S[400];
+       snprintf(S,sizeof(S),"cdrom:[%s]/%s",Name.c_str(),
+ 	       (*I).c_str() + CDROM.length());
+-      string TargetF = _config->FindDir("Dir::State::lists") + "partial/";
++      string TargetF = _config->FindDir("Dir::Cache::lists") + "partial/";
+       TargetF += URItoFileName(S);
+       FileFd Target;
+       if (_config->FindB("APT::CDROM::NoAct",false) == true)
+@@ -754,7 +754,7 @@ bool TranslationsCopy::CopyTranslations(string CDROM,string Name,	/*{{{*/
+       {
+ 	 // Move out of the partial directory
+ 	 Target.Close();
+-	 string FinalF = _config->FindDir("Dir::State::lists");
++	 string FinalF = _config->FindDir("Dir::Cache::lists");
+ 	 FinalF += URItoFileName(S);
+ 	 if (rename(TargetF.c_str(),FinalF.c_str()) != 0)
+ 	    return _error->Errno("rename","Failed to rename");
+diff --git a/apt-pkg/init.cc b/apt-pkg/init.cc
+index 2416286..e965cba 100644
+--- a/apt-pkg/init.cc
++++ b/apt-pkg/init.cc
+@@ -48,12 +48,12 @@ bool pkgInitConfig(Configuration &Cnf)
+    
+    // State
+    Cnf.CndSet("Dir::State","var/lib/apt/");
+-   Cnf.CndSet("Dir::State::lists","lists/");
+    Cnf.CndSet("Dir::State::cdroms","cdroms.list");
+    Cnf.CndSet("Dir::State::mirrors","mirrors/");
+ 
+    // Cache
+    Cnf.CndSet("Dir::Cache","var/cache/apt/");
++   Cnf.CndSet("Dir::Cache::lists","lists/");
+    Cnf.CndSet("Dir::Cache::archives","archives/");
+    Cnf.CndSet("Dir::Cache::srcpkgcache","srcpkgcache.bin");
+    Cnf.CndSet("Dir::Cache::pkgcache","pkgcache.bin");
+diff --git a/apt-pkg/update.cc b/apt-pkg/update.cc
+index 5d5b196..d65ba34 100644
+--- a/apt-pkg/update.cc
++++ b/apt-pkg/update.cc
+@@ -93,8 +93,8 @@ bool AcquireUpdate(pkgAcquire &Fetcher, int const PulseInterval,
+        (_config->FindB("APT::Get::List-Cleanup",true) == true &&
+ 	_config->FindB("APT::List-Cleanup",true) == true))
+    {
+-      if (Fetcher.Clean(_config->FindDir("Dir::State::lists")) == false ||
+-	  Fetcher.Clean(_config->FindDir("Dir::State::lists") + "partial/") == false)
++      if (Fetcher.Clean(_config->FindDir("Dir::Cache::lists")) == false ||
++	  Fetcher.Clean(_config->FindDir("Dir::Cache::lists") + "partial/") == false)
+ 	 // something went wrong with the clean
+ 	 return false;
+    }
+diff --git a/debian/apt.dirs b/debian/apt.dirs
+index 6d492a3..e5b4fcc 100644
+--- a/debian/apt.dirs
++++ b/debian/apt.dirs
+@@ -10,7 +10,7 @@ etc/apt/trusted.gpg.d
+ etc/kernel/postinst.d
+ etc/logrotate.d
+ var/cache/apt/archives/partial
+-var/lib/apt/lists/partial
++var/cache/apt/lists/partial
+ var/lib/apt/mirrors/partial
+ var/lib/apt/periodic
+ var/log/apt
+diff --git a/debian/changelog b/debian/changelog
+index f03f73b..7b9e7d3 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,3 +1,10 @@
++apt (1.0.4+nmu1) UNRELEASED; urgency=low
++
++  * Non-maintainer upload.
++  * Fix #494964
++
++ --  <pheanex@localhost.localdomain>  Sun, 15 Jun 2014 12:25:24 +0200
++
+ apt (1.0.4) unstable; urgency=low
+ 
+   [ Michael Vogt ]
+@@ -2866,7 +2873,7 @@ apt (0.8.12) unstable; urgency=low
+ 
+   [ Michael Vogt ]
+   * apt-pkg/deb/debindexfile.cc:
+-    - ignore missing deb-src files in /var/lib/apt/lists, thanks
++    - ignore missing deb-src files in /var/cache/apt/lists, thanks
+       to Thorsten Spindler (LP: #85590)
+   * apt-pkg/contrib/fileutl.cc, apt-pkg/deb/dpkgpm.cc:
+     - honor Dpkg::Chroot-Directory in the RunScripts*() methods
+diff --git a/doc/apt.conf.5.xml b/doc/apt.conf.5.xml
+index fcbf20d..5e500b8 100644
+--- a/doc/apt.conf.5.xml
++++ b/doc/apt.conf.5.xml
+@@ -575,7 +575,7 @@ DPkg::Pre-Install-Pkgs {"/usr/sbin/dpkg-preconfigure --apt";};
+      <programlisting>Acquire::Languages { "environment"; "de"; "en"; "none"; "fr"; };</programlisting></para>
+      <para>Note: To prevent problems resulting from APT being executed in different environments
+      (e.g. by different users or by other programs) all Translation files which are found in
+-     <filename>/var/lib/apt/lists/</filename> will be added to the end of the list
++     <filename>/var/cache/apt/lists/</filename> will be added to the end of the list
+      (after an implicit "<literal>none</literal>").</para>
+      </listitem>
+      </varlistentry>
+diff --git a/doc/apt_preferences.5.xml b/doc/apt_preferences.5.xml
+index d8c3efa..6b548f8 100644
+--- a/doc/apt_preferences.5.xml
++++ b/doc/apt_preferences.5.xml
+@@ -524,7 +524,7 @@ Pin: release l=Debian
+ 
+ <para>All of the <filename>Packages</filename> and <filename>Release</filename>
+ files retrieved from locations listed in the &sources-list; file are stored
+-in the directory <filename>/var/lib/apt/lists</filename>, or in the file named
++in the directory <filename>/var/cache/apt/lists</filename>, or in the file named
+ by the variable <literal>Dir::State::Lists</literal> in the <filename>apt.conf</filename> file.
+ For example, the file
+ <filename>debian.lcs.mit.edu_debian_dists_unstable_contrib_binary-i386_Release</filename>
+diff --git a/doc/files.sgml b/doc/files.sgml
+index 56c7f57..7019bb5 100644
+--- a/doc/files.sgml
++++ b/doc/files.sgml
+@@ -135,7 +135,7 @@ from the ASCII character set. Examples:
+ 
+ <example>
+ http://www.debian.org/archive/dists/stable/binary-i386/Packages 
+-/var/lib/apt/lists/www.debian.org_archive_dists_stable_binary-i386_Packages
++/var/cache/apt/lists/www.debian.org_archive_dists_stable_binary-i386_Packages
+ 
+ cdrom:Debian 1.3/debian/Packages
+ /var/lib/apt/info/Debian%201.3_debian_Packages
+diff --git a/doc/po/apt-doc.pot b/doc/po/apt-doc.pot
+index a058e65..a9dade4 100644
+--- a/doc/po/apt-doc.pot
++++ b/doc/po/apt-doc.pot
+@@ -3176,7 +3176,7 @@ msgstr ""
+ msgid ""
+ "Note: To prevent problems resulting from APT being executed in different "
+ "environments (e.g. by different users or by other programs) all Translation "
+-"files which are found in <filename>/var/lib/apt/lists/</filename> will be "
++"files which are found in <filename>/var/cache/apt/lists/</filename> will be "
+ "added to the end of the list (after an implicit "
+ "\"<literal>none</literal>\")."
+ msgstr ""
+@@ -4574,7 +4574,7 @@ msgstr ""
+ msgid ""
+ "All of the <filename>Packages</filename> and <filename>Release</filename> "
+ "files retrieved from locations listed in the &sources-list; file are stored "
+-"in the directory <filename>/var/lib/apt/lists</filename>, or in the file "
++"in the directory <filename>/var/cache/apt/lists</filename>, or in the file "
+ "named by the variable <literal>Dir::State::Lists</literal> in the "
+ "<filename>apt.conf</filename> file.  For example, the file "
+ "<filename>debian.lcs.mit.edu_debian_dists_unstable_contrib_binary-i386_Release</filename> "
+diff --git a/doc/po/de.po b/doc/po/de.po
+index ac4a196..734888f 100644
+--- a/doc/po/de.po
++++ b/doc/po/de.po
+@@ -4536,13 +4536,13 @@ msgstr ""
+ msgid ""
+ "Note: To prevent problems resulting from APT being executed in different "
+ "environments (e.g. by different users or by other programs) all Translation "
+-"files which are found in <filename>/var/lib/apt/lists/</filename> will be "
++"files which are found in <filename>/var/cache/apt/lists/</filename> will be "
+ "added to the end of the list (after an implicit \"<literal>none</literal>\")."
+ msgstr ""
+ "Hinweis: Um Problemen vorzubeugen, die daher kommen, dass APT in "
+ "unterschiedlichen Umgebungen ausgefÃ¼hrt wird (z.B. durch verschiedene "
+ "Benutzer oder durch andere Programme) werden alle Ãbersetzungsdateien, die "
+-"in <filename>/var/lib/apt/lists/</filename> gefunden werden, an das Ende der "
++"in <filename>/var/cache/apt/lists/</filename> gefunden werden, an das Ende der "
+ "Liste hinzugefÃ¼gt (nach einem impliziten Â»<literal>none</literal>Â«)."
+ 
+ #. type: Content of: <refentry><refsect1><variablelist><varlistentry><listitem><para>
+@@ -6502,7 +6502,7 @@ msgstr "Pin: release l=Debian\n"
+ msgid ""
+ "All of the <filename>Packages</filename> and <filename>Release</filename> "
+ "files retrieved from locations listed in the &sources-list; file are stored "
+-"in the directory <filename>/var/lib/apt/lists</filename>, or in the file "
++"in the directory <filename>/var/cache/apt/lists</filename>, or in the file "
+ "named by the variable <literal>Dir::State::Lists</literal> in the "
+ "<filename>apt.conf</filename> file.  For example, the file <filename>debian."
+ "lcs.mit.edu_debian_dists_unstable_contrib_binary-i386_Release</filename> "
+@@ -6513,7 +6513,7 @@ msgid ""
+ msgstr ""
+ "Alle <filename>Packages</filename>- und <filename>Release</filename>-"
+ "Dateien, die von Orten heruntergeladen werden, die in der Datei &sources-"
+-"list; aufgelistet sind, werden im Verzeichnis <filename>/var/lib/apt/lists</"
++"list; aufgelistet sind, werden im Verzeichnis <filename>/var/cache/apt/lists</"
+ "filename> oder in der von der Variablen <literal>Dir::State::Lists</literal> "
+ "in der Datei <filename>apt.conf</filename> benannten Datei gespeichert. Die "
+ "Datei <filename>debian.lcs.mit.edu_debian_dists_unstable_contrib_binary-"
+diff --git a/doc/po/es.po b/doc/po/es.po
+index 2cf3a07..c5c1181 100644
+--- a/doc/po/es.po
++++ b/doc/po/es.po
+@@ -4602,12 +4602,12 @@ msgstr ""
+ msgid ""
+ "Note: To prevent problems resulting from APT being executed in different "
+ "environments (e.g. by different users or by other programs) all Translation "
+-"files which are found in <filename>/var/lib/apt/lists/</filename> will be "
++"files which are found in <filename>/var/cache/apt/lists/</filename> will be "
+ "added to the end of the list (after an implicit \"<literal>none</literal>\")."
+ msgstr ""
+ "Nota: para impedir problemas derivados de ejecutar APT en distintos entornos "
+ "(por ejemplo, por distintos usuarios u otros programas), todos los ficheros "
+-"Â«TranslationÂ» que se encuentran en <filename>/var/lib/apt/lists/</filename> "
++"Â«TranslationÂ» que se encuentran en <filename>/var/cache/apt/lists/</filename> "
+ "se aÃ±aden al final de la lista (despuÃ©s de un Â«<literal>none</literal>Â» "
+ "implÃ­cito)."
+ 
+@@ -6555,7 +6555,7 @@ msgstr "Pin: release l=Debian\n"
+ msgid ""
+ "All of the <filename>Packages</filename> and <filename>Release</filename> "
+ "files retrieved from locations listed in the &sources-list; file are stored "
+-"in the directory <filename>/var/lib/apt/lists</filename>, or in the file "
++"in the directory <filename>/var/cache/apt/lists</filename>, or in the file "
+ "named by the variable <literal>Dir::State::Lists</literal> in the "
+ "<filename>apt.conf</filename> file.  For example, the file <filename>debian."
+ "lcs.mit.edu_debian_dists_unstable_contrib_binary-i386_Release</filename> "
+@@ -6566,7 +6566,7 @@ msgid ""
+ msgstr ""
+ "Todos los ficheros <filename>Packages</filename> y <filename>Release</"
+ "filename> obtenidos de los recursos en Â«&sources-list;Â» se guardan en el "
+-"directorio <filename>/var/lib/apt/lists</filename>, o en el directorio "
++"directorio <filename>/var/cache/apt/lists</filename>, o en el directorio "
+ "definido por la variable <literal>Dir::State::Lists</literal>, que se puede "
+ "definir en el fichero <filename>apt.conf</filename>. Por ejemplo, el fichero "
+ "<filename>debian.lcs.mit.edu_debian_dists_unstable_contrib_binary-"
+diff --git a/doc/po/fr.po b/doc/po/fr.po
+index 530de50..cec92a7 100644
+--- a/doc/po/fr.po
++++ b/doc/po/fr.po
+@@ -4552,13 +4552,13 @@ msgstr ""
+ msgid ""
+ "Note: To prevent problems resulting from APT being executed in different "
+ "environments (e.g. by different users or by other programs) all Translation "
+-"files which are found in <filename>/var/lib/apt/lists/</filename> will be "
++"files which are found in <filename>/var/cache/apt/lists/</filename> will be "
+ "added to the end of the list (after an implicit \"<literal>none</literal>\")."
+ msgstr ""
+ "NoteÂ : afin d'Ã©viter des problÃ¨mes lorsqu'APT est exÃ©cutÃ© dans diffÃ©rents "
+ "environnements (p.Â ex. par diffÃ©rents utilisateurs ou diffÃ©rents "
+ "programmes), tous les fichiers Â«Â TranslationÂ Â»qui sont trouvÃ©s dans "
+-"<filename>/var/lib/apt/lists/</filename> seront ajoutÃ©s Ã  la fin de la liste "
++"<filename>/var/cache/apt/lists/</filename> seront ajoutÃ©s Ã  la fin de la liste "
+ "(aprÃ¨s un Â«Â <literal>none</literal>Â Â» implicite)."
+ 
+ #. type: Content of: <refentry><refsect1><variablelist><varlistentry><listitem><para>
+@@ -6505,7 +6505,7 @@ msgstr "Pin: release l=Debian\n"
+ msgid ""
+ "All of the <filename>Packages</filename> and <filename>Release</filename> "
+ "files retrieved from locations listed in the &sources-list; file are stored "
+-"in the directory <filename>/var/lib/apt/lists</filename>, or in the file "
++"in the directory <filename>/var/cache/apt/lists</filename>, or in the file "
+ "named by the variable <literal>Dir::State::Lists</literal> in the "
+ "<filename>apt.conf</filename> file.  For example, the file <filename>debian."
+ "lcs.mit.edu_debian_dists_unstable_contrib_binary-i386_Release</filename> "
+@@ -6516,7 +6516,7 @@ msgid ""
+ msgstr ""
+ "Tous les fichiers <filename>Packages</filename> et <filename>Release</"
+ "filename> rÃ©cupÃ©rÃ©s dans des sources indiquÃ©es dans le fichier &sources-"
+-"list; sont conservÃ©s dans le rÃ©pertoire <filename>/var/lib/apt/lists</"
++"list; sont conservÃ©s dans le rÃ©pertoire <filename>/var/cache/apt/lists</"
+ "filename> ou dans le fichier spÃ©cifiÃ© par la variable <literal>Dir::State::"
+ "Lists</literal> dans le fichier <filename>apt.conf</filename>.  Par exemple, "
+ "le fichier <filename>debian.lcs.mit.edu_debian_dists_unstable_contrib_binary-"
+diff --git a/doc/po/it.po b/doc/po/it.po
+index c5ef090..7d0a1ca 100644
+--- a/doc/po/it.po
++++ b/doc/po/it.po
+@@ -4547,12 +4547,12 @@ msgstr ""
+ msgid ""
+ "Note: To prevent problems resulting from APT being executed in different "
+ "environments (e.g. by different users or by other programs) all Translation "
+-"files which are found in <filename>/var/lib/apt/lists/</filename> will be "
++"files which are found in <filename>/var/cache/apt/lists/</filename> will be "
+ "added to the end of the list (after an implicit \"<literal>none</literal>\")."
+ msgstr ""
+ "Notare che per prevenire problemi risultanti dall'uso di APT in ambienti "
+ "differenti (ad esempio da parte di utenti o programmi diversi), tutti i file "
+-"Translation che si trovano in <filename>/var/lib/apt/lists/</filename> "
++"Translation che si trovano in <filename>/var/cache/apt/lists/</filename> "
+ "vengono aggiunti alla fine dell'elenco (dopo un \"<literal>none</literal>\" "
+ "implicito)."
+ 
+@@ -6504,7 +6504,7 @@ msgstr "Pin: release l=Debian\n"
+ msgid ""
+ "All of the <filename>Packages</filename> and <filename>Release</filename> "
+ "files retrieved from locations listed in the &sources-list; file are stored "
+-"in the directory <filename>/var/lib/apt/lists</filename>, or in the file "
++"in the directory <filename>/var/cache/apt/lists</filename>, or in the file "
+ "named by the variable <literal>Dir::State::Lists</literal> in the "
+ "<filename>apt.conf</filename> file.  For example, the file <filename>debian."
+ "lcs.mit.edu_debian_dists_unstable_contrib_binary-i386_Release</filename> "
+@@ -6515,7 +6515,7 @@ msgid ""
+ msgstr ""
+ "Tutti i file <filename>Packages</filename> e <filename>Release</filename> "
+ "recuperati dalle posizioni elencate nel file &sources-list; sono memorizzati "
+-"nella directory <filename>/var/lib/apt/lists</filename> o nel file indicato "
++"nella directory <filename>/var/cache/apt/lists</filename> o nel file indicato "
+ "dalla variabile <literal>Dir::State::Lists</literal> nel file <filename>apt."
+ "conf</filename>. Per esempio, il file <filename>debian.lcs.mit."
+ "edu_debian_dists_unstable_contrib_binary-i386_Release</filename> contiene il "
+diff --git a/doc/po/ja.po b/doc/po/ja.po
+index 2475b81..2a1327b 100644
+--- a/doc/po/ja.po
++++ b/doc/po/ja.po
+@@ -4393,11 +4393,11 @@ msgstr ""
+ msgid ""
+ "Note: To prevent problems resulting from APT being executed in different "
+ "environments (e.g. by different users or by other programs) all Translation "
+-"files which are found in <filename>/var/lib/apt/lists/</filename> will be "
++"files which are found in <filename>/var/cache/apt/lists/</filename> will be "
+ "added to the end of the list (after an implicit \"<literal>none</literal>\")."
+ msgstr ""
+ "æ³¨æ: ç°ãªãç°å¢ (ä¾: ç°ãªãã¦ã¼ã¶ãä»ã®ãã­ã°ã©ã ) ã§ APT ãå®è¡ãããã¨ã«ã"
+-"ãåé¡ãé²ãããã<filename>/var/lib/apt/lists/</filename> ã«ãããã¹ã¦ã® "
++"ãåé¡ãé²ãããã<filename>/var/cache/apt/lists/</filename> ã«ãããã¹ã¦ã® "
+ "Translation ãã¡ã¤ã«ãããªã¹ãã®æå¾ (æé»ã® \"<literal>none</literal>\" ã®"
+ "å¾) ã«è¿½å ãã¾ãã"
+ 
+@@ -6257,7 +6257,7 @@ msgstr "Pin: release l=Debian\n"
+ msgid ""
+ "All of the <filename>Packages</filename> and <filename>Release</filename> "
+ "files retrieved from locations listed in the &sources-list; file are stored "
+-"in the directory <filename>/var/lib/apt/lists</filename>, or in the file "
++"in the directory <filename>/var/cache/apt/lists</filename>, or in the file "
+ "named by the variable <literal>Dir::State::Lists</literal> in the "
+ "<filename>apt.conf</filename> file.  For example, the file <filename>debian."
+ "lcs.mit.edu_debian_dists_unstable_contrib_binary-i386_Release</filename> "
+@@ -6268,7 +6268,7 @@ msgid ""
+ msgstr ""
+ "&sources-list; ãã¡ã¤ã«ã«åæãããå ´æããåå¾ãã <filename>Packages</"
+ "filename> ãã¡ã¤ã«ã <filename>Release</filename> ãã¡ã¤ã«ã¯ãã¹ã¦ã"
+-"<filename>/var/lib/apt/lists</filename> ãã£ã¬ã¯ããªãã<filename>apt.conf</"
++"<filename>/var/cache/apt/lists</filename> ãã£ã¬ã¯ããªãã<filename>apt.conf</"
+ "filename> ãã¡ã¤ã«ã® <literal>Dir::State::Lists</literal> å¤æ°ã§æå®ããå ´æ"
+ "ã«åå¾ããã¾ããä¾ãã°ã<filename>debian.lcs.mit."
+ "edu_debian_dists_unstable_contrib_binary-i386_Release</filename> ãã¡ã¤ã«ã¯ã"
+diff --git a/doc/po/pl.po b/doc/po/pl.po
+index 5f92c52..b2bcaf8 100644
+--- a/doc/po/pl.po
++++ b/doc/po/pl.po
+@@ -4279,7 +4279,7 @@ msgstr ""
+ msgid ""
+ "Note: To prevent problems resulting from APT being executed in different "
+ "environments (e.g. by different users or by other programs) all Translation "
+-"files which are found in <filename>/var/lib/apt/lists/</filename> will be "
++"files which are found in <filename>/var/cache/apt/lists/</filename> will be "
+ "added to the end of the list (after an implicit \"<literal>none</literal>\")."
+ msgstr ""
+ 
+@@ -5957,7 +5957,7 @@ msgstr "Pin: release l=Debian\n"
+ msgid ""
+ "All of the <filename>Packages</filename> and <filename>Release</filename> "
+ "files retrieved from locations listed in the &sources-list; file are stored "
+-"in the directory <filename>/var/lib/apt/lists</filename>, or in the file "
++"in the directory <filename>/var/cache/apt/lists</filename>, or in the file "
+ "named by the variable <literal>Dir::State::Lists</literal> in the "
+ "<filename>apt.conf</filename> file.  For example, the file <filename>debian."
+ "lcs.mit.edu_debian_dists_unstable_contrib_binary-i386_Release</filename> "
+@@ -5968,7 +5968,7 @@ msgid ""
+ msgstr ""
+ "Wszystkie pliki <filename>Packages</filename> i <filename>Release</filename> "
+ "pobierane z lokalizacji podanych w pliku &sources-list; sÄ przechowywane w "
+-"katalogu <filename>/var/lib/apt/lists</filename> lub w pliku o nazwie "
++"katalogu <filename>/var/cache/apt/lists</filename> lub w pliku o nazwie "
+ "bÄdÄcej wartoÅciÄ zmiennej <literal>Dir::State::Lists</literal> z pliku "
+ "<filename>apt.conf</filename>. Na przykÅad plik o nazwie <filename>debian."
+ "lcs.mit.edu_debian_dists_unstable_contrib_binary-i386_Release</filename> "
+diff --git a/doc/po/pt.po b/doc/po/pt.po
+index 6ebf93b..7c95e4c 100644
+--- a/doc/po/pt.po
++++ b/doc/po/pt.po
+@@ -4540,12 +4540,12 @@ msgstr ""
+ msgid ""
+ "Note: To prevent problems resulting from APT being executed in different "
+ "environments (e.g. by different users or by other programs) all Translation "
+-"files which are found in <filename>/var/lib/apt/lists/</filename> will be "
++"files which are found in <filename>/var/cache/apt/lists/</filename> will be "
+ "added to the end of the list (after an implicit \"<literal>none</literal>\")."
+ msgstr ""
+ "Nota: Para prevenir problemas resultantes do APT ser executado em ambientes "
+ "diferentes (ex. por diferentes utilizadores ou por outros programas) todos "
+-"os ficheiros de TraduÃ§Ã£o que se encontram em <filename>/var/lib/apt/lists/</"
++"os ficheiros de TraduÃ§Ã£o que se encontram em <filename>/var/cache/apt/lists/</"
+ "filename> serÃ£o adicionados ao final da lista (apÃ³s um \"<literal>none</"
+ "literal>\" implÃ­cito)."
+ 
+@@ -6477,7 +6477,7 @@ msgstr "Pin: release l=Debian\n"
+ msgid ""
+ "All of the <filename>Packages</filename> and <filename>Release</filename> "
+ "files retrieved from locations listed in the &sources-list; file are stored "
+-"in the directory <filename>/var/lib/apt/lists</filename>, or in the file "
++"in the directory <filename>/var/cache/apt/lists</filename>, or in the file "
+ "named by the variable <literal>Dir::State::Lists</literal> in the "
+ "<filename>apt.conf</filename> file.  For example, the file <filename>debian."
+ "lcs.mit.edu_debian_dists_unstable_contrib_binary-i386_Release</filename> "
+@@ -6488,7 +6488,7 @@ msgid ""
+ msgstr ""
+ "Todos os ficheiros <filename>Packages</filename> e <filename>Release</"
+ "filename> obtidos das localizaÃ§Ãµes listadas no ficheiro &sources-list; sÃ£o "
+-"armazenados no directÃ³rio <filename>/var/lib/apt/lists</filename>, ou no "
++"armazenados no directÃ³rio <filename>/var/cache/apt/lists</filename>, ou no "
+ "ficheiro nomeado pela variÃ¡vel <literal>Dir::State::Lists</literal> no "
+ "ficheiro <filename>apt.conf</filename>. Por exemplo, o ficheiro "
+ "<filename>debian.lcs.mit.edu_debian_dists_unstable_contrib_binary-"
+diff --git a/doc/po/pt_BR.po b/doc/po/pt_BR.po
+index e9e785f..befd904 100644
+--- a/doc/po/pt_BR.po
++++ b/doc/po/pt_BR.po
+@@ -3176,7 +3176,7 @@ msgstr ""
+ msgid ""
+ "Note: To prevent problems resulting from APT being executed in different "
+ "environments (e.g. by different users or by other programs) all Translation "
+-"files which are found in <filename>/var/lib/apt/lists/</filename> will be "
++"files which are found in <filename>/var/cache/apt/lists/</filename> will be "
+ "added to the end of the list (after an implicit \"<literal>none</literal>\")."
+ msgstr ""
+ 
+@@ -4879,7 +4879,7 @@ msgstr ""
+ msgid ""
+ "All of the <filename>Packages</filename> and <filename>Release</filename> "
+ "files retrieved from locations listed in the &sources-list; file are stored "
+-"in the directory <filename>/var/lib/apt/lists</filename>, or in the file "
++"in the directory <filename>/var/cache/apt/lists</filename>, or in the file "
+ "named by the variable <literal>Dir::State::Lists</literal> in the "
+ "<filename>apt.conf</filename> file.  For example, the file <filename>debian."
+ "lcs.mit.edu_debian_dists_unstable_contrib_binary-i386_Release</filename> "
+@@ -4890,7 +4890,7 @@ msgid ""
+ msgstr ""
+ "Todos os arquivos <filename>Packages</filename> e <filename>Release</"
+ "filename> obtidos das localidades listadas no arquivo &sources-list; sÃ£o "
+-"mantidos no diretÃ³rio <filename>/var/lib/apt/lists</filename> ou no arquivo "
++"mantidos no diretÃ³rio <filename>/var/cache/apt/lists</filename> ou no arquivo "
+ "indicado pela variÃ¡vel <literal>Dir::State::Lists</literal> no arquivo "
+ "<filename>apt.conf</filename>. Por exemplo, o arquivo <filename>debian.lcs."
+ "mit.edu_debian_dists_unstable_contrib_binary-i386_Release</filename> contÃ©m "
+diff --git a/test/integration/skip-bug-601016-description-translation b/test/integration/skip-bug-601016-description-translation
+index 33c209e..6db99d4 100755
+--- a/test/integration/skip-bug-601016-description-translation
++++ b/test/integration/skip-bug-601016-description-translation
+@@ -83,7 +83,7 @@ $MD5Sum
+ testrun() {
+ 	echo "Acquire::Languages { \"${LOCALE}\"; \"en\"; };" > rootdir/etc/apt/apt.conf.d/00languages
+ 	export LC_ALL=""
+-	rm -rf rootdir/var/lib/apt/lists
++	rm -rf rootdir/var/cache/apt/lists
+ 	setupaptarchive
+ 	testequal "$LOCALESTANZA" aptcache show apt -o Test=File-${LOCALE}
+ 	testequal "$LOCALESTANZA" aptcache show apt:i386 -o Test=File-${LOCALE}
+diff --git a/test/integration/test-apt-cdrom b/test/integration/test-apt-cdrom
+index 8d8fdf1..17c67e0 100755
+--- a/test/integration/test-apt-cdrom
++++ b/test/integration/test-apt-cdrom
+@@ -93,8 +93,8 @@ Found 2 package indexes, 1 source indexes, 2 translation indexes and 1 signature
+ $CDROM_POST" aptcdromlog add
+ msgtest 'Test for the german description translation of' 'testing'
+ aptcache show testing -o Acquire::Languages=de | grep -q '^Description-de: ' && msgpass || msgfail
+-rm -rf rootdir/var/lib/apt/lists
+-mkdir -p rootdir/var/lib/apt/lists/partial
++rm -rf rootdir/var/cache/apt/lists
++mkdir -p rootdir/var/cache/apt/lists/partial
+ testequal "$CDROM_PRE
+ Found 2 package indexes, 1 source indexes, 1 translation indexes and 1 signatures
+ $CDROM_POST" aptcdromlog add
+diff --git a/test/integration/test-apt-translation-has-no-packages b/test/integration/test-apt-translation-has-no-packages
+index bb2353a..53f9c17 100755
+--- a/test/integration/test-apt-translation-has-no-packages
++++ b/test/integration/test-apt-translation-has-no-packages
+@@ -29,7 +29,7 @@ APTARCHIVE=$(readlink -f ./aptarchive)
+ # corrupt the Translation-en file to look like a regular Packages file
+ rm rootdir/var/cache/apt/*.bin
+ cp $APTARCHIVE/dists/unstable/main/binary-amd64/Packages \
+-   rootdir/var/lib/apt/lists/*Translation-en
++   rootdir/var/cache/apt/lists/*Translation-en
+ 
+ # ensure that there is no Version for the package foo generated out of
+ # the corrupted Translation-en file
+diff --git a/test/integration/test-bug-595691-empty-and-broken-archive-files b/test/integration/test-bug-595691-empty-and-broken-archive-files
+index a05ed5f..f45f336 100755
+--- a/test/integration/test-bug-595691-empty-and-broken-archive-files
++++ b/test/integration/test-bug-595691-empty-and-broken-archive-files
+@@ -121,7 +121,7 @@ Reading package lists..." "empty archive Packages.$COMPRESS over http"
+ 	testaptgetupdate "Get: http://localhost:8080  Packages
+ Err http://localhost:8080  Packages
+   Empty files can't be valid archives
+-W: Failed to fetch ${COMPRESSOR}:$(readlink -f rootdir/var/lib/apt/lists/partial/localhost:8080_Packages)  Empty files can't be valid archives
++W: Failed to fetch ${COMPRESSOR}:$(readlink -f rootdir/var/cache/apt/lists/partial/localhost:8080_Packages)  Empty files can't be valid archives
+ 
+ E: Some index files failed to download. They have been ignored, or old ones used instead." "empty file Packages.$COMPRESS over http"
+ }
+diff --git a/test/integration/test-bug-602412-dequote-redirect b/test/integration/test-bug-602412-dequote-redirect
+index 6393f0c..d286ddd 100755
+--- a/test/integration/test-bug-602412-dequote-redirect
++++ b/test/integration/test-bug-602412-dequote-redirect
+@@ -32,7 +32,7 @@ Reading package lists..." aptget update
+ 
+ testrun 'http://localhost:8080'
+ 
+-rm -rf rootdir/var/lib/apt/lists rootdir/var/cache/apt/archives
++rm -rf rootdir/var/cache/apt/lists rootdir/var/cache/apt/archives
+ changetohttpswebserver
+ 
+ testrun 'https://localhost:4433'
+diff --git a/test/integration/test-bug-624218-Translation-file-handling b/test/integration/test-bug-624218-Translation-file-handling
+index d3c5b08..9bb3566 100755
+--- a/test/integration/test-bug-624218-Translation-file-handling
++++ b/test/integration/test-bug-624218-Translation-file-handling
+@@ -12,36 +12,36 @@ setupaptarchive
+ 
+ changetowebserver
+ 
+-rm -rf rootdir/var/lib/apt/lists
++rm -rf rootdir/var/cache/apt/lists
+ 
+ translationslisted() {
+ 	msgtest 'No download of non-existent locals' "$1"
+ 	LC_ALL="" aptget update -o Acquire::Languages=en | grep -q -e 'Translation-[^e][^n] ' && msgfail || msgpass
+-	rm -rf rootdir/var/lib/apt/lists
++	rm -rf rootdir/var/cache/apt/lists
+ 
+ 	msgtest 'Download of existent locals' "$1"
+ 	LC_ALL="" aptget update | grep -q -e 'Translation-en ' && msgpass || msgfail
+-	rm -rf rootdir/var/lib/apt/lists
++	rm -rf rootdir/var/cache/apt/lists
+ 
+ 	msgtest 'Download of en in LC_ALL=C' "$1"
+ 	LC_ALL=C aptget update | grep -q -e 'Translation-en ' && msgpass || msgfail
+-	rm -rf rootdir/var/lib/apt/lists
++	rm -rf rootdir/var/cache/apt/lists
+ 
+ 	msgtest 'Download of en as forced language' "$1"
+ 	aptget update -o Acquire::Languages=en | grep -q -e 'Translation-en ' && msgpass || msgfail
+-	rm -rf rootdir/var/lib/apt/lists
++	rm -rf rootdir/var/cache/apt/lists
+ 
+ 	msgtest 'Download of nothing else in forced language' "$1"
+ 	aptget update -o Acquire::Languages=en | grep -q -e 'Translation-[^e][^n] ' && msgfail || msgpass
+-	rm -rf rootdir/var/lib/apt/lists
++	rm -rf rootdir/var/cache/apt/lists
+ 
+ 	msgtest 'Download no Translation- if forced language is non-existent' "$1"
+ 	aptget update -o Acquire::Languages=ast_DE | grep -q -e 'Translation-' && msgfail || msgpass
+-	rm -rf rootdir/var/lib/apt/lists
++	rm -rf rootdir/var/cache/apt/lists
+ 
+ 	msgtest 'Download of nothing if none is forced' "$1"
+ 	aptget update -o Acquire::Languages=none | grep -q -e 'Translation' && msgfail || msgpass
+-	rm -rf rootdir/var/lib/apt/lists
++	rm -rf rootdir/var/cache/apt/lists
+ }
+ 
+ translationslisted 'with full Index'
+@@ -60,34 +60,34 @@ signreleasefiles
+ 
+ msgtest 'Download of en as forced language' 'without Index'
+ aptget update -o Acquire::Languages=en | grep -q -e 'Translation-en ' && msgpass || msgfail
+-rm -rf rootdir/var/lib/apt/lists
++rm -rf rootdir/var/cache/apt/lists
+ 
+ msgtest 'Download of nothing else in forced language' 'without Index'
+ aptget update -o Acquire::Languages=en | grep -q -e 'Translation-[^e][^n] ' && msgfail || msgpass
+-rm -rf rootdir/var/lib/apt/lists
++rm -rf rootdir/var/cache/apt/lists
+ 
+ msgtest 'Download of ast_DE as forced language' 'without Index'
+ aptget update -o Acquire::Languages=ast_DE | grep -q -e 'Translation-ast_DE$' && msgpass || msgfail
+-rm -rf rootdir/var/lib/apt/lists
++rm -rf rootdir/var/cache/apt/lists
+ 
+ msgtest 'Download of nothing else in forced language' 'without Index'
+ aptget update -o Acquire::Languages=ast_DE | grep -q -e 'Translation-[^a][^s]' && msgfail || msgpass
+-rm -rf rootdir/var/lib/apt/lists
++rm -rf rootdir/var/cache/apt/lists
+ 
+ msgtest 'Download of nothing if none is forced' 'without Index'
+ aptget update -o Acquire::Languages=none | grep -q -e 'Translation' && msgfail || msgpass
+-rm -rf rootdir/var/lib/apt/lists
++rm -rf rootdir/var/cache/apt/lists
+ 
+-mkdir -p rootdir/var/lib/apt/lists
+-touch rootdir/var/lib/apt/lists/localhost:8080_dists_unstable_main_i18n_Translation-ast_DE
++mkdir -p rootdir/var/cache/apt/lists
++touch rootdir/var/cache/apt/lists/localhost:8080_dists_unstable_main_i18n_Translation-ast_DE
+ 
+ msgtest 'Download of builtin files' 'without Index'
+ aptget update | grep -q -e 'Translation-ast_DE' && msgpass || msgfail
+-rm -rf rootdir/var/lib/apt/lists
++rm -rf rootdir/var/cache/apt/lists
+ 
+-mkdir -p rootdir/var/lib/apt/lists
+-touch rootdir/var/lib/apt/lists/localhost:8080_dists_unstable_main_i18n_Translation-ast_DE
++mkdir -p rootdir/var/cache/apt/lists
++touch rootdir/var/cache/apt/lists/localhost:8080_dists_unstable_main_i18n_Translation-ast_DE
+ 
+ msgtest 'Download of nothing (even builtin) if none is forced' 'without Index'
+ aptget update -o Acquire::Languages=none | grep -q -e 'Translation' && msgfail || msgpass
+-rm -rf rootdir/var/lib/apt/lists
++rm -rf rootdir/var/cache/apt/lists
+diff --git a/test/integration/test-bug-633350-do-not-kill-last-char-in-Release b/test/integration/test-bug-633350-do-not-kill-last-char-in-Release
+index 988f8c9..7435ef9 100755
+--- a/test/integration/test-bug-633350-do-not-kill-last-char-in-Release
++++ b/test/integration/test-bug-633350-do-not-kill-last-char-in-Release
+@@ -15,7 +15,7 @@ echo 'NotAutomatic: yes' >> aptarchive/dists/unstable/Release
+ signreleasefiles
+ find aptarchive/dists -name 'InRelease' -delete
+ 
+-rm -rf rootdir/var/lib/apt/lists
++rm -rf rootdir/var/cache/apt/lists
+ 
+ OUTPUT="$(aptget update 2>&1)"
+ msgtest 'Check that parsing happens without warnings' 'with missing newline'
+diff --git a/test/integration/test-bug-719263-print-uris-removes-authentication b/test/integration/test-bug-719263-print-uris-removes-authentication
+index 5e674db..d8d85fb 100755
+--- a/test/integration/test-bug-719263-print-uris-removes-authentication
++++ b/test/integration/test-bug-719263-print-uris-removes-authentication
+@@ -34,7 +34,7 @@ testsuccess aptget update --print-uris
+ testnoact
+ 
+ # same thing, just not with InRelease this time
+-rm -rf rootdir/var/lib/apt/lists
++rm -rf rootdir/var/cache/apt/lists
+ testsuccess aptget update -o Acquire::TryInRelease=0
+ 
+ testnoact
+diff --git a/test/integration/test-compressed-indexes b/test/integration/test-compressed-indexes
+index 6671dd7..78853b6 100755
+--- a/test/integration/test-compressed-indexes
++++ b/test/integration/test-compressed-indexes
+@@ -27,21 +27,21 @@ testequal "$GOODSHOWSRC" aptcache showsrc testpkg
+ 
+ testrun() {
+ 	local F
+-	if [ -e rootdir/var/lib/apt/lists/*localhost*Release ]; then
++	if [ -e rootdir/var/cache/apt/lists/*localhost*Release ]; then
+ 		msgtest "Check if all index files are" "${1:-uncompressed}"
+ 		if [ "$1" = "compressed" ]; then
+-			! test -e rootdir/var/lib/apt/lists/*_Packages || F=1
+-			! test -e rootdir/var/lib/apt/lists/*_Sources || F=1
+-			test -e rootdir/var/lib/apt/lists/*_Packages.gz || F=1
+-			test -e rootdir/var/lib/apt/lists/*_Sources.gz || F=1
++			! test -e rootdir/var/cache/apt/lists/*_Packages || F=1
++			! test -e rootdir/var/cache/apt/lists/*_Sources || F=1
++			test -e rootdir/var/cache/apt/lists/*_Packages.gz || F=1
++			test -e rootdir/var/cache/apt/lists/*_Sources.gz || F=1
+ 		else
+-			test -e rootdir/var/lib/apt/lists/*_Packages || F=1
+-			test -e rootdir/var/lib/apt/lists/*_Sources || F=1
+-			! test -e rootdir/var/lib/apt/lists/*_Packages.gz || F=1
+-			! test -e rootdir/var/lib/apt/lists/*_Sources.gz || F=1
++			test -e rootdir/var/cache/apt/lists/*_Packages || F=1
++			test -e rootdir/var/cache/apt/lists/*_Sources || F=1
++			! test -e rootdir/var/cache/apt/lists/*_Packages.gz || F=1
++			! test -e rootdir/var/cache/apt/lists/*_Sources.gz || F=1
+ 		fi
+ 		if [ -n "$F" ]; then
+-			ls -laR rootdir/var/lib/apt/lists/
++			ls -laR rootdir/var/cache/apt/lists/
+ 			msgfail
+ 		else
+ 			msgpass
+@@ -83,7 +83,7 @@ testsuccess aptget update -o Acquire::Pdiffs=0
+ msgmsg "File: Test with uncompressed indexes (update unchanged without pdiffs)"
+ testrun
+ 
+-rm -rf rootdir/var/lib/apt/lists
++rm -rf rootdir/var/cache/apt/lists
+ echo 'Acquire::CompressionTypes::Order:: "gz";
+ Acquire::GzipIndexes "true";' > rootdir/etc/apt/apt.conf.d/02compressindex
+ 
+@@ -117,7 +117,7 @@ testsuccess aptget update -o Acquire::Pdiffs=0
+ msgmsg "HTTP: Test with uncompressed indexes (update unchanged without pdiffs)"
+ testrun
+ 
+-rm -rf rootdir/var/lib/apt/lists
++rm -rf rootdir/var/cache/apt/lists
+ echo 'Acquire::CompressionTypes::Order:: "gz";
+ Acquire::GzipIndexes "true";' > rootdir/etc/apt/apt.conf.d/02compressindex
+ 
+diff --git a/test/integration/test-hashsum-verification b/test/integration/test-hashsum-verification
+index e77efb4..e886888 100755
+--- a/test/integration/test-hashsum-verification
++++ b/test/integration/test-hashsum-verification
+@@ -16,7 +16,7 @@ prepare() {
+ 	if [ "$DATE" = 'now' -a "$1" = "${PKGFILE}-new" ]; then
+ 		DATE='now + 6 days'
+ 	fi
+-	for release in $(find rootdir/var/lib/apt/lists 2> /dev/null); do
++	for release in $(find rootdir/var/cache/apt/lists 2> /dev/null); do
+ 		touch -d 'now - 6 hours' $release
+ 	done
+ 	cp $1 aptarchive/Packages
+@@ -54,7 +54,7 @@ PKGFILE="${TESTDIR}/$(echo "$(basename $0)" | sed 's#^test-#Packages-#')"
+ 
+ runtest() {
+ 	prepare ${PKGFILE}
+-	rm -rf rootdir/var/lib/apt/lists
++	rm -rf rootdir/var/cache/apt/lists
+ 	signreleasefiles 'Joe Sixpack'
+ 	find aptarchive/ -name "$DELETEFILE" -delete
+ 
+@@ -63,11 +63,11 @@ runtest() {
+ 	aptget update 2>&1 | grep "Hash Sum mismatch" > /dev/null && msgpass || msgfail
+         msgtest 'No package from the source available'
+         [ "$(aptcache show apt 2>&1)" = "E: No packages found" ] && msgpass || msgfail
+-        msgtest 'No Packages file in /var/lib/apt/lists'
+-        [ "$(ls rootdir/var/lib/apt/lists/*Package* 2>/dev/null)" = "" ] && msgpass || msgfail 
++        msgtest 'No Packages file in /var/cache/apt/lists'
++        [ "$(ls rootdir/var/cache/apt/lists/*Package* 2>/dev/null)" = "" ] && msgpass || msgfail 
+         
+         # now with the unsigned Release file
+-        rm -rf rootdir/var/lib/apt/lists
++        rm -rf rootdir/var/cache/apt/lists
+         rm aptarchive/InRelease aptarchive/Release.gpg
+         msgtest 'unsigned apt-get update gets the expected hashsum mismatch'
+ 	aptget update 2>&1 | grep "Hash Sum mismatch" > /dev/null && msgpass || msgfail
+diff --git a/test/integration/test-pdiff-usage b/test/integration/test-pdiff-usage
+index afe1ad4..7463a8a 100755
+--- a/test/integration/test-pdiff-usage
++++ b/test/integration/test-pdiff-usage
+@@ -32,7 +32,7 @@ wasmergeused() {
+ 	fi
+ 
+ 	msgtest 'No intermediate patch files' 'still exist'
+-	local EDS="$(find rootdir/var/lib/apt/lists -name '*.ed' -o -name '*.ed.*')"
++	local EDS="$(find rootdir/var/cache/apt/lists -name '*.ed' -o -name '*.ed.*')"
+ 	if [ -z "$EDS" ]; then
+ 		msgpass
+ 	else
+@@ -62,9 +62,9 @@ testrun() {
+ 	compressfile 'aptarchive/Packages'
+ 	generatereleasefiles
+ 	signreleasefiles
+-	rm -rf aptarchive/Packages.diff rootdir/var/lib/apt/lists
++	rm -rf aptarchive/Packages.diff rootdir/var/cache/apt/lists
+ 	testsuccess aptget update "$@"
+-	cp -a rootdir/var/lib/apt/lists rootdir/var/lib/apt/lists-bak
++	cp -a rootdir/var/cache/apt/lists rootdir/var/cache/apt/lists-bak
+ 	testnopackage newstuff
+ 	testequal "$(cat ${PKGFILE})
+ " aptcache show apt oldstuff
+@@ -93,7 +93,7 @@ SHA1-Patches:
+ " aptcache show apt newstuff
+ 
+ 	msgmsg "Testcase: index is already up-to-date: $*"
+-	find rootdir/var/lib/apt/lists -name '*.IndexDiff' -type f -delete
++	find rootdir/var/cache/apt/lists -name '*.IndexDiff' -type f -delete
+ 	testsuccess aptget update "$@"
+ 	testequal "$(cat ${PKGFILE}-new)
+ " aptcache show apt newstuff
+@@ -132,16 +132,16 @@ SHA1-Patches:
+ 	signreleasefiles
+ 	cp -a aptarchive/Packages Packages-future
+ 	find aptarchive -name 'Packages*' -type f -delete
+-	rm -rf rootdir/var/lib/apt/lists
+-	cp -a rootdir/var/lib/apt/lists-bak rootdir/var/lib/apt/lists
++	rm -rf rootdir/var/cache/apt/lists
++	cp -a rootdir/var/cache/apt/lists-bak rootdir/var/cache/apt/lists
+ 	wasmergeused "$@"
+ 	testnopackage oldstuff
+ 	testequal "$(cat Packages-future)
+ " aptcache show apt newstuff futurestuff
+ 
+ 	msgmsg "Testcase: patch applying fails, but successful fallback: $*"
+-	rm -rf rootdir/var/lib/apt/lists
+-	cp -a rootdir/var/lib/apt/lists-bak rootdir/var/lib/apt/lists
++	rm -rf rootdir/var/cache/apt/lists
++	cp -a rootdir/var/cache/apt/lists-bak rootdir/var/cache/apt/lists
+ 	cp ${PKGFILE}-new aptarchive/Packages
+ 	compressfile 'aptarchive/Packages'
+ 	mkdir -p aptarchive/Packages.diff
+diff --git a/test/integration/test-releasefile-valid-until b/test/integration/test-releasefile-valid-until
+index e673d5f..ba06e4d 100755
+--- a/test/integration/test-releasefile-valid-until
++++ b/test/integration/test-releasefile-valid-until
+@@ -16,7 +16,7 @@ getlabelfromsuite() {
+ setupaptarchive
+ 
+ setupreleasefile() {
+-	rm -rf rootdir/var/lib/apt/lists
++	rm -rf rootdir/var/cache/apt/lists
+ 	aptget clean
+ 	generatereleasefiles "$1" "$2"
+ 	signreleasefiles
+diff --git a/test/integration/test-releasefile-verification b/test/integration/test-releasefile-verification
+index e558b83..ef9c5cd 100755
+--- a/test/integration/test-releasefile-verification
++++ b/test/integration/test-releasefile-verification
+@@ -22,7 +22,7 @@ prepare() {
+ 			DATE='now - 7 day'
+ 		fi
+ 	fi
+-	for release in $(find rootdir/var/lib/apt/lists 2> /dev/null); do
++	for release in $(find rootdir/var/cache/apt/lists 2> /dev/null); do
+ 		touch -d 'now - 1 year' $release
+ 	done
+ 	aptget clean
+@@ -114,7 +114,7 @@ updatefailure() {
+ 
+ runtest() {
+ 	prepare ${PKGFILE}
+-	rm -rf rootdir/var/lib/apt/lists
++	rm -rf rootdir/var/cache/apt/lists
+ 	signreleasefiles 'Joe Sixpack'
+ 	find aptarchive/ -name "$DELETEFILE" -delete
+ 	msgtest 'Cold archive signed by' 'Joe Sixpack'
+@@ -133,7 +133,7 @@ runtest() {
+ 	installaptnew
+ 
+ 	prepare ${PKGFILE}
+-	rm -rf rootdir/var/lib/apt/lists
++	rm -rf rootdir/var/cache/apt/lists
+ 	cp keys/rexexpired.pub rootdir/etc/apt/trusted.gpg.d/rexexpired.gpg
+ 	signreleasefiles 'Rex Expired'
+ 	find aptarchive/ -name "$DELETEFILE" -delete
+@@ -145,7 +145,7 @@ runtest() {
+ 	rm rootdir/etc/apt/trusted.gpg.d/rexexpired.gpg
+ 
+ 	prepare ${PKGFILE}
+-	rm -rf rootdir/var/lib/apt/lists
++	rm -rf rootdir/var/cache/apt/lists
+ 	signreleasefiles 'Marvin Paranoid'
+ 	find aptarchive/ -name "$DELETEFILE" -delete
+ 	msgtest 'Cold archive signed by' 'Marvin Paranoid'
+@@ -156,7 +156,7 @@ runtest() {
+ 
+ 	prepare ${PKGFILE}-new
+ 	# weborf doesn't support If-Range
+-	for release in $(find rootdir/var/lib/apt/lists/partial/ -name '*Release'); do
++	for release in $(find rootdir/var/cache/apt/lists/partial/ -name '*Release'); do
+ 		rm $release
+ 		touch $release
+ 	done
+@@ -170,7 +170,7 @@ runtest() {
+ 
+ 
+ 	prepare ${PKGFILE}
+-	rm -rf rootdir/var/lib/apt/lists
++	rm -rf rootdir/var/cache/apt/lists
+ 	signreleasefiles 'Joe Sixpack'
+ 	find aptarchive/ -name "$DELETEFILE" -delete
+ 	msgtest 'Cold archive signed by' 'Joe Sixpack'
+@@ -211,7 +211,7 @@ runtest() {
+ 
+ runtest2() {
+ 	prepare ${PKGFILE}
+-	rm -rf rootdir/var/lib/apt/lists
++	rm -rf rootdir/var/cache/apt/lists
+ 	signreleasefiles 'Joe Sixpack'
+ 	msgtest 'Cold archive signed by' 'Joe Sixpack'
+ 	updatesuccess
+@@ -228,7 +228,7 @@ runtest2() {
+ 	failaptnew
+ 
+ 	# Unsigned archive from the beginning must also be detected.
+-	rm -rf rootdir/var/lib/apt/lists
++	rm -rf rootdir/var/cache/apt/lists
+ 	msgtest 'Cold archive signed by' 'nobody'
+ 	updatesuccess
+ 	testequal "$(cat ${PKGFILE}-new)
+diff --git a/test/integration/test-ubuntu-bug-346386-apt-get-update-paywall b/test/integration/test-ubuntu-bug-346386-apt-get-update-paywall
+index 7112d2b..06bf648 100755
+--- a/test/integration/test-ubuntu-bug-346386-apt-get-update-paywall
++++ b/test/integration/test-ubuntu-bug-346386-apt-get-update-paywall
+@@ -35,8 +35,8 @@ ensure_n_canary_strings_in_dir() {
+ 	test "$N" = "$EXPECTED_N" && msgpass || msgfail "Expected $EXPECTED_N canaries, got $N"
+ }
+ 
+-LISTS='rootdir/var/lib/apt/lists'
+-rm -rf rootdir/var/lib/apt/lists
++LISTS='rootdir/var/cache/apt/lists'
++rm -rf rootdir/var/cache/apt/lists
+ msgtest 'Got expected NODATA failure in' 'apt-get update'
+ aptget update -qq 2>&1 | grep -q 'E: GPG error.*NODATA' && msgpass || msgfail
+ 
+diff --git a/test/integration/test-ubuntu-bug-784473-InRelease-one-message-only b/test/integration/test-ubuntu-bug-784473-InRelease-one-message-only
+index 50ca2bf..ad489be 100755
+--- a/test/integration/test-ubuntu-bug-784473-InRelease-one-message-only
++++ b/test/integration/test-ubuntu-bug-784473-InRelease-one-message-only
+@@ -10,7 +10,7 @@ insertpackage 'unstable' 'apt' 'i386' '0.8.11'
+ 
+ setupaptarchive
+ 
+-rm -rf rootdir/var/lib/apt/lists
++rm -rf rootdir/var/cache/apt/lists
+ 
+ find aptarchive/ -name 'Release.gpg' -delete
+ find aptarchive/ -name 'InRelease' -exec cp {} {}.old \;
+diff --git a/test/libapt/configuration_test.cc b/test/libapt/configuration_test.cc
+index 647d8a4..a9792df 100644
+--- a/test/libapt/configuration_test.cc
++++ b/test/libapt/configuration_test.cc
+@@ -107,10 +107,10 @@ TEST(ConfigurationTest,DirsAndFiles)
+ 	EXPECT_EQ("/rootdir/srv/sid/var/lib/apt", Cnf.FindFile("Dir::State"));
+ 	EXPECT_EQ("/rootdir/srv/sid/var/lib/aptitude", Cnf.FindFile("Dir::Aptitude::State"));
+ 
+-	Cnf.Set("Dir::State", "/dev/null");
+-	Cnf.Set("Dir::State::lists", "lists/");
+-	EXPECT_EQ("/rootdir/dev/null", Cnf.FindDir("Dir::State"));
+-	EXPECT_EQ("/rootdir/dev/null", Cnf.FindDir("Dir::State::lists"));
++	Cnf.Set("Dir::Cache", "/dev/null");
++	Cnf.Set("Dir::Cache::lists", "lists/");
++	EXPECT_EQ("/rootdir/dev/null", Cnf.FindDir("Dir::Cache"));
++	EXPECT_EQ("/rootdir/dev/null", Cnf.FindDir("Dir::Cache::lists"));
+ }
+ TEST(ConfigurationTest,Vector)
+ {
+diff --git a/test/libapt/getlanguages_test.cc b/test/libapt/getlanguages_test.cc
+index c50ff6f..e71afb1 100644
+--- a/test/libapt/getlanguages_test.cc
++++ b/test/libapt/getlanguages_test.cc
+@@ -166,7 +166,7 @@ TEST(LanguagesTest,TranslationFiles)
+    createTranslation("ast_DE");
+    createTranslation("tlh%5fDE");
+ 
+-   _config->Set("Dir::State::lists", tempdir);
++   _config->Set("Dir::Cache::lists", tempdir);
+    std::vector<std::string> vec = APT::Configuration::getLanguages(true, false, env);
+    EXPECT_EQ(8, vec.size());
+    EXPECT_EQ("de_DE", vec[0]);
+@@ -190,7 +190,7 @@ TEST(LanguagesTest,TranslationFiles)
+    EXPECT_EQ("none", vec[0]);
+    _config->Set("Acquire::Languages", "");
+ 
+-   _config->Set("Dir::State::lists", "/non-existing-dir");
++   _config->Set("Dir::Cache::lists", "/non-existing-dir");
+    _config->Set("Acquire::Languages::1", "none");
+    env[0] = "de_DE.UTF-8";
+    vec = APT::Configuration::getLanguages(false, false, env);
+-- 
+1.7.10.4
+

@@ -1,0 +1,134 @@
+Index: atftp-0.7/tftp_file.c
+===================================================================
+--- atftp-0.7.orig/tftp_file.c	2011-11-16 13:31:24.267659251 +0100
++++ atftp-0.7/tftp_file.c	2011-11-21 13:07:35.455173548 +0100
+@@ -605,6 +612,7 @@
+      int timeout_state = state; /* what state should we go on when timeout */
+      int result;
+      long block_number = 0;
++     long last_requested_block = -1;
+      long last_block = -1;
+      int data_size;             /* size of data received */
+      int sockfd = data->sockfd; /* just to simplify calls */
+@@ -615,10 +623,10 @@
+      FILE *fp;                  /* the local file pointer */
+      int number_of_timeout = 0;
+      struct stat file_stat;
+-     int convert = 0;           /* if true, do netascii convertion */
++     int convert = 0;           /* if true, do netascii conversion */
+      char string[MAXLEN];
+ 
+-     long prev_block_number = 0; /* needed to support netascii convertion */
++     long prev_block_number = 0; /* needed to support netascii conversion */
+      long prev_file_pos = 0;
+      int temp = 0;
+ 
+@@ -634,7 +642,7 @@
+      /* copy sa_peer structure */
+      memcpy(&sa, &data->sa_peer, sizeof(sa));
+ 
+-     /* check to see if conversion is requiered */
++     /* check to see if conversion is required */
+      if (strcasecmp(data->tftp_options[OPT_MODE].value, "netascii") == 0)
+           convert = 1;
+ 
+@@ -758,13 +766,24 @@
+                     break;
+                case GET_ACK:
+                     number_of_timeout = 0;
+-                    /* if the socket if not connected, connect it */
++                    /* if the socket is not connected, connect it */
+                     if (!connected)
+                     {
+                          //connect(sockfd, (struct sockaddr *)&sa, sizeof(sa));
+                          connected = 1;
+                     }
+                     block_number = ntohs(tftphdr->th_block);
++
++                    if (last_requested_block >= block_number)
++                    {
++                        if (data->trace)
++                            fprintf(stderr, "received duplicated ACK <block: %ld >= %ld>\n",
++                                    last_requested_block, block_number);
++                        break;
++                    }
++                    else
++                        last_requested_block = block_number;
++
+                     if (data->trace)
+                          fprintf(stderr, "received ACK <block: %ld>\n",
+                                  block_number);
+@@ -777,7 +796,7 @@
+                     break;
+                case GET_OACK:
+                     number_of_timeout = 0;
+-                    /* if the socket if not connected, connect it */
++                    /* if the socket is not connected, connect it */
+                     if (!connected)
+                     {
+                          //connect(sockfd, (struct sockaddr *)&sa, sizeof(sa));
+Index: atftp-0.7/tftpd_file.c
+===================================================================
+--- atftp-0.7.orig/tftpd_file.c	2011-11-16 14:03:16.979755903 +0100
++++ atftp-0.7/tftpd_file.c	2011-11-21 12:48:01.264245650 +0100
+@@ -403,6 +403,7 @@
+      int timeout_state = state;
+      int result;
+      long block_number = 0;
++     long last_requested_block = -1;
+      long last_block = -1;
+      int block_loops = 0;
+      int data_size;
+@@ -455,7 +457,7 @@
+ #ifdef HAVE_PCRE
+      if (fp == NULL)
+      {
+-          /* Verify if this file have a working subsitution */
++          /* Verify if this file have a working substitution */
+           if (pcre_top != NULL)
+           {
+                if (tftpd_pcre_sub(pcre_top, string, MAXLEN,
+@@ -859,6 +861,17 @@
+                     {
+                          logger(LOG_DEBUG, "received ACK <block: %d>", block_number);
+                     }
++
++		    /* check whether the block request isn't already fulfilled */
++                    if (last_requested_block >= block_number)
++                    {
++                        if (data->trace)
++                            logger(LOG_DEBUG, "received duplicated ACK <block: %d >= %d>", last_requested_block, block_number);
++                        break;
++                    }
++                    else
++                        last_requested_block = block_number;
++
+                     if (ntohs(tftphdr->th_block) == 65535)
+                     {
+                          block_loops++;
+@@ -955,9 +968,11 @@
+                                 ntohs(client_info->client.sin_port));
+                          /* client is a new client structure */
+                          sa =  &client_info->client;
+-                         /* nedd to send an oack to that client */
++                         /* need to send an oack to that client */
+                          state = S_SEND_OACK;                
+                          fseek(fp, 0, SEEK_SET);
++			 /* reset the last block received counter */
++			 last_requested_block = -1;
+                     }
+                     else
+                     {
+Index: atftp-0.7/tftpd.c
+===================================================================
+--- atftp-0.7.orig/tftpd.c	2011-11-16 13:31:24.267659251 +0100
++++ atftp-0.7/tftpd.c	2011-11-21 12:48:01.273245910 +0100
+@@ -301,7 +308,7 @@
+           open_logger("atftpd", log_file, logging_level);
+      }
+ 
+-     /* We need to retieve some information from incomming packets */
++     /* We need to retrieve some information from incomming packets */
+      if (setsockopt(0, SOL_IP, IP_PKTINFO, &one, sizeof(one)) != 0)
+      {
+           logger(LOG_WARNING, "Failed to set socket option: %s", strerror(errno));

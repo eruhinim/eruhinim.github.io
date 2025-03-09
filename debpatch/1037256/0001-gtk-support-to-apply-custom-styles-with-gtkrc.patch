@@ -1,0 +1,100 @@
+From 22ba16ddf1f7246db8dd8da6deda53ef76f20a81 Mon Sep 17 00:00:00 2001
+From: Kentaro Hayashi <kenhys@xdump.org>
+Date: Mon, 23 Dec 2024 23:26:17 +0900
+Subject: [PATCH 1/2] gtk: support to apply custom styles with gtkrc
+
+In the previous versions, it does not support
+applying language specific custom style.
+
+Without custom style, it can't resolve language specific
+style issue such as Han unification.
+
+Because of Han unification, wrong font typefaces are
+rendered by default when you choose Japanese language
+using GUI installer.
+
+Most of typefaces are correct, but there are wrong
+typefaces (Simplified Chinese) which is used for widget rendering.
+
+Notably, even though "Continue" or "Back" button can't be rendered
+correctly.
+
+This issue [1] will not be solved by using DroidSansFallback.ttf
+(which is shipped by fonts-android udeb) for Japanese.
+
+It means that we need to switch font itself which contains Japanese
+typeface to fix this issue.
+
+In this commit, add fallback to apply custom gtkrc to
+override existing style.
+
+[1] Your Code Displays Japanese Wrong
+https://heistak.github.io/your-code-displays-japanese-wrong/
+
+Signed-off-by: Kentaro Hayashi <kenhys@xdump.org>
+---
+ src/modules/frontend/gtk/di.c | 34 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+
+diff --git a/src/modules/frontend/gtk/di.c b/src/modules/frontend/gtk/di.c
+index a6cb38f1..843624d4 100644
+--- a/src/modules/frontend/gtk/di.c
++++ b/src/modules/frontend/gtk/di.c
+@@ -45,6 +45,7 @@
+ 
+ #include <gtk/gtk.h>
+ #include <gdk/gdkkeysyms.h>
++#include <glib/gprintf.h>
+ 
+ #include "question.h"
+ #include "database.h"
+@@ -355,6 +356,36 @@ static GtkTextDirection get_text_direction(struct frontend * fe)
+     return direction;
+ }
+ 
++/** Set language specific style explicitly
++ *
++ * @param fe cdebconf frontend
++ */
++static void set_language_specific_style(struct frontend *fe)
++{
++    gchar rc_language_path[PATH_MAX];
++    gchar * rc_contents;
++    gsize length;
++    char * language = cdebconf_gtk_get_text(fe, "debconf/language",
++                                            "Current language for installer");
++    if (language) {
++        /* Apply language specific custom style, such as
++         * font name.
++         *
++         * Typically, it is required to resolve Han Unification issue
++         * for rendering Japanese typeface correctly.
++         *
++         * [1] https://wiki.debian.org/DebianInstaller/GUIFonts
++         */
++        g_snprintf(rc_language_path, PATH_MAX, "/etc/gtk-2.0/%s.gtkrc", language);
++        if (g_file_test(rc_language_path, G_FILE_TEST_IS_REGULAR)) {
++            if (g_file_get_contents(rc_language_path, &rc_contents, &length, NULL)) {
++                gtk_rc_parse_string(rc_contents);
++                g_free(rc_contents);
++            }
++        }
++    }
++}
++
+ /** Update various settings with the current language settings.
+  *
+  * @param fe cdebconf frontend
+@@ -365,6 +396,9 @@ static void refresh_language(struct frontend * fe)
+     gtk_rc_reparse_all();
+     /* Adapt text direction. */
+     gtk_widget_set_default_direction(get_text_direction(fe));
++
++    /* Override specific style supplementary */
++    set_language_specific_style(fe);
+ }
+ 
+ /** Update what needs to be updated on a new user interaction.
+-- 
+2.45.2
+

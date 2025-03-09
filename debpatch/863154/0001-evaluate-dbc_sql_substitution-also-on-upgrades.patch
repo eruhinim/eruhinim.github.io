@@ -1,0 +1,60 @@
+>From a8b2829d63e9386925e21fd4b4819b52719ba15b Mon Sep 17 00:00:00 2001
+From: Joerg Steffens <joerg.steffens@bareos.com>
+Date: Mon, 22 May 2017 16:20:30 +0200
+Subject: [PATCH 1/2] evaluate dbc_sql_substitution also on upgrades
+
+Until now, dbc_sql_substitution has only be evaluated on installations.
+This changes uses it also for sql upgrades.
+---
+ dpkg/postinst | 22 +++++++++++++++++++---
+ 1 file changed, 19 insertions(+), 3 deletions(-)
+
+diff --git a/dpkg/postinst b/dpkg/postinst
+index 6e54c3b..dfeb4c1 100644
+--- a/dpkg/postinst
++++ b/dpkg/postinst
+@@ -409,7 +409,7 @@ _dbc_find_upgrades(){
+ ## be applied, that is assumed to have been done by _dbc_find_upgrades().
+ ##
+ _dbc_apply_upgrades(){
+-    local f vers sqlfile admsqlfile scriptfile
++    local f vers sqlfile admsqlfile scriptfile tsubstfile error_msg_upgrade
+     _dbc_debug "_dbc_apply_upgrades() $@"
+     # check for new upgrades in these three locations
+     vers="$1"
+@@ -432,14 +432,30 @@ _dbc_apply_upgrades(){
+     _dbc_asuser=""
+     if [ -f "$admsqlfile" ]; then
+         dbc_logline "applying upgrade admin sql for $dbc_oldversion -> $vers"
+-        $dbc_sqlfile_cmd $admsqlfile || dbc_upgrade_error "processing $admsqlfile" || return $?
++        tsubstfile=$admsqlfile
++        error_msg_upgrade="processing $admsqlfile"
++        if [ "$dbc_sql_substitutions" ]; then
++            tsubstfile=$(dbc_mktemp)
++            /usr/sbin/dbconfig-generate-include -f template -o template_infile=$admsqlfile $dbc_packageconfig > $tsubstfile
++            error_msg_upgrade="processing $admsqlfile (translated: $tsubstfile)"
++        fi
++        $dbc_sqlfile_cmd $tsubstfile || dbc_upgrade_error "$error_msg_upgrade" || return $?
++        [ "$dbc_sql_substitutions" ] && rm -f $tsubstfile
+         [ "$dbc_tried_again" ] && return 0
+     fi
+ 
+     if [ -f "$sqlfile" ]; then
+         _dbc_asuser="yes"
+         dbc_logline "applying upgrade sql for $dbc_oldversion -> $vers"
+-        $dbc_sqlfile_cmd $sqlfile || dbc_upgrade_error "processing $sqlfile" || return $?
++        tsubstfile=$sqlfile
++        error_msg_upgrade="processing $sqlfile"
++        if [ "$dbc_sql_substitutions" ]; then
++            tsubstfile=$(dbc_mktemp)
++            /usr/sbin/dbconfig-generate-include -f template -o template_infile=$sqlfile $dbc_packageconfig > $tsubstfile
++            error_msg_upgrade="processing $sqlfile (translated: $tsubstfile)"
++        fi
++        $dbc_sqlfile_cmd $tsubstfile || dbc_upgrade_error "$error_msg_upgrade" || return $?
++        [ "$dbc_sql_substitutions" ] && rm -f $tsubstfile
+         [ "$dbc_tried_again" ] && return 0
+         _dbc_asuser=""
+     fi
+-- 
+2.7.4
+

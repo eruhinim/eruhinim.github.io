@@ -1,0 +1,115 @@
+From 4a0a75c6925b9d91f314760847855659b9429e45 Mon Sep 17 00:00:00 2001
+From: Iain Lane <iain.lane@canonical.com>
+Date: Mon, 6 Feb 2017 10:49:42 +0000
+Subject: [PATCH] WIP: autopkgtest-virt-qemu: Record kernel panics as failures
+
+In the auxverb, look for either the exit file being created, or for a
+kernel panic being outputted to the console, to know when the command is
+finished running.
+
+This is WIP because we can't run later commands (e.g. copyup) even if we
+manage to detect a panic.
+
+Closes: #851870
+---
+ virt/autopkgtest-virt-qemu | 61 ++++++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 54 insertions(+), 7 deletions(-)
+
+diff --git a/virt/autopkgtest-virt-qemu b/virt/autopkgtest-virt-qemu
+index 35c4990..432cce6 100755
+--- a/virt/autopkgtest-virt-qemu
++++ b/virt/autopkgtest-virt-qemu
+@@ -320,9 +320,12 @@ def make_auxverb(shared_dir):
+     auxverb = os.path.join(workdir, 'runcmd')
+     with open(auxverb, 'w') as f:
+         f.write('''#!%(py)s
++import asyncio, functools
+ import sys, os, tempfile, threading, time, atexit, shutil, fcntl, errno, pipes
+ import socket
+ 
++from concurrent.futures import CancelledError
++
+ dir_host = '%(dir)s'
+ job_host = tempfile.mkdtemp(prefix='job.', dir=dir_host)
+ atexit.register(shutil.rmtree, job_host)
+@@ -389,10 +392,49 @@ cmd = 'PYTHONHASHSEED=0 /tmp/eofcat %%(d)s/stdin_eof %%(d)s/exit.tmp < %%(d)s/st
+ s.send(cmd.encode())
+ 
+ # wait until command has exited
+-path_exit = os.path.join(job_host, 'exit')
+-while not os.path.exists(path_exit) or os.path.getsize(path_exit) == 0:
+-    time.sleep(0.2)
+-running = False
++@asyncio.coroutine
++def should_exit(data_future):
++    global running
++    path_exit = os.path.join(job_host, 'exit')
++    while not os.path.exists(path_exit) or os.path.getsize(path_exit) == 0:
++        yield from asyncio.sleep(0.2)
++    else:
++        running = False
++        # stop looking at ttyS0
++        data_future.cancel()
++
++# also quit early if the guest kernel panics
++@asyncio.coroutine
++def wait_for_data():
++    global running
++    # Register the open socket to wait for data
++    reader, writer = yield from asyncio.open_unix_connection(path="%(console)s")
++
++    # Wait for data
++    while True:
++        data = yield from reader.readline()
++
++        if b'Kernel panic - not syncing' in data:
++            running = False
++            return
++
++def future_done(cancelme, future):
++    # One of the futures finished
++    cancelme.cancel()
++
++try:
++    loop = asyncio.get_event_loop()
++
++    data_future = asyncio.async(wait_for_data())
++    exitfile = asyncio.async(should_exit(data_future))
++
++    g = asyncio.gather(data_future, exitfile, loop=loop)
++    data_future.add_done_callback(functools.partial(future_done, g))
++    exitfile.add_done_callback(functools.partial(future_done, g))
++
++    loop.run_until_complete(g)
++except CancelledError:
++    pass
+ 
+ # mop up terminal response
+ while True:
+@@ -405,15 +447,20 @@ while True:
+     time.sleep(0.05)
+ s.close()
+ 
+-with open(path_exit) as f:
+-    rc = int(f.read().strip())
++try:
++    with open(path_exit) as f:
++        rc = int(f.read().strip())
++except FileNotFoundError:
++    # this will happen in the case of a kernel panic (wait_for_data), which is
++    # a failure
++    rc = 1
+ 
+ t_stdin.join()
+ t_stdout.join()
+ t_stderr.join()
+ # code 255 means that the auxverb itself failed, so translate
+ sys.exit(rc == 255 and 253 or rc)
+-''' % {'py': sys.executable, 'tty': os.path.join(workdir, 'ttyS1'), 'dir': shared_dir})
++''' % {'py': sys.executable, 'console': os.path.join(workdir, 'ttyS0'), 'tty': os.path.join(workdir, 'ttyS1'), 'dir': shared_dir})
+ 
+     os.chmod(auxverb, 0o755)
+ 
+-- 
+2.10.2
+

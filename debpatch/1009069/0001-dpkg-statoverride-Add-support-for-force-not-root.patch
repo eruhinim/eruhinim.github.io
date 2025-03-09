@@ -1,0 +1,63 @@
+From 4b6cb4b25974afeee9523623dbdf02621db8389e Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Wed, 6 Apr 2022 23:02:37 +0200
+Subject: [PATCH] dpkg-statoverride: Add support for --force-not-root
+
+When installing a stat override, we are changing the user/group and mode
+for the pathname, which in most cases might require root privileges. Add
+support for the not-root force option, so that it can be used standalone
+or does not break when called within a maintscript on a not-root dpkg
+invocation.
+
+Based-on-patch-by: John Spencer <maillist-dpkg@barfooze.de>
+Closes: #1009069
+---
+ man/dpkg-statoverride.pod | 3 +++
+ src/statoverride/main.c   | 9 +++++++--
+ 2 files changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/man/dpkg-statoverride.pod b/man/dpkg-statoverride.pod
+index 4b5437f68..86c272c5d 100644
+--- a/man/dpkg-statoverride.pod
++++ b/man/dpkg-statoverride.pod
+@@ -134,6 +134,9 @@ Use platform-specific Mandatory Access Controls (MAC) based security when
+ installing files into the filesystem (since dpkg 1.19.5).
+ On Linux systems the implementation uses SELinux.
+ 
++B<not-root>:
++Try to (de)install things even when not root (since dpkg 1.21.8).
++
+ =item B<--force>
+ 
+ Force an action, even if a sanity check would otherwise prohibit it.
+diff --git a/src/statoverride/main.c b/src/statoverride/main.c
+index 1b3c998d4..747f1c160 100644
+--- a/src/statoverride/main.c
++++ b/src/statoverride/main.c
+@@ -105,6 +105,7 @@ usage(const struct cmdinfo *cip, const char *value)
+ }
+ 
+ #define FORCE_STATCMD_MASK \
++	FORCE_NON_ROOT | \
+ 	FORCE_SECURITY_MAC | FORCE_STATOVERRIDE_ADD | FORCE_STATOVERRIDE_DEL
+ 
+ static const char *admindir;
+@@ -185,9 +186,13 @@ statdb_node_remove(const char *filename)
+ static void
+ statdb_node_apply(const char *filename, struct file_stat *filestat)
+ {
+-	if (chown(filename, filestat->uid, filestat->gid) < 0)
++	int rc;
++
++	rc = chown(filename, filestat->uid, filestat->gid);
++	if (forcible_nonroot_error(rc) < 0)
+ 		ohshite(_("error setting ownership of '%.255s'"), filename);
+-	if (chmod(filename, filestat->mode & ~S_IFMT))
++	rc = chmod(filename, filestat->mode & ~S_IFMT);
++	if (forcible_nonroot_error(rc) < 0)
+ 		ohshite(_("error setting permissions of '%.255s'"), filename);
+ 
+ 	dpkg_selabel_load();
+-- 
+2.35.1
+

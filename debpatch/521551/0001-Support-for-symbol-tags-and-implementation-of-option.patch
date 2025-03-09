@@ -1,0 +1,482 @@
+From a93c9c0eaf45662f89997ec60a01ac635a3f10fe Mon Sep 17 00:00:00 2001
+From: Modestas Vainius <modestas@vainius.eu>
+Date: Sat, 18 Apr 2009 22:13:33 +0300
+Subject: [PATCH] Support for symbol tags and implementation of optional/arch tags.
+
+Symbols might be tagged with arbitary number of tags which are
+separated by '|' (aka pipe) character. Tags (only if there are any) must be
+enclosed in the () brackets right before symbol name. Tags can have arbitary
+number of arguments (parameters). Arguments follow the tag name after the '='
+character and are separated by commas (','). Arguments might be quoted with
+either " or ' characters if they contain special characters like  " ' | = , (
+). If the symbol specification has tags, the symbol name itself can be quoted
+too if it contains whitespaces (which are normally not allowed). If there are
+no tags, symbol name cannot be quoted (like before).
+
+Example of a quoted symbol with 3 tags:
+
+ (tag1="\"param1, val",,"param2"|tag2=param1|tag3)"Foo::Bar::foobar()"@Base 1.0 1
+
+As a result of tag support, a new parameter 'template' has been added to
+SymbolFile::dump(). If template is not set (default), dump() strips tags when
+dumping symbols . If template is set, dump() keeps tags in the output.
+
+The patch also adds support for two tags:
+
+* optional - a symbol marked as optional can disappear from the object file at
+  any time and that will never cause dpkg-gensymbols to fail (just emit the
+  diff).  If disappeared optional symbol is detected, it is dumped as MISSING
+  with deprecated string set to current package version (hence it always
+  appears in the dpkg-gensymbols diff). If optional symbol reappears, it gets
+  undeprecated but its minver is kept unchanged (contraty to reappearing
+  MISSING symbols).
+
+  Example. C++ template instantiation which disappearance is not ABI breaking
+  (i.e. basically it is private symbol):
+
+  (optional)_ZN6Phonon22ObjectDescriptionModelILNS_21ObjectDescriptionTypeE0EE11qt_metacastEPKc@Base 4:4.2.0
+
+* arch=<arch name or alias>,... AND !arch=<arch name or alias>,... - allows to
+  mark a symbol as arch-specific. When dumping in non-templace mode, only
+  symbols of the current host architecture are dumped. When dumping in template
+  mode, always all arch-specific symbols are dumped (including proper tags). If
+  arch-specific symbol appears on the arch that it is not supposed to appear,
+  it is made arch neutral.  If arch-specific symbol disappears from its arch,
+  it gets declared as MISSING.
+
+  Example. armel specific symbol due to qreal mangling as float on arm(el)
+  and double on other arches:
+
+  (!arch=armel)_ZN6Phonon11AudioOutput13volumeChangedEd@Base 4:4.2.0
+  (arch=armel)_ZN6Phonon11AudioOutput13volumeChangedEf@Base 4:4.2.0
+
+Signed-off-by: Modestas Vainius <modestas@vainius.eu>
+---
+ scripts/Dpkg/Shlibs/SymbolFile.pm |  302 +++++++++++++++++++++++++++++++------
+ scripts/dpkg-gensymbols.pl        |    8 +-
+ 2 files changed, 262 insertions(+), 48 deletions(-)
+
+diff --git a/scripts/Dpkg/Shlibs/SymbolFile.pm b/scripts/Dpkg/Shlibs/SymbolFile.pm
+index 4bd5bc8..459553b 100644
+--- a/scripts/Dpkg/Shlibs/SymbolFile.pm
++++ b/scripts/Dpkg/Shlibs/SymbolFile.pm
+@@ -1,4 +1,5 @@
+ # Copyright (C) 2007  Raphael Hertzog
++#           (C) 2009  Modestas Vainius
+ 
+ # This program is free software; you can redistribute it and/or modify
+ # it under the terms of the GNU General Public License as published by
+@@ -14,6 +15,213 @@
+ # with this program; if not, write to the Free Software Foundation, Inc.,
+ # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ 
++package Dpkg::Shlibs::SymbolFile::Symbol;
++
++use strict;
++use warnings;
++use Dpkg::Gettext;
++use Dpkg::Arch qw(debarch_is);
++use Dpkg::ErrorHandling;
++use Text::Balanced qw( extract_delimited extract_bracketed extract_multiple );
++
++sub new {
++    my ($cls, %args) = @_;
++    my $self = bless {
++        symbol => undef,
++        minver => undef,
++        dep_id => 0,
++        deprecated => 0,
++        tags => [],
++    }, $cls;
++    map { $self->{$_} = $args{$_} } keys %args;
++    return $self;
++}
++
++sub parse {
++    my ($self, $symbolspec) = @_;
++    my $symbol;
++    my $rest;
++
++    if ($symbolspec =~ /^\(/) {
++	# (tag1="\"param1, val",,"param2"|tag2=param1|tag3)"Foo::Bar::foobar()"@Base 1.0 1
++	my $tagspec;
++	($tagspec, $symbol) = extract_bracketed($symbolspec, '(\'")');
++
++	if (!defined $tagspec) {
++	    error(_g("missing tagspec closure ')' in the symbol specification: %s"), $symbolspec);
++	}
++	if (!$symbol) {
++	    error(_g("symbol name unspecified: %s"), $symbolspec);
++	}
++
++	my @tags;
++	my @tokens = extract_multiple($tagspec,
++	    [ sub { extract_delimited($_[0], q{'"}) },
++	      qr/[^"'|=,()]+/,
++	      qr/,/ ], undef, 0);
++
++	if (!(shift(@tokens) eq "(" &&  pop(@tokens) eq ")")) {
++	    error(_g("unbalanced brackets in the symbol tag specification: %s"), $tagspec);
++	}
++
++	# Parse tag specification
++	my $tag;
++	my $prev_token = '';
++	for my $token (@tokens) {
++	    if (!defined $tag) {
++		# New tag name
++		$tag = { name => $token, args => [] };
++		push @tags, $tag;
++	    } elsif ($token eq ",") {
++		# Args delimiter. Handle empty
++		if ($prev_token eq $token) {
++		    # Empty arg
++		    push @{$tag->{args}}, '';
++		}
++	    } elsif ($token eq "=") {
++		# Tag-arg delimiter. Do nothing
++	    } elsif ($token eq "|") {
++		# Tag delimiter, get ready for the next tag.
++		$tag = undef;
++	    } else {
++		# Argument
++		push @{$tag->{args}}, $token;
++	    }
++	    $prev_token = $token;
++	}
++	$self->{tags} = \@tags;
++
++	# If tag specification exists symbol name might be quoted (once) too
++	($symbol, $rest) = extract_delimited($symbol, '\'"');
++	$symbol = "" if (!defined $symbol);
++	if ($rest =~ m/^(\S+)(.*)$/) {
++	    $symbol .= $1;
++	    $rest = $2;
++	}
++	error(_g("symbol name unspecified: %s"), $symbolspec) if (!$symbol);
++    } else {
++	# No tag specification. Symbol name is up to the first space
++	# foobarsymbol@Base 1.0 1
++	if ($symbolspec =~ m/^(\S+)(.*)$/) {
++	    $symbol = $1;
++	    $rest = $2;
++	} else {
++	    return 0;
++	}
++    }
++    $self->{symbol} = $symbol;
++
++    # Now parse "the rest" (minver and dep_id)
++    if ($rest =~ /^\s(\S+)(?:\s(\d+))?/) {
++	$self->{minver} = $1;
++	$self->{dep_id} = $2;
++    } else {
++	return 0;
++    }
++    return 1;
++}
++
++sub get_name {
++    my $self = shift;
++    my $symbol = $self->{symbol};
++    $symbol =~ s/['"']//g;
++    return $symbol;
++}
++
++sub get_tags {
++    my $self = shift;
++    my @tags;
++    for my $tag (@{$self->{tags}}) {
++	push @tags, $tag if (grep { $tag->{name} eq $_ } @_ );
++    }
++    return @tags;
++}
++
++sub delete_tags {
++    my $self = shift;
++    if (@{$self->{tags}}) {
++	my @tags;
++	for my $tag (@{$self->{tags}}) {
++	    push @tags, $tag if (grep({ $tag->{name} eq $_ } @_) == 0);
++	}
++	if (@tags) {
++	    $self->{tags} = \@tags;
++	} else {
++	    delete $self->{tags};
++	}
++    }
++}
++
++sub get_tag_args {
++    my $self = shift;
++    my $tag = shift;
++    my @args;
++    for (@{$tag->{args}}) {
++	s/^["'](.*)["']$/$1/;
++	s/\\(["'])/$1/g;
++	push @args, $_;
++    }
++    return @args;
++}
++
++sub is_optional {
++    my $self = shift;
++    return scalar($self->get_tags("optional"));
++}
++
++sub is_arch_specific {
++    my $self = shift;
++    return scalar($self->get_tags('arch', '!arch'));
++}
++
++sub is_from_arch {
++    my ($self, $arch) = @_;
++    my $ret = 1;
++
++    return 1 if not defined $arch;
++
++    for my $tag (@{$self->{tags}}) {
++	if ($tag->{name} eq "arch") {
++	    $ret &&= grep { debarch_is($arch, $_) } $self->get_tag_args($tag);
++	} elsif ($tag->{name} eq "!arch") {
++	    $ret &&= ! grep { debarch_is($arch, $_) } $self->get_tag_args($tag);
++	}
++	return 0 if (!$ret);
++    }
++
++    return 1;
++}
++
++sub get_tagspec {
++    my ($self) = @_;
++    if (@{$self->{tags}}) {
++	my @tags;
++	for my $tag (@{$self->{tags}}) {
++	    if (@{$tag->{args}}) {
++	    	push @tags, $tag->{name} . "="  . join(",", @{$tag->{args}});
++	    } else {
++	    	push @tags, $tag->{name};
++	    }
++	}
++	return "(". join("|", @tags) . ")";
++    }
++    return "";
++}
++
++sub get_symbolspec {
++    my $self = shift;
++    my $with_tags = shift;
++    my $spec = "";
++    $spec .= "#MISSING: $self->{deprecated}#" if $self->{deprecated};
++    $spec .= " ";
++    $spec .= $self->get_tagspec() if ($with_tags);
++    # When dumping without tags, ensure symbolname is unquoted
++    $spec .= ($with_tags) ? $self->{symbol} : $self->get_name();
++    $spec .= " $self->{minver}";
++    $spec .= " $self->{dep_id}" if $self->{dep_id};
++    return $spec;
++}
++
+ package Dpkg::Shlibs::SymbolFile;
+ 
+ use Dpkg::Gettext;
+@@ -73,8 +281,9 @@ unwind_cpp_pr2 uread4 uread8 uwrite4 uwrite8));
+ sub new {
+     my $this = shift;
+     my $file = shift;
++    my %opts=@_;
+     my $class = ref($this) || $this;
+-    my $self = { };
++    my $self = \%opts;
+     bless $self, $class;
+     $self->clear();
+     if (defined($file) ) {
+@@ -117,38 +326,33 @@ sub load {
+         my $obj;
+         $current_object_ref = \$obj;
+     }
+-    local *object = $current_object_ref;
++    my $object = $current_object_ref;
+     while (defined($_ = <$sym_file>)) {
+ 	chomp($_);
+-	if (/^\s+(\S+)\s(\S+)(?:\s(\d+))?/) {
++
++	if (/^(?:\s+|#(?:DEPRECATED|MISSING): ([^#]+)#\s*)(.*)/) {
+ 	    if (not defined ($object)) {
+ 		error(_g("Symbol information must be preceded by a header (file %s, line %s)."), $file, $.);
+ 	    }
+-	    my $name = $1;
+-	    # New symbol
+-	    my $sym = {
+-		minver => $2,
+-		dep_id => defined($3) ? $3 : 0,
+-		deprecated => 0
+-	    };
+-	    if ($name =~ /^\*@(.*)$/) {
+-		error(_g("you can't use wildcards on unversioned symbols: %s"), $_) if $1 eq "Base";
+-		$self->{objects}{$object}{wildcards}{$1} = $sym;
++	    # Symbol specification
++	    my $deprecated = ($1) ? $1 : 0;
++	    my $sym = new Dpkg::Shlibs::SymbolFile::Symbol(deprecated => $deprecated);
++	    if ($sym->parse($2)) {
++		my $name = $sym->get_name();
++		if (!$deprecated && $name =~ /^\*@(.*)$/) {
++		    error(_g("you can't use wildcards on unversioned symbols: %s"), $_) if $1 eq "Base";
++		    $self->{objects}{$object}{wildcards}{$1} = $sym;
++		} else {
++		    $self->{objects}{$object}{syms}{$name} = $sym;
++		}
+ 	    } else {
+-		$self->{objects}{$object}{syms}{$name} = $sym;
++		warning(_g("Failed to parse a line in %s: %s"), $file, $_);
+ 	    }
+ 	} elsif (/^#include\s+"([^"]+)"/) {
+ 	    my $filename = $1;
+ 	    my $dir = $file;
+ 	    $dir =~ s{[^/]+$}{}; # Strip filename
+ 	    $self->load("$dir$filename", $seen, $current_object_ref);
+-	} elsif (/^#(?:DEPRECATED|MISSING): ([^#]+)#\s*(\S+)\s(\S+)(?:\s(\d+))?/) {
+-	    my $sym = {
+-		minver => $3,
+-		dep_id => defined($4) ? $4 : 0,
+-		deprecated => $1
+-	    };
+-	    $self->{objects}{$object}{syms}{$2} = $sym;
+ 	} elsif (/^#/) {
+ 	    # Skip possible comments
+ 	} elsif (/^\|\s*(.*)$/) {
+@@ -203,6 +407,7 @@ sub save {
+ 
+ sub dump {
+     my ($self, $fh, %opts) = @_;
++    $opts{template} = 0 unless exists $opts{template};
+     $opts{with_deprecated} = 1 unless exists $opts{with_deprecated};
+     foreach my $soname (sort keys %{$self->{objects}}) {
+ 	my @deps = @{$self->{objects}{$soname}{deps}};
+@@ -222,10 +427,10 @@ sub dump {
+ 	foreach my $sym (sort keys %{$self->{objects}{$soname}{syms}}) {
+ 	    my $info = $self->{objects}{$soname}{syms}{$sym};
+ 	    next if $info->{deprecated} and not $opts{with_deprecated};
+-	    print $fh "#MISSING: $info->{deprecated}#" if $info->{deprecated};
+-	    print $fh " $sym $info->{minver}";
+-	    print $fh " $info->{dep_id}" if $info->{dep_id};
+-	    print $fh "\n";
++	    # Do not dump symbols from foreign arch unless dumping a template.
++	    next if !$opts{template} && !$info->is_from_arch($self->{arch});
++	    # Dump symbol specification. Dump symbol tags only in template mode.
++	    print $fh $info->get_symbolspec($opts{template}), "\n";
+ 	}
+     }
+ }
+@@ -259,29 +464,31 @@ sub merge_symbols {
+ 	    if ($info->{deprecated}) {
+ 		# Symbol reappeared somehow
+ 		$info->{deprecated} = 0;
+-		$info->{minver} = $minver;
+-		next;
++		$info->{minver} = $minver if (!$info->is_optional());
++	    } else {
++		# We assume that the right dependency information is already
++		# there.
++		if (vercmp($minver, $info->{minver}) < 0) {
++		    $info->{minver} = $minver;
++		}
+ 	    }
+-	    # We assume that the right dependency information is already
+-	    # there.
+-	    if (vercmp($minver, $info->{minver}) < 0) {
+-		$info->{minver} = $minver;
++	    if (!$info->is_from_arch($self->{arch})) {
++		# Remove arch tags because they are incorrect.
++		$info->delete_tags("arch", "!arch");
+ 	    }
+ 	} else {
+ 	    # The symbol is new and not present in the file
+ 	    my $info;
+ 	    my $symobj = $dynsyms{$sym};
+-	    if ($symobj->{version} and exists $obj->{wildcards}{$symobj->{version}}) {
++	    my $w_obj = $obj->{wildcards}{$symobj->{version}};
++	    if ($symobj->{version} and defined $w_obj
++	        and $w_obj->is_from_arch($self->{arch})) {
+ 		# Get the info from wildcards
+ 		$info = $obj->{wildcards}{$symobj->{version}};
+ 		$self->{used_wildcards}++;
+ 	    } else {
+ 		# New symbol provided by the current release
+-		$info = {
+-		    minver => $minver,
+-		    deprecated => 0,
+-		    dep_id => 0
+-		};
++		$info = new Dpkg::Shlibs::SymbolFile::Symbol(symbol => $sym, minver => $minver);
+ 	    }
+ 	    $obj->{syms}{$sym} = $info;
+ 	}
+@@ -292,12 +499,16 @@ sub merge_symbols {
+     # the symbol was introduced)
+     foreach my $sym (keys %{$self->{objects}{$soname}{syms}}) {
+ 	if (! exists $dynsyms{$sym}) {
+-	    # Do nothing if already deprecated
+-	    next if $self->{objects}{$soname}{syms}{$sym}{deprecated};
+-
+ 	    my $info = $self->{objects}{$soname}{syms}{$sym};
+-	    if (vercmp($minver, $info->{minver}) > 0) {
+-		$self->{objects}{$soname}{syms}{$sym}{deprecated} = $minver;
++
++	    # Ignore symbols from foreign arch
++	    next if (!$info->is_from_arch($self->{arch}));
++
++	    if ($info->{deprecated}) {
++		# Bump deprecated if the symbol is optional.
++		$info->{deprecated} = $minver if ($info->is_optional());
++	    } elsif (vercmp($minver, $info->{minver}) > 0) {
++		$info->{deprecated} = $minver;
+ 	    }
+ 	}
+     }
+@@ -399,11 +610,14 @@ sub get_new_symbols {
+ 	my $mysyms = $self->{objects}{$soname}{syms};
+ 	next if not exists $ref->{objects}{$soname};
+ 	my $refsyms = $ref->{objects}{$soname}{syms};
+-	foreach my $sym (grep { not $mysyms->{$_}{deprecated} }
++	foreach my $sym (grep {  not $mysyms->{$_}{deprecated} and
++	                         not $mysyms->{$_}->is_optional() and
++				 $mysyms->{$_}->is_from_arch($self->{arch}) }
+ 	    keys %{$mysyms})
+ 	{
+ 	    if ((not exists $refsyms->{$sym}) or
+-		$refsyms->{$sym}{deprecated})
++		$refsyms->{$sym}{deprecated} or
++		not $refsyms->{$sym}->is_from_arch($self->{arch}) )
+ 	    {
+ 		push @res, {
+ 		    'soname' => $soname,
+diff --git a/scripts/dpkg-gensymbols.pl b/scripts/dpkg-gensymbols.pl
+index bebe0f7..968b108 100755
+--- a/scripts/dpkg-gensymbols.pl
++++ b/scripts/dpkg-gensymbols.pl
+@@ -125,8 +125,8 @@ if (not defined($oppackage)) {
+     $oppackage = $packages[0];
+ }
+ 
+-my $symfile = Dpkg::Shlibs::SymbolFile->new();
+-my $ref_symfile = Dpkg::Shlibs::SymbolFile->new();
++my $symfile = Dpkg::Shlibs::SymbolFile->new(undef, arch => $host_arch);
++my $ref_symfile = Dpkg::Shlibs::SymbolFile->new(undef, arch => $host_arch);
+ # Load source-provided symbol information
+ foreach my $file ($input, $output, "debian/$oppackage.symbols.$host_arch",
+     "debian/symbols.$host_arch", "debian/$oppackage.symbols",
+@@ -253,8 +253,8 @@ if ($compare) {
+ 	# and after
+ 	my $before = File::Temp->new(TEMPLATE=>'dpkg-gensymbolsXXXXXX');
+ 	my $after = File::Temp->new(TEMPLATE=>'dpkg-gensymbolsXXXXXX');
+-	$ref_symfile->dump($before, package => $oppackage);
+-        $symfile->dump($after, package => $oppackage);
++	$ref_symfile->dump($before, package => $oppackage, template => 1);
++	$symfile->dump($after, package => $oppackage, template => 1);
+ 	seek($before, 0, 0); seek($after, 0, 0);
+ 	my ($md5_before, $md5_after) = (Digest::MD5->new(), Digest::MD5->new());
+ 	$md5_before->addfile($before);
+-- 
+1.6.2.3
+

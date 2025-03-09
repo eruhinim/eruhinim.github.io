@@ -1,0 +1,166 @@
+From bddacb45a3a86b27d6fed0b8892b14520652994b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=A9my=20Bobbio?= <lunar@debian.org>
+Date: Sat, 6 Apr 2013 09:56:50 +0200
+Subject: [PATCH] Add support for backports
+
+The text added in apt-setup/services-select was adapted from
+apt-setup/backports for Ubuntu.
+---
+ debian/apt-setup-udeb.install   |    1 +
+ debian/apt-setup-udeb.templates |   16 +++++++--
+ debian/changelog                |    6 +++
+ generators/93backports          |   74 +++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 94 insertions(+), 3 deletions(-)
+ create mode 100755 generators/93backports
+
+diff --git a/debian/apt-setup-udeb.install b/debian/apt-setup-udeb.install
+index bc39edd..d3af6fd 100644
+--- a/debian/apt-setup-udeb.install
++++ b/debian/apt-setup-udeb.install
+@@ -5,3 +5,4 @@ generators/60local usr/lib/apt-setup/generators
+ generators/90services-select usr/lib/apt-setup/generators
+ generators/91security usr/lib/apt-setup/generators
+ generators/92updates usr/lib/apt-setup/generators
++generators/93backports usr/lib/apt-setup/generators
+diff --git a/debian/apt-setup-udeb.templates b/debian/apt-setup-udeb.templates
+index 811c0b7..6b7a9a3 100644
+--- a/debian/apt-setup-udeb.templates
++++ b/debian/apt-setup-udeb.templates
+@@ -32,6 +32,11 @@ Type: text
+ # :sl2:
+ _Description: Scanning the release updates repository...
+ 
++Template: apt-setup/progress/backports
++Type: text
++# :sl2:
++_Description: Scanning the backports repository...
++
+ Template: apt-setup/local/key-error
+ Type: select
+ Default: Retry
+@@ -73,13 +78,13 @@ _Description: Cannot access repository
+ # All services are enabled by default to allow preseeding
+ Template: apt-setup/services-select
+ Type: multiselect
+-Choices-C: security, updates
++Choices-C: security, updates, backports
+ # SEC_HOST and VOL_HOST are host names (e.g. security.debian.org)
+ # Translators: the *entire* string should be under 55 columns
+ # including host name. In short, KEEP THIS SHORT and, yes, that's tricky
+ # :sl1:
+-__Choices: security updates (from ${SEC_HOST}), release updates
+-Default: security, updates
++__Choices: security updates (from ${SEC_HOST}), release updates, backported software
++Default: security, updates, backports
+ # :sl1:
+ _Description: Services to use:
+  Debian has two services that provide updates to releases: security and
+@@ -92,6 +97,11 @@ _Description: Services to use:
+  relatively frequently and where not having the latest version could reduce
+  the usability of the software. It also provides regression fixes.
+  This service is only available for stable and oldstable releases.
++ .
++ Backported software are adapted from the development version to work with
++ this release. Although this software has not gone through such complete
++ testing as that contained in the release, it includes newer versions of
++ some applications which may provide useful features.
+ 
+ Template: apt-setup/multiarch
+ Type: string
+diff --git a/debian/changelog b/debian/changelog
+index adfbc62..b8863f1 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,3 +1,9 @@
++apt-setup (1:0.79~~backports1) UNRELEASED; urgency=low
++
++  * Add support for backports.
++
++ -- Jérémy Bobbio <lunar@debian.org>  Sat, 06 Apr 2013 09:54:51 +0200
++
+ apt-setup (1:0.78) unstable; urgency=low
+ 
+   [ Updated translations ]
+diff --git a/generators/93backports b/generators/93backports
+new file mode 100755
+index 0000000..f169025
+--- /dev/null
++++ b/generators/93backports
+@@ -0,0 +1,74 @@
++#!/bin/sh
++set -e
++
++. /usr/share/debconf/confmodule
++
++file="$1"
++
++db_get apt-setup/services-select
++if ! echo "$RET" | grep -q backports; then
++	exit
++fi
++
++if db_get mirror/codename && [ "$RET" ]; then
++	codename="$RET"
++	db_get mirror/suite
++	suite="$RET"
++
++	db_get mirror/protocol
++	protocol="$RET"
++	db_get mirror/$protocol/hostname
++	host="$RET"
++	db_get mirror/$protocol/directory
++	directory="/${RET#/}"
++else
++	db_get cdrom/codename
++	codename="$RET"
++	db_get cdrom/suite
++	suite="$RET"
++fi
++
++# To determine if non-free and contrib should be included, grep
++# the file to see if they are listed in it.
++dists="main"
++for dist in contrib non-free; do
++	if grep -q '^[^#]* '$dist $ROOT/etc/apt/sources.list.new; then
++		dists="$dists $dist"
++	fi
++done
++
++echo "# ${codename}-backports, previously on backports.debian.org" >> $file
++
++# Don't test mirror if no network selected in netcfg
++if  [ -n "$protocol" ] && [ -n "$host" ]; then
++	echo "deb $protocol://${host}${directory} ${codename}-backports $dists" >> $file
++else
++	echo "# A network mirror was not selected during install.  The following entries" >> $file
++	echo "# are provided as examples, but you should amend them as appropriate" >> $file
++	echo "# for your mirror of choice." >> $file
++	echo "#" >> $file
++	echo "# deb http://ftp.debian.org/debian/ ${codename}-backports $dists" >> $file
++fi
++if db_get netcfg/dhcp_options && \
++   [ "$RET" = "Do not configure the network at this time" ]; then
++	CODE=9
++else
++	CODE=0
++	export ASV_TIMEOUT="-o Acquire::http::Timeout=30"
++	if ! apt-setup-verify --from $PROGRESS_FROM --to $PROGRESS_TO $file; then
++		db_subst apt-setup/service-failed HOST "$host"
++		db_input critical apt-setup/service-failed || true
++		if ! db_go; then
++			exit 10 # back up
++		fi
++		CODE=9
++	fi
++fi
++
++if [ -n "$protocol" ] && [ -n "$host" ]; then
++	echo "deb-src $protocol://${host}${directory} ${codename}-backports $dists" >> $file
++else
++	echo "# deb-src http://ftp.debian.org/debian/ ${codename}-backports $dists" >> $file
++fi
++
++exit $CODE
+-- 
+1.7.2.5
+

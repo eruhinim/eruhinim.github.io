@@ -1,0 +1,85 @@
+diff -Nru bind9-9.7.1.dfsg.P2/debian/changelog bind9-9.7.1.dfsg.P2-parselimit/debian/changelog
+--- bind9-9.7.1.dfsg.P2/debian/changelog	2010-07-16 13:25:16.000000000 +0200
++++ bind9-9.7.1.dfsg.P2-parselimit/debian/changelog	2010-09-28 19:21:25.000000000 +0200
+@@ -1,3 +1,12 @@
++bind9 (1:9.7.1.dfsg.P2-3) unstable; urgency=low
++
++  * /lib/isccfg/include/isccfg/grammar.h, lib/isccfg/parser.c:
++    Limit the maximum number of include files that can be opened
++    simultaneously to prevent recursive includes (i.e. named.conf
++    with an 'include named.conf' statement) from working.
++
++ -- Javier Fernandez-Sanguino Pen~a <jfs@debian.org>  Tue, 28 Sep 2010 19:19:16 +0200
++
+ bind9 (1:9.7.1.dfsg.P2-2) unstable; urgency=low
+ 
+   * Correct conflicts for bind9-host
+diff -Nru bind9-9.7.1.dfsg.P2/lib/isccfg/include/isccfg/grammar.h bind9-9.7.1.dfsg.P2-parselimit/lib/isccfg/include/isccfg/grammar.h
+--- bind9-9.7.1.dfsg.P2/lib/isccfg/include/isccfg/grammar.h	2009-06-12 01:47:55.000000000 +0200
++++ bind9-9.7.1.dfsg.P2-parselimit/lib/isccfg/include/isccfg/grammar.h	2010-09-28 21:25:19.000000000 +0200
+@@ -203,6 +203,14 @@
+ 	 */
+ 	cfg_obj_t *	closed_files;
+ 
++        /* %
++         * Number of files that we are currently
++         * parsing, this is the length of the open_files
++         * stack. We keep this number in order to 
++         * detect infinite recursive includes.
++         */
++	unsigned int	open_files_count;
++
+ 	/*%
+ 	 * Current line number.  We maintain our own
+ 	 * copy of this so that it is available even
+diff -Nru bind9-9.7.1.dfsg.P2/lib/isccfg/parser.c bind9-9.7.1.dfsg.P2-parselimit/lib/isccfg/parser.c
+--- bind9-9.7.1.dfsg.P2/lib/isccfg/parser.c	2009-09-03 01:43:54.000000000 +0200
++++ bind9-9.7.1.dfsg.P2-parselimit/lib/isccfg/parser.c	2010-09-28 21:25:19.000000000 +0200
+@@ -395,6 +395,7 @@
+ 	pctx->errors = 0;
+ 	pctx->warnings = 0;
+ 	pctx->open_files = NULL;
++	pctx->open_files_count = 0;
+ 	pctx->closed_files = NULL;
+ 	pctx->line = 0;
+ 	pctx->callback = NULL;
+@@ -432,12 +433,22 @@
+ 	return (result);
+ }
+ 
++#define MAX_OPEN_FILES 100 /* How many open files we want to keep. */
++
+ static isc_result_t
+ parser_openfile(cfg_parser_t *pctx, const char *filename) {
+ 	isc_result_t result;
+ 	cfg_listelt_t *elt = NULL;
+ 	cfg_obj_t *stringobj = NULL;
+ 
++        /* Check wether the limit of open files has been exceeded */
++        pctx->open_files_count++;
++        if (pctx->open_files_count > MAX_OPEN_FILES)  {
++		cfg_parser_error(pctx, 0, "too many included files, last was: %s",
++			     filename);
++		goto cleanup;
++	}
++
+ 	result = isc_lex_openfile(pctx->lexer, filename);
+ 	if (result != ISC_R_SUCCESS) {
+ 		cfg_parser_error(pctx, 0, "open: %s: %s",
+@@ -449,6 +460,7 @@
+ 	CHECK(create_listelt(pctx, &elt));
+ 	elt->obj = stringobj;
+ 	ISC_LIST_APPEND(pctx->open_files->value.list, elt, link);
++            
+ 
+ 	return (ISC_R_SUCCESS);
+  cleanup:
+@@ -2118,6 +2130,8 @@
+ 						value.list, elt, link);
+ 				ISC_LIST_APPEND(pctx->closed_files->
+ 						value.list, elt, link);
++                                if (pctx->open_files_count > 0) 
++                                    pctx->open_files_count--;
+ 				goto redo;
+ 			}
+ 			pctx->seen_eof = ISC_TRUE;

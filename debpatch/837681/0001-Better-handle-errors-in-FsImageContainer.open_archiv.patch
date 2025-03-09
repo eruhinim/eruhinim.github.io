@@ -1,0 +1,92 @@
+From 0fdaa5ddabdf3846e56ab9c7af342fc2ffd1352b Mon Sep 17 00:00:00 2001
+From: Peter Oberndorfer <kumbayo84@arcor.de>
+Date: Sun, 21 May 2017 21:54:50 +0200
+Subject: [PATCH] Better handle errors in FsImageContainer.open_archive()
+
+Under some conditions GuestFS.launch() can fail.
+For example under Ubuntu 17.04 the linux kernel images under /boot/
+are only readable by root.
+https://bugs.launchpad.net/ubuntu/+source/linux/+bug/759725
+
+The failure is handled in open_archive but extract and
+close_archive are still called and do not handle the half initialized
+FsImageContainer.
+
+They throw the following exceptions when called:
+RuntimeError: tar_out: call launch before using this function.
+RuntimeError: umount_all: call launch before using this function
+
+Avoid this problem the following way:
+* If starting guestfs fails, raise a ContainerExtractionError.
+  This will cause the image to be compared as a raw file without
+  calling any other container extraction methods.
+  It will also leave information about the failed extraction in the result.
+* If guestfs is not available, return an empty array from get_member_names.
+  This will cause the image to be compared as a raw file.
+  It would be nice to raise a RequiredToolNotFound in this case
+  but currently it supports missing tools, but not missing python modules.
+
+This should help with
+https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=837681
+---
+ diffoscope/comparators/fsimage.py | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/diffoscope/comparators/fsimage.py b/diffoscope/comparators/fsimage.py
+index 028d8c6..e7f1334 100644
+--- a/diffoscope/comparators/fsimage.py
++++ b/diffoscope/comparators/fsimage.py
+@@ -22,6 +22,7 @@ import logging
+ import os.path
+ 
+ from diffoscope.difference import Difference
++from diffoscope.exc import ContainerExtractionError
+ 
+ from .utils.file import File
+ from .utils.archive import Archive
+@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
+ 
+ class FsImageContainer(Archive):
+     def open_archive(self):
++        self.launched = False
+         if not guestfs:
+             return None
+ 
+@@ -47,25 +49,31 @@ class FsImageContainer(Archive):
+         self.g.add_drive_opts (self.source.path, format="raw", readonly=1)
+         try:
+             self.g.launch()
+-        except RuntimeError:
++        except RuntimeError as exc:
+             logger.exception("guestfs can't be launched")
+             logger.error("If memory is too tight for 512 MiB, try running with LIBGUESTFS_MEMSIZE=256 or lower.")
+-            return None
++            self.g.close()
++            self.g = None
++            raise ContainerExtractionError(self.source.path, exc)
++        self.launched = True
+         devices = self.g.list_devices()
+         self.g.mount(devices[0], "/")
+         self.fs = self.g.list_filesystems()[devices[0]]
+         return self
+ 
+     def close_archive(self):
+-        if not guestfs:
++        if not guestfs or not self.launched:
+             return None
+         self.g.umount_all()
+         self.g.close()
+ 
+     def get_member_names(self):
++        if not guestfs or not self.launched:
++            return []
+         return [os.path.basename(self.source.path) + '.tar']
+ 
+     def extract(self, member_name, dest_dir):
++        assert guestfs and self.launched
+         dest_path = os.path.join(dest_dir, member_name)
+         logger.debug('filesystem image extracting to %s', dest_path)
+         self.g.tar_out("/", dest_path)
+-- 
+2.11.0
+

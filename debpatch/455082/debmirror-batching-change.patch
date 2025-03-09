@@ -1,0 +1,634 @@
+--- /usr/bin/debmirror	2007-11-12 16:01:19.000000000 -0800
++++ /home/kees/bin/new-debmirror	2007-11-29 17:42:14.907059447 -0800
+@@ -610,15 +609,23 @@
+ foreach my $dist (@dists) {
+   make_dir ("dists/$dist");
+   make_dir ("$tempdir/dists/$dist");
+-  remote_get("dists/$dist/Release");
++  $files{"dists/$dist/Release"}=0;
++  if (!$ignore_release_gpg) {
++    $files{"dists/$dist/Release.gpg"}=0;
++  }
++}
++
++chdir($tempdir) or die "unable to chdir($tempdir): $!\n";
++batch_get();
++chdir($mirrordir) or die "unable to chdir($mirrordir): $!\n";
++
++foreach my $dist (@dists) {
+   $files{"dists/$dist/Release"}=1;
+   $files{$tempdir."/"."dists/$dist/Release"}=1;
+-  my $t = $num_errors;
+-  remote_get("dists/$dist/Release.gpg");
+-  $files{"dists/$dist/Release.gpg"}=1;
+-  $files{$tempdir."/"."dists/$dist/Release.gpg"}=1;
+   # Check for gpg
+   if (!$ignore_release_gpg) {
++    $files{"dists/$dist/Release.gpg"}=1;
++    $files{$tempdir."/"."dists/$dist/Release.gpg"}=1;
+     if (system("gpgv --version >/dev/null 2>/dev/null")) {
+       say("gpgv failed: --ignore-release-gpg or gpgv binary missing?");
+       push (@errlog,"gpgv failed: --ignore-release-gpg or gpgv binary missing?\n");
+@@ -649,7 +656,6 @@
+       $num_errors++;
+     }
+   }
+-  $num_errors=$t if ($ignore_release_gpg);
+ 
+   # Parse the Release
+   if (open RELEASE, "<$tempdir/dists/$dist/Release") {
+@@ -734,20 +740,98 @@
+ say("Get Packages and Sources files and other miscellany.");
+ # Get Packages and Sources files and other miscellany.
+ my (@package_files, @source_files);
+-foreach my $dist (@dists) {
+-  foreach my $section (@sections) {
+-    # no d-i in woody
+-    next if ($section =~ /debian-installer/ && $dist eq "woody");
+-    next if ($section =~ /debian-installer/ && $dist eq "experimental");
+-    next if ($section =~ /debian-installer/ && $dist =~ /.*-proposed-updates/);
+-    next if ($section =~ /debian-installer/ && $dist =~ /.*breezy-updates/ );
+-    next if ($section =~ /debian-installer/ && $dist eq "breezy-security" );
+-    foreach my $arch (@arches) {
+-      get_index("dists/$dist/$section/binary-$arch", "Packages");
++sub process_dists {
++  my $process_func = shift;
++  my $extension = shift;
++
++  my $okay = 1;
++  foreach my $dist (@dists) {
++    foreach my $section (@sections) {
++      # no d-i in woody
++      next if ($section =~ /debian-installer/ && $dist eq "woody");
++      next if ($section =~ /debian-installer/ && $dist eq "experimental");
++      next if ($section =~ /debian-installer/ && $dist =~ /.*-proposed-updates/);
++      next if ($section =~ /debian-installer/ && $dist =~ /.*breezy-updates/ );
++      next if ($section =~ /debian-installer/ && $dist eq "breezy-security" );
++      foreach my $arch (@arches) {
++        $okay = 0 unless &{$process_func}("dists/$dist/$section/binary-$arch", "Packages", $extension);
++      }
++      if ($do_source) {
++        $okay = 0 unless &{$process_func}("dists/$dist/$section/source", "Sources", $extension);
++      }
+     }
+-    get_index("dists/$dist/$section/source", "Sources") if ($do_source);
+   }
++  return $okay;
++}
++
++sub want_packages
++{
++  my $subdir = shift;
++  my $file = shift;
++  my $ext  = shift;
++
++  make_dir("$subdir");
++  make_dir("$tempdir/$subdir");
++
++  $files{"$subdir/$file$ext"}=0;
++
++  return 1;
++}
++
++# Fetch pdiffs
++process_dists(\&handle_index, "");
++
++# Collect releases
++my $need_releases = 0;
++sub handle_releases {
++  my $subdir = shift;
++  my $file = shift;
++
++  if (!check_lists ("$tempdir/$subdir/Release")) {
++    if (exists $file_lists_size{"$tempdir/$subdir/Release"}) {
++      say("$subdir/Release needs fetch");
++    }
++    else {
++      say("$subdir/Release failed md5sum check, removing");
++      push (@errlog,"$subdir/Release failed md5sum check, removing\n");
++      unlink "$tempdir/$subdir/Release";
++    }
++    $files{"$subdir/Release"}=0;
++    $need_releases = 1;
++  }
++  else {
++    $files{"$subdir/Release"}=1;
++    $files{"$tempdir/$subdir/Release"}=1;
++  }
++  return 1;
++}
++# Mark missing Releases
++process_dists(\&handle_releases, "");
++if ($need_releases) {
++    chdir($tempdir) or die "unable to chdir($tempdir): $!\n";
++    batch_get();
++    chdir($mirrordir) or die "unable to chdir($mirrordir): $!\n";
++    # Mark fetched Releases
++    process_dists(\&handle_releases, "");
++}
++
++# Collect package lists
++my $failed = 0;
++foreach my $ext (".bz2", "gz", "") {
++  process_dists(\&want_packages, $ext);
++
++  chdir($tempdir) or die "unable to chdir($tempdir): $!\n";
++  batch_get();
++  chdir($mirrordir) or die "unable to chdir($mirrordir): $!\n";
++
++  # Process package lists
++  last if process_dists(\&check_packages, $ext);
++
++  $failed = 1;
+ }
++
++die "Could not fetch Packages files" if ($failed);
++
+ foreach (@extra_dirs) {
+   get_packages($_, "Packages");
+   get_sources($_, "Sources") if ($do_source);
+@@ -897,152 +981,8 @@
+ cleanup_unknown_files() if ($cleanup && ! $post_cleanup);
+ 
+ say("Download all files that we need to get (".int(1+$bytes_to_get/1024/1024)." MiB).");
+-# Download all files that we need to get.
+-DOWNLOAD: {
+-  init_connection;
+-  $_ = $download_method;
+ 
+-  /^hftp$/ && do {
+-    # LWP stuff
+-    my $dirname;
+-    my $i=0;
+-    foreach my $file (sort keys %files) {
+-      if (!$files{$file}) {
+-	if (($dirname) = $file =~ m:(.*)/:) {
+-	  make_dir($dirname);
+-	}
+-	hftp_get($file);
+-	if ($max_batch > 0 && ++$i >= $max_batch) {
+-	  push (@errlog,"Batch limit exceeded, mirror run was partial\n");
+-	  $num_errors++;
+-	  last;
+-	}
+-      }
+-    }
+-    last DOWNLOAD;
+-  };
+-
+-  /^http$/ && do {
+-    # LWP stuff
+-    my $dirname;
+-    my $i=0;
+-    foreach my $file (sort keys %files) {
+-      if (!$files{$file}) {
+-	if (($dirname) = $file =~ m:(.*)/:) {
+-	  make_dir($dirname);
+-	}
+-	http_get($file);
+-	if ($max_batch > 0 && ++$i >= $max_batch) {
+-	  push (@errlog,"Batch limit exceeded, mirror run was partial\n");
+-	  $num_errors++;
+-	  last;
+-	}
+-      }
+-    }
+-    last DOWNLOAD;
+-  };
+-
+-  # Ftp method
+-  /^ftp$/ && do {
+-    my $dirname;
+-    my $i=0;
+-    foreach my $file (sort keys %files) {
+-      if (!$files{$file}) {
+-	if (($dirname) = $file =~ m:(.*)/:) {
+-	  make_dir($dirname);
+-	}
+-	ftp_get($file);
+-	if ($max_batch > 0 && ++$i >= $max_batch) {
+-	  push (@errlog,"Batch limit exceeded, mirror run was partial\n");
+-	  $num_errors++;
+-	  last;
+-	}
+-      }
+-    }
+-    last DOWNLOAD;
+-  };
+-
+-  # Rsync method
+-  /^rsync$/ && do {
+-    my $opt=$rsync_options;
+-    my $fh;
+-    my @result;
+-    my $i=0;
+-    my $j=0;
+-    $opt = "$opt --progress" if $progress;
+-    $opt = "$opt -v" if $verbose;
+-    $opt = "$opt -v" if $debug;
+-    $opt = "$opt -n" if $dry_run;
+-    foreach my $file (sort keys %files) {
+-      if (!$files{$file}) {
+-	my $dirname;
+-	my @dir;
+-	($dirname) = $file =~ m:(.*/):;
+-	@dir= split(/\//, $dirname);
+-	for (0..$#dir) {
+-	  push (@result, "" . join('/', @dir[0..$_]) . "/");
+-	}
+-	push (@result, "$file");
+-	if (++$j >= $rsync_batch) {
+-	  $j = 0;
+-	  ($fh, $rsynctempfile) = tempfile();
+-	  if (@result) {
+-	    @result = sort(@result);
+-	    my $prev = "not equal to $result[0]";
+-	    @result = grep($_ ne $prev && ($prev = $_, 1), @result);
+-	    for (@result) {
+-	      print $fh "$_\n";
+-	    }
+-	  }
+-	  system ("rsync --timeout=$timeout $opt $remoteroot --include-from=$rsynctempfile --exclude='*' $mirrordir");
+-	  close $fh;
+-	  unlink $rsynctempfile;
+-	  foreach my $dest (@result) {
+-	    if (-f $dest) {
+-	      if (!check_lists($dest)) {
+-		say("$dest failed md5sum check");
+-		$num_errors++;
+-	      }
+-	    } elsif (!-d $dest) {
+-	      say("$dest missing");
+-	      $num_errors++;
+-	    }
+-	  }
+-	  @result = ();
+-	}
+-	if ($max_batch > 0 && ++$i >= $max_batch) {
+-	  print "Batch limit exceeded, mirror run will be partial\n";
+-	  push (@errlog,"Batch limit exceeded, mirror run was partial\n");
+-	  $num_errors++;
+-	  last;
+-	}
+-      }
+-    }
+-    ($fh, $rsynctempfile) = tempfile();
+-    if (@result) {
+-      @result = sort(@result);
+-      my $prev = "not equal to $result[0]";
+-      @result = grep($_ ne $prev && ($prev = $_, 1), @result);
+-      for (@result) {
+-	print $fh "$_\n";
+-      }
+-      system ("rsync --timeout=$timeout $opt $remoteroot --include-from=$rsynctempfile --exclude='*' $mirrordir");
+-      close $fh;
+-      foreach my $dest (@result) {
+-	if (-f $dest) {
+-	  if (!check_lists($dest)) {
+-	    say("$dest failed md5sum check");
+-	    $num_errors++;
+-	  }
+-	} elsif (!-d $dest) {
+-	  say("$dest missing");
+-	  $num_errors++;
+-	}
+-      }
+-    }
+-    last DOWNLOAD;
+-  };
+-}
++batch_get();
+ 
+ # Finish up. Write out trace file.
+ if ($download_method eq 'ftp') { $ftp->quit; }
+@@ -1205,6 +1145,7 @@
+       if (!$res) {
+ 	say("$file failed md5sum check");
+ 	# FIXME: make sure the size doesn't match so it gets retried
++	unlink($file) if (-f $file);
+       }
+     };
+   }
+@@ -1340,7 +1281,7 @@
+   }
+   $opt = "$opt --progress" if $progress;
+   $opt = "$opt -v" if $debug;
+-  system ("rsync --timeout=$timeout $opt $remoteroot --include=$file --exclude='*' .");
++  system ("rsync --no-motd --timeout=$timeout $opt $remoteroot --include=$file --exclude='*' .");
+   if ($? == 0 && -f $file) {
+     return 1;
+   } else {
+@@ -1350,6 +1291,149 @@
+   }
+ }
+ 
++sub batch_get {
++  # Download all files that we need to get.
++  DOWNLOAD: {
++    init_connection;
++    $_ = $download_method;
++  
++    /^hftp$/ && do {
++      # LWP stuff
++      my $dirname;
++      my $i=0;
++      foreach my $file (sort keys %files) {
++        if (!$files{$file}) {
++          if (($dirname) = $file =~ m:(.*)/:) {
++            make_dir($dirname);
++          }
++          hftp_get($file);
++          if ($max_batch > 0 && ++$i >= $max_batch) {
++            push (@errlog,"Batch limit exceeded, mirror run was partial\n");
++            $num_errors++;
++            last;
++          }
++        }
++      }
++      last DOWNLOAD;
++    };
++  
++    /^http$/ && do {
++      # LWP stuff
++      my $dirname;
++      my $i=0;
++      foreach my $file (sort keys %files) {
++        if (!$files{$file}) {
++          if (($dirname) = $file =~ m:(.*)/:) {
++            make_dir($dirname);
++          }
++          http_get($file);
++          if ($max_batch > 0 && ++$i >= $max_batch) {
++            push (@errlog,"Batch limit exceeded, mirror run was partial\n");
++            $num_errors++;
++            last;
++          }
++        }
++      }
++      last DOWNLOAD;
++    };
++  
++    # Ftp method
++    /^ftp$/ && do {
++      my $dirname;
++      my $i=0;
++      foreach my $file (sort keys %files) {
++        if (!$files{$file}) {
++          if (($dirname) = $file =~ m:(.*)/:) {
++            make_dir($dirname);
++          }
++          ftp_get($file);
++          if ($max_batch > 0 && ++$i >= $max_batch) {
++            push (@errlog,"Batch limit exceeded, mirror run was partial\n");
++            $num_errors++;
++            last;
++          }
++        }
++      }
++      last DOWNLOAD;
++    };
++  
++    # Rsync method
++    /^rsync$/ && do {
++      my $opt=$rsync_options;
++      my $fh;
++      my @result;
++      my $i=0;
++      my $j=0;
++      my @tofetch;
++      $opt = "$opt --progress" if $progress;
++      $opt = "$opt -v" if $verbose;
++      $opt = "$opt -v" if $debug;
++      $opt = "$opt -n" if $dry_run;
++
++      foreach my $file (sort keys %files) {
++        if (!$files{$file}) {
++            push(@tofetch,$file);
++        }
++      }
++      my $last = scalar(@tofetch);
++      foreach my $file (@tofetch) {
++          my $dirname;
++          my @dir;
++          ($dirname) = $file =~ m:(.*/):;
++          @dir= split(/\//, $dirname);
++          for (0..$#dir) {
++            push (@result, "" . join('/', @dir[0..$_]) . "/");
++          }
++          push (@result, "$file");
++          $i++;
++          $j++;
++          say("want $file ($i/$last $j/$rsync_batch)");
++          if ($j >= $rsync_batch || $i ==  $last) {
++            $j = 0;
++            ($fh, $rsynctempfile) = tempfile();
++            if (@result) {
++              @result = sort(@result);
++              my $prev = "not equal to $result[0]";
++              @result = grep($_ ne $prev && ($prev = $_, 1), @result);
++              for (@result) {
++                print $fh "$_\n";
++              }
++            }
++            system ("rsync --no-motd --timeout=$timeout $opt $remoteroot --include-from=$rsynctempfile --exclude='*' .");
++            if ($? != 0) {
++                die "rsync failed!";
++            }
++            close $fh;
++            unlink $rsynctempfile;
++            foreach my $dest (@result) {
++              if (-f $dest) {
++                if (!check_lists($dest)) {
++                  my $errstr = "$dest failed md5sum check";
++                  say($errstr);
++                  push (@errlog,$errstr."\n");
++                  $num_errors++;
++                }
++              } elsif (!-d $dest) {
++                my $errstr = "$dest missing";
++                say($errstr);
++                  push (@errlog,$errstr."\n");
++                $num_errors++;
++              }
++            }
++            @result = ();
++          }
++          if ($max_batch > 0 && $i >= $max_batch) {
++            print "Batch limit exceeded, mirror run will be partial\n";
++            push (@errlog,"Batch limit exceeded, mirror run was partial\n");
++            $num_errors++;
++            last;
++          }
++      }
++      last DOWNLOAD;
++    };
++  }
++}
++
+ # run system() with stdin and stdout redirected to files
+ # unlinks stdout target file first to break hard links
+ sub system_redirect_io {
+@@ -1358,15 +1442,17 @@
+   if (-f $tofile) {
+     unlink($tofile) or die "unlink($tofile) failed: $!";
+   }
++  say("$command <$fromfile >$tofile");
+   system("$command <$fromfile >$tofile");
++  if ($? != 0) {
++    die "Failed: $command <$fromfile >$tofile\n";
++  }
++  
+ }
+ 
+-# Get Index file in the passed subdirectory.
+-sub get_index {
++sub handle_index {
+   my $subdir=shift;
+   my $file=shift;
+-  make_dir($subdir);
+-  make_dir("$tempdir/$subdir");
+ 
+   if (!($pdiff_mode eq "none") && exists $file_lists_size{"$tempdir/$subdir/$file.diff/Index"}) {
+     if (!check_lists ("$tempdir/$subdir/$file.diff/Index")) {
+@@ -1395,76 +1481,46 @@
+     $files{"$subdir/$file.diff/Index"}=1 if ($pdiff_mode eq "mirror");
+     $files{"$tempdir/$subdir/$file.diff/Index"}=1;
+   }
++  return 1;
++}
+ 
+-  if (exists $file_lists_size{"$tempdir/$subdir/$file.gz"}) {
+-    if (!check_lists ("$tempdir/$subdir/$file.gz")) {
+-      say("$subdir/$file.gz needs fetch");
+-      remote_get("$subdir/$file.gz");
+-      if (check_lists ("$tempdir/$subdir/$file.gz")) {
+-	system_redirect_io("gzip -d", "$tempdir/$subdir/$file.gz", "$tempdir/$subdir/$file");
+-	system_redirect_io("bzip2", "$tempdir/$subdir/$file", "$tempdir/$subdir/$file.bz2");
+-      } else {
+-	say("$subdir/$file.gz failed md5sum check");
+-	push (@errlog,"$subdir/$file.gz failed md5sum check\n");
+-	$num_errors++;
+-      }
+-    } else {
+-      $bytes_gotten += $file_lists_size{"$tempdir/$subdir/$file.gz"};
+-    }
+-  } elsif ($ignore_release) {
+-    say("Ignoring missing Release file for $subdir/$file.gz");
+-    push (@errlog,"Ignoring missing Release file for $subdir/$file.gz\n");
+-    say("$subdir/$file.gz needs fetch");
+-    remote_get("$subdir/$file.gz");
+-  } else {
+-    if (-f "$subdir/$file.gz") {
+-      say("$subdir/$file.gz exists locally but not in Release");
+-      die "Won't mirror without $subdir/$file.gz signature in Release";
+-    } else {
+-      say("$subdir/$file.gz does not exist locally or in Release, skipping.") if ($debug);
+-    }
+-  }
+-  if (exists $file_lists_size{"$tempdir/$subdir/$file"}) {
+-    if (!check_lists ("$tempdir/$subdir/$file")) {
+-      say("$subdir/$file needs fetch");
+-      remote_get("$subdir/$file");
+-      if (check_lists ("$tempdir/$subdir/$file")) {
+-	system_redirect_io("bzip2", "$tempdir/$subdir/$file", "$tempdir/$subdir/$file.bz2");
+-      } else {
+-	say("$subdir/$file failed md5sum check");
+-	push (@errlog,"$subdir/$file failed md5sum check\n");
+-	$num_errors++;
+-      }
+-    } else {
+-      $bytes_gotten += $file_lists_size{"$tempdir/$subdir/$file"};
++# Check packages files
++sub check_packages {
++    my $subdir=shift;
++    my $file=shift;
++    my $ext=shift;
++
++    if (check_lists ("$tempdir/$subdir/$file$ext")) {
++        # File was fetched happily, convert it to other extension types
++
++        if ($ext eq ".bz2") {
++            if (!check_lists ("$tempdir/$subdir/$file")) {
++              system_redirect_io("bzip2 -d", "$tempdir/$subdir/$file.bz2", "$tempdir/$subdir/$file");
++              system_redirect_io("gzip -9 -n", "$tempdir/$subdir/$file", "$tempdir/$subdir/$file.gz");
++            }
++        }
++        elsif ($ext eq ".gz") {
++            if (!check_lists ("$tempdir/$subdir/$file")) {
++              system_redirect_io("gzip -d", "$tempdir/$subdir/$file.gz", "$tempdir/$subdir/$file");
++              system_redirect_io("bzip2 -9", "$tempdir/$subdir/$file", "$tempdir/$subdir/$file.bz2");
++            }
++        }
++        elsif ($ext eq "") {
++            system_redirect_io("gzip -9 -n", "$tempdir/$subdir/$file", "$tempdir/$subdir/$file.gz");
++	        system_redirect_io("bzip2 -9", "$tempdir/$subdir/$file", "$tempdir/$subdir/$file.bz2");
++        }
++        else {
++            die "Yeow: unknown extention '$ext'";
++        }
++
++        if (!check_lists ("$tempdir/$subdir/$file")) {
++            die "md5sum of $subdir/$file failed!?";
++        }
+     }
+-  }
+-  if (exists $file_lists_size{"$tempdir/$subdir/$file.bz2"}) {
+-    if (!check_lists ("$tempdir/$subdir/$file.bz2")) {
+-      say("$subdir/$file.bz2 needs fetch");
+-      remote_get("$subdir/$file.bz2");
+-      if (!check_lists ("$tempdir/$subdir/$file.bz2")) {
+-	say("$subdir/$file.bz2 failed md5sum check, removing");
+-	push (@errlog,"$subdir/$file.bz2 failed md5sum check, removing\n");
+-	unlink "$tempdir/$subdir/$file.bz2";
+-      }
+-    } else {
+-      $bytes_gotten += $file_lists_size{"$tempdir/$subdir/$file.bz2"};
+-    }
+-  }
+-  if (exists $file_lists_size{"$tempdir/$subdir/Release"}) {
+-    if (!check_lists ("$tempdir/$subdir/Release")) {
+-      say("$subdir/Release needs fetch");
+-      remote_get("$subdir/Release");
+-      if (!check_lists ("$tempdir/$subdir/Release")) {
+-	say("$subdir/Release failed md5sum check, removing");
+-	push (@errlog,"$subdir/Release failed md5sum check, removing\n");
+-	unlink "$tempdir/$subdir/Release";
+-      }
+-    } else {
+-      $bytes_gotten += $file_lists_size{"$tempdir/$subdir/Release"};
++    else {
++        return 0;
+     }
+-  }
++
+   if ($file eq "Packages") {
+     push @package_files, "$tempdir/$subdir/$file.gz";
+   } else {
+@@ -1474,14 +1530,14 @@
+       die "get_index called with unknown type $file\n";
+     }
+   }
+-  $files{"$subdir/$file.gz"}=1;
+   $files{"$subdir/$file.bz2"}=1;
++  $files{"$subdir/$file.gz"}=1;
+   $files{"$subdir/$file"}=1;
+-  $files{"$subdir/Release"}=1;
+-  $files{"$tempdir/$subdir/$file.gz"}=1;
+   $files{"$tempdir/$subdir/$file.bz2"}=1;
++  $files{"$tempdir/$subdir/$file.gz"}=1;
+   $files{"$tempdir/$subdir/$file"}=1;
+-  $files{"$tempdir/$subdir/Release"}=1;
++
++  return 1;
+ }
+ 
+ sub fetch_and_apply_pdiffs {
+@@ -1607,7 +1663,7 @@
+     chomp $file;
+     $file=~s:^\./::;
+     unless (exists $files{$file} or (defined($ignore) && $file=~/$ignore/o)) {
+-      say("deleting $file") if ($verbose);
++      say("deleting $file");
+       if (! $dry_run) {
+        unlink $file or die "unlink $file: $!";
+       }

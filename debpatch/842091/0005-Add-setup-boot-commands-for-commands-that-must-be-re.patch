@@ -1,0 +1,149 @@
+From 7c28a373446a69fad24959e600e6f4e0788cc605 Mon Sep 17 00:00:00 2001
+From: Simon McVittie <simon.mcvittie@collabora.co.uk>
+Date: Thu, 27 Oct 2016 21:00:13 +0100
+Subject: [PATCH 5/5] Add --setup-boot-commands for commands that must be
+ repeated every time
+
+My original use-case for this is a dpkg-based system that needs
+"mount -o remount,rw /" before any dpkg operation, but it could also
+be useful for transient setup like writing files into /run/systemd
+and /run/udev.
+---
+ lib/adt_run_args.py     |  4 ++++
+ lib/adt_testbed.py      | 19 ++++++++++++++++++-
+ lib/autopkgtest_args.py | 13 +++++++++++++
+ runner/autopkgtest      |  1 +
+ runner/autopkgtest.1    | 15 +++++++++++++++
+ 5 files changed, 51 insertions(+), 1 deletion(-)
+
+diff --git a/lib/adt_run_args.py b/lib/adt_run_args.py
+index 7f6aa3e..2edcf6e 100644
+--- a/lib/adt_run_args.py
++++ b/lib/adt_run_args.py
+@@ -261,6 +261,10 @@ details.'''
+                          '(e. g. "apt-get update" or adding apt sources); '
+                          'can be a string with the commands, or a file '
+                          'containing the commands')
++    g_setup.add_argument('--setup-commands-boot', metavar='COMMANDS_OR_PATH',
++                         action='append', default=[],
++                         help='Run these commands after --setup-commands, '
++                         'and also every time the testbed is rebooted')
+     # ensure that this fails with something other than 100, as apt-get update
+     # failures are usually transient
+     g_setup.add_argument('-U', '--apt-upgrade', dest='setup_commands',
+diff --git a/lib/adt_testbed.py b/lib/adt_testbed.py
+index a90b3c3..6307e0f 100644
+--- a/lib/adt_testbed.py
++++ b/lib/adt_testbed.py
+@@ -45,7 +45,8 @@ timeouts = {'short': 100, 'copy': 300, 'install': 3000, 'test': 10000,
+ 
+ class Testbed:
+     def __init__(self, vserver_argv, output_dir, user,
+-                 setup_commands=[], add_apt_pockets=[], copy_files=[]):
++                 setup_commands=[], add_apt_pockets=[], copy_files=[],
++                 setup_commands_boot=[]):
+         self.sp = None
+         self.lastsend = None
+         self.scratch = None
+@@ -60,6 +61,7 @@ class Testbed:
+         self.install_tmp_env = []
+         self.user = user
+         self.setup_commands = setup_commands
++        self.setup_commands_boot = setup_commands_boot
+         self.add_apt_pockets = add_apt_pockets
+         self.copy_files = copy_files
+         self.initial_kernel_version = None
+@@ -186,6 +188,21 @@ class Testbed:
+             if m:
+                 self.cpu_flags = m.group(2)
+ 
++        xenv = ['AUTOPKGTEST_IS_SETUP_BOOT_COMMAND=1']
++        if self.user:
++            xenv.append('AUTOPKGTEST_NORMAL_USER=' + self.user)
++            xenv.append('ADT_NORMAL_USER=' + self.user)
++
++        for c in self.setup_commands_boot:
++            rc = self.execute(['sh', '-ec', c], xenv=xenv, kind='install')[0]
++            if rc:
++                # setup scripts should exit with 100 if it's the package's
++                # fault, otherwise it's considered a transient testbed failure
++                if rc == 100:
++                    self.badpkg('testbed setup commands failed with status 100')
++                else:
++                    self.bomb('testbed setup commands failed with status %i' % rc)
++
+     def _opened(self, pl):
+         self.scratch = pl[0]
+         self.deps_installed = []
+diff --git a/lib/autopkgtest_args.py b/lib/autopkgtest_args.py
+index 34e5eec..ce4cce9 100644
+--- a/lib/autopkgtest_args.py
++++ b/lib/autopkgtest_args.py
+@@ -238,6 +238,10 @@ for details.'''
+                          '(e. g. "apt-get update" or adding apt sources); '
+                          'can be a string with the commands, or a file '
+                          'containing the commands')
++    g_setup.add_argument('--setup-commands-boot', metavar='COMMANDS_OR_PATH',
++                         action='append', default=[],
++                         help='Run these commands after --setup-commands, '
++                         'and also every time the testbed is rebooted')
+     # ensure that this fails with something other than 100, as apt-get update
+     # failures are usually transient
+     g_setup.add_argument('-U', '--apt-upgrade', dest='setup_commands',
+@@ -376,6 +380,15 @@ for details.'''
+             with open(c, encoding='UTF-8') as f:
+                 args.setup_commands[i] = f.read().strip()
+ 
++    for i, c in enumerate(args.setup_commands_boot):
++        if '/' not in c:
++            shipped = os.path.join('/usr/share/autopkgtest/setup-commands', c)
++            if os.path.exists(shipped):
++                c = shipped
++        if os.path.exists(c):
++            with open(c, encoding='UTF-8') as f:
++                args.setup_commands_boot[i] = f.read().strip()
++
+     # parse --copy arguments
+     copy_pairs = []
+     for arg in args.copy:
+diff --git a/runner/autopkgtest b/runner/autopkgtest
+index 0753910..62dc0f3 100755
+--- a/runner/autopkgtest
++++ b/runner/autopkgtest
+@@ -655,6 +655,7 @@ def main():
+                                       output_dir=tmp,
+                                       user=opts.user,
+                                       setup_commands=opts.setup_commands,
++                                      setup_commands_boot=opts.setup_commands_boot,
+                                       add_apt_pockets=opts.apt_pocket,
+                                       copy_files=opts.copy)
+         testbed.start()
+diff --git a/runner/autopkgtest.1 b/runner/autopkgtest.1
+index 88331c4..fb168bf 100644
+--- a/runner/autopkgtest.1
++++ b/runner/autopkgtest.1
+@@ -226,6 +226,21 @@ rebooted after the setup commands. This can be suppressed by creating a file
+ .BR /run/autopkgtest_no_reboot.stamp .
+ 
+ .TP
++.BI \-\-setup\-commands\-boot= commands
++Run
++.I commands
++after the
++.BR \-\-setup\-commands ,
++and after every reboot. For example, these commands could be used to
++add files in a tmpfs.
++
++These commands never cause the testbed to be rebooted (because that could
++lead to an infinite loop). Otherwise, they are just like the
++.BR \-\-setup\-commands .
++
++This option can be specified multiple times.
++
++.TP
+ .BR --apt-upgrade " | " -U
+ Run
+ .B apt\-get update
+-- 
+2.10.1
+

@@ -1,0 +1,123 @@
+--- usr/bin/uscan	2009-10-08 23:26:42.000000000 +0200
++++ home/andrikos/temp/uscan	2010-07-18 17:59:25.000000000 +0200
+@@ -6,6 +6,7 @@
+ # Originally written by Christoph Lameter <clameter@debian.org> (I believe)
+ # Modified by Julian Gilbey <jdg@debian.org>
+ # HTTP support added by Piotr Roszatycki <dexter@debian.org>
++# Full source search support by Nick Andrik <nick.andrik@gmail.com>
+ # Rewritten in Perl, Copyright 2002-2006, Julian Gilbey
+ #
+ # This program is free software; you can redistribute it and/or modify
+@@ -675,6 +676,13 @@
+ # opts=downloadurlmangle=s/prdownload/download/ \
+ #   http://developer.berlios.de/project/showfiles.php?group_id=2051 \
+ #   http://prdownload.berlios.de/softdevice/vdr-softdevice-(.*).tgz
++#
++# The option fullsourcemangle can be used to search in the full text of the page
++# (not just in the href="..." URLs). The substitution has to compute the URL of
++# the file from the matching text. For example:
++# opts=fullsourcemangle=s/.*"(.*)".*/$1/ \
++#   http://foo.bar.org/trac/downloads \
++#   <a\s+href="/trac/downloads/[\d]+">\s*foo-([\d\.]+)\.tar\.bz2\s*</a>
+ 
+ 
+ sub process_watchline ($$$$$$)
+@@ -764,6 +772,9 @@
+ 		elsif ($opt =~ /^downloadurlmangle\s*=\s*(.+)/) {
+ 		    @{$options{'downloadurlmangle'}} = split /;/, $1;
+ 		}
++		elsif ($opt =~ /^fullsourcemangle\s*=\s*(.+)/) {
++		    @{$options{'fullsourcemangle'}} = split /;/, $1;
++		}
+ 		else {
+ 		    warn "$progname warning: unrecognised option $opt\n";
+ 		}
+@@ -893,33 +904,63 @@
+ 
+ 	print STDERR "$progname debug: matching pattern(s) @patterns\n" if $debug;
+ 	my @hrefs;
+-	while ($content =~ m/<\s*a\s+[^>]*href\s*=\s*([\"\'])(.*?)\1/sgi) {
+-	    my $href = $2;
+-	    $href =~ s/\n//g;
+-	    foreach my $_pattern (@patterns) {
+-		if ($href =~ m&^$_pattern$&) {
+-		    if ($watch_version == 2) {
+-			# watch_version 2 only recognised one group; the code
+-			# below will break version 2 watchfiles with a construction
+-			# such as file-([\d\.]+(-\d+)?) (bug #327258)
+-			push @hrefs, [$1, $href];
+-		    } else {
+-			# need the map { ... } here to handle cases of (...)?
+-			# which may match but then return undef values
+-			my $mangled_version =
+-			    join(".", map { $_ if defined($_) }
+-			 	$href =~ m&^$_pattern$&);
+-			foreach my $pat (@{$options{'uversionmangle'}}) {
+-			    if (! safe_replace(\$mangled_version, $pat)) {
+-				warn "$progname: In $watchfile, potentially"
+-				  . " unsafe or malformed uversionmangle"
+-				  . " pattern:\n  '$pat'"
+-				  . " found. Skipping watchline\n"
+-				  . "  $line\n";
+-				return 1;
++	if ( exists $options{'fullsourcemangle'} ) {
++	    # We are searching in the whole text of the file, not just the links
++	    while ($content =~ m/($filepattern)/sgi){
++	    	my $href = $1;
++		my $mangled_version = $2;
++		$href =~ s/[\s\n]+/ /g;
++		foreach my $pat (@{$options{'fullsourcemangle'}}) {
++		    if (! safe_replace(\$href, $pat)) {
++		        warn "$progname: In $watchfile, potentially"
++		          . " unsafe or malformed fullsourcemangle"
++		          . " pattern:\n  '$pat'"
++		          . " found. Skipping watchline\n"
++		          . "  $line\n";
++		        return 1;
++		    }
++		}
++		foreach my $pat (@{$options{'uversionmangle'}}) {
++		    if (! safe_replace(\$mangled_version, $pat)) {
++		        warn "$progname: In $watchfile, potentially"
++		          . " unsafe or malformed uversionmangle"
++		          . " pattern:\n  '$pat'"
++		          . " found. Skipping watchline\n"
++		          . "  $line\n";
++		        return 1;
++		    }
++		}
++		push @hrefs, [$mangled_version, $href];
++	    }
++	} else {
++	    while ($content =~ m/<\s*a\s+[^>]*href\s*=\s*([\"\'])(.*?)\1/sgi) {
++		my $href = $2;
++		$href =~ s/\n//g;
++		foreach my $_pattern (@patterns) {
++		    if ($href =~ m&^$_pattern$&) {
++			if ($watch_version == 2) {
++			    # watch_version 2 only recognised one group; the code
++			    # below will break version 2 watchfiles with a construction
++			    # such as file-([\d\.]+(-\d+)?) (bug #327258)
++			    push @hrefs, [$1, $href];
++			} else {
++			    # need the map { ... } here to handle cases of (...)?
++			    # which may match but then return undef values
++			    my $mangled_version =
++				join(".", map { $_ if defined($_) }
++				    $href =~ m&^$_pattern$&);
++			    foreach my $pat (@{$options{'uversionmangle'}}) {
++				if (! safe_replace(\$mangled_version, $pat)) {
++				    warn "$progname: In $watchfile, potentially"
++				      . " unsafe or malformed uversionmangle"
++				      . " pattern:\n  '$pat'"
++				      . " found. Skipping watchline\n"
++				      . "  $line\n";
++				    return 1;
++				}
+ 			    }
++			    push @hrefs, [$mangled_version, $href];
+ 			}
+-			push @hrefs, [$mangled_version, $href];
+ 		    }
+ 		}
+ 	    }

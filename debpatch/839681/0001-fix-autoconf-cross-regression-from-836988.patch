@@ -1,0 +1,57 @@
+From 8f6fb0e6229cf6c576077cbce6450433b2e0ce6a Mon Sep 17 00:00:00 2001
+From: Helmut Grohne <helmut@subdivi.de>
+Date: Mon, 3 Oct 2016 19:09:58 +0200
+Subject: [PATCH] fix autoconf/cross regression from #836988
+
+When adding the makefile buildsystem cross variables, the intention was
+that it would not affect non-makefile buildsystems (in particular no
+downstream buildsystems). However, the decision which buildsystem to use
+is done on a per-target basis. Thus a typical autoconf package will use
+the autoconf buildsystem for configure and test, but fall back to the
+makefile buildsystem for clean and build. Thus the cross variables were
+added for autoconf build as well, which broke the cross build of icu.
+
+The solution chosen here is to have autoconf take over build and clean
+from makefile as well by inheriting its methods. Thus the semantics stay
+unchanged with the exception of not adding the cross variables for
+build.
+
+All other children of the makefile buildsystem (including mkcmake)
+already take over all targets, so this issue really only affects
+autoconf.
+
+Fixes: 7ea67c9aace4 ("makefile.pm: Set CC+CXX to the host compilers when
+       cross-building")
+Signed-off-by: Helmut Grohne <helmut@subdivi.de>
+---
+ Debian/Debhelper/Buildsystem/autoconf.pm | 14 +++++---------
+ 1 file changed, 5 insertions(+), 9 deletions(-)
+
+diff --git a/Debian/Debhelper/Buildsystem/autoconf.pm b/Debian/Debhelper/Buildsystem/autoconf.pm
+index 8604152..ec3a9f7 100644
+--- a/Debian/Debhelper/Buildsystem/autoconf.pm
++++ b/Debian/Debhelper/Buildsystem/autoconf.pm
+@@ -19,15 +19,11 @@ sub check_auto_buildable {
+ 	my $this=shift;
+ 	my ($step)=@_;
+ 
+-	# Handle configure; the rest - next class (compat with 7.0.x code path)
+-	if ($step eq "configure") {
+-		return 1 if -x $this->get_sourcepath("configure");
+-	}
+-	if ($step eq "test") {
+-		return 1 if (-e $this->get_buildpath("Makefile") &&
+-			     -x $this->get_sourcepath("configure"));
+-	}
+-	return 0;
++	return 0 unless -x $this->get_sourcepath("configure");
++
++	# Handle configure explicitly; inherit the rest
++	return 1 if $step eq "configure";
++	return $this->SUPER::check_auto_buildable(@_);
+ }
+ 
+ sub configure {
+-- 
+2.9.3
+

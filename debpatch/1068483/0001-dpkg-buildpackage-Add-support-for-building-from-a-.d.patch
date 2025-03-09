@@ -1,0 +1,169 @@
+From 972a9630fdb25705ca011c9b6b9c8a0a75bca6ea Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Wed, 17 Aug 2016 00:54:47 +0200
+Subject: [PATCH] dpkg-buildpackage: Add support for building from a .dsc or
+ dir
+
+This adds support to build directly from a source package .dsc, or to
+specify a source directory to use for the build. In the first case we
+will extract the source package. For both .dsc and directory we will
+change directory to the source tree.
+
+For the .dsc case, we can then tell dpkg-genbuildinfo to include
+references to the source package, as we can ascertain the provenance of
+the source tree.
+
+Closes: #882511
+---
+ man/dpkg-buildpackage.pod    | 15 +++++++---
+ scripts/dpkg-buildpackage.pl | 54 ++++++++++++++++++++++++++++++++++--
+ 2 files changed, 62 insertions(+), 7 deletions(-)
+
+diff --git a/man/dpkg-buildpackage.pod b/man/dpkg-buildpackage.pod
+index a3dc324de..7e74ce8b7 100644
+--- a/man/dpkg-buildpackage.pod
++++ b/man/dpkg-buildpackage.pod
+@@ -27,21 +27,26 @@ dpkg-buildpackage - build binary or source packages from sources
+ 
+ =head1 SYNOPSIS
+ 
+-B<dpkg-buildpackage>
+-[I<option>...]
++B<dpkg-buildpackage> [I<option>...] [B<-->] [I<filename>.dsc|I<directory>]
+ 
+ =head1 DESCRIPTION
+ 
+ B<dpkg-buildpackage>
+ is a program that automates the process of building a Debian package.
+-It
+-consists of the following steps:
++
++The I<filename>.dsc and I<directory> arguments are
++supported since dpkg 1.22.7.
++
++It consists of the following steps:
+ 
+ =over
+ 
+ =item B<1.>
+ 
+ It runs the B<preinit> hook before reading any source file.
++If a B<.dsc> file has been specified it unpacks it and changes directory to it,
++if a I<directory> has been specified it changes directory to it,
++otherwise it expects the current directory to contain the source tree.
+ It prepares the build environment by setting various environment
+ variables (see B<ENVIRONMENT>), runs the B<init> hook, and calls
+ B<dpkg-source --before-build> (unless B<-T> or B<--target>
+@@ -87,6 +92,8 @@ It runs the B<buildinfo>
+ hook and calls B<dpkg-genbuildinfo> to generate a B<.buildinfo> file.
+ Several B<dpkg-buildpackage> options are forwarded to
+ B<dpkg-genbuildinfo>.
++If a I<.dsc> was specified, then it will be referenced in the generated
++B<.buildinfo> file, as we can ascertain the provenance of the source tree.
+ 
+ =item B<7.>
+ 
+diff --git a/scripts/dpkg-buildpackage.pl b/scripts/dpkg-buildpackage.pl
+index df2edded9..8cf857600 100755
+--- a/scripts/dpkg-buildpackage.pl
++++ b/scripts/dpkg-buildpackage.pl
+@@ -64,7 +64,7 @@ later for copying conditions. There is NO warranty.
+ 
+ sub usage {
+     printf g_(
+-'Usage: %s [<option>...]')
++'Usage: %s [<option>...] [--] [<filename.dsc>|<directory>]')
+     . "\n\n" . g_(
+ 'Options:
+       --build=<type>[,...]    specify the build <type>: full, source, binary,
+@@ -173,6 +173,7 @@ my $parallel;
+ my $parallel_force = 0;
+ my $checkbuilddep = 1;
+ my $check_builtin_builddep = 1;
++my $source;
+ my @source_opts;
+ my $check_command = $ENV{DEB_CHECK_COMMAND};
+ my @check_opts;
+@@ -200,6 +201,7 @@ my $changedby;
+ my $desc;
+ my $buildinfo_file;
+ my @buildinfo_opts;
++my $buildinfo_with_dsc = 0;
+ my $changes_file;
+ my @changes_opts;
+ my @hook_names = qw(
+@@ -408,8 +410,14 @@ while (@ARGV) {
+     } elsif (/^-R(.*)$/ or /^--rules-file=(.*)$/) {
+ 	my $arg = $1;
+ 	@debian_rules = split ' ', $arg;
+-    } else {
++    } elsif ($_ eq '--') {
++        $source = shift @ARGV;
++        last;
++    } elsif (/^-/) {
+ 	usageerr(g_('unknown option or argument %s'), $_);
++    } else {
++        $source = $_;
++        last;
+     }
+ }
+ 
+@@ -486,6 +494,40 @@ if ($build_opts->has('terse')) {
+ 
+ set_build_profiles(@build_profiles) if @build_profiles;
+ 
++# Handle specified source trees.
++if (defined $source) {
++    if (-d $source) {
++        chdir $source
++            or syserr(g_('cannot change directory to %s'), $source);
++    } elsif (-f $source) {
++        require Dpkg::Source::Package;
++
++        run_cmd('dpkg-source', @source_opts, '--extract', $source);
++
++        my %srcopt = (
++            no_check => 0,
++            no_overwrite_dir => 1,
++            require_valid_signature => 0,
++            require_strong_checksums => 0,
++        );
++        my $srcpkg = Dpkg::Source::Package->new(
++            filename => $source,
++            options => \%srcopt,
++        );
++
++        my $srcdir = $srcpkg->get_basename();
++        $srcdir =~ s/_/-/g;
++
++        chdir $srcdir
++            or syserr(g_('cannot change directory to %s'), $srcdir);
++
++        # We can now let dpkg-genbuildinfo know that we can include the .dsc
++        # in the .buildinfo file as we handled it ourselves, and what we are
++        # building matches the source we extracted it from.
++        $buildinfo_with_dsc = 1;
++    }
++}
++
+ my $changelog = changelog_parse();
+ my $ctrl = Dpkg::Control::Info->new();
+ 
+@@ -682,7 +724,13 @@ if (build_has_any(BUILD_BINARY)) {
+ 
+ $buildinfo_file //= "../$pva.buildinfo";
+ 
+-push @buildinfo_opts, "--build=$build_types" if build_has_none(BUILD_DEFAULT);
++my $buildinfo_buildtypes;
++if (build_has_none(BUILD_DEFAULT) || $buildinfo_with_dsc) {
++    $buildinfo_buildtypes = $build_types;
++    $buildinfo_buildtypes .= ",source" if $buildinfo_with_dsc;
++}
++
++push @buildinfo_opts, "--build=$buildinfo_buildtypes" if $buildinfo_buildtypes;
+ push @buildinfo_opts, "--admindir=$admindir" if $admindir;
+ push @buildinfo_opts, "-O$buildinfo_file" if $buildinfo_file;
+ 
+-- 
+2.43.0
+

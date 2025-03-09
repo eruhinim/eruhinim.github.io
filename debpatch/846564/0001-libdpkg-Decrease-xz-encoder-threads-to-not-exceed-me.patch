@@ -1,0 +1,60 @@
+From f48c09879e6ba91110a2918a3caea5985ef57a3f Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Sun, 4 Dec 2016 02:35:27 +0100
+Subject: [PATCH] libdpkg: Decrease xz encoder threads to not exceed memory
+ limits
+
+---
+ lib/dpkg/compress.c | 27 ++++++++++++++++++++++++++-
+ 1 file changed, 26 insertions(+), 1 deletion(-)
+
+diff --git a/lib/dpkg/compress.c b/lib/dpkg/compress.c
+index 2eda658fa..a6dd522ed 100644
+--- a/lib/dpkg/compress.c
++++ b/lib/dpkg/compress.c
+@@ -529,9 +529,9 @@ filter_xz_init(struct io_lzma *io, lzma_stream *s)
+ 	uint32_t preset;
+ 	lzma_check check = LZMA_CHECK_CRC64;
+ #ifdef HAVE_LZMA_MT
++	uint64_t mt_memlimit;
+ 	lzma_mt mt_options = {
+ 		.flags = 0,
+-		.threads = sysconf(_SC_NPROCESSORS_ONLN),
+ 		.block_size = 0,
+ 		.timeout = 0,
+ 		.filters = NULL,
+@@ -548,6 +548,31 @@ filter_xz_init(struct io_lzma *io, lzma_stream *s)
+ 
+ #ifdef HAVE_LZMA_MT
+ 	mt_options.preset = preset;
++
++	/* Initialize the multi-threaded memory limit to half the physical
++	 * RAM, or to 128 MiB if we cannot infer the number. */
++	mt_memlimit = lzma_physmem() / 2;
++	if (mt_memlimit == 0)
++		mt_memlimit = 128 * 1024 * 1024;
++	/* Clamp the multi-threaded memory limit to half the addressable
++	 * memory on this architecture. */
++	if (mt_memlimit > INTPTR_MAX)
++		mt_memlimit = INTPTR_MAX;
++
++	mt_options.threads = lzma_cputhreads();
++	if (mt_options.threads == 0)
++		mt_options.threads = 1;
++
++	/* Check that we have enough RAM to use the multi-threaded encoder,
++	 * and decrease them up to single-threaded to reduce memory usage. */
++	for (; mt_options.threads > 1; mt_options.threads--) {
++		uint64_t mt_memusage;
++
++		mt_memusage = lzma_stream_encoder_mt_memusage(&mt_options);
++		if (mt_memusage < mt_memlimit)
++			break;
++	}
++
+ 	ret = lzma_stream_encoder_mt(s, &mt_options);
+ #else
+ 	ret = lzma_easy_encoder(s, preset, check);
+-- 
+2.11.0.rc1.160.g51e66c2
+

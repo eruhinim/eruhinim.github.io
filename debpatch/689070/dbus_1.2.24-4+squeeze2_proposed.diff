@@ -1,0 +1,425 @@
+diffstat for dbus-1.2.24 dbus-1.2.24
+
+ changelog                                                               |   12 
+ patches/0001-CVE-2012-3524-Don-t-access-environment-variables-or-.patch |  215 ++++++++++
+ patches/0002-hardening-Ensure-_dbus_check_setuid-is-initialized-t.patch |   35 +
+ patches/0003-hardening-Remove-activation-helper-handling-for-DBUS.patch |   56 ++
+ patches/0004-activation-helper-Ensure-DBUS_STARTER_ADDRESS-is-set.patch |   63 ++
+ patches/series                                                          |    4 
+ 6 files changed, 385 insertions(+)
+
+diff -Nru dbus-1.2.24/debian/changelog dbus-1.2.24/debian/changelog
+--- dbus-1.2.24/debian/changelog	2011-06-14 20:09:38.000000000 +0100
++++ dbus-1.2.24/debian/changelog	2012-09-29 15:52:32.000000000 +0100
+@@ -1,3 +1,15 @@
++dbus (1.2.24-4+squeeze2) stable; urgency=low
++
++  * CVE-2012-3524: apply patches from upstream 1.6.6 to avoid arbitrary
++    code execution in setuid/setgid binaries that incorrectly use libdbus
++    without first sanitizing the environment variables inherited from
++    their less-privileged caller (Closes: #689070).
++    - As per upstream 1.6.8, do not check filesystem capabilities for now,
++      only setuid/setgid, fixing regressions in certain configurations of
++      gnome-keyring
++
++ -- Simon McVittie <smcv@debian.org>  Sat, 29 Sep 2012 13:33:07 +0100
++
+ dbus (1.2.24-4+squeeze1) stable; urgency=low
+ 
+   * Update Vcs-* control fields to reflect the move to git
+diff -Nru dbus-1.2.24/debian/patches/0001-CVE-2012-3524-Don-t-access-environment-variables-or-.patch dbus-1.2.24/debian/patches/0001-CVE-2012-3524-Don-t-access-environment-variables-or-.patch
+--- dbus-1.2.24/debian/patches/0001-CVE-2012-3524-Don-t-access-environment-variables-or-.patch	1970-01-01 01:00:00.000000000 +0100
++++ dbus-1.2.24/debian/patches/0001-CVE-2012-3524-Don-t-access-environment-variables-or-.patch	2012-09-29 15:52:32.000000000 +0100
+@@ -0,0 +1,215 @@
++From 50247498f01cc88be7b2a6aef9dcefb0fe3f10f1 Mon Sep 17 00:00:00 2001
++From: Simon McVittie <simon.mcvittie@collabora.co.uk>
++Date: Sat, 29 Sep 2012 14:09:12 +0100
++Subject: [PATCH 1/4] CVE-2012-3524: Don't access environment variables or run
++ dbus-launch when setuid
++
++This matches a corresponding change in GLib.  See
++glib/gutils.c:g_check_setuid().
++
++Some programs attempt to use libdbus when setuid; notably the X.org
++server is shipped in such a configuration. libdbus never had an
++explicit policy about its use in setuid programs.
++
++I'm not sure whether we should advertise such support.  However, given
++that there are real-world programs that do this currently, we can make
++them safer with not too much effort.
++
++Better to fix a problem caused by an interaction between two
++components in *both* places if possible.
++
++How to determine whether or not we're running in a privilege-escalated
++path is operating system specific.  Note that GTK+'s code to check
++euid versus uid worked historically on Unix, more modern systems have
++filesystem capabilities and SELinux domain transitions, neither of
++which are captured by the uid comparison.
++
++On Linux/glibc, the way this works is that the kernel sets an
++AT_SECURE flag in the ELF auxiliary vector, and glibc looks for it on
++startup.  If found, then glibc sets a public-but-undocumented
++__libc_enable_secure variable which we can use.  Unfortunately, while
++it *previously* worked to check this variable, a combination of newer
++binutils and RPM break it:
++http://www.openwall.com/lists/owl-dev/2012/08/14/1
++
++So for now on Linux/glibc, we fall back to the historical Unix version
++until we get glibc fixed.
++
++On some BSD variants, there is a issetugid() function.  On other Unix
++variants, we fall back to what GTK+ has been doing.
++
++Reported-by: Sebastian Krahmer <krahmer@suse.de>
++Signed-off-by: Colin Walters <walters@verbum.org>
++Conflicts:
++	dbus/dbus-sysdeps-unix.c
++Cherry-picked: from 9cdf87a998329e06a1ffc401829b4f01b10d2861
++Conflicts:
++	configure.in
++	dbus/dbus-sysdeps-unix.c
++	dbus/dbus-sysdeps-win.c
++---
++ configure.in             |    2 +-
++ dbus/dbus-keyring.c      |    7 ++++++
++ dbus/dbus-sysdeps-unix.c |   62 +++++++++++++++++++++++++++++++++++++++++++++-
++ dbus/dbus-sysdeps-win.c  |    6 +++++
++ dbus/dbus-sysdeps.c      |    5 ++++
++ dbus/dbus-sysdeps.h      |    1 +
++ 6 files changed, 81 insertions(+), 2 deletions(-)
++
++diff --git a/configure.in b/configure.in
++index b027f86..28c11de 100644
++--- a/configure.in
+++++ b/configure.in
++@@ -430,7 +430,7 @@ AC_DEFINE_UNQUOTED(DBUS_HAVE_ATOMIC_INT_COND, [$have_atomic_inc_cond],
++ AC_SEARCH_LIBS(socket,[socket network])
++ AC_CHECK_FUNC(gethostbyname,,[AC_CHECK_LIB(nsl,gethostbyname)])
++ 
++-AC_CHECK_FUNCS(vsnprintf vasprintf nanosleep usleep setenv clearenv unsetenv socketpair getgrouplist fpathconf setrlimit poll)
+++AC_CHECK_FUNCS(vsnprintf vasprintf nanosleep usleep setenv clearenv unsetenv socketpair getgrouplist fpathconf setrlimit poll issetugid getresuid)
++ 
++ #### Check for broken poll; taken from Glib's configure
++ 
++diff --git a/dbus/dbus-keyring.c b/dbus/dbus-keyring.c
++index 6dc1e12..0c32a4f 100644
++--- a/dbus/dbus-keyring.c
+++++ b/dbus/dbus-keyring.c
++@@ -718,6 +718,13 @@ _dbus_keyring_new_for_credentials (DBusCredentials  *credentials,
++   DBusCredentials *our_credentials;
++   
++   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
+++
+++  if (_dbus_check_setuid ())
+++    {
+++      dbus_set_error_const (error, DBUS_ERROR_NOT_SUPPORTED,
+++                            "Unable to create DBus keyring when setuid");
+++      return NULL;
+++    }
++   
++   keyring = NULL;
++   error_set = FALSE;
++diff --git a/dbus/dbus-sysdeps-unix.c b/dbus/dbus-sysdeps-unix.c
++index b58d09a..d4777c5 100644
++--- a/dbus/dbus-sysdeps-unix.c
+++++ b/dbus/dbus-sysdeps-unix.c
++@@ -3124,7 +3124,14 @@ _dbus_get_autolaunch_address (DBusString *address,
++   int i;
++   DBusString uuid;
++   dbus_bool_t retval;
++-  
+++
+++  if (_dbus_check_setuid ())
+++    {
+++      dbus_set_error_const (error, DBUS_ERROR_NOT_SUPPORTED,
+++                            "Unable to autolaunch when setuid");
+++      return FALSE;
+++    }
+++
++   _DBUS_ASSERT_ERROR_IS_CLEAR (error);
++   retval = FALSE;
++ 
++@@ -3510,4 +3517,57 @@ _dbus_get_is_errno_eagain_or_ewouldblock (void)
++   return errno == EAGAIN || errno == EWOULDBLOCK;
++ }
++ 
+++/**
+++ * **NOTE**: If you modify this function, please also consider making
+++ * the corresponding change in GLib.  See
+++ * glib/gutils.c:g_check_setuid().
+++ *
+++ * Returns TRUE if the current process was executed as setuid (or an
+++ * equivalent __libc_enable_secure is available).  See:
+++ * http://osdir.com/ml/linux.lfs.hardened/2007-04/msg00032.html
+++ */
+++dbus_bool_t
+++_dbus_check_setuid (void)
+++{
+++  /* TODO: get __libc_enable_secure exported from glibc.
+++   * See http://www.openwall.com/lists/owl-dev/2012/08/14/1
+++   */
+++#if 0 && defined(HAVE_LIBC_ENABLE_SECURE)
+++  {
+++    /* See glibc/include/unistd.h */
+++    extern int __libc_enable_secure;
+++    return __libc_enable_secure;
+++  }
+++#elif defined(HAVE_ISSETUGID)
+++  /* BSD: http://www.freebsd.org/cgi/man.cgi?query=issetugid&sektion=2 */
+++  return issetugid ();
+++#else
+++  uid_t ruid, euid, suid; /* Real, effective and saved user ID's */
+++  gid_t rgid, egid, sgid; /* Real, effective and saved group ID's */
+++
+++  static dbus_bool_t check_setuid_initialised;
+++  static dbus_bool_t is_setuid;
+++
+++  if (_DBUS_UNLIKELY (!check_setuid_initialised))
+++    {
+++#ifdef HAVE_GETRESUID
+++      if (getresuid (&ruid, &euid, &suid) != 0 ||
+++          getresgid (&rgid, &egid, &sgid) != 0)
+++#endif /* HAVE_GETRESUID */
+++        {
+++          suid = ruid = getuid ();
+++          sgid = rgid = getgid ();
+++          euid = geteuid ();
+++          egid = getegid ();
+++        }
+++
+++      check_setuid_initialised = TRUE;
+++      is_setuid = (ruid != euid || ruid != suid ||
+++                   rgid != egid || rgid != sgid);
+++
+++    }
+++  return is_setuid;
+++#endif
+++}
+++
++ /* tests in dbus-sysdeps-util.c */
++#diff --git a/dbus/dbus-sysdeps-win.c b/dbus/dbus-sysdeps-win.c
++#index 02f3123..15fb5cb 100644
++#--- a/dbus/dbus-sysdeps-win.c
++#+++ b/dbus/dbus-sysdeps-win.c
++#@@ -3370,6 +3370,12 @@ _dbus_append_keyring_directory_for_credentials (DBusString      *directory,
++#   return FALSE;
++# }
++# 
++#+dbus_bool_t
++#+_dbus_check_setuid (void)
++#+{
++#+  return FALSE;
++#+}
++#+
++# /** @} end of sysdeps-win */
++# /* tests in dbus-sysdeps-util.c */
++# 
++diff --git a/dbus/dbus-sysdeps.c b/dbus/dbus-sysdeps.c
++index ccd80cc..c3acc17 100644
++--- a/dbus/dbus-sysdeps.c
+++++ b/dbus/dbus-sysdeps.c
++@@ -176,6 +176,11 @@ _dbus_setenv (const char *varname,
++ const char*
++ _dbus_getenv (const char *varname)
++ {  
+++  /* Don't respect any environment variables if the current process is
+++   * setuid.  This is the equivalent of glibc's __secure_getenv().
+++   */
+++  if (_dbus_check_setuid ())
+++    return NULL;
++   return getenv (varname);
++ }
++ 
++diff --git a/dbus/dbus-sysdeps.h b/dbus/dbus-sysdeps.h
++index 7817e04..3c374d2 100644
++--- a/dbus/dbus-sysdeps.h
+++++ b/dbus/dbus-sysdeps.h
++@@ -97,6 +97,7 @@ typedef struct DBusCredentials DBusCredentials;
++ 
++ void _dbus_abort (void) _DBUS_GNUC_NORETURN;
++ 
+++dbus_bool_t _dbus_check_setuid (void);
++ const char* _dbus_getenv (const char *varname);
++ dbus_bool_t _dbus_setenv (const char *varname,
++ 			  const char *value);
++-- 
++1.7.10.4
++
+diff -Nru dbus-1.2.24/debian/patches/0002-hardening-Ensure-_dbus_check_setuid-is-initialized-t.patch dbus-1.2.24/debian/patches/0002-hardening-Ensure-_dbus_check_setuid-is-initialized-t.patch
+--- dbus-1.2.24/debian/patches/0002-hardening-Ensure-_dbus_check_setuid-is-initialized-t.patch	1970-01-01 01:00:00.000000000 +0100
++++ dbus-1.2.24/debian/patches/0002-hardening-Ensure-_dbus_check_setuid-is-initialized-t.patch	2012-09-29 15:52:32.000000000 +0100
+@@ -0,0 +1,35 @@
++From 47ed79c961361fa049bae499c33e0eb91ab22ade Mon Sep 17 00:00:00 2001
++From: Colin Walters <walters@verbum.org>
++Date: Thu, 27 Sep 2012 21:35:22 -0400
++Subject: [PATCH 2/4] hardening: Ensure _dbus_check_setuid() is initialized
++ threadsafe manner
++
++This is a highly theoretical concern, but we might as well.
++
++https://bugs.freedesktop.org/show_bug.cgi?id=52202
++
++Conflicts:
++	dbus/dbus-sysdeps-pthread.c
++---
++ dbus/dbus-sysdeps-pthread.c |    5 +++++
++ 1 file changed, 5 insertions(+)
++
++diff --git a/dbus/dbus-sysdeps-pthread.c b/dbus/dbus-sysdeps-pthread.c
++index 46e4204..f21af85 100644
++--- a/dbus/dbus-sysdeps-pthread.c
+++++ b/dbus/dbus-sysdeps-pthread.c
++@@ -358,6 +358,11 @@ check_monotonic_clock (void)
++ dbus_bool_t
++ _dbus_threads_init_platform_specific (void)
++ {
+++  /* These have static variables, and we need to handle both the case
+++   * where dbus_threads_init() has been called and when it hasn't;
+++   * so initialize them before any threads are allowed to enter.
+++   */
++   check_monotonic_clock ();
+++  (void) _dbus_check_setuid ();
++   return dbus_threads_init (&pthread_functions);
++ }
++-- 
++1.7.10.4
++
+diff -Nru dbus-1.2.24/debian/patches/0003-hardening-Remove-activation-helper-handling-for-DBUS.patch dbus-1.2.24/debian/patches/0003-hardening-Remove-activation-helper-handling-for-DBUS.patch
+--- dbus-1.2.24/debian/patches/0003-hardening-Remove-activation-helper-handling-for-DBUS.patch	1970-01-01 01:00:00.000000000 +0100
++++ dbus-1.2.24/debian/patches/0003-hardening-Remove-activation-helper-handling-for-DBUS.patch	2012-09-29 15:52:32.000000000 +0100
+@@ -0,0 +1,56 @@
++From f70d1236b0f28bbc3da53b6eacb38b2a5786bc17 Mon Sep 17 00:00:00 2001
++From: Colin Walters <walters@verbum.org>
++Date: Fri, 28 Sep 2012 12:01:56 -0400
++Subject: [PATCH 3/4] hardening: Remove activation helper handling for
++ DBUS_VERBOSE
++
++It's not really useful.
++
++See https://bugs.freedesktop.org/show_bug.cgi?id=52202#c17
++
++Conflicts:
++	bus/activation-helper.c
++---
++ bus/activation-helper.c |   14 +-------------
++ 1 file changed, 1 insertion(+), 13 deletions(-)
++
++diff --git a/bus/activation-helper.c b/bus/activation-helper.c
++index baba8f0..bc5ed07 100644
++--- a/bus/activation-helper.c
+++++ b/bus/activation-helper.c
++@@ -140,18 +140,12 @@ out_all:
++   return desktop_file;
++ }
++ 
++-/* Cleares the environment, except for DBUS_VERBOSE and DBUS_STARTER_x */
+++/* Clears the environment, except for DBUS_STARTER_x */
++ static dbus_bool_t
++ clear_environment (DBusError *error)
++ {
++-  const char *debug_env = NULL;
++   const char *starter_env = NULL;
++ 
++-#ifdef DBUS_ENABLE_VERBOSE_MODE
++-  /* are we debugging */
++-  debug_env = _dbus_getenv ("DBUS_VERBOSE");
++-#endif
++-
++   /* we save the starter */
++   starter_env = _dbus_getenv ("DBUS_STARTER_ADDRESS");
++ 
++@@ -165,12 +159,6 @@ clear_environment (DBusError *error)
++     }
++ #endif
++ 
++-#ifdef DBUS_ENABLE_VERBOSE_MODE
++-  /* restore the debugging environment setting if set */
++-  if (debug_env)
++-    _dbus_setenv ("DBUS_VERBOSE", debug_env);
++-#endif
++-
++   /* restore the starter */
++   if (starter_env)
++     _dbus_setenv ("DBUS_STARTER_ADDRESS", starter_env);
++-- 
++1.7.10.4
++
+diff -Nru dbus-1.2.24/debian/patches/0004-activation-helper-Ensure-DBUS_STARTER_ADDRESS-is-set.patch dbus-1.2.24/debian/patches/0004-activation-helper-Ensure-DBUS_STARTER_ADDRESS-is-set.patch
+--- dbus-1.2.24/debian/patches/0004-activation-helper-Ensure-DBUS_STARTER_ADDRESS-is-set.patch	1970-01-01 01:00:00.000000000 +0100
++++ dbus-1.2.24/debian/patches/0004-activation-helper-Ensure-DBUS_STARTER_ADDRESS-is-set.patch	2012-09-29 15:52:32.000000000 +0100
+@@ -0,0 +1,63 @@
++From 5b86cb6a27d4a0a6e877946ec1a666e8832614dc Mon Sep 17 00:00:00 2001
++From: Geoffrey Thomas <gthomas@mokafive.com>
++Date: Thu, 27 Sep 2012 22:02:06 -0700
++Subject: [PATCH 4/4] activation-helper: Ensure DBUS_STARTER_ADDRESS is set
++ correctly
++
++The fix for CVE-2012-3524 filters out all environment variables if
++libdbus is used from a setuid program, to prevent various spoofing
++attacks.
++
++Unfortunately, the activation helper is a setuid program linking
++libdbus, and this creates a regression for launched programs using
++DBUS_STARTER_ADDRESS, since it will no longer exist.
++
++Fix this by hardcoding the starter address to the default system bus
++address.
++
++Signed-off-by: Geoffrey Thomas <gthomas@mokafive.com>
++Signed-off-by: Colin Walters <walters@verbum.org>
++---
++ bus/activation-helper.c |   16 +++++-----------
++ 1 file changed, 5 insertions(+), 11 deletions(-)
++
++diff --git a/bus/activation-helper.c b/bus/activation-helper.c
++index bc5ed07..bfe832e 100644
++--- a/bus/activation-helper.c
+++++ b/bus/activation-helper.c
++@@ -140,15 +140,12 @@ out_all:
++   return desktop_file;
++ }
++ 
++-/* Clears the environment, except for DBUS_STARTER_x */
+++/* Clears the environment, except for DBUS_STARTER_x,
+++ * which we hardcode to the system bus.
+++ */
++ static dbus_bool_t
++ clear_environment (DBusError *error)
++ {
++-  const char *starter_env = NULL;
++-
++-  /* we save the starter */
++-  starter_env = _dbus_getenv ("DBUS_STARTER_ADDRESS");
++-
++ #ifndef ACTIVATION_LAUNCHER_TEST
++   /* totally clear the environment */
++   if (!_dbus_clearenv ())
++@@ -159,11 +156,8 @@ clear_environment (DBusError *error)
++     }
++ #endif
++ 
++-  /* restore the starter */
++-  if (starter_env)
++-    _dbus_setenv ("DBUS_STARTER_ADDRESS", starter_env);
++-
++-  /* set the type, which must be system if we got this far */
+++  /* Ensure the bus is set to system */
+++  _dbus_setenv ("DBUS_STARTER_ADDRESS", DBUS_SYSTEM_BUS_DEFAULT_ADDRESS);
++   _dbus_setenv ("DBUS_STARTER_BUS_TYPE", "system");
++ 
++   return TRUE;
++-- 
++1.7.10.4
++
+diff -Nru dbus-1.2.24/debian/patches/series dbus-1.2.24/debian/patches/series
+--- dbus-1.2.24/debian/patches/series	2011-06-12 12:51:34.000000000 +0100
++++ dbus-1.2.24/debian/patches/series	2012-09-29 15:52:32.000000000 +0100
+@@ -4,3 +4,7 @@
+ 11-589662-reload-kqueue.patch
+ 12-CVE-2010-4352-reject-deeply-nested-variants.patch
+ 13-629938-_dbus_header_byteswap.patch
++0001-CVE-2012-3524-Don-t-access-environment-variables-or-.patch
++0002-hardening-Ensure-_dbus_check_setuid-is-initialized-t.patch
++0003-hardening-Remove-activation-helper-handling-for-DBUS.patch
++0004-activation-helper-Ensure-DBUS_STARTER_ADDRESS-is-set.patch

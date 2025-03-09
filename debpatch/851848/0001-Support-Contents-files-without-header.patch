@@ -1,0 +1,143 @@
+>From d18535572869a6a3e526bfb4ad08e667ce479c71 Mon Sep 17 00:00:00 2001
+From: Manfred Stock <manfred.stock+debian@gmail.com>
+Date: Thu, 19 Jan 2017 09:34:13 +0100
+Subject: [PATCH] Support Contents files without header
+
+Current versions of the Contents files in the Debian archive don't seem to
+contain a header anymore, which kind-of breaks the parser, as it only processed
+lines after the line matched by the regular expression ^FILE\s+LOCATION. Since
+the regular expression which is used to parse the file column of the Contents
+files looks robust enough, it seems like this check can be dropped (which gets
+done in a rather unrelated change in dh-make-perl commit
+885b31c44b4a61d6f6ca44d3335c20506ab41ee9, too, so current versions are not
+affected by this problem).
+---
+ lib/Debian/AptContents.pm                         | 38 ++++++++++-------------
+ t/AptContents.t                                   | 16 +++++++++-
+ t/contents/sources.list                           |  1 +
+ t/contents/test_debian_dists_stable_main_Contents |  2 ++
+ 4 files changed, 34 insertions(+), 23 deletions(-)
+ create mode 100644 t/contents/test_debian_dists_stable_main_Contents
+
+diff --git a/lib/Debian/AptContents.pm b/lib/Debian/AptContents.pm
+index e47af51..5844847 100644
+--- a/lib/Debian/AptContents.pm
++++ b/lib/Debian/AptContents.pm
+@@ -315,30 +315,24 @@ sub read_cache {
+             }
+ 
+             $self->warning( 1, "Parsing $_ ..." );
+-            my $capturing = 0;
+             my $line;
+             while ( defined( $line = $f->getline ) ) {
+-                if ($capturing) {
+-                    my ( $file, $packages ) = split( /\s+/, $line );
+-                    next unless $file =~ s{
+-                        ^usr/
+-                        (?:share|lib)/
+-                        (?:perl\d+/             # perl5/
+-                        | perl/(?:\d[\d.]+)/   # or perl/5.10/
+-                        )
+-                    }{}x;
+-                    $cache->{apt_contents}{$file} = exists $cache->{apt_contents}{$file}
+-                        ? $cache->{apt_contents}{$file}.','.$packages
+-                        : $packages;
+-
+-                    # $packages is a comma-separated list of
+-                    # section/package items. We'll parse it when a file
+-                    # matches. Otherwise we'd parse thousands of entries,
+-                    # while checking only a couple
+-                }
+-                else {
+-                    $capturing = 1 if $line =~ /^FILE\s+LOCATION/;
+-                }
++                my ( $file, $packages ) = split( /\s+/, $line );
++                next unless $file =~ s{
++                    ^usr/
++                    (?:share|lib)/
++                    (?:perl\d+/             # perl5/
++                    | perl/(?:\d[\d.]+)/   # or perl/5.10/
++                    )
++                }{}x;
++                $cache->{apt_contents}{$file} = exists $cache->{apt_contents}{$file}
++                    ? $cache->{apt_contents}{$file}.','.$packages
++                    : $packages;
++
++                # $packages is a comma-separated list of
++                # section/package items. We'll parse it when a file
++                # matches. Otherwise we'd parse thousands of entries,
++                # while checking only a couple
+             }
+         }
+ 
+diff --git a/t/AptContents.t b/t/AptContents.t
+index 4aec946..9348e49 100755
+--- a/t/AptContents.t
++++ b/t/AptContents.t
+@@ -3,7 +3,7 @@
+ use strict;
+ use warnings;
+ 
+-use Test::More tests => 26;
++use Test::More tests => 29;
+ 
+ BEGIN {
+     use_ok 'Debian::AptContents';
+@@ -125,6 +125,8 @@ $apt_contents = instance();
+ 
+ is( $apt_contents->source, 'cache', 'cache was used' );
+ 
++is(scalar keys %{$apt_contents->cache()->{apt_contents}}, 185, 'all Perl-related Contents lines read');
++
+ sleep(1);   # allow the clock to tick so the timestamp actually differs
+ touch( glob "$Bin/contents/*Contents*" );
+ 
+@@ -143,6 +145,7 @@ is( $apt_contents->find_perl_module_package('Moose') . '',
+ is_deeply(
+     $apt_contents->get_contents_files,
+     [   "$Bin/contents/test_debian_dists_sid_main_Contents",
++        "$Bin/contents/test_debian_dists_stable_main_Contents",
+         "$Bin/contents/test_debian_dists_testing_main_Contents"
+     ]
+ );
+@@ -159,6 +162,17 @@ is( $apt_contents->find_perl_module_package('GD') . '',
+ );
+ 
+ is_deeply(
++    [ $apt_contents->find_file_packages('Catalyst/Runtime.pm') ],
++    [ 'libcatalyst-perl' ],
++    "Catalyst/Runtime.pm is in libcatalyst-perl"
++);
++
++is( $apt_contents->find_perl_module_package('Catalyst::Runtime') . '',
++    'libcatalyst-perl',
++    'Catalyst::Runtime found by module name'
++);
++
++is_deeply(
+     [ $apt_contents->find_file_packages('Image/Magick.pm') ],
+     [ 'perlmagick', 'graphicsmagick-libmagick-dev-compat' ],
+     "Image/Magick.pm in perlmagick and graphicsmagick-libmagick-dev-compat, but different paths"
+diff --git a/t/contents/sources.list b/t/contents/sources.list
+index bb7f14b..f7a11d4 100644
+--- a/t/contents/sources.list
++++ b/t/contents/sources.list
+@@ -3,6 +3,7 @@
+ deb http://test/debian sid main
+ deb http://test/debian testing main
+ deb http://test/debian testing main
++deb http://test/debian stable main
+ deb     http://security.debian.org/ stable/updates main contrib non-free
+ deb     http://www.toastfreeware.priv.at/debian stable/
+ deb     http://www.kiberpipa.org/~minmax/cinelerra/builds/sid/ ./
+diff --git a/t/contents/test_debian_dists_stable_main_Contents b/t/contents/test_debian_dists_stable_main_Contents
+new file mode 100644
+index 0000000..d3b8354
+--- /dev/null
++++ b/t/contents/test_debian_dists_stable_main_Contents
+@@ -0,0 +1,2 @@
++bin/afio						    utils/afio
++usr/share/perl5/Catalyst/Runtime.pm perl/libcatalyst-perl
+-- 
+2.1.4
+

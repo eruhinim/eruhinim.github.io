@@ -1,0 +1,110 @@
+diff --git a/debootstrap b/debootstrap
+index 2a959bb..80d6a7a 100755
+--- a/debootstrap
++++ b/debootstrap
+@@ -29,6 +29,7 @@ KEYRING=""
+ DISABLE_KEYRING=""
+ FORCE_KEYRING=""
+ VARIANT=""
++MERGED_USR=""
+ ARCH=""
+ HOST_ARCH=""
+ HOST_OS=""
+@@ -102,6 +103,7 @@ usage()
+       --variant=X            use variant X of the bootstrap scripts
+                              (currently supported variants: buildd, fakechroot,
+                               scratchbox, minbase)
++      --no-merged-usr        do not make /{bin,sbin,lib}/ symlinks to /usr/
+       --keyring=K            check Release files against keyring K
+       --no-check-gpg         avoid checking Release file signatures
+       --force-check-gpg      force checking Release file signatures
+@@ -304,6 +306,10 @@ if [ $# != 0 ] ; then
+ 			error 1 NEEDARG "option requires an argument %s" "$1"
+ 		fi
+ 		;;
++	    --no-merged-usr)
++		MERGED_USR=no
++		shift
++		;;
+ 	    --keyring|--keyring=?*)
+ 		if ! gpgv --version >/dev/null 2>&1; then
+ 			error 1 NEEDGPGV "gpgv not installed, but required for Release verification"
+diff --git a/debootstrap.8 b/debootstrap.8
+index 5864148..5eeaf04 100644
+--- a/debootstrap.8
++++ b/debootstrap.8
+@@ -84,6 +84,9 @@ The default, with no \fB\-\-variant=X\fP argument, is to create a base
+ Debian installation in
+ .IR TARGET .
+ .IP
++.IP "\fB\-\-no-merged-usr\fP"
++Do not create /{bin,sbin,lib}/ symlinks pointing to their conterparts in /usr/.
++.IP
+ .IP "\fB\-\-keyring=KEYRING\fP"
+ Override the default keyring for the distribution being bootstrapped,
+ and use
+diff --git a/functions b/functions
+index 8bef5e6..400cf4a 100644
+--- a/functions
++++ b/functions
+@@ -1099,6 +1099,43 @@ setup_dselect_method () {
+ 	esac
+ }
+ 
++# Find out where the runtime dynamic linker and the shared libraries
++# can be installed on each architecture: native, multilib and multiarch.
++# This data can be verified by checking the files in the debian/sysdeps/
++# directory of the glibc package.
++#
++# This function must be updated to support any new architecture which
++# either installs the RTLD in a directory different from /lib or builds
++# multilib library packages.
++setup_merged_usr() {
++	if [ "$MERGED_USR" = "no" ]; then return 0; fi
++
++	local link_dir
++	case $ARCH in
++	    hurd-*)	return 0 ;;
++	    amd64)	link_dir="lib32 lib64 libx32" ;;
++	    i386)	link_dir="lib64 libx32" ;;
++	    mips|mipsel)
++			link_dir="lib32 lib64" ;;
++	    mips64*|mipsn32*)
++			link_dir="lib32 lib64 libo32" ;;
++	    powerpc)	link_dir="lib64" ;;
++	    ppc64)	link_dir="lib32 lib64" ;;
++	    ppc64el)	link_dir="lib64" ;;
++	    s390x)	link_dir="lib32" ;;
++	    sparc)	link_dir="lib64" ;;
++	    sparc64)	link_dir="lib32 lib64" ;;
++	    x32)	link_dir="lib32 lib64 libx32" ;;
++	esac
++	link_dir="bin sbin lib $link_dir"
++
++	local dir
++	for dir in $link_dir; do
++		ln -s usr/$dir $TARGET/$dir
++		mkdir -p $TARGET/usr/$dir
++	done
++}
++
+ ################################################################ pkgdetails
+ 
+ # NOTE
+diff --git a/scripts/sid b/scripts/sid
+index bf3404f..11f032a 100644
+--- a/scripts/sid
++++ b/scripts/sid
+@@ -41,6 +41,12 @@ work_out_debs () {
+ }
+ 
+ first_stage_install () {
++	case $SUITE in
++		etch|etch-m68k|jessie|lenny|squeeze|wheezy) ;;
++		oldstable|stable) ;;
++		*) setup_merged_usr ;;
++	esac
++
+ 	extract $required
+ 
+ 	mkdir -p "$TARGET/var/lib/dpkg"

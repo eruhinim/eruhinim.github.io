@@ -1,0 +1,138 @@
+From 6c58729e7a13c5ae98b07e689a32cd25ed642cf5 Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Tue, 29 Sep 2015 15:06:34 +0200
+Subject: [PATCH] Switch from libdpkg-parse-perl to libdpkg-perl modules
+
+---
+ Build.PL                            |  3 ++-
+ debian/control                      |  1 -
+ lib/Debian/Control/FromCPAN.pm      | 17 +++++++----------
+ lib/DhMakePerl/Command/Packaging.pm | 16 +++++-----------
+ 4 files changed, 14 insertions(+), 23 deletions(-)
+
+diff --git a/Build.PL b/Build.PL
+index 22db76f..fb57f99 100644
+--- a/Build.PL
++++ b/Build.PL
+@@ -7,7 +7,6 @@ my $builder = My::Builder->new(
+     module_name         => 'DhMakePerl',
+     license             => 'gpl',
+     recommends          => {
+-        'DPKG::Parse' => 0.02,
+         'Git'         => 0,
+         'IO::Dir'     => 0,
+     },
+@@ -24,6 +23,8 @@ my $builder = My::Builder->new(
+         'CPAN::Meta'                => 0,
+         'Cwd'                       => 0,
+         'Dpkg'                      => 0,
++        'Dpkg::Index'               => 0,
++        'Dpkg::Control::Types'      => 0,
+         'Dpkg::Source::Package'     => '1.01',
+         'Email::Address::XS'        => '1.01',
+         'Email::Date::Format'       => 0,
+diff --git a/debian/control b/debian/control
+index d9bcdf5..b8405be 100644
+--- a/debian/control
++++ b/debian/control
+@@ -79,7 +79,6 @@ Depends: debhelper (>= 12),
+ Recommends: apt-file (>= 3),
+             apt (>= 1.1.8),
+             git,
+-            libdpkg-parse-perl,
+             libmodule-build-perl,
+             libsys-cpu-perl,
+             pristine-tar
+diff --git a/lib/Debian/Control/FromCPAN.pm b/lib/Debian/Control/FromCPAN.pm
+index f7fefc5..e8edaae 100644
+--- a/lib/Debian/Control/FromCPAN.pm
++++ b/lib/Debian/Control/FromCPAN.pm
+@@ -54,11 +54,11 @@ a required module belongs.
+ 
+ =item dpkg_available
+ 
+-An instance of L<DPKG::Parse::Available> to be used when checking whether
++An instance of L<Dpkg::Index> to be used when checking whether
+ the locally available package is the required version. For example:
+ 
+-    my $available = DPKG::Parse::Available->new;
+-    $available->parse;
++    my $available = Dpkg::Index->new(type => CTRL_INFO_PKG);
++    $available->load("$Dpkg::ADMINDIR/available");
+ 
+ =item dir
+ 
+@@ -299,7 +299,7 @@ L<Debian::Dependencies> class) and a list of missing modules.
+ 
+ Installed packages and perl core are searched first, then the APT contents.
+ 
+-If a DPKG::Parse::Available object is passed, also check the available package version
++If a Dpkg::Index object is passed, also check the available package version.
+ 
+ =cut
+ 
+@@ -340,12 +340,12 @@ sub find_debs_for_modules {
+                 );
+ 
+                 # Check the actual version available, if we've been passed
+-                # a DPKG::Parse::Available object
++                # a Dpkg::Index object
+                 if ( $dpkg_available ) {
+                     my @available;
+                     my @satisfied = grep {
+-                        if ( my $pkg = $dpkg_available->get_package('name' => $_) ) {
+-                            my $have_pkg = Debian::Dependency->new( $_, '=', $pkg->version );
++                        if ( my $pkg = $dpkg_available->get_by_key($_) ) {
++                            my $have_pkg = Debian::Dependency->new( $_, '=', $pkg->{Version} );
+                             push @available, $have_pkg;
+                             $have_pkg->satisfies($direct_dep);
+                         }
+@@ -360,9 +360,6 @@ sub find_debs_for_modules {
+                         push @missing, $module;
+                     }
+                 }
+-                else {
+-                    warn "DPKG::Parse not available. Not checking version of $module.";
+-                }
+             }
+         }
+ 
+diff --git a/lib/DhMakePerl/Command/Packaging.pm b/lib/DhMakePerl/Command/Packaging.pm
+index 136a9eb..9c7578e 100644
+--- a/lib/DhMakePerl/Command/Packaging.pm
++++ b/lib/DhMakePerl/Command/Packaging.pm
+@@ -31,6 +31,9 @@ use Config::INI::Reader ();
+ use CPAN ();
+ use CPAN::Meta;
+ use Cwd qw( getcwd );
++use Dpkg;
++use Dpkg::Index;
++use Dpkg::Control::Types;
+ use Debian::Control::FromCPAN;
+ use Debian::Dependencies;
+ use Debian::Rules;
+@@ -1375,19 +1378,10 @@ sub discover_dependencies {
+         # control->discover_dependencies needs configured CPAN
+         $self->configure_cpan;
+ 
+-        # Attempt to get an instance of DPKG::Parse::Available. If this
+-        # isn't available, warn the user, as versions of packages cannot
+-        # be checked.
+         # Don't cache this in case we've built and installed a
+         # module in this instance.
+-        my $dpkg_available;
+-        if ( eval { require DPKG::Parse::Available } && DPKG::Parse->VERSION >= 0.02 ) {
+-            $dpkg_available = DPKG::Parse::Available->new;
+-            $dpkg_available->parse;
+-        } else {
+-            warn "DPKG::Parse v0.02 or higher not found.";
+-            warn "Versions of required packages will not be checked.";
+-        }
++        my $dpkg_available = Dpkg::Index->new(type => CTRL_INFO_PKG);
++        $dpkg_available->load("$Dpkg::ADMINDIR/available");
+ 
+         return $self->control->discover_dependencies(
+             {   dir                => $self->main_dir,
+-- 
+2.24.0
+

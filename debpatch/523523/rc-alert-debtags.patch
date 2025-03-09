@@ -1,0 +1,174 @@
+Index: scripts/rc-alert.pl
+===================================================================
+--- scripts/rc-alert.pl	(revision 1856)
++++ scripts/rc-alert.pl	(working copy)
+@@ -29,6 +29,7 @@
+ sub print_if_relevant(%);
+ sub human_flags($);
+ sub unhtmlsanit($);
++sub dt_parse_request($);
+ 
+ my $cachedir = $ENV{'HOME'}."/.devscripts_cache/";
+ my $url = "http://bugs.debian.org/release-critical/other/all.html";
+@@ -63,6 +64,9 @@
+ my $distincoperation = "or";
+ my $distexcoperation = "or";
+ 
++my $debtags = '';
++my $debtags_db = '/var/lib/debtags/package-tags';
++
+ my $progname = basename($0);
+ 
+ my $usage = <<"EOF";
+@@ -83,6 +87,10 @@
+   --include-dist-op  Must all distributions be matched for inclusion?
+   --exclude-dists    Set of distributions to exclude
+   --exclude-dist-op  Must all distributions be matched for exclusion?
++
++  Debtags options: (only list packages with matching debtags)
++  --debtags          tags (comma seperated, e.g. implemented-in::perl,role::plugin)
++  --debtags-database database file (standard is /var/lib/debtags/package-tags)
+ EOF
+ 
+ my $version = <<"EOF";
+@@ -90,6 +98,7 @@
+ This code is copyright 2003 by Anthony DeRobertis
+ Modifications copyright 2003 by Julian Gilbey <jdg\@debian.org>
+ Modifications copyright 2008 by Adam D. Barratt <adam\@adam-barratt.org.uk>
++Modifications copyright 2009 by Jan Hauke Rahm <info\@jhr-online.de>
+ This program comes with ABSOLUTELY NO WARRANTY.
+ You are free to redistribute this code under the terms of the
+ GNU General Public License, version 2, or (at your option) any later version.
+@@ -111,6 +120,8 @@
+ 	   "exclude-dists=s" => \$excludedists,
+ 	   "include-dist-op|o=s" => \$distincoperation,
+ 	   "exclude-dist-op=s" => \$distexcoperation,
++	   "debtags=s" => \$debtags,
++	   "debtags-database=s" => \$debtags_db,
+ 	   );
+ 
+ if ($opt_help) { print $usage; exit 0; }
+@@ -164,6 +175,22 @@
+     $package_list = InstalledPackages(0);
+ }
+ 
++## Get debtags info
++my %dt_pkg;
++my @dt_requests;
++if ($debtags) {
++    ## read debtags database to %dt_pkg
++    open DEBTAGS, $debtags_db or die "$progname: could not read debtags database: $!\n";
++    while (<DEBTAGS>) {
++        next unless /^(.+?)(?::?\s*|:\s+(.+?)\s*)$/;
++        $dt_pkg{$1} = $2;
++    }
++    close DEBTAGS;
++
++    ## and parse the request string
++    @dt_requests = dt_parse_request($debtags);
++}
++
+ ## Read the list of bugs
+ 
+ my $found_bugs_start;
+@@ -210,6 +237,11 @@
+ 	
+ 	return unless $flagsapply and $distsapply;
+ 
++    foreach (@dt_requests) {
++        ## the array should be empty if nothing requested
++        return unless ($dt_pkg{$args{pkg}} and $dt_pkg{$args{pkg}} =~ /$_/);
++    }
++
+ 	# yep, relevant
+ 	print "Package: $args{pkg}\n",
+ 	    $comment,  # non-empty comments always contain the trailing \n
+@@ -217,6 +249,7 @@
+ 	    "Title:   " . unhtmlsanit($args{name}) , "\n",
+ 	    "Flags:   " . $flags , "\n",
+ 	    (defined $args{dists} ? "Dists:  " . $dists . "\n" : ""),
++	    (defined $dt_pkg{$args{pkg}} ? "Debtags:  " . $dt_pkg{$args{pkg}} . "\n" : ""),
+ 	    "\n";
+     }
+ }
+@@ -302,3 +335,24 @@
+     $in =~ s/&(lt|gt|amp|quot);/$saniarray{$1}/g;
+     return $in;
+ }
++
++sub dt_parse_request($) {
++    my %dt_lookup;
++    foreach (split /,/, $_[0]) {
++        my ($d_key, $d_val) = split '::', $_;
++        die "A debtag has to be of the form 'key::value'. See debtags manpage for details!"
++            unless ($d_key and $d_val);
++        if ($dt_lookup{$d_key}) {
++            $dt_lookup{$d_key} = "$dt_lookup{$d_key}|$d_val";
++            next;
++        }
++        $dt_lookup{$d_key} = $d_val;
++    }
++
++    my @out;
++    while (my ($dk, $dv) = each %dt_lookup) {
++        $dv = "($dv)" if ($dv =~ /\|/);
++        push @out, $dk . "::" . $dv;
++    }
++    return @out;
++}
+Index: scripts/rc-alert.1
+===================================================================
+--- scripts/rc-alert.1	(revision 1856)
++++ scripts/rc-alert.1	(working copy)
+@@ -2,7 +2,7 @@
+ .SH NAME
+ rc-alert \- check for installed packages with release-critical bugs
+ .SH SYNOPSIS
+-\fBrc-alert [inclusion options] [package ...]\fR
++\fBrc-alert [inclusion options] [\-\-debtags [tag [, tag]...]] [package ...]\fR
+ .br
+ \fBrc-alert \-\-help|\-\-version\fR
+ .SH DESCRIPTION
+@@ -24,7 +24,7 @@
+ .TP
+ .BR \-\-version ", " \-v
+ Show version and copyright information.
+-.TP
++.P
+ It is also possible to filter the list of bugs reported based on the
+ tags and distributions associated with the package. The filtering options
+ are:
+@@ -62,6 +62,26 @@
+ If set to \fIand\fP, a bug must apply to all of the specified distributions
+ in order to be excluded.  By default the bug will be excluded if it applies
+ to any of the listed distributions.
++.P
++Then it is possible to only list bugs which have specific debtags set. Note
++that you need to have debtags installed and also that it's not mandatory for
++maintainers to set proper debtags by now. Thus the produced list is probably
++incomplete.
++.TP
++.BR \-\-debtags
++Match packages based on the listed tags. Each package is matched only if it has
++all the listed tags; in the case of multiple tags within the same facet, a
++package is matched if it has any one of the listed tags within a facet.
++
++For example, specifying an option of ‘--debtags
++implemented-in::perl,role::plugin,implemented-in::python’ specifies a tag from
++the ‘role’ facet and two tags from the ‘implemented-in’ facet; the match will
++only include packages that have the ‘role::plugin’ tag and that have either of
++the tags ‘implemented-in::perl’ or ‘implemented-in::python’.
++.TP
++.BR \-\-debtags\-database
++Use a non-standard debtags database, standard is
++/var/lib/debtags/packages-tags.
+ .SH EXAMPLES
+ .TP
+ .BR \-\-include\-dists " OS"
+@@ -83,4 +103,5 @@
+ .SH AUTHOR
+ \fBrc-alert\fR was written by Anthony DeRobertis and modified by
+ Julian Gilbey <jdg@debian.org> and Adam D. Barratt <adam@adam-barratt.org.uk>
+-for the devscripts package.
++for the devscripts package. Debtags functionality was added by Jan Hauke Rahm
++<info@jhr-online.de>.

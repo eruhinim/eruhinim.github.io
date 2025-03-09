@@ -1,0 +1,134 @@
+=== modified file 'debian/changelog'
+--- a/debian/changelog	2012-11-07 16:12:25 +0000
++++ b/debian/changelog	2012-11-27 07:41:30 +0000
+@@ -1,3 +1,15 @@
++cryptsetup (2:1.4.3-4.1) UNRELEASED; urgency=low
++
++  * Non-maintainer upload.
++  * Fix upstart jobs to not cause boot hangs when actually used in
++    conjunction with startpar.  Closes: #694499.
++  * In connection with the above, make the cryptdisks-early job explicitly
++    wait for 'umountfs' on shutdown just like cryptdisks does; otherwise,
++    the teardown of the cryptdisks upstart job may cause the cryptdisks-early
++    init script run before we're done unmounting filesystems.
++
++ -- Steve Langasek <vorlon@debian.org>  Mon, 26 Nov 2012 19:26:36 -0800
++
+ cryptsetup (2:1.4.3-4) unstable; urgency=medium
+ 
+   * change recommends for busybox to busybox | busybox-static. Thanks to
+
+=== modified file 'debian/cryptdisks-early.init'
+--- a/debian/cryptdisks-early.init	2011-05-11 14:45:42 +0000
++++ b/debian/cryptdisks-early.init	2012-11-27 07:40:19 +0000
+@@ -6,7 +6,7 @@
+ # Should-Start:      udev mdadm-raid
+ # Should-Stop:       udev mdadm-raid
+ # X-Start-Before:    lvm2
+-# X-Stop-After:      lvm2
++# X-Stop-After:      lvm2 umountfs
+ # X-Interactive:     true
+ # Default-Start:     S
+ # Default-Stop:      0 6
+
+=== removed file 'debian/cryptdisks-early.upstart'
+--- a/debian/cryptdisks-early.upstart	2012-04-11 23:55:35 +0000
++++ b/debian/cryptdisks-early.upstart	1970-01-01 00:00:00 +0000
+@@ -1,25 +0,0 @@
+-# cryptdisks - enable encrypted block devices
+-
+-description    "enable encrypted block devices"
+-
+-start on block-device-added ID_FS_USAGE=crypto
+-instance $DEVNAME
+-
+-task
+-
+-script
+-	if [ -r /lib/cryptsetup/cryptdisks.functions ]; then
+-		. /lib/cryptsetup/cryptdisks.functions
+-	else
+-		exit 0
+-	fi
+-
+-	case "$CRYPTDISKS_ENABLE" in
+-	[Nn]*)
+-		exit 1
+-		;;
+-	esac
+-
+-	INITSTATE=udev
+-	crypttab_start_one_disk "$DEVNAME"
+-end script
+
+=== added file 'debian/cryptdisks-udev.upstart'
+--- a/debian/cryptdisks-udev.upstart	1970-01-01 00:00:00 +0000
++++ b/debian/cryptdisks-udev.upstart	2012-11-27 03:21:23 +0000
+@@ -0,0 +1,25 @@
++# cryptdisks - enable encrypted block devices
++
++description    "enable encrypted block devices"
++
++start on block-device-added ID_FS_USAGE=crypto
++instance $DEVNAME
++
++task
++
++script
++	if [ -r /lib/cryptsetup/cryptdisks.functions ]; then
++		. /lib/cryptsetup/cryptdisks.functions
++	else
++		exit 0
++	fi
++
++	case "$CRYPTDISKS_ENABLE" in
++	[Nn]*)
++		exit 1
++		;;
++	esac
++
++	INITSTATE=udev
++	crypttab_start_one_disk "$DEVNAME"
++end script
+
+=== modified file 'debian/cryptdisks.upstart'
+--- a/debian/cryptdisks.upstart	2012-06-08 13:42:51 +0000
++++ b/debian/cryptdisks.upstart	2012-11-27 07:07:27 +0000
+@@ -17,9 +17,17 @@
+ 
+ start on stopped udevtrigger or container
+ 
++# Currently stopping is a no-op, so we can stop this anywhere during the
++# shutdown sequence.  We let the cryptdisks-early init script take care of
++# device teardown instead; it happens that the distinction between the
++# 'cryptdisks' and 'cryptdisks-early' jobs is irrelevant on shutdown because
++# the only sequencing difference is lvm2, which has no init script that's
++# called on shutdown.
++stop on unmounted-remote-filesystems
++
+ task
+ 
+-script
++pre-start script
+ 	if [ -r /lib/cryptsetup/cryptdisks.functions ]; then
+ 		. /lib/cryptsetup/cryptdisks.functions
+ 	else
+
+=== added file 'debian/cryptsetup.maintscript'
+--- a/debian/cryptsetup.maintscript	1970-01-01 00:00:00 +0000
++++ b/debian/cryptsetup.maintscript	2012-11-27 07:43:52 +0000
+@@ -0,0 +1,1 @@
++mv_conffile /etc/init/cryptdisks-early.conf /etc/init/cryptdisks-udev.conf 2:1.4.3-4
+
+=== modified file 'debian/rules'
+--- a/debian/rules	2012-06-12 21:26:18 +0000
++++ b/debian/rules	2012-11-27 03:26:25 +0000
+@@ -156,6 +156,7 @@
+ 	dh_installdocs -a
+ 	dh_installexamples -a debian/scripts/gen-ssl-key
+ 	dh_installinit -a --no-start --name=cryptdisks-early --update-rcd-params="start 26 S . start 59 0 6 ."
++	dh_installinit -a --no-start --name=cryptdisks-udev
+ 	dh_installinit -a --no-start --name=cryptdisks --update-rcd-params="start 28 S . start 48 0 6 ."
+ 	dh_installman -a debian/doc/crypttab.5 debian/doc/cryptdisks_start.8 debian/doc/cryptdisks_stop.8
+ 	dh_installman -p cryptsetup-bin debian/luksformat.8
+

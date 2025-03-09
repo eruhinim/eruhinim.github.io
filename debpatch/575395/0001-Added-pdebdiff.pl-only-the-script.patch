@@ -1,0 +1,737 @@
+From 7e14b5dc8b85b77f799d3856f0aa89cb32de4145 Mon Sep 17 00:00:00 2001
+From: Niels Thykier <niels@thykier.net>
+Date: Mon, 28 Jun 2010 14:56:33 +0200
+Subject: [PATCH 1/2] Added pdebdiff.pl (only the script).
+
+---
+ scripts/pdebdiff.pl |  718 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 files changed, 718 insertions(+), 0 deletions(-)
+ create mode 100755 scripts/pdebdiff.pl
+
+diff --git a/scripts/pdebdiff.pl b/scripts/pdebdiff.pl
+new file mode 100755
+index 0000000..38a9493
+--- /dev/null
++++ b/scripts/pdebdiff.pl
+@@ -0,0 +1,718 @@
++#!/usr/bin/perl
++#
++# Copyright: 2010, Niels Thykier <niels@thykier.net>
++# It comes with ABSOLUTELY NO WARRANTY and may distributed
++# and modified under the same terms as Perl itself.
++#
++# Mini-changelog:
++#  28/06-2010 - Made pdediff strip the tmpdir from the resulting
++#               diff.
++#             - Added support for git based packaging.
++#             - Use File::Temp to create the tempdir.
++#
++
++=head1 NAME
++
++pdebdiff - Diffs the debian folder of two debian sources.
++
++=head1 SYNOPSIS
++
++B<pdebdiff> [I<options>] [I<src1>[ I<src2>]]
++
++B<pdebdiff> B<--help>
++
++=head1 DESCRIPTION
++
++B<pdebdiff> compares the debian/ folder of two debian packages and
++optionally pipes it to B<colordiff> or/and a pager. A source package
++is either a dsc file or the folder containing an unpacked debian
++source package.
++
++If passed two sources, it will compare the debian parts of
++these. Otherwise B<pdebdiff> will check if it has been run from an
++unpacked source package and (if so) compare this with either a source
++passed per command line or a previous released version (extracting the
++version from the changelog)
++
++If B<pdebdiff> is run from an unpacked source package and notices a
++VCS it supports (currently only B<git>), it will generate the diff
++based on the tags of that VCS. In case the VCS diff generator supports
++it, B<pdebdiff> will use its coloring instead of B<colordiff>. If the
++newest version does not appear to be tagged, it will be assumed to be
++the HEAD of the current VCS branch.
++
++When comparing a non-native 1.0 package with any other type of
++package, B<pdebdiff> will convert debian/ folder of the other package
++to a diff.gz and use interdiff to compare the changes.  Due to how
++these diff.gz files are created, B<pdebdiff> may lie about the version
++of the converted package, if it believes this will produce better
++output.
++
++=head1 OPTIONS
++
++=over 4
++
++=item B<-h> B<--help>
++
++Prints usage info and exits.
++
++=item B<--version>
++
++Prints version and license info and exits.
++
++=item B<--color>, B<--colour>
++
++Pipe the resulting diff through colordiff or use the colouring of the
++VCS diff generator (if any).
++
++With this option, pdebdiff will pass -R to the pager if it thinks it
++is less.
++
++Note: This is silently ignored if colordiff is not in PATH and the VCS
++diff being used (if any) does not have a colouring option.
++
++=item B<--pager>
++
++Pipe the resulting diff to a pager. If environment variable PAGER is
++set, this will be used; otherwise pdebdiff will look for a pager.
++
++=item B<--less>
++
++Assume the pager is less; this option implies B<--pager>. If PAGER is
++set, it is assumed to be less. If PAGER is not set pdebdiff will fail
++with an error, if it cannot find less.
++
++By default, pdebdiff will guess whether the pager is less based on the
++name of the command.
++
++=item B<--vcs> B<--no-vcs>
++
++Determines whether pdebdiff should check for a Version Control System
++(VCS) and use that to generate the diff.
++
++This defaults to using VCS and is only used if pdebdiff is run from
++an unpacked source package and given no source package per command
++line.
++
++=item B<--dch-limit=>I<N>
++
++Check at most I<N> releases for the released version. By default this
++is 10.
++
++Only used if not passed any sources.
++
++Note: The first entry is never considered a match and is not included
++in I<N>.
++
++=item B<--dist=>I<distribution>
++
++When parsing a changelog, find the first entry that was released into
++I<distribution>. If not passed, pdebdiff will find the first entry in
++the changelog that does not have "UNRELEASED" as dist.
++
++Only used if not passed any sources.
++
++Note: The first entry is never considered a match.
++
++=item B<--include=>I<dir>
++
++Adds I<dir> to the list of folders of where to find a dsc.
++
++Only used if not passed any sources.
++
++By default pdebdiff will check the following dirs:
++
++ .., ../build-area and /var/cache/pbuilder/result
++
++=item B<-d> B<--debug>
++
++Enable debug printing to stderr.
++
++=item B<--keep-temp> B<--no-keep-temp> 
++
++Whether to keep the temp files and dirs.
++
++Defaults to removing them.
++
++=back
++
++=cut
++
++use strict;
++use warnings;
++use Dpkg::Control;
++use Dpkg::Changelog::Debian;
++use Cwd 'abs_path';
++use Getopt::Long;
++use File::Temp;
++
++my $progname = $0;
++my $debug = 0;
++my $diff = 'diff';
++my $idiff = 'interdiff';
++my $pager = 0;
++my $isless = 0;
++my $color = 0;
++my $dist = undef;
++my $dchlimit = 10;
++my @dscinc = ();
++my $usevcs = '';
++my $keeptmp = '';
++# Needed tools.
++my @needed = ("diff", "tar");
++
++$progname =~ s@[^/]*/@@g;
++
++GetOptions( 'd|debug' => sub { $debug = 1; },
++	    'h|help' => sub { usage(); exit(0); },
++	    'version' => sub { version(); exit(0); },
++	    'pager' => \$pager,
++	    'less' => sub { $pager = 1; $isless = 1; },
++	    'color|colour' => \$color, # I like British.
++	    'dist=s' => \$dist,
++	    'dch-limit=i' => \$dchlimit,
++	    'include=s' => \@dscinc,
++	    'vcs!' => \$usevcs,
++	    'keep-temp!' => \$keeptmp,
++    ) or choke("Usage: $progname [options] [<dsc1>[ <dsc2>]]\nUse: $progname --help for more details.");
++
++if(!(scalar(@ARGV) == 2 or -f 'debian/changelog' && scalar(@ARGV) < 2)){
++    usage();
++    exit(1);
++}
++
++push(@dscinc, "..", "../build-area", "/var/cache/pbuilder/result");
++
++if( ! -t STDOUT && $pager){
++    print STDERR "Ignoring request for pager - stdout is not a tty!\n";
++    $pager = 0;
++}
++
++$usevcs = 1 if($usevcs eq '');
++
++my $api = undef;
++eval { $api = $Dpkg::Control::VERSION; };
++$api = -1 if(!defined($api) or $api =~ m/^-1,/);
++my $nsrcpkg;
++my $osrcpkg;
++my $tmpdir = undef;
++my $basedir = undef;
++if(scalar(@ARGV) == 2){
++    my ($opkg, $npkg) = @ARGV;
++    debug("$opkg - $npkg");
++    if( -d $opkg ){
++	$osrcpkg = parseChangelog($opkg);
++    } else {
++	$osrcpkg = parseDSC($opkg);
++	choke("Cannot find " . $osrcpkg->debian_packaging()) unless( -e $osrcpkg->debian_packaging());
++    }
++    if( -d $npkg ){
++	$nsrcpkg = parseChangelog($npkg);
++    } else {
++	$nsrcpkg = parseDSC($npkg);
++	choke("Cannot find " . $nsrcpkg->debian_packaging()) unless( -e $nsrcpkg->debian_packaging());
++    }
++} else {
++    if(scalar(@ARGV) > 0){
++	my $opkg = shift(@ARGV);
++	$nsrcpkg = parseChangelog('.');
++	if( -d $opkg ){
++	    $osrcpkg = parseChangelog($opkg);
++	} else {
++	    $osrcpkg = parseDSC($opkg);
++	    choke("Cannot find " . $osrcpkg->debian_packaging()) unless( -e $osrcpkg->debian_packaging());
++	}
++    } else {
++	($nsrcpkg, $osrcpkg) = parseChangelog('.', $dchlimit, $dist);
++	if( $usevcs && -d ".git" ) {
++	    # Hello GIT.
++	    my $gcmd = "git tag | grep -q ^debian/" . $nsrcpkg->{'version'}. "'\$'";
++	    my $isTagged;
++	    @needed = ("git");
++	    checkRequirements();
++	    debug("$gcmd");
++	    `$gcmd`;
++	    $isTagged = $?;
++	    $gcmd = "git diff";
++	    if($color){
++		$gcmd .= " --color";
++		$color = 2;
++	    }
++	    output("$gcmd debian/" .  $osrcpkg->{'version'} . ".." . ($isTagged?"debian/" . $nsrcpkg->{'version'}:"HEAD") . " -- debian/");
++	    exit(0);
++	}
++    }
++}
++
++checkRequirements();
++
++$tmpdir = File::Temp::tempdir( CLEANUP => $keeptmp?0:1 );
++
++if(($osrcpkg->{'native'} || $osrcpkg->{'format'} ne '1.0') && ($nsrcpkg->{'native'} || $nsrcpkg->{'format'} ne '1.0')){
++    # Both are 3.0 or both are native 1.0
++    # ensure the name + version are not equal
++    my ($ounpack, $nunpack);
++    my $oversion = $osrcpkg->{'version'};
++    $oversion .= "~" if($nsrcpkg->{'version'} eq $oversion && $osrcpkg->{'source'} eq $nsrcpkg->{'source'});
++    $ounpack = $osrcpkg->move($tmpdir, $oversion);
++    $nunpack = $nsrcpkg->move($tmpdir);
++    output("$diff -Nur \"$ounpack\" \"$nunpack\"");
++} else {
++    my $odgz;
++    my $ndgz;
++    my $oup = $osrcpkg->{'version'};
++    my $nup = $nsrcpkg->{'version'};
++    $oup =~ s/-[^-]*$//;
++    $nup =~ s/-[^-]*$//;
++    if(($nsrcpkg->{'native'} || $nsrcpkg->{'format'} ne '1.0') &&
++       ($osrcpkg->{'source'} eq $nsrcpkg->{'source'})){
++	# lie - it gives a better result.
++	debug("Lying about the current version to obtain better results... $nup -> $oup");
++	$nup = $oup;
++    }
++    print "$0: Since the upstream versions differ, this will probably not produce anything useful.\n" unless($oup eq $nup);
++    print "$0: Since the source names differ, this will probably not produce anything useful.\n"
++	unless($osrcpkg->{'source'} eq $nsrcpkg->{'source'});
++    $odgz = $osrcpkg->diffgz($tmpdir, $oup, ".old");
++    $ndgz = $nsrcpkg->diffgz($tmpdir, $nup);
++    output("$idiff -z \"$odgz\" \"$ndgz\"");
++}
++
++exit(0);
++
++### END OF SCRIPT ###
++
++sub output{
++    my $command = shift;
++    my $pcmd;
++    my $res;
++    my $outcmd = '';
++    my $out;
++    my $diff;
++    my $err;
++    # Check if color has already been handled.
++    if($color != 2){
++	# We only use color if colordiff is available
++	$color = 0 unless($color && hasCommand('colordiff'));
++	if($color){
++	    $outcmd .= " | colordiff ";
++	}
++    }
++    if($pager){
++	my $pagercmd = $ENV{PAGER};
++	if(!defined($pagercmd)){
++	    foreach my $cmd ('less', 'more'){
++		if(hasCommand($cmd)){
++		    $pagercmd = $cmd;
++		    last;
++		}
++	    }
++	    choke("less does not appear in path.") if($isless && $pagercmd ne 'less');
++	    $isless = $isless || $pagercmd =~ m/less/;
++	}
++	$pagercmd .= " -R" if($pagercmd !~ m/-R/ && $isless && $color);
++	$outcmd .= " | $pagercmd";
++    }
++    if($outcmd){
++	debug("Running: $command $outcmd");
++	open($out, $outcmd) or choke("$outcmd: $!");
++    } else {
++	debug("Running: $command");
++	$out = \*STDOUT;
++    }
++    open($diff, "-|", $command) or choke("$command: $!");
++    while(my $line = <$diff>){
++	$line =~ s@^(\+\+\+|---) $tmpdir/*@$1 @o if(defined($tmpdir));
++	print $out $line;
++    }
++    close($out) if($outcmd);    
++    close($diff);
++    $err = ($? >> 8);
++    choke("$command failed with $err!") if($err != 1 && $err != 0);
++}
++
++
++sub doParseDSC {
++    my $filename = shift;
++    my $dsc = Dpkg::Control->new("type" => CTRL_PKG_SRC);
++    debug("api: $api " . ($api>0?'libdpkg-perl':'dpkg-dev [unstable api]'));
++    if($api > 0){
++	# dpkg >= 1.15.6 - using libdpkg-perl
++	open(my $fd, "<", $filename) or choke("$filename: $!");
++	$dsc->parse($fd, $filename);
++	close($fd);
++    } else {
++	# dpkg < 1.15.6 - using dpkg-dev
++	$dsc->parse($filename);
++    }
++    return $dsc;
++}
++
++sub parseDSC {
++    my $filename = shift;
++    my ($src, $version, $format, $debchanges);
++    my $dsc;
++    my $dscdir = $filename;
++    my $orig = undef;
++    my $native = 0;
++    my $diffgz;
++    my $mover;
++    $dscdir = "." unless($dscdir =~ m@/@o);
++    $dscdir =~ s@/[^/]*$@@o;
++    choke("Could not find: $filename") unless( -e $filename );
++    $dsc = doParseDSC($filename);
++    ($src, $version, $format) = ($dsc->{'Source'}, $dsc->{'Version'}, $dsc->{'Format'});
++    choke("Source field was not present in $filename (or it was not a dsc file)") unless(defined($src));
++    debug("$filename - $dscdir - " . join(" - ", ($src, $version)));
++    {
++	my @filesField = split(/\s+/, $dsc->{'Files'});
++	my $len = scalar(@filesField);
++	my $i = 3;
++	for( ; $i < $len ; $i+=3 ){
++	    if($format eq '3.0 (quilt)'){
++		$debchanges = $filesField[$i] if($filesField[$i] =~ m/^${src}_${version}\.debian\.tar\./);
++	    } elsif($format eq '3.0 (native)'){
++		$debchanges = $filesField[$i] if($filesField[$i] =~ m/^${src}_${version}\.tar\./);
++	    } else {
++		$debchanges = $filesField[$i] if($filesField[$i] =~ m/^${src}_${version}\.diff\.gz/);
++		$orig = $filesField[$i] if($filesField[$i] =~ m/^${src}_${version}\.tar/);
++	    }
++	}
++    }
++    if(!defined($debchanges) and $format eq '1.0'){
++	$debchanges = $orig;
++	$native = 1;
++    } else {
++	$native = $format eq '3.0 (native)';
++    }
++    if($format eq '1.0' && !$native){
++	$diffgz = \&diffgzFetch;
++	$mover = sub { choke("Assertion Failed: Mover not defined for non-native 1.0 sources"); };
++    } else {
++	$diffgz = \&diffgzTar;
++	$mover = \&unpackTar;
++    }
++
++    choke("Could not find debian changes.") unless(defined($debchanges));
++    return Debian::Devscripts::PDebDiff->new({ 'source' => $src,
++					       'version' => $version,
++					       'format' => $format,
++					       'native' => $native,
++					       'basedir' => $dscdir,
++					       'debian-changes' => $debchanges,
++					       'unpacked' => 0,
++					       '!mover' => $mover,
++					       '!diffgz' => $diffgz
++					     });
++}
++
++sub parseChangelog {
++    my $basedir = shift;
++    my $limit = shift;
++    my $dist = shift;
++    my $dch = Dpkg::Changelog::Debian->new();
++    my $dchf = "${basedir}/debian/changelog";
++    my @range;
++    my $entry;
++    my $unr;
++    my $dsc;
++    my $srcpkg;
++    my $oldsrcpkg;
++    choke("limit must be >= 1 (value $limit)") if(defined($limit) && $limit < 1);
++    choke("Cannot find $dchf") unless( -e $dchf );
++    open(DCH, "<", $dchf) or choke("$dchf: $!");
++    $dch->parse(\*DCH, $dchf);
++    close(DCH);
++    $limit = 0 unless(defined($limit));
++    @range = $dch->get_range( { count => $limit +1} );
++    $unr = shift(@range);
++    $srcpkg = Debian::Devscripts::PDebDiff->new({ 'source' => $unr->get_source(),
++						  'version' => $unr->get_version(),
++						  'format' => '0.0 (unpacked-source)',
++						  'native' => '', # is neither
++						  'basedir' => $basedir,
++						  'debian-changes' => 'debian',
++						  'unpacked' => 1,
++						  '!mover' => \&moveDebDir,
++						  '!diffgz' => \&diffgzMovedDebDir
++						});
++    return $srcpkg unless($limit > 0);
++    range:
++    foreach my $r (@range){
++	# find the first entry that is in unstable.
++	my @dists = $r->get_distributions();
++	foreach my $d (@dists){
++	    if((!defined($dist) && $d ne 'UNRELEASED') or
++		(defined($dist) && $d eq $dist)) {
++		$entry = $r;
++		last range;
++	    }
++	}
++    }
++    choke("Could not find a release " . (defined($dist)? "to $dist": "") .
++	  " within $limit entries (use --dch-limit to increase this limit)") unless(defined($entry) && $limit > 0);
++    $dsc = $entry->get_source() . "_" . $entry->get_version() . ".dsc";
++    foreach my $dir (@dscinc){
++	if( -e "$dir/$dsc"){
++	    debug("$dsc is in $dir");
++	    return ($srcpkg, parseDSC("$dir/$dsc"));
++	}
++	debug("Tried: $dir/$dsc");
++    }
++    choke("Could not find $dsc");
++}
++
++sub moveDebDir{
++    my $this = shift;
++    my $tmp = shift;
++    my $dir = $this->debian_packaging();
++    my $src = $this->{'source'};
++    my $version = $this->{'version'};
++    my $findcmd = " && find \"$tmp/$src-$version\" -depth \\( -name '.svn' -o -name 'CVS' \\) -exec rm -fr {} \\;";
++    debug("mkdir -p \"$tmp/$src-$version\" && cp -a \"$dir\"  \"$tmp/$src-$version\" $findcmd");
++    system("mkdir -p \"$tmp/$src-$version\" && cp -a \"$dir\"  \"$tmp/$src-$version\" $findcmd") == 0
++	or choke("Failed to link $dir/debian to $tmp/$src-$version");
++    return "$tmp/$src-$version";
++}
++
++sub unpackTar {
++    my $this = shift;
++    my $tmp = shift;
++    my $tar = abs_path($this->debian_packaging());
++    my $src = $this->{'source'};
++    my $version = $this->{'version'};
++    my $native = $this->{'native'};
++    my $vch = shift//$version;
++    my $comp = " --auto-compress ";
++    my $args = $native ? "$src-$version/debian/" : "";
++    $tmp = "$tmp/$src-$vch" unless($native);
++    debug("mkdir -p \"$tmp\" && cd \"$tmp\" && tar -x $comp -f \"$tar\" $args");
++    system("mkdir -p \"$tmp\" && cd \"$tmp\" && tar -x $comp -f \"$tar\" $args") == 0
++	or choke("Failed to untar $tar.");
++    if($native){
++	system("mv -f \"$tmp/$src-$version\" \"$tmp/$src-$vch\"") == 0
++	    or choke("Failed to rename unpacked source") unless($version eq $vch);
++	$tmp = "$tmp/$src-$vch";
++    }
++    return $tmp;
++}
++
++sub diffgzTar {
++    my $this = shift;
++    my $tmp = shift;
++    my $vch = shift;
++    my $version = $this->{'version'};
++    my $unpacked;
++    $unpacked = unpackTar($this, $tmp);
++    debug("diffgzTar:" . $this->{'source'} . " $version, $vch");
++    if(defined($vch) && $vch ne $version){
++	my $src = $this->{'source'};
++	debug("mv -f \"$unpacked\" \"$tmp/$src-$vch\"");
++	system("mv -f \"$unpacked\" \"$tmp/$src-$vch\"") == 0
++	    or choke("Failed to rename \"$unpacked\" -> \"$tmp/$src-$vch\"");
++	$unpacked = "$src-$vch";
++    } else {
++	$unpacked =~ s@^$tmp/@@;
++    }
++    return diffgzDir($this, $tmp, $unpacked, @_);
++}
++
++sub diffgzMovedDebDir{
++    my $this = shift;
++    my $tmp = shift;
++    my $moved = moveDebDir($this, $tmp);
++    my $vch = shift;
++    my $version = $this->{'version'};
++    if(defined($vch) && $vch ne $version){
++	my $src = $this->{'source'};
++	debug("mv -f \"$moved\" \"$tmp/$src-$vch\"");
++	system("mv -f \"$moved\" \"$tmp/$src-$vch\"") == 0
++	    or choke("Failed to rename \"$moved\" -> \"$tmp/$src-$vch\"");
++	$moved = "$src-$vch";
++    } else {
++	$moved =~ s@^$tmp/@@;
++    }
++    return diffgzDir($tmp, $tmp, $moved, @_);
++}
++
++sub diffgzDir {
++    my $this = shift;
++    my $tmp = shift;
++    my $name = shift;
++    my $extra = shift//'';
++    # trailing slashses gives problems.
++    $name =~ s@/*$@@;
++    debug("mkdir -p \"$tmp/$name.orig\" && cd \"$tmp\" && $diff -Nur $name.orig $name  | gzip -9c > $name$extra.diff.gz");
++    system("mkdir -p \"$tmp/$name.orig\" && cd \"$tmp\" && $diff -Nur $name.orig $name  | gzip -9c > $name$extra.diff.gz") == 0 or
++	choke("Failed to create $name$extra.diff.gz");
++    debug("mv -f \"$tmp/$name\" \"$tmp/$name\"`date +%s`");
++    system("mv -f \"$tmp/$name\" \"$tmp/$name\"`date +%s`") == 0 or choke("Renaming \"$tmp/$name\" failed");
++    return "$tmp/$name$extra.diff.gz";
++}
++
++sub diffgzFetch{
++    my $this = shift;
++    return $this->debian_packaging();
++}
++
++sub debug{
++    my $msg = shift;
++    print STDERR "D: $msg\n" if($debug);
++}
++
++sub choke{
++    my $msg = shift;
++    print STDERR "$msg\n";
++    system("rm -fr \"$tmpdir\"") if(defined($tmpdir));
++    exit(1);
++}
++
++sub hasCommand{
++    my $cmd = shift;
++    return system("which $cmd 2>/dev/null >/dev/null") == 0;
++}
++
++sub checkRequirements{
++    push(@needed, "interdiff") if((!$osrcpkg->{'native'} && $osrcpkg->{'format'} eq '1.0') ||
++				  (!$nsrcpkg->{'native'} && $nsrcpkg->{'format'} eq '1.0'));
++    foreach my $cmd (@needed){
++	debug("Checking for $cmd");
++	hasCommand($cmd) or choke("Cannot find $cmd, which is needed for this operation.");
++    }
++    # We are good.
++    1;
++}
++
++sub version {
++    print <<EOF
++$progname: ###VERSION###
++Copyright (C): 2010, Niels Thykier <niels\@thykier.net>.
++
++This script comes with ABSOLUTELY NO WARRANTY and may be modified
++and distributed under the same terms as Perl.
++EOF
++;
++}
++
++sub usage{
++    my $slash = '/';
++    print <<EOF
++Usage: $progname [OPTION]... [src1 [src2]]
++
++$progname compares the debian folder of two debian packages and
++optionally pipes it to colordiff or${slash}and a pager. A source package
++is either a dsc file or the folder containing an unpacked debian
++source package.
++
++If run from an unpacked source package being passed one or zero
++source packages, it will compare the unpacked source package to
++either the source package passed or to an earlier version of
++the same source.
++
++ -d, --debug      Prints debug information to stderr.
++ -h, --help       Prints this usage and exits.
++ --version        Prints version and license info and exits.
++ --pager          Pipe the output to a pager.
++ --less           Assume the pager is less (implies --pager).
++ --color,--colour Pipe the output through colordiff.
++                  NB: May not work, if your pager is not less.
++ --[no-]vcs       Do (not) look for/use known VCS repositories to
++                  generate the diff.
++                  Ignored if not run from an unpacked source.
++ --dist <dist>    Look for <dist> in the changelog.
++                  Defaults to any dist, which is not UNRELEASED.
++                  Ignored if passed one or more sources.
++ --dch-limit <N>  Look at most <N> version back in the changelog (def: 10)
++                  Ignored if passed one or more sources.
++ --include <dir>  Look for dsc files in <dir>.
++                  Ignored if passed one or more sources.
++ --[no-]keep-temp Do (not) leave temp dirs/files behind (for debugging).
++                  Defaults to removing them.
++
++If at least one of the source packages are 1.0, then the final difference
++will be generated using interdiff. diff will still be used to convert any
++3.0 sources into a diff.gz.
++
++If name of the pager suggests it is less (or --less is passed), $progname
++will pass the correct options to make it display the colors.
++
++Note: --color is silently ignored if colordiff is not available and the
++VCS used does not have its own colouring option.
++
++VCSs supported: git
++
++EOF
++;
++
++}
++
++package Debian::Devscripts::PDebDiff;
++
++# Pseudo module for encapsulating src-packages.
++
++sub new{
++    my ($ref, $opt) = @_;
++    return bless($opt, $ref);
++}
++
++sub debian_packaging {
++    my $this = shift;
++    return $this->{'basedir'} . "/" . $this->{'debian-changes'};
++}
++
++sub move {
++    my $this = shift;
++    my $handler = $this->{'!mover'};
++    return $handler->($this, @_);
++}
++
++sub diffgz{
++    my $this = shift;
++    my $handler = $this->{'!diffgz'};
++    return $handler->($this, @_);
++}
++
++=head1 EXAMPLES
++
++When run from an unpacked source package, B<pdebdiff> will
++diff the unpacked source package against the latest
++released version.
++
++ user@host:/my/package-1.0$ ls debian/changelog
++ debian/changelog
++ user@host:/my/package-1.0$ pdebdiff
++
++The case above, it will first look for a known VCS repository
++and use the tag of the previous version to generate the diff.
++If it cannot find a known VCS, it will attempt to look for a
++packed source of the previous version.
++
++In case your builder places dsc files in a non-standard place,
++you may have to pass B<--include> to pdebdiff.
++
++ user@host:/my/package-1.0$ pdebdiff --include $HOME/myresults
++
++You can also specify that the unpacked source package should
++be diffed against a specific dsc file.
++
++ user@host:/my/package-1.0$ ../build-area/package_0.9-1.dsc
++
++Or even another unpacked source:
++
++ user@host:/my/package-1.0$ ls ../package-0.9/debian/changelog
++ ../package-0.9/debian/changelog
++ user@host:/my/package-1.0$ pdebdiff ../package-0.9
++
++Alternatively you can compare two sources by passing them both
++by command line. These can also be unpacked sources.
++
++ user@host:~$ pdebdiff package_1.0-1.dsc package_1.0-2.dsc
++ user@host:~$ pdebdiff package-0.9/ package-1.0/
++ user@host:~$ pdebdiff package_1.0-1.dsc package-1.0/
++ user@host:~$ pdebdiff package-1.0/ package_1.0-3.dsc
++
++=head1 AUTHOR
++
++Niels Thykier <niels@thykier.net>
++
++=cut
+-- 
+1.7.1
+

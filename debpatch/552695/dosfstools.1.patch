@@ -1,0 +1,176 @@
+diff --git a/debian/changelog b/debian/changelog
+index d4c0675..44b2460 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,3 +1,15 @@
++dosfstools (3.0.6-1ubuntu1~ppa2) karmic; urgency=low
++
++  * Unless overridden by the user sets the DOS boot sector's
++    hidden-sectors field to match the start of a hard disk's
++    partition.
++  * Initialize DOS boot sector device_number according to device media type 
++    Addresses LP: #398241
++  * Adds options to override the DOS boot sector device_number and
++    the FAT media type. 
++
++ -- John S Gruber <johnsgruber@gmail.com>  Sun, 18 Oct 2009 21:10:45 -0400
++
+ dosfstools (3.0.6-1) unstable; urgency=low
+ 
+   * Updating maintainer field.
+diff --git a/man/mkdosfs.8 b/man/mkdosfs.8
+index bb87ce6..8c0f138 100644
+--- a/man/mkdosfs.8
++++ b/man/mkdosfs.8
+@@ -64,6 +64,14 @@
+ .I logical-sector-size
+ ]
+ [
++.B \-D
++.I drive-number
++]
++[
++.B \-M
++.I FAT-media-type
++]
++[
+ .B \-v
+ ]
+ .I device
+@@ -118,6 +126,11 @@ be stored on the disk, but the file nevertheless will have the
+ correct size. The resulting file can be copied later to a floppy disk
+ or other device, or mounted through a loop device.
+ .TP
++.BI \-D " drive-number"
++Specify the BIOS drive number to be stored in the FAT boot sector.
++This value is usually 0x80 for hard disks and 0x00 for floppy devices
++or partitions to be used for floppy emulation.
++.TP
+ .BI \-f " number-of-FATs"
+ Specify the number of file allocation tables in the file system.  The
+ default is 2.  Currently the Linux MS-DOS file system does not support
+@@ -164,6 +177,11 @@ file must not exceed 418 bytes once line feeds have been converted to
+ carriage return-line feed combinations, and tabs have been expanded.
+ If the filename is a hyphen (-), the text is taken from standard input.
+ .TP
++.BI \-M " FAT-media-type"
++Specify the BIOS drive number to be stored in the FAT boot sector.
++This value is usually 0xF8 for hard disks and has a value from 0xF9
++to 0xFF for floppies or partitions to be used for floppy emulation.
++.TP
+ .BI \-n " volume-name"
+ Sets the volume name (label) of the file system.  The volume name can
+ be up to 11 characters long.  The default is no label.
+diff --git a/src/mkdosfs.c b/src/mkdosfs.c
+index 89c5600..7c6773b 100644
+--- a/src/mkdosfs.c
++++ b/src/mkdosfs.c
+@@ -310,6 +310,10 @@ static int sectors_per_cluster = 0;	/* Number of sectors per disk cluster */
+ static int root_dir_entries = 0;	/* Number of root directory entries */
+ static char *blank_sector;		/* Blank sector - all zeros */
+ static int hidden_sectors = 0;		/* Number of hidden sectors */
++static int hidden_sectors_by_user = 0; /* -h option invoked */
++static int drive_number_option = 0;             /* drive number */
++static int drive_number_by_user = 0;    /* drive number option invoked */
++static int fat_media_byte = 0;          /* media byte in header and starting FAT */
+ static int malloc_entire_fat = FALSE;	/* Whether we should malloc() the entire FAT or not */
+ 
+ /* Function prototype definitions */
+@@ -753,6 +757,8 @@ establish_params (int device_num,int size)
+       else {
+         bs.secs_track = CT_LE_W(geometry.sectors);	/* Set up the geometry information */
+         bs.heads = CT_LE_W(geometry.heads);
++	  if (!hidden_sectors_by_user)
++	     hidden_sectors = CT_LE_L(geometry.start);
+       }
+     def_hd_params:
+       bs.media = (char) 0xf8; /* Set up the media descriptor for a hard drive */
+@@ -805,6 +811,18 @@ setup_tables (void)
+     strcpy (bs.system_id, "mkdosfs");
+   if (sectors_per_cluster)
+     bs.cluster_size = (char) sectors_per_cluster;
++
++  if (fat_media_byte)
++    bs.media = (char) fat_media_byte;
++  
++  if (bs.media == 0xf8)
++      vi->drive_number=0x80;
++  else
++      vi->drive_number=0x00;
++
++  if (drive_number_by_user)
++    vi->drive_number= (char) drive_number_option;
++
+   if (size_fat == 32)
+     {
+       /* Under FAT32, the root dir is in a cluster chain, and this is
+@@ -1198,9 +1216,11 @@ setup_tables (void)
+       printf("%s has %d head%s and %d sector%s per track,\n",
+ 	     device_name, CF_LE_W(bs.heads), (CF_LE_W(bs.heads) != 1) ? "s" : "",
+ 	     CF_LE_W(bs.secs_track), (CF_LE_W(bs.secs_track) != 1) ? "s" : "");
++      printf("hidden sectors 0x%04x;\n",  hidden_sectors);
+       printf("logical sector size is %d,\n",sector_size);
+       printf("using 0x%02x media descriptor, with %d sectors;\n",
+ 	     (int) (bs.media), num_sectors);
++      printf("drive number 0x%02x;\n", (int) (vi->drive_number));
+       printf("file system has %d %d-bit FAT%s and %d sector%s per cluster.\n",
+ 	     (int) (bs.fats), size_fat, (bs.fats != 1) ? "s" : "",
+ 	     (int) (bs.cluster_size), (bs.cluster_size != 1) ? "s" : "");
+@@ -1386,6 +1406,7 @@ Usage: mkdosfs [-A] [-c] [-C] [-v] [-I] [-l bad-block-file] [-b backup-boot-sect
+        [-m boot-msg-file] [-n volume-name] [-i volume-id]\n\
+        [-s sectors-per-cluster] [-S logical-sector-size] [-f number-of-FATs]\n\
+        [-h hidden-sectors] [-F fat-size] [-r root-dir-entries] [-R reserved-sectors]\n\
++       [-M FAT-media-byte] [-D drive_number]\n\
+        /dev/name [blocks]\n");
+ }
+ 
+@@ -1448,7 +1469,7 @@ main (int argc, char **argv)
+   printf ("%s " VERSION " (" VERSION_DATE ")\n",
+ 	   program_name);
+ 
+-  while ((c = getopt (argc, argv, "Ab:cCf:F:Ii:l:m:n:r:R:s:S:h:v")) != EOF)
++  while ((c = getopt (argc, argv, "Ab:cCf:F:Ii:l:m:n:r:R:s:S:h:M:D:v")) != EOF)
+     /* Scan the command line for options */
+     switch (c)
+       {
+@@ -1473,6 +1494,16 @@ main (int argc, char **argv)
+       case 'C':		/* C : Create a new file */
+ 	create = TRUE;
+ 	break;
++    
++      case 'D':		/* D : Choose Drive Number */
++	drive_number_option = (int) strtol (optarg, &tmp, 0);
++	if (*tmp || (drive_number_option != 0 && drive_number_option != 0x80))
++	  {
++	    printf ("Drive number must be 0 or 0x80: %s\n", optarg);
++	    usage ();
++	  }
++	drive_number_by_user=1;
++	break;
+ 
+       case 'f':		/* f : Choose number of FATs */
+ 	nr_fats = (int) strtol (optarg, &tmp, 0);
+@@ -1500,6 +1531,7 @@ main (int argc, char **argv)
+ 	    printf("Bad number of hidden sectors : %s\n", optarg);
+ 	    usage ();
+ 	  }
++	hidden_sectors_by_user = 1;
+ 	break;
+ 
+       case 'I':
+@@ -1587,6 +1619,15 @@ main (int argc, char **argv)
+ 	  }
+ 	break;
+ 
++      case 'M':		/* M : FAT Media byte */
++	fat_media_byte = (int) strtol (optarg, &tmp, 0);
++	if (*tmp || fat_media_byte < 248 || fat_media_byte > 255)
++	  {
++	    printf ("FAT Media byte must be between 0xF8 and 0xFF : %s\n", optarg);
++	    usage ();
++	  }
++	break;
++
+       case 'n':		/* n : Volume name */
+ 	sprintf(volume_name, "%-11.11s", optarg);
+ 	break;

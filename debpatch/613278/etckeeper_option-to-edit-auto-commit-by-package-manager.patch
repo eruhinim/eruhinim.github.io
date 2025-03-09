@@ -1,0 +1,309 @@
+From a6b9629d2285ec73654f752ab45572773b6fc722 Mon Sep 17 00:00:00 2001
+From: "Bradley M. Kuhn" <bkuhn@ebb.org>
+Date: Sun, 8 Sep 2013 13:09:42 -0400
+Subject: Save TTY and use variable as part of determination if running
+ interactively.
+
+---
+ commit.d/50vcs-commit |    8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/commit.d/50vcs-commit b/commit.d/50vcs-commit
+index 3a4c819..75b3a6e 100755
+--- a/commit.d/50vcs-commit
++++ b/commit.d/50vcs-commit
+@@ -28,17 +28,23 @@ if [ -n "$dnsdomainname" ]; then
+ 	hostname="$hostname.$dnsdomainname"
+ fi
+ 
++# Save TTY for use for tty ownership determination, and interactivity test.
++TTY="$(tty 2>/dev/null || true)"
+ USER=
+ if [ -n "$SUDO_USER" ]; then
+ 	USER="$SUDO_USER"
+ else
+ 	# try to check tty ownership, in case user su'd to root
+-	TTY="$(tty 2>/dev/null || true)"
+ 	if [ -n "$TTY" ] && [ -c "$TTY" ]; then
+ 		USER="$(find "$TTY" -printf "%u")"
+ 	fi
+ fi
+ 
++isInteractive="0"
++if [ -f "$TTY" ] && [ ! -z "$PS1" ];then
++    isInteractive="1"
++fi
++
+ if [ "$VCS" = git ] && [ -d .git ]; then
+ 	if [ -n "$USER" ]; then
+ 		# Use user.name and user.email from the gitconfig belonging
+-- 
+1.7.10.4
+
+
+From dc30b61d27987026de8cee2181bac07f7b60bdbf Mon Sep 17 00:00:00 2001
+From: "Bradley M. Kuhn" <bkuhn@ebb.org>
+Date: Sun, 8 Sep 2013 13:12:58 -0400
+Subject: Add EDIT_AUTO_COMMIT_MESSAGES_WHEN_INTERACTIVE configuration option.
+
+Currently, only Git seems to support the --edit option, and therefore will be
+the only VCS able to honor this option at this time.
+---
+ etckeeper.conf |    5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/etckeeper.conf b/etckeeper.conf
+index 639c77b..8b49fb4 100644
+--- a/etckeeper.conf
++++ b/etckeeper.conf
+@@ -29,6 +29,11 @@ DARCS_COMMIT_OPTIONS="-a"
+ # so you can commit the changes by hand.
+ #AVOID_COMMIT_BEFORE_INSTALL=1
+ 
++# Uncomment to force etckeeper, when running in an interactive terminal, to
++# edit automatically generated commit messages before completing the commit.
++# This option is only supported if the underlying VCS supports it.
++#EDIT_AUTO_COMMIT_MESSAGES_WHEN_INTERACTIVE=1
++
+ # The high-level package manager that's being used.
+ # (apt, pacman-g2, yum, zypper etc)
+ HIGHLEVEL_PACKAGE_MANAGER=apt
+-- 
+1.7.10.4
+
+
+From ce56296530cb2494520171391e0115e633c29fbf Mon Sep 17 00:00:00 2001
+From: "Bradley M. Kuhn" <bkuhn@ebb.org>
+Date: Sun, 8 Sep 2013 13:13:38 -0400
+Subject: Initial support for EDIT_AUTO_COMMIT_MESSAGES_WHEN_INTERACTIVE with
+ Git on commits.
+
+---
+ commit.d/50vcs-commit |    4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/commit.d/50vcs-commit b/commit.d/50vcs-commit
+index 75b3a6e..bd09db9 100755
+--- a/commit.d/50vcs-commit
++++ b/commit.d/50vcs-commit
+@@ -73,7 +73,11 @@ if [ "$VCS" = git ] && [ -d .git ]; then
+ 		fi
+ 	fi
+ 	if [ -n "$logfile" ]; then
++	    if [ "$isInteractive" = 1 ] && [ "$EDIT_AUTO_COMMIT_MESSAGES_WHEN_INTERACTIVE" = 1 ]; then
++		git commit $GIT_COMMIT_OPTIONS --edit -F "$logfile"
++            else
+ 		git commit $GIT_COMMIT_OPTIONS -F "$logfile"
++            fi
+ 	else
+ 		git commit $GIT_COMMIT_OPTIONS
+ 	fi
+-- 
+1.7.10.4
+
+
+From 4e181cdccd5275ca2a8c822410bf8f14272fffd0 Mon Sep 17 00:00:00 2001
+From: "Bradley M. Kuhn" <bkuhn@ebb.org>
+Date: Sun, 8 Sep 2013 13:39:16 -0400
+Subject: tempfile code already found in other files, as we'll need a tempfile
+ here.
+
+Perhaps this tempfile code should be a utility function somewhere?
+---
+ post-install.d/50vcs-commit |   10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/post-install.d/50vcs-commit b/post-install.d/50vcs-commit
+index 7710c4a..c6fa0a0 100755
+--- a/post-install.d/50vcs-commit
++++ b/post-install.d/50vcs-commit
+@@ -3,6 +3,16 @@ set -e
+ 		
+ pl="/var/cache/etckeeper/packagelist"
+ 
++if which tempfile >/dev/null 2>&1 || type -p tempfile >/dev/null 2>&1; then
++    tempfile="tempfile"
++elif which mktemp >/dev/null 2>&1 || type -p mktemp >/dev/null 2>&1; then
++    tempfile="mktemp"
++else
++    echo "etckeeper warning: can't find tempfile or mktemp" >&2
++    exit 1
++fi
++commitfile=$($tempfile)
++
+ if etckeeper unclean; then
+ 	message="committing changes in /etc after $HIGHLEVEL_PACKAGE_MANAGER run"
+ 
+-- 
+1.7.10.4
+
+
+From 1b1785d6fd95d66ef12cfeb0165f02df246e74b2 Mon Sep 17 00:00:00 2001
+From: "Bradley M. Kuhn" <bkuhn@ebb.org>
+Date: Sun, 8 Sep 2013 16:38:10 -0400
+Subject: =?UTF-8?q?Support=20-F=20<logfile>=20option,=20for=20precreated=20l?=
+ =?UTF-8?q?og=20files.=0ANote=20that=20they'll=20still=20be=20deleted=20here?=
+ =?UTF-8?q?=20by=20the=20EXIT=20trap.?=
+
+---
+ commit.d/50vcs-commit |   11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/commit.d/50vcs-commit b/commit.d/50vcs-commit
+index bd09db9..5157558 100755
+--- a/commit.d/50vcs-commit
++++ b/commit.d/50vcs-commit
+@@ -8,14 +8,19 @@ cleanup () {
+ }
+ if [ -n "$1" ]; then
+ 	trap cleanup EXIT
+-	logfile="$(mktemp -t etckeeper-$VCS.XXXXXXXXXX)"
+-	if [ "x$1" = "x--stdin" ]; then
+-		cat > "$logfile"
++	if [ "x$1" = "x-F" ]; then
++		shift 1
++		logfile="$1"
+ 	else
++	    logfile="$(mktemp -t etckeeper-$VCS.XXXXXXXXXX)"
++	    if [ "x$1" = "x--stdin" ]; then
++		cat > "$logfile"
++	    else
+ 		if [ "x$1" = "x-m" ]; then
+ 			shift 1
+ 		fi
+ 		echo "$1" > "$logfile"
++	    fi
+ 	fi
+ else
+ 	logfile=""
+-- 
+1.7.10.4
+
+
+From e96838660090e82f526e99071ce0bd3da29d9059 Mon Sep 17 00:00:00 2001
+From: "Bradley M. Kuhn" <bkuhn@ebb.org>
+Date: Sun, 8 Sep 2013 16:38:23 -0400
+Subject: Call this logfile to make it consistent with other scripts.
+
+---
+ post-install.d/50vcs-commit |    6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/post-install.d/50vcs-commit b/post-install.d/50vcs-commit
+index c6fa0a0..1752345 100755
+--- a/post-install.d/50vcs-commit
++++ b/post-install.d/50vcs-commit
+@@ -11,7 +11,7 @@ else
+     echo "etckeeper warning: can't find tempfile or mktemp" >&2
+     exit 1
+ fi
+-commitfile=$($tempfile)
++logfile=$($tempfile)
+ 
+ if etckeeper unclean; then
+ 	message="committing changes in /etc after $HIGHLEVEL_PACKAGE_MANAGER run"
+@@ -22,9 +22,11 @@ if etckeeper unclean; then
+ 			echo
+ 			echo "Package changes:"
+ 			etckeeper list-installed | diff -U0 $pl.pre-install - | tail -n+4 | egrep '^[-+]' || true
+-		) | etckeeper commit --stdin
++		) > $logfile
++                etckeeper commit -F $logfile
+ 	else
+ 		etckeeper commit "$(printf "$message")"
++
+ 	fi
+ fi
+ 	
+-- 
+1.7.10.4
+
+
+From 200231fa23aad4409d8ce1ce061bbd2e44347747 Mon Sep 17 00:00:00 2001
+From: "Bradley M. Kuhn" <bkuhn@ebb.org>
+Date: Sun, 8 Sep 2013 17:03:31 -0400
+Subject: PS1 is probably never going to be set this deep down in calls of
+ shell scripts.
+
+---
+ commit.d/50vcs-commit |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/commit.d/50vcs-commit b/commit.d/50vcs-commit
+index 5157558..5010a6b 100755
+--- a/commit.d/50vcs-commit
++++ b/commit.d/50vcs-commit
+@@ -46,7 +46,7 @@ else
+ fi
+ 
+ isInteractive="0"
+-if [ -f "$TTY" ] && [ ! -z "$PS1" ];then
++if [ -f "$TTY" ]; then
+     isInteractive="1"
+ fi
+ 
+-- 
+1.7.10.4
+
+
+From a3f16689c8ab0488ee903b01d670e5640c33dd19 Mon Sep 17 00:00:00 2001
+From: "Bradley M. Kuhn" <bkuhn@ebb.org>
+Date: Sun, 8 Sep 2013 17:29:33 -0400
+Subject: TTY's aren't regular files, so -e is the right test, not -f.
+
+---
+ commit.d/50vcs-commit |    2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/commit.d/50vcs-commit b/commit.d/50vcs-commit
+index 5010a6b..25df8b5 100755
+--- a/commit.d/50vcs-commit
++++ b/commit.d/50vcs-commit
+@@ -46,7 +46,7 @@ else
+ fi
+ 
+ isInteractive="0"
+-if [ -f "$TTY" ]; then
++if [ -e "$TTY" ]; then
+     isInteractive="1"
+ fi
+ 
+-- 
+1.7.10.4
+
+
+From 81d998de51e3bb344fb6fa6d87fb074199c76d01 Mon Sep 17 00:00:00 2001
+From: "Bradley M. Kuhn" <bkuhn@ebb.org>
+Date: Sun, 8 Sep 2013 17:57:46 -0400
+Subject: =?UTF-8?q?We=20need=20to=20load=20the=20etckeeper.conf=20file=20her?=
+ =?UTF-8?q?e,=20because=20this=20script=0Ais=20usually=20called=20from=20the?=
+ =?UTF-8?q?=20package=20manager=20rather=20than=20etckeeper=20script.?=
+
+---
+ commit.d/50vcs-commit |   10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/commit.d/50vcs-commit b/commit.d/50vcs-commit
+index 25df8b5..cf4a87b 100755
+--- a/commit.d/50vcs-commit
++++ b/commit.d/50vcs-commit
+@@ -1,6 +1,16 @@
+ #!/bin/sh
+ set -e
+ 
++if [ -z "$ETCKEEPER_CONF_DIR" ]; then
++	ETCKEEPER_CONF_DIR=/etc/etckeeper
++fi
++
++conf="$ETCKEEPER_CONF_DIR/etckeeper.conf"
++
++if [ -e $conf ]; then
++	. $conf
++fi
++
+ cleanup () {
+ 	if [ -n "$logfile" ]; then
+ 		rm -f "$logfile"
+-- 
+1.7.10.4
+

@@ -1,0 +1,723 @@
+From b1ef96f7daee840c4695a3ffccb3ea843cbd8068 Mon Sep 17 00:00:00 2001
+From: Roger Meier <r.meier@siemens.com>
+Date: Mon, 13 Sep 2021 16:32:02 +0200
+Subject: [PATCH] Contacts: Retrieve user S/MIME certificate
+
+see https://gitlab.gnome.org/GNOME/evolution-ews/-/issues/3
+---
+ src/EWS/addressbook/e-book-backend-ews.c | 335 +++++++++++++++++++++--
+ src/EWS/addressbook/ews-oab-decoder.c    |  54 +++-
+ src/EWS/common/e-ews-connection.c        |   8 +-
+ src/EWS/common/e-ews-item.c              |  65 +++++
+ src/EWS/common/e-ews-item.h              |   5 +
+ 5 files changed, 431 insertions(+), 36 deletions(-)
+
+diff --git a/src/EWS/addressbook/e-book-backend-ews.c b/src/EWS/addressbook/e-book-backend-ews.c
+index 197d49fd..9bf75100 100644
+--- a/src/EWS/addressbook/e-book-backend-ews.c
++++ b/src/EWS/addressbook/e-book-backend-ews.c
+@@ -60,6 +60,10 @@
+ #define X_EWS_CHANGEKEY "X-EWS-CHANGEKEY"
+ #define X_EWS_GAL_SHA1 "X-EWS-GAL-SHA1"
+ #define X_EWS_PHOTO_CHECK_DATE "X-EWS-PHOTO-CHECK-DATE" /* YYYYMMDD of the last check for photo */
++#define X_EWS_CERT_KIND "X-EWS-CERT-KIND"
++
++#define E_EWS_CERT_KIND_USER "UserSMIMECertificate"
++#define E_EWS_CERT_KIND_MSEX "MSExchangeCertificate"
+ 
+ #define EWS_MAX_FETCH_COUNT 500
+ 
+@@ -69,7 +73,19 @@
+ /* passing field uris for PhysicalAddress, PhoneNumbers causes error, so we
+  * use Default view to fetch them. Thus the summary props just have attachments
+  * and some additional properties that are not return with Default view */
+-#define CONTACT_ITEM_PROPS "item:Attachments item:HasAttachments item:Body item:LastModifiedTime contacts:Manager contacts:Department contacts:SpouseName contacts:AssistantName contacts:BusinessHomePage contacts:Birthday"
++#define CONTACT_ITEM_PROPS "item:Attachments "\
++			   "item:HasAttachments "\
++			   "item:Body "\
++			   "item:LastModifiedTime "\
++			   "contacts:Manager "\
++			   "contacts:Department "\
++			   "contacts:SpouseName "\
++			   "contacts:AssistantName "\
++			   "contacts:BusinessHomePage "\
++			   "contacts:Birthday"
++#define CONTACT_ITEM_PROPS_10SP2 CONTACT_ITEM_PROPS " "\
++			   "contacts:UserSMIMECertificate "\
++			   "contacts:MSExchangeCertificate"
+ 
+ struct _EBookBackendEwsPrivate {
+ 	GRecMutex cnc_lock;
+@@ -551,6 +567,238 @@ ebews_populate_photo (EBookBackendEws *bbews,
+ 	e_contact_photo_free (photo);
+ }
+ 
++static void
++ebews_populate_cert (EBookBackendEws *bbews,
++		     EContact *contact,
++		     EEwsItem *item,
++		     const gchar *kind,
++		     GCancellable *cancellable,
++		     GError **error)
++{
++	EVCardAttribute *attr;
++	EContactCert cert;
++
++	g_return_if_fail (g_str_equal (kind, E_EWS_CERT_KIND_USER) || g_str_equal (kind, E_EWS_CERT_KIND_MSEX));
++
++	/* Support for certificates was added in Exchange 2010 SP2. */
++	if (!e_ews_connection_satisfies_server_version (bbews->priv->cnc, E_EWS_EXCHANGE_2010_SP2))
++		return;
++
++	if (g_str_equal (kind, E_EWS_CERT_KIND_USER))
++		cert.data = (gchar *) e_ews_item_get_user_certificate (item, &cert.length);
++	else
++		cert.data = (gchar *) e_ews_item_get_msexchange_certificate (item, &cert.length);
++
++	if (!cert.data || !cert.length)
++		return;
++
++	attr = e_vcard_attribute_new (NULL, EVC_KEY);
++
++	e_vcard_append_attribute (E_VCARD (contact), attr);
++
++	e_vcard_attribute_add_param_with_value (
++		attr,
++		e_vcard_attribute_param_new (EVC_TYPE),
++		"X509");
++
++	e_vcard_attribute_add_param_with_value (
++		attr,
++		e_vcard_attribute_param_new (EVC_ENCODING),
++		"b");
++
++	e_vcard_attribute_add_param_with_value (
++		attr,
++		e_vcard_attribute_param_new (X_EWS_CERT_KIND),
++		kind);
++
++	e_vcard_attribute_add_value_decoded (attr, cert.data, cert.length);
++}
++
++static void
++ebews_populate_user_cert (EBookBackendEws *bbews,
++			  EContact *contact,
++			  EEwsItem *item,
++			  GCancellable *cancellable,
++			  GError **error)
++{
++	ebews_populate_cert (bbews, contact, item, E_EWS_CERT_KIND_USER, cancellable, error);
++}
++
++static void
++ebews_populate_msex_cert (EBookBackendEws *bbews,
++			  EContact *contact,
++			  EEwsItem *item,
++			  GCancellable *cancellable,
++			  GError **error)
++{
++	ebews_populate_cert (bbews, contact, item, E_EWS_CERT_KIND_MSEX, cancellable, error);
++}
++
++static EVCardAttribute *
++ebews_find_cert_attribute (EContact *contact,
++			   const gchar *kind,
++			   gint fallback_index)
++{
++	GList *link;
++	EVCardAttribute *fallback_attr = NULL;
++
++	for (link = e_vcard_get_attributes (E_VCARD (contact)); link; link = g_list_next (link)) {
++		EVCardAttribute *attr = link->data;
++		const gchar *attr_name;
++
++		attr_name = e_vcard_attribute_get_name (attr);
++
++		if (attr_name && g_ascii_strcasecmp (attr_name, EVC_KEY) == 0) {
++			GList *values;
++			gboolean is_x509 = FALSE;
++
++			for (values = e_vcard_attribute_get_param (attr, EVC_TYPE); values && !is_x509; values = g_list_next (values)) {
++				is_x509 = values->data && g_ascii_strcasecmp ((gchar *) values->data, "X509") == 0;
++			}
++
++			if (!is_x509)
++				continue;
++
++			if (!fallback_attr) {
++				if (!fallback_index) {
++					fallback_attr = attr;
++					fallback_index = -1;
++				} else if (fallback_index > 0) {
++					fallback_index--;
++				}
++			}
++
++			for (values = e_vcard_attribute_get_param (attr, X_EWS_CERT_KIND); values; values = g_list_next (values)) {
++				if (values->data && g_ascii_strcasecmp ((gchar *) values->data, kind) == 0)
++					return attr;
++			}
++		}
++	}
++
++	return fallback_attr;
++}
++
++static const gchar *
++ebews_find_cert_base64_data (EContact *contact,
++			     const gchar *kind,
++			     gint fallback_index)
++{
++	EVCardAttribute *attr;
++	GList *values;
++	const gchar *base64_data;
++
++	attr = ebews_find_cert_attribute (contact, kind, fallback_index);
++	if (!attr)
++		return NULL;
++
++	values = e_vcard_attribute_get_values (attr);
++	base64_data = values ? values->data : NULL;
++
++	if (base64_data && *base64_data)
++		return base64_data;
++
++	return NULL;
++}
++
++static void
++ebews_set_cert (EBookBackendEws *bbews,
++		ESoapMessage *message,
++		EContact *contact,
++		const gchar *kind,
++		gint fallback_index)
++{
++	const gchar *base64_data;
++
++	/* Support for certificates was added in Exchange 2010 SP2. */
++	if (!e_ews_connection_satisfies_server_version (bbews->priv->cnc, E_EWS_EXCHANGE_2010_SP2))
++		return;
++
++	base64_data = ebews_find_cert_base64_data (contact, kind, fallback_index);
++	if (!base64_data)
++		return;
++
++	e_soap_message_start_element (message, kind, NULL, NULL);
++	e_ews_message_write_string_parameter (message, "Base64Binary", NULL, base64_data);
++	e_soap_message_end_element (message);
++}
++
++static void
++ebews_set_user_cert (EBookBackendEws *bbews,
++		     ESoapMessage *message,
++		     EContact *contact)
++{
++	ebews_set_cert (bbews, message, contact, E_EWS_CERT_KIND_USER, 0);
++}
++
++
++static void
++ebews_set_msex_cert (EBookBackendEws *bbews,
++		     ESoapMessage *message,
++		     EContact *contact)
++{
++	ebews_set_cert (bbews, message, contact, E_EWS_CERT_KIND_MSEX, 1);
++}
++
++static void
++ebews_set_cert_changes (EBookBackendEws *bbews,
++			ESoapMessage *message,
++			EContact *new,
++			EContact *old,
++			const gchar *kind,
++			gint fallback_index)
++{
++	const gchar *new_base64_data, *old_base64_data;
++
++	/* The first pass */
++	if (!message)
++		return;
++
++	/* Support for certificates was added in Exchange 2010 SP2. */
++	if (!e_ews_connection_satisfies_server_version (bbews->priv->cnc, E_EWS_EXCHANGE_2010_SP2))
++		return;
++
++	/* Intentionally search by kind in the old contact, the new can have added cert, which would not have set the kind yet */
++	new_base64_data = ebews_find_cert_base64_data (new, kind, fallback_index);
++	old_base64_data = ebews_find_cert_base64_data (old, kind, -1);
++
++	if (g_strcmp0 (new_base64_data, old_base64_data) == 0)
++		return;
++
++	if (new_base64_data) {
++		e_ews_message_start_set_item_field (message, kind, "contacts", "Contact");
++		e_soap_message_start_element (message, kind, NULL, NULL);
++		e_ews_message_write_string_parameter (message, "Base64Binary", NULL, new_base64_data);
++		e_soap_message_end_element (message);
++		e_ews_message_end_set_item_field (message);
++	} else {
++		e_ews_message_add_delete_item_field (message, kind, "contacts");
++	}
++}
++
++static void
++ebews_set_user_cert_changes (EBookBackendEws *bbews,
++			     ESoapMessage *message,
++			     EContact *new,
++			     EContact *old,
++			     gchar **out_new_change_key,
++			     GCancellable *cancellable,
++			     GError **error)
++{
++	ebews_set_cert_changes (bbews, message, new, old, E_EWS_CERT_KIND_USER, 0);
++}
++
++static void
++ebews_set_msex_cert_changes (EBookBackendEws *bbews,
++			     ESoapMessage *message,
++			     EContact *new,
++			     EContact *old,
++			     gchar **out_new_change_key,
++			     GCancellable *cancellable,
++			     GError **error)
++{
++	ebews_set_cert_changes (bbews, message, new, old, E_EWS_CERT_KIND_MSEX, 1);
++}
++
+ static void
+ set_phone_number (EContact *contact,
+                   EContactField field,
+@@ -716,15 +964,17 @@ ebews_populate_emails (EBookBackendEws *bbews,
+ }
+ 
+ static void
+-ebews_set_item_id (ESoapMessage *message,
+-                   EContact *contact)
++ebews_set_item_id (EBookBackendEws *bbews,
++		   ESoapMessage *message,
++		   EContact *contact)
+ {
+ 
+ }
+ 
+ static void
+-ebews_set_full_name (ESoapMessage *msg,
+-                     EContact *contact)
++ebews_set_full_name (EBookBackendEws *bbews,
++		     ESoapMessage *msg,
++		     EContact *contact)
+ {
+ 	EContactName *name;
+ 
+@@ -765,22 +1015,25 @@ ebews_set_date_value (ESoapMessage *message,
+ }
+ 
+ static void
+-ebews_set_birth_date (ESoapMessage *message,
+-                      EContact *contact)
++ebews_set_birth_date (EBookBackendEws *bbews,
++		      ESoapMessage *message,
++		      EContact *contact)
+ {
+ 	ebews_set_date_value (message, contact, E_CONTACT_BIRTH_DATE, "Birthday");
+ }
+ 
+ static void
+-ebews_set_anniversary (ESoapMessage *message,
+-                       EContact *contact)
++ebews_set_anniversary (EBookBackendEws *bbews,
++		       ESoapMessage *message,
++		       EContact *contact)
+ {
+ 	ebews_set_date_value (message, contact, E_CONTACT_ANNIVERSARY, "WeddingAnniversary");
+ }
+ 
+ static void
+-ebews_set_photo (ESoapMessage *message,
+-                 EContact *contact)
++ebews_set_photo (EBookBackendEws *bbews,
++		 ESoapMessage *message,
++		 EContact *contact)
+ {
+ 
+ }
+@@ -811,8 +1064,9 @@ add_entry (ESoapMessage *msg,
+ }
+ 
+ static void
+-ebews_set_phone_numbers (ESoapMessage *msg,
+-                         EContact *contact)
++ebews_set_phone_numbers (EBookBackendEws *bbews,
++			 ESoapMessage *msg,
++			 EContact *contact)
+ {
+ 	gint i;
+ 	const gchar *include_hdr = "PhoneNumbers";
+@@ -858,8 +1112,9 @@ add_physical_address (ESoapMessage *msg,
+ }
+ 
+ static void
+-ebews_set_address (ESoapMessage *msg,
+-                   EContact *contact)
++ebews_set_address (EBookBackendEws *bbews,
++		   ESoapMessage *msg,
++		   EContact *contact)
+ {
+ 	gboolean include_hdr = TRUE;
+ 
+@@ -875,15 +1130,17 @@ ebews_set_address (ESoapMessage *msg,
+ }
+ 
+ static void
+-ebews_set_ims (ESoapMessage *message,
+-               EContact *contact)
++ebews_set_ims (EBookBackendEws *bbews,
++	       ESoapMessage *message,
++	       EContact *contact)
+ {
+ 
+ }
+ 
+ static void
+-ebews_set_notes (ESoapMessage *msg,
+-                 EContact *contact)
++ebews_set_notes (EBookBackendEws *bbews,
++		 ESoapMessage *msg,
++		 EContact *contact)
+ {
+ 	gchar *notes = e_contact_get (contact, E_CONTACT_NOTE);
+ 	if (!notes)
+@@ -895,8 +1152,9 @@ ebews_set_notes (ESoapMessage *msg,
+ }
+ 
+ static void
+-ebews_set_emails (ESoapMessage *msg,
+-                  EContact *contact)
++ebews_set_emails (EBookBackendEws *bbews,
++		  ESoapMessage *msg,
++		  EContact *contact)
+ {
+ 	const gchar *include_hdr = "EmailAddresses";
+ 
+@@ -1470,7 +1728,8 @@ ebews_populate_givenname (EBookBackendEws *bbews,
+ }
+ 
+ static void
+-ebews_set_givenname (ESoapMessage *message,
++ebews_set_givenname (EBookBackendEws *bbews,
++		     ESoapMessage *message,
+ 		     EContact *contact)
+ {
+ 	/* Does nothing, the "GivenName" is filled by the "FullName" code */
+@@ -1507,7 +1766,7 @@ static const struct field_element_mapping {
+ 	/* set function for simple string type values */
+ 	const gchar * (*get_simple_prop_func) (EEwsItem *item);
+ 	void (*populate_contact_func)(EBookBackendEws *bbews, EContact *contact, EEwsItem *item, GCancellable *cancellable, GError **error);
+-	void (*set_value_in_soap_message) (ESoapMessage *message, EContact *contact);
++	void (*set_value_in_soap_message) (EBookBackendEws *bbews, ESoapMessage *message, EContact *contact);
+ 	void (*set_changes) (EBookBackendEws *bbews, ESoapMessage *message, EContact *new, EContact *old, gchar **out_new_change_key, GCancellable *cancellable, GError **error);
+ 
+ } mappings[] = {
+@@ -1538,6 +1797,8 @@ static const struct field_element_mapping {
+ 	{ E_CONTACT_GIVEN_NAME, ELEMENT_TYPE_COMPLEX, "GivenName", NULL, ebews_populate_givenname, ebews_set_givenname, ebews_set_givenname_changes},
+ 	{ E_CONTACT_ANNIVERSARY, ELEMENT_TYPE_COMPLEX, "WeddingAnniversary", NULL,  ebews_populate_anniversary, ebews_set_anniversary, ebews_set_anniversary_changes },
+ 	{ E_CONTACT_PHOTO, ELEMENT_TYPE_COMPLEX, "Photo", NULL,  ebews_populate_photo, ebews_set_photo, ebews_set_photo_changes },
++	{ E_CONTACT_X509_CERT, ELEMENT_TYPE_COMPLEX, "UserSMIMECertificate", NULL,  ebews_populate_user_cert, ebews_set_user_cert, ebews_set_user_cert_changes },
++	{ E_CONTACT_X509_CERT, ELEMENT_TYPE_COMPLEX, "MSExchangeCertificate", NULL,  ebews_populate_msex_cert, ebews_set_msex_cert, ebews_set_msex_cert_changes },
+ 
+ 	/* Should take of uid and changekey (REV) */
+ 	{ E_CONTACT_UID, ELEMENT_TYPE_COMPLEX, "ItemId", NULL,  ebews_populate_uid, ebews_set_item_id},
+@@ -1578,12 +1839,19 @@ ebb_ews_write_dl_members (ESoapMessage *msg,
+ 	e_soap_message_end_element (msg); /* Members */
+ }
+ 
++typedef struct _CreateItemsData
++{
++	EBookBackendEws *bbews;
++	EContact *contact;
++} CreateItemsData;
++
+ static gboolean
+ ebb_ews_convert_dl_to_xml_cb (ESoapMessage *msg,
+ 			      gpointer user_data,
+ 			      GError **error)
+ {
+-	EContact *contact = user_data;
++	CreateItemsData *cid = user_data;
++	EContact *contact = cid->contact;
+ 	EVCardAttribute *attribute;
+ 	GList *values;
+ 
+@@ -1606,7 +1874,8 @@ ebb_ews_convert_contact_to_xml_cb (ESoapMessage *msg,
+ 				   gpointer user_data,
+ 				   GError **error)
+ {
+-	EContact *contact = user_data;
++	CreateItemsData *cid = user_data;
++	EContact *contact = cid->contact;
+ 	gint i, element_type;
+ 
+ 	/* Prepare Contact node in the SOAP message */
+@@ -1627,7 +1896,7 @@ ebb_ews_convert_contact_to_xml_cb (ESoapMessage *msg,
+ 				e_ews_message_write_string_parameter (msg, mappings[i].element_name, NULL, val);
+ 			g_free (val);
+ 		} else
+-			mappings[i].set_value_in_soap_message (msg, contact);
++			mappings[i].set_value_in_soap_message (cid->bbews, msg, contact);
+ 	}
+ 
+ 	/* end of "Contact" */
+@@ -2032,7 +2301,11 @@ ebb_ews_fetch_items_sync (EBookBackendEws *bbews,
+ 	if (contact_item_ids) {
+ 		EEwsAdditionalProps *add_props;
+ 		add_props = e_ews_additional_props_new ();
+-		add_props->field_uri = g_strdup (CONTACT_ITEM_PROPS);
++
++		if (e_ews_connection_satisfies_server_version (bbews->priv->cnc, E_EWS_EXCHANGE_2010_SP2))
++			add_props->field_uri = g_strdup (CONTACT_ITEM_PROPS_10SP2);
++		else
++			add_props->field_uri = g_strdup (CONTACT_ITEM_PROPS);
+ 
+ 		ret = e_ews_connection_get_items_sync (
+ 			bbews->priv->cnc, EWS_PRIORITY_MEDIUM,
+@@ -3730,8 +4003,13 @@ ebb_ews_save_contact_sync (EBookMetaBackend *meta_backend,
+ 		g_clear_object (&old_contact);
+ 		g_clear_object (&book_cache);
+ 	} else {
++		CreateItemsData cid;
++
++		cid.bbews = bbews;
++		cid.contact = contact;
++
+ 		success = e_ews_connection_create_items_sync (bbews->priv->cnc, EWS_PRIORITY_MEDIUM, NULL, NULL,
+-			fid, is_dl ? ebb_ews_convert_dl_to_xml_cb : ebb_ews_convert_contact_to_xml_cb, contact,
++			fid, is_dl ? ebb_ews_convert_dl_to_xml_cb : ebb_ews_convert_contact_to_xml_cb, &cid,
+ 			&items, cancellable, error);
+ 	}
+ 
+@@ -3970,6 +4248,7 @@ ebb_ews_get_backend_property (EBookBackend *book_backend,
+ 			e_contact_field_name (E_CONTACT_BIRTH_DATE),
+ 			e_contact_field_name (E_CONTACT_NOTE),
+ 			e_contact_field_name (E_CONTACT_PHOTO),
++			e_contact_field_name (E_CONTACT_X509_CERT),
+ 			NULL);
+ 
+ 		g_string_free (buffer, TRUE);
+diff --git a/src/EWS/addressbook/ews-oab-decoder.c b/src/EWS/addressbook/ews-oab-decoder.c
+index cc734019..3374440d 100644
+--- a/src/EWS/addressbook/ews-oab-decoder.c
++++ b/src/EWS/addressbook/ews-oab-decoder.c
+@@ -140,21 +140,61 @@ ews_populate_string_list (EContact *contact,
+ }
+ 
+ static void
+-ews_populate_cert (EContact *contact,
+-                    EContactField field,
+-                    gpointer value,
+-                    gpointer user_data)
++ews_populate_cert_data (EContact *contact,
++			GBytes *bytes)
+ {
+-	GSList *list = value;
+-	GBytes *bytes = list->data;
+ 	EContactCert cert;
+ 
++	if (!bytes || !g_bytes_get_size (bytes))
++		return;
++
+ 	cert.data = (gpointer) g_bytes_get_data (bytes, &cert.length);
+ 	cert.length = g_bytes_get_size (bytes);
+ 
+ 	e_contact_set (contact, E_CONTACT_X509_CERT, &cert);
+ }
+ 
++static void
++ews_populate_cert (EContact *contact,
++                    EContactField field,
++                    gpointer value,
++                    gpointer user_data)
++{
++	GSList *link;
++
++	for (link = value; link; link = g_slist_next (link)) {
++		GBytes *bytes = link->data;
++
++		ews_populate_cert_data (contact, bytes);
++	}
++}
++
++static void
++ews_populate_user_cert (EContact *contact,
++			EContactField field,
++			gpointer value,
++			gpointer user_data)
++{
++	GBytes *bytes = value;
++
++	ews_populate_cert_data (contact, bytes);
++}
++
++static void
++ews_populate_user_x509_cert (EContact *contact,
++			     EContactField field,
++			     gpointer value,
++			     gpointer user_data)
++{
++	GSList *link;
++
++	for (link = value; link; link = g_slist_next (link)) {
++		GBytes *bytes = link->data;
++
++		ews_populate_cert_data (contact, bytes);
++	}
++}
++
+ static void
+ ews_populate_photo (EContact *contact,
+                     EContactField field,
+@@ -243,6 +283,8 @@ static const struct prop_field_mapping {
+ 	{EWS_PT_THUMBNAIL_PHOTO, E_CONTACT_PHOTO, ews_populate_photo},
+ 	{EWS_PT_OFFICE_LOCATION, E_CONTACT_OFFICE, ews_populate_simple_string},
+ 	{EWS_PT_X509_CERT, E_CONTACT_X509_CERT, ews_populate_cert},
++	{EWS_PT_USER_CERTIFICATE, E_CONTACT_X509_CERT, ews_populate_user_cert},
++	{EWS_PT_USER_X509_CERTIFICATE, E_CONTACT_X509_CERT, ews_populate_user_x509_cert},
+ 	{EWS_PT_SEND_RICH_INFO, E_CONTACT_WANTS_HTML, ews_populate_simple_string},
+ };
+ 
+diff --git a/src/EWS/common/e-ews-connection.c b/src/EWS/common/e-ews-connection.c
+index 1d318068..933d9237 100644
+--- a/src/EWS/common/e-ews-connection.c
++++ b/src/EWS/common/e-ews-connection.c
+@@ -6268,10 +6268,14 @@ e_ews_connection_resolve_names (EEwsConnection *cnc,
+ 
+ 	e_soap_message_add_attribute (msg, "SearchScope", get_search_scope_str (scope), NULL, NULL);
+ 
+-	if (fetch_contact_data)
++	if (fetch_contact_data) {
+ 		e_soap_message_add_attribute (msg, "ReturnFullContactData", "true", NULL, NULL);
+-	else
++
++		if (e_ews_connection_satisfies_server_version (cnc, E_EWS_EXCHANGE_2010_SP2))
++			e_soap_message_add_attribute (msg, "ContactDataShape", "AllProperties", NULL, NULL);
++	} else {
+ 		e_soap_message_add_attribute (msg, "ReturnFullContactData", "false", NULL, NULL);
++	}
+ 
+ 	if (parent_folder_ids) {
+ 		e_soap_message_start_element (msg, "ParentFolderIds", "messages", NULL);
+diff --git a/src/EWS/common/e-ews-item.c b/src/EWS/common/e-ews-item.c
+index 73a82fd4..ce8fa4d3 100644
+--- a/src/EWS/common/e-ews-item.c
++++ b/src/EWS/common/e-ews-item.c
+@@ -52,6 +52,12 @@ struct _EEwsContactFields {
+ 	gchar *givenname;
+ 	gchar *middlename;
+ 	gchar *notes;
++
++	gsize msexchange_cert_len;
++	guchar *msexchange_cert;
++
++	gsize user_cert_len;
++	guchar *user_cert;
+ };
+ 
+ struct _EEwsTaskFields {
+@@ -337,6 +343,8 @@ ews_free_contact_fields (struct _EEwsContactFields *con_fields)
+ 		g_free (con_fields->givenname);
+ 		g_free (con_fields->middlename);
+ 		g_free (con_fields->notes);
++		g_free (con_fields->msexchange_cert);
++		g_free (con_fields->user_cert);
+ 		g_free (con_fields);
+ 	}
+ }
+@@ -827,6 +835,37 @@ parse_contact_field (EEwsItem *item,
+ 		 * with old servers (< 2010_SP2) we prefer use item:Body.
+ 		 */
+ 		priv->contact_fields->notes = e_soap_parameter_get_string_value (subparam);
++	} else if (!g_ascii_strcasecmp (name, "UserSMIMECertificate") ||
++		   !g_ascii_strcasecmp (name, "MSExchangeCertificate")) {
++		ESoapParameter *data_param;
++		guchar **out_bytes;
++		gsize *out_len;
++
++		if (!g_ascii_strcasecmp (name, "UserSMIMECertificate")) {
++			out_bytes = &priv->contact_fields->user_cert;
++			out_len = &priv->contact_fields->user_cert_len;
++		} else {
++			out_bytes = &priv->contact_fields->msexchange_cert;
++			out_len = &priv->contact_fields->msexchange_cert_len;
++		}
++
++		data_param = e_soap_parameter_get_first_child_by_name (subparam, "Base64Binary");
++		if (data_param) {
++			gchar *base64_data;
++
++			base64_data = e_soap_parameter_get_string_value (data_param);
++			if (base64_data && *base64_data) {
++				*out_bytes = g_base64_decode_inplace (base64_data, out_len);
++				if (!*out_len) {
++					g_free (*out_bytes);
++
++					*out_len = 0;
++					*out_bytes = NULL;
++				}
++			} else {
++				g_free (base64_data);
++			}
++		}
+ 	}
+ }
+ 
+@@ -2698,6 +2737,32 @@ e_ews_item_get_notes (EEwsItem *item)
+ 	return item->priv->contact_fields->notes;
+ }
+ 
++const guchar *
++e_ews_item_get_user_certificate (EEwsItem *item,
++				 gsize *out_len)
++{
++	g_return_val_if_fail (E_IS_EWS_ITEM (item), NULL);
++	g_return_val_if_fail (item->priv->contact_fields != NULL, NULL);
++	g_return_val_if_fail (out_len != NULL, NULL);
++
++	*out_len = item->priv->contact_fields->user_cert_len;
++
++	return item->priv->contact_fields->user_cert;
++}
++
++const guchar *
++e_ews_item_get_msexchange_certificate (EEwsItem *item,
++				       gsize *out_len)
++{
++	g_return_val_if_fail (E_IS_EWS_ITEM (item), NULL);
++	g_return_val_if_fail (item->priv->contact_fields != NULL, NULL);
++	g_return_val_if_fail (out_len != NULL, NULL);
++
++	*out_len = item->priv->contact_fields->msexchange_cert_len;
++
++	return item->priv->contact_fields->msexchange_cert;
++}
++
+ time_t
+ e_ews_item_get_birthday (EEwsItem *item)
+ {
+diff --git a/src/EWS/common/e-ews-item.h b/src/EWS/common/e-ews-item.h
+index fde46528..8a0dbbf5 100644
+--- a/src/EWS/common/e-ews-item.h
++++ b/src/EWS/common/e-ews-item.h
+@@ -419,6 +419,11 @@ const gchar *	e_ews_item_get_surname		(EEwsItem *item);
+ const gchar *	e_ews_item_get_givenname	(EEwsItem *item);
+ const gchar *	e_ews_item_get_middlename	(EEwsItem *item);
+ const gchar *	e_ews_item_get_notes		(EEwsItem *item);
++const guchar *	e_ews_item_get_user_certificate	(EEwsItem *item,
++						 gsize *out_len);
++const guchar *	e_ews_item_get_msexchange_certificate
++						(EEwsItem *item,
++						 gsize *out_len);
+ 
+ /*Task fields*/
+ const gchar *	e_ews_item_get_status		(EEwsItem *item);
+-- 
+2.25.1
+

@@ -1,0 +1,94 @@
+From ee1bd0fbc681de462853b9068048c82d1cd31747 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=A9my=20Bobbio?= <lunar@debian.org>
+Date: Tue, 27 Aug 2013 23:53:22 +0200
+Subject: [PATCH 2/3] dpkg-buildpackage: produce the same timestamp in .deb
+ and .changes
+
+When using dpkg-buildpackage, we now record a timestamp at the beginning of the
+build and use it to build .deb and .changes.
+
+We use the DEB_BUILD_TIMESTAMP environment variable to pass the timestamp to
+dpkg-deb. The later will simply use the current time if the former is unset.
+---
+ dpkg-deb/build.c             |   22 ++++++++++++++++++++--
+ scripts/dpkg-buildpackage.pl |    7 +++++++
+ 2 files changed, 27 insertions(+), 2 deletions(-)
+
+diff --git a/dpkg-deb/build.c b/dpkg-deb/build.c
+index 73e5bdd..0ec6e27 100644
+--- a/dpkg-deb/build.c
++++ b/dpkg-deb/build.c
+@@ -686,6 +686,24 @@ initialize_ar(const char *debar)
+   return arfd;
+ }
+ 
++static time_t
++get_build_timestamp(void)
++{
++  time_t timestamp;
++  const char *value;
++  char *end;
++
++  errno = 0;
++  value = getenv("DEB_BUILD_TIMESTAMP");
++  if (!value)
++    return time(NULL);
++
++  timestamp = strtol(value, &end, 10);
++  if (value == end || *end || errno != 0)
++    ohshite(_("unable to parse timestamp `%.255s'"), value);
++  return timestamp;
++}
++
+ /**
+  * Overly complex function that builds a .deb file.
+  */
+@@ -698,11 +716,11 @@ do_build(const char *const *argv)
+   int arfd;
+   int gzfd;
+ 
++  build_timestamp = get_build_timestamp();
++
+   /* Decode our arguments. */
+   decode_arguments(argv, &dir, &subdir, &debar);
+ 
+-  build_timestamp = time(NULL);
+-
+   /* Perform some sanity checks on the to-be-build package. */
+   check_build_sanity(dir, subdir, &debar);
+ 
+diff --git a/scripts/dpkg-buildpackage.pl b/scripts/dpkg-buildpackage.pl
+index 710a261..4173ad3 100755
+--- a/scripts/dpkg-buildpackage.pl
++++ b/scripts/dpkg-buildpackage.pl
+@@ -124,6 +124,7 @@ my $binarytarget = 'binary';
+ my $targetarch = my $targetgnusystem = '';
+ my $call_target = '';
+ my $call_target_as_root = 0;
++my $timestamp = time;
+ my (@checkbuilddep_opts, @changes_opts, @source_opts);
+ 
+ use constant BUILD_DEFAULT    => 1;
+@@ -271,6 +272,8 @@ if ($< == 0) {
+     }
+ }
+ 
++$ENV{DEB_BUILD_TIMESTAMP} = $timestamp;
++
+ my $build_opts = Dpkg::BuildOptions->new();
+ if (defined $parallel) {
+     $parallel = $build_opts->get('parallel') if $build_opts->has('parallel');
+@@ -440,6 +443,10 @@ if (defined($changedby)) { push @changes_opts, "-e$changedby" }
+ if (defined($since)) { push @changes_opts, "-v$since" }
+ if (defined($desc)) { push @changes_opts, "-C$desc" }
+ 
++chomp(my $date822 = `date -R -d\@$timestamp`);
++$? && subprocerr('date -R');
++push @changes_opts, "-DDate=$date822";
++
+ my $chg = "../$pva.changes";
+ print STDERR " dpkg-genchanges @changes_opts >$chg\n";
+ open my $changes_fh, '-|', 'dpkg-genchanges', @changes_opts
+-- 
+1.7.10.4
+

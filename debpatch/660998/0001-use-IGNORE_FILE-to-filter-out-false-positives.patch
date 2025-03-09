@@ -1,0 +1,57 @@
+>From 40cb03d3a8c4d784e0969d610eb9381a02e2ab46 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?IOhannes=20m=20zm=C3=B6lnig?= <zmoelnig@iem.at>
+Date: Mon, 25 Aug 2014 09:53:37 +0200
+Subject: [PATCH] use IGNORE_FILE to filter out false-positives
+
+if the user defines an IGNORE_FILE in /etc/chkrootkit.conf
+and this file is readable, this file will be used to filter out
+false-positives (and other lines, depending on the regular expressions
+in the file), in the cron-script.
+
+TODO:
+- exit-code of the cron-script (cf. 19ce77e7)
+ - it probably should bail out if there is an un-filtered error
+ - it probably should bail out if there is a filter-rule that had no match
+- the value of IGNORE_FILE is currently not handled by debconf.
+---
+ debian/cron.daily | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/debian/cron.daily b/debian/cron.daily
+index 7a6b7b9..6566d3c 100755
+--- a/debian/cron.daily
++++ b/debian/cron.daily
+@@ -5,6 +5,7 @@ set -e
+ CHKROOTKIT=/usr/sbin/chkrootkit
+ CF=/etc/chkrootkit.conf
+ LOG_DIR=/var/log/chkrootkit
++IGNORE_FILE=/dev/null
+ 
+ if [ ! -x $CHKROOTKIT ]; then
+   exit 0
+@@ -14,9 +15,13 @@ if [ -f $CF ]; then
+     . $CF
+ fi
+ 
++if [ ! -r "${IGNORE_FILE}" ]; then
++ IGNORE_FILE=/dev/null
++fi
++
+ if [ "$RUN_DAILY" = "true" ]; then
+     if [ "$DIFF_MODE" = "true" ]; then
+-				eval $CHKROOTKIT $RUN_DAILY_OPTS > $LOG_DIR/log.today.raw 2>&1
++				eval $CHKROOTKIT $RUN_DAILY_OPTS | egrep -v -f "${IGNORE_FILE}" > $LOG_DIR/log.today.raw 2>&1
+ 				# the sed expression replaces the messages about /sbin/dhclient3 /usr/sbin/dhcpd3
+ 				# with a message that is the same whatever order eth0 and eth1 were scanned
+ 				sed -r -e 's,eth(0|1)(:[0-9])?: PACKET SNIFFER\((/sbin/dhclient3|/usr/sbin/dhcpd3)\[[0-9]+\]\),eth\[0|1\]: PACKET SNIFFER\([dhclient3|dhcpd3]{PID}\),' \
+@@ -46,6 +51,6 @@ if [ "$RUN_DAILY" = "true" ]; then
+ 						echo "# (note that unedited output is in $LOG_DIR/log.today.raw)"
+         fi
+     else
+-        eval $CHKROOTKIT $RUN_DAILY_OPTS
++        eval $CHKROOTKIT $RUN_DAILY_OPTS | (egrep -v -f "${IGNORE_FILE}" || true)
+     fi
+ fi
+-- 
+2.0.1
+

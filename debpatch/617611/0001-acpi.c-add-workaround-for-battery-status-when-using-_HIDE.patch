@@ -1,0 +1,223 @@
+From fda79dc59ec6fd16cc14b427cc58cb53deb54494 Mon Sep 17 00:00:00 2001
+From: Luca Capello <luca@pca.it>
+Date: Wed, 9 Mar 2011 23:25:02 +0100
+Subject: [PATCH] acpi.c: add workaround for battery status when using -s
+
+---
+ ChangeLog |    2 +
+ acpi.c    |  161 +++++++++++++++++++++++++++++++------------------------------
+ 2 files changed, 83 insertions(+), 80 deletions(-)
+
+diff --git a/ChangeLog b/ChangeLog
+index 4a4b4d0..dac63a5 100644
+--- a/ChangeLog
++++ b/ChangeLog
+@@ -2,6 +2,8 @@
+ 
+  * main.c: use spaces to align -h output
+ 	(Debian bug #617548)
++ * acpi.c: add workaround for battery status when using -s
++	(Debian bug #617611)
+ 
+ 2010-03-28  Michael Meskes  <meskes@debian.org>
+ 
+diff --git a/acpi.c b/acpi.c
+index 336a91c..789cf10 100644
+--- a/acpi.c
++++ b/acpi.c
+@@ -267,6 +267,7 @@ void print_battery_information(struct list *batteries, int show_empty_slots, int
+ 	int percentage;
+ 	char *state = NULL, *poststr;
+ 	int type_battery = TRUE;
++	int type_total = 1;
+ 	char capacity_unit[4] = "mAh";
+ 
+ 	fields = battery->data;
+@@ -309,6 +310,7 @@ void print_battery_information(struct list *batteries, int show_empty_slots, int
+ 		    get_unit_value(value->value) / 1000;
+ 	    } else if (!strcmp(value->attr, "type")) {
+ 		type_battery = (strcasecmp(value->value, "battery") == 0);
++		type_total++;
+ 	    } else if (!strcmp(value->attr, "charging state") || !strcmp(value->attr, "State")) {
+ 		state = value->value;
+ 	    } else if (!strcmp(value->attr, "voltage_now")) {
+@@ -318,98 +320,97 @@ void print_battery_information(struct list *batteries, int show_empty_slots, int
+ 	    }
+ 	    fields = list_next(fields);
+ 	}
+-	if (type_battery) {	/* or else this is the ac_adapter */
+-	    if (!state) {
+-		if (show_empty_slots) 
+-		    printf("%s %d: slot empty\n", BATTERY_DESC, battery_num - 1);
+-	    } else {
+-		/* convert energy values (in mWh) to charge values (in mAh) if needed and possible */
+-		if (last_capacity_unit != -1 && last_capacity == -1) {
+-		    if (voltage != -1) {
+-			last_capacity = last_capacity_unit * 1000 / voltage;
+-		    } else {
+-			last_capacity = last_capacity_unit;
+-			strcpy(capacity_unit, "mWh");
+-		    }
++	if (type_battery) {	/* or else this is the ac_adapter or the battery is not present */
++	    /* convert energy values (in mWh) to charge values (in mAh) if needed and possible */
++	    if (last_capacity_unit != -1 && last_capacity == -1) {
++		if (voltage != -1) {
++		    last_capacity = last_capacity_unit * 1000 / voltage;
++		} else {
++		    last_capacity = last_capacity_unit;
++		    strcpy(capacity_unit, "mWh");
+ 		}
+-		if (design_capacity_unit != -1 && design_capacity == -1) {
+-		    if (voltage != -1) {
+-			design_capacity = design_capacity_unit * 1000 / voltage;
+-		    } else {
+-			design_capacity = design_capacity_unit;
+-			strcpy(capacity_unit, "mWh");
+-		    }
++	    }
++	    if (design_capacity_unit != -1 && design_capacity == -1) {
++		if (voltage != -1) {
++		    design_capacity = design_capacity_unit * 1000 / voltage;
++		} else {
++		    design_capacity = design_capacity_unit;
++		    strcpy(capacity_unit, "mWh");
+ 		}
+-		if (remaining_energy != -1 && remaining_capacity == -1) {
+-		    if (voltage != -1) {
+-			remaining_capacity = remaining_energy * 1000 / voltage;
+-			present_rate = present_rate * 1000 / voltage;
+-		    } else {
+-			remaining_capacity = remaining_energy;
+-		    }
++	    }
++	    if (remaining_energy != -1 && remaining_capacity == -1) {
++		if (voltage != -1) {
++		    remaining_capacity = remaining_energy * 1000 / voltage;
++		    present_rate = present_rate * 1000 / voltage;
++		} else {
++		    remaining_capacity = remaining_energy;
+ 		}
+-		if (last_capacity < MIN_CAPACITY)
+-		    percentage = 0;
+-		else
+-		    percentage = remaining_capacity * 100 / last_capacity;
+-		
+-		if (percentage > 100)
+-		    percentage = 100;
+-
+-		printf("%s %d: %s, %d%%", BATTERY_DESC, battery_num - 1, state, percentage);
+-
+-		if (present_rate == -1) {
+-		    poststr = "rate information unavailable";
+-		    seconds = -1;
+-		} else if (!strcasecmp(state, "charging")) {
+-		    if (present_rate > MIN_PRESENT_RATE) {
+-			seconds = 3600 * (last_capacity - remaining_capacity) / present_rate;
+-			poststr = " until charged";
+-		    } else {
+-			poststr = "charging at zero rate - will never fully charge.";
+-			seconds = -1;
+-		    }
+-		} else if (!strcasecmp(state, "discharging")) {
+-		    if (present_rate > MIN_PRESENT_RATE) {
+-			seconds = 3600 * remaining_capacity / present_rate;
+-			poststr = " remaining";
+-		    } else {
+-			poststr = "discharging at zero rate - will never fully discharge.";
+-			seconds = -1;
+-		    }
++	    }
++	    if (last_capacity < MIN_CAPACITY)
++		percentage = 0;
++	    else
++		percentage = remaining_capacity * 100 / last_capacity;
++
++	    if (percentage > 100)
++		percentage = 100;
++
++	    printf("%s %d: %s, %d%%", BATTERY_DESC, battery_num - 1, state, percentage);
++
++	    if (present_rate == -1) {
++		poststr = "rate information unavailable";
++		seconds = -1;
++	    } else if (!strcasecmp(state, "charging")) {
++		if (present_rate > MIN_PRESENT_RATE) {
++		    seconds = 3600 * (last_capacity - remaining_capacity) / present_rate;
++		    poststr = " until charged";
+ 		} else {
+-		    poststr = NULL;
++		    poststr = "charging at zero rate - will never fully charge.";
+ 		    seconds = -1;
+ 		}
+-
+-		if (seconds > 0) {
+-		    hours = seconds / 3600;
+-		    seconds -= 3600 * hours;
+-		    minutes = seconds / 60;
+-		    seconds -= 60 * minutes;
+-		    printf(", %02d:%02d:%02d%s", hours, minutes, seconds, poststr);
+-		} else if (poststr != NULL) {
+-		    printf(", %s", poststr);
++	    } else if (!strcasecmp(state, "discharging")) {
++		if (present_rate > MIN_PRESENT_RATE) {
++		    seconds = 3600 * remaining_capacity / present_rate;
++		    poststr = " remaining";
++		} else {
++		    poststr = "discharging at zero rate - will never fully discharge.";
++		    seconds = -1;
+ 		}
++	    } else {
++		poststr = NULL;
++		seconds = -1;
++	    }
+ 
+-		printf("\n");
++	    if (seconds > 0) {
++		hours = seconds / 3600;
++		seconds -= 3600 * hours;
++		minutes = seconds / 60;
++		seconds -= 60 * minutes;
++		printf(", %02d:%02d:%02d%s", hours, minutes, seconds, poststr);
++	    } else if (poststr != NULL) {
++		printf(", %s", poststr);
++	    }
+ 
+-		if (show_capacity && design_capacity > 0) {
+-		    if (last_capacity <= 100) {
+-			/* some broken systems just give a percentage here */
+-			percentage = last_capacity;
+-			last_capacity = percentage * design_capacity / 100;
+-		    } else {
+-			percentage = last_capacity * 100 / design_capacity;
+-		    }
+-		    if (percentage > 100)
+-			percentage = 100;
++	    printf("\n");
+ 
+-		    printf ("%s %d: design capacity %d %s, last full capacity %d %s = %d%%\n",
+-			 BATTERY_DESC, battery_num - 1, design_capacity, capacity_unit, last_capacity, capacity_unit, percentage);
++	    if (show_capacity && design_capacity > 0) {
++		if (last_capacity <= 100) {
++		    /* some broken systems just give a percentage here */
++		    percentage = last_capacity;
++		    last_capacity = percentage * design_capacity / 100;
++		} else {
++		    percentage = last_capacity * 100 / design_capacity;
+ 		}
++		if (percentage > 100)
++		    percentage = 100;
++
++		printf ("%s %d: design capacity %d %s, last full capacity %d %s = %d%%\n",
++		    BATTERY_DESC, battery_num - 1, design_capacity, capacity_unit, last_capacity, capacity_unit, percentage);
+ 	    }
+ 	    battery_num++;
++	} else { /* this is a workaround: differently from /sys/class/power_supply/AC,
++		    /sys/class/power_supply/BAT0 exists only if a battery is present */
++	    if (show_empty_slots && battery_num != type_total)
++		printf("%s %d: slot empty\n", BATTERY_DESC, battery_num - 1);
+ 	}
+ 	battery = list_next(battery);
+     }
+-- 
+1.7.4.1
+

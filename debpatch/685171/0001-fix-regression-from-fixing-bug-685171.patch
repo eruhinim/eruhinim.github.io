@@ -1,0 +1,50 @@
+From 9e164a2d2b449ad0a5fd4ea1cacc80015032e56f Mon Sep 17 00:00:00 2001
+From: josch <j.schauer@email.de>
+Date: Fri, 14 Sep 2012 11:15:23 +0200
+Subject: [PATCH] fix regression from fixing bug#685171
+
+---
+ deb/debcudf.ml |   27 +++++++++++++++++++++------
+ 1 file changed, 21 insertions(+), 6 deletions(-)
+
+diff --git a/deb/debcudf.ml b/deb/debcudf.ml
+index c428954..937390d 100644
+--- a/deb/debcudf.ml
++++ b/deb/debcudf.ml
+@@ -380,12 +380,27 @@ let tocudf tables ?(options=default_options) ?(inst=false) pkg =
+             in
+             sc :: masc 
+       in
+-      let multiarchconflicts =
+-        List.flatten (
+-          List.map (fun arch ->
+-            add_arch_l options.native arch (loadl tables originalconflicts)
+-          ) (options.native::options.foreign)
+-        )
++      let multiarchconflicts = match pkg.multiarch with
++        |`Same ->
++            (* for all conflicts B of a M-A: Same package A, check if B is also
++               provided by A. If yes, then only conflict with B in the
++               architecture of A. See bug#685171 and
++               https://lists.debian.org/deity/2012/09/msg00077.html *)
++            List.fold_left (fun res c ->
++              if List.mem c pkg.provides then
++                (* this conflict is also provided by this package *)
++                (add_arch_l options.native pkgarch (loadl tables [c]))@res
++              else
++                (* conflict with all architectures *)
++                List.fold_left (fun res arch ->
++                  (add_arch_l options.native arch (loadl tables [c]))@res
++                ) res (options.native::options.foreign)
++            ) [] originalconflicts
++        |_ ->
++            (* conflicts of other packages must conflict with all architectures *)
++            List.fold_left (fun res arch ->
++              (add_arch_l options.native arch (loadl tables originalconflicts))@res
++            ) [] (options.native::options.foreign)
+       in
+       multiarchconflicts @ multiarchconstraints
+     in
+-- 
+1.7.10
+

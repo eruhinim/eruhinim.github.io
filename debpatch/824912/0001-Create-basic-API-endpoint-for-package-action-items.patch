@@ -1,0 +1,188 @@
+From d5dee064ebda4697d6a2fd9919d7f287e595afe4 Mon Sep 17 00:00:00 2001
+From: efkin <efkin@riseup.net>
+Date: Mon, 12 Dec 2016 15:28:24 +0100
+Subject: [PATCH] Create basic API endpoint for package action items
+
+Fixes: #824912
+Reported by: pabs@debian.org
+---
+ distro_tracker/core/tests/tests_views.py | 105 +++++++++++++++++++++++++++++++
+ distro_tracker/core/views.py             |  24 +++++++
+ distro_tracker/project/urls.py           |   3 +
+ 3 files changed, 132 insertions(+)
+
+diff --git a/distro_tracker/core/tests/tests_views.py b/distro_tracker/core/tests/tests_views.py
+index ba01293..4c622d6 100644
+--- a/distro_tracker/core/tests/tests_views.py
++++ b/distro_tracker/core/tests/tests_views.py
+@@ -423,6 +423,111 @@ class PackageAutocompleteViewTest(TestCase):
+         self.assertEqual(response.status_code, 404)
+ 
+ 
++class PackageActionsJSONViewTest(TestCase):
++    """
++    Test for the :class:`distro_tracker.core.views.PackageActionsJSONView`.
++    """
++    def setUp(self):
++        self.package = SourcePackageName.objects.create(name='dummy-package')
++        self.action_type = ActionItemType.objects.create(
++            type_name='test',
++            full_description_template='action-item-test.html',
++        )
++        self.add_test_template_dir()
++
++    def test_json_returns_empty_list(self):
++        """
++        Tests that the JSON response returns an empty list
++        if there are no action items associated.
++        """
++        response = self.client.get(reverse(
++            'dtracker-api-package-actions',
++            kwargs={
++                'package_name': 'dummy-package',
++            }
++        ))
++        response = json.loads(response.content.decode('utf-8'))
++        self.assertEqual(
++            response,
++            [],
++        )
++
++    def test_json_returns_item_type_name(self):
++        """
++        Tests that the JSON response correctly return the type_name.
++        """
++        short_description = "Short description of item"
++        action_item = ActionItem.objects.create(
++            package=self.package,
++            item_type=self.action_type,
++            short_description=short_description,
++        )
++        response = self.client.get(reverse(
++            'dtracker-api-package-actions',
++            kwargs={
++                'package_name': 'dummy-package',
++            }
++        ))
++        response = json.loads(response.content.decode('utf-8'))
++        self.assertEqual(
++            1,
++            len(response),
++        )
++        self.assertEqual(
++            'test',
++            response[0]['type_name']
++        )
++
++    def test_json_returns_empty_extra_data(self):
++        """
++        Tests that the JSON response returns None
++        if no extra data is associated.
++        """
++        short_description = "Short description of item"
++        action_item = ActionItem.objects.create(
++            package=self.package,
++            item_type=self.action_type,
++            short_description=short_description,
++        )
++        response = self.client.get(reverse(
++            'dtracker-api-package-actions',
++            kwargs={
++                'package_name': 'dummy-package',
++            }
++        ))
++        response = json.loads(response.content.decode('utf-8'))
++        self.assertEqual(
++            None,
++            response[0]['extra_data'],
++        )
++
++    def test_json_returns_item_extra_data(self):
++        """
++        Tests that JSON response returns correctly
++        extra data dict.
++        """
++        short_description = "Short description of item"
++        action_item = ActionItem.objects.create(
++            package=self.package,
++            item_type=self.action_type,
++            short_description=short_description,
++            extra_data={
++                'url': 'test.debian.org'
++            }
++        )
++        response = self.client.get(reverse(
++            'dtracker-api-package-actions',
++            kwargs={
++                'package_name': 'dummy-package',
++            }
++        ))
++        response = json.loads(response.content.decode('utf-8'))
++        self.assertEqual(
++            'test.debian.org',
++            response[0]['extra_data']['url'],
++        )
++
++
+ class ActionItemJsonViewTest(TestCase):
+     """
+     Tests for the :class:`distro_tracker.core.views.ActionItemJsonView`.
+diff --git a/distro_tracker/core/views.py b/distro_tracker/core/views.py
+index a360a1d..9905a3a 100644
+--- a/distro_tracker/core/views.py
++++ b/distro_tracker/core/views.py
+@@ -106,6 +106,30 @@ class PackageSearchView(View):
+             })
+ 
+ 
++class PackageActionsJSONView(View):
++    """
++    A view that renders a list of all the actions that are needed
++    on a package as well as the URLs to more info about those
++    actions in a JSONResponse.
++    """
++    def get(self, request, *args, **kwargs):
++        package_name = kwargs['package_name']
++        package = get_object_or_404(
++            PackageName,
++            name=package_name,
++        )
++        actions = package.action_items.all()
++        data = []
++        for action in actions:
++            data += [
++                dict(
++                    type_name=action.item_type.type_name,
++                    extra_data=action.extra_data,
++                )
++            ]
++        return render_to_json_response(data)
++
++
+ class OpenSearchDescription(View):
+     """
+     Return the open search description XML document allowing
+diff --git a/distro_tracker/project/urls.py b/distro_tracker/project/urls.py
+index 5a5b091..47eb636 100644
+--- a/distro_tracker/project/urls.py
++++ b/distro_tracker/project/urls.py
+@@ -45,6 +45,7 @@ from distro_tracker.core.views import SetMembershipKeywords
+ from distro_tracker.core.views import EditMembershipView
+ from distro_tracker.core.views import IndexView
+ from distro_tracker.core.views import PackageNews
++from distro_tracker.core.views import PackageActionsJSONView
+ from distro_tracker.core.news_feed import PackageNewsFeed
+ from distro_tracker.accounts.views import ConfirmAddAccountEmail
+ from distro_tracker.accounts.views import LoginView
+@@ -95,6 +96,8 @@ urlpatterns = [
+         name='dtracker-api-action-item'),
+     url(r'^api/keywords/$', KeywordsView.as_view(),
+         name='dtracker-api-keywords'),
++    url(r'^api/(?P<package_name>[^/]+)/actions', PackageActionsJSONView.as_view(),
++        name='dtracker-api-package-actions'),
+ 
+     url(r'^admin/', include(admin.site.urls)),
+ 
+-- 
+2.1.4
+

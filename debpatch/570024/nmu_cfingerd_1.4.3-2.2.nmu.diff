@@ -1,0 +1,368 @@
+diff -u cfingerd-1.4.3/debian/cron cfingerd-1.4.3/debian/cron
+--- cfingerd-1.4.3/debian/cron
++++ cfingerd-1.4.3/debian/cron
+@@ -7,7 +7,7 @@
+ cd /var/log
+ for LOG in cfingerd.log
+ do
+-   if [ -f $LOG ]; then
++   if [ -f "$LOG" ]; then
+       savelog -g adm -m 644 -u root -c 4 $LOG >/dev/null
+    fi
+ done
+diff -u cfingerd-1.4.3/debian/rules cfingerd-1.4.3/debian/rules
+--- cfingerd-1.4.3/debian/rules
++++ cfingerd-1.4.3/debian/rules
+@@ -95,6 +95,7 @@
+ 	$(installbin) -d debian/tmp/usr/share/doc/$(package)/examples
+ 	$(installdoc) debian/{ping,uptime} debian/tmp/usr/share/doc/$(package)/examples
+ 	$(installdoc) scripts/trace debian/tmp/usr/share/doc/$(package)/examples
++	$(installdoc) debian/cfingerd.xinetd debian/tmp/usr/share/doc/$(package)/examples
+ 	#
+ 	dpkg-shlibdeps debian/tmp/usr/sbin/{cfingerd,userlist}
+ 	dpkg-gencontrol -isp
+diff -u cfingerd-1.4.3/debian/changelog cfingerd-1.4.3/debian/changelog
+--- cfingerd-1.4.3/debian/changelog
++++ cfingerd-1.4.3/debian/changelog
+@@ -1,3 +1,11 @@
++cfingerd (1.4.3-2.2) unstable; urgency=low
++
++  * Non-maintainer upload.
++  * Implement IPv6-capability.
++  * debian/cfingerd.xinetd: New file, configuration example.
++
++ -- Mats Erik Andersson <mats.andersson@gisladisker.se>  Mon, 15 Feb 2010 22:27:09 +0100
++
+ cfingerd (1.4.3-2.1) unstable; urgency=medium
+ 
+   * Non-maintainer upload.
+diff -u cfingerd-1.4.3/src/rfc1413.c cfingerd-1.4.3/src/rfc1413.c
+--- cfingerd-1.4.3/src/rfc1413.c
++++ cfingerd-1.4.3/src/rfc1413.c
+@@ -25,11 +25,15 @@
+  * the implementation.  Completely rewritten by yours truly to be self-
+  * contained in a single program.  Simple, easy to use.
+  */
+-#define BUFLEN	256
+-char *get_rfc1413_data( struct sockaddr_in local_addr )
++#define BUFLEN	(2 * INET6_ADDRSTRLEN)
++char *get_rfc1413_data(struct sockaddr_storage * local_addr,
++			struct sockaddr_storage * peer_addr )
+ {
+     int i, j;
+-    struct sockaddr_in sin;
++    unsigned short newport;
++    struct sockaddr_storage sin;
++    struct sockaddr_in *sa4 = (struct sockaddr_in *) &sin;
++    struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *) &sin;
+     char buffer[1024], buf[BUFLEN], uname[64], *bleah;
+     char *cp, *xp;
+     struct servent *serv;
+@@ -37,33 +41,57 @@
+     bleah = (char *) malloc(BUFLEN);
+     memset(bleah, 0, BUFLEN);
+ 
+-    j = socket(AF_INET, SOCK_STREAM, 0);
++    j = socket(local_addr->ss_family, SOCK_STREAM, 0);
+     if (j < 2) {
+ 	snprintf(bleah, BUFLEN, "unknown@%s", remote_addr);
+ 	syslog(LOG_ERR, "rfc1413-socket: %s", strerror(errno));
+ 	return(bleah);
+     }
+ 
+-    sin.sin_family = AF_INET;
+-    sin.sin_addr.s_addr = local_addr.sin_addr.s_addr;
+-    sin.sin_port = 0;
+-    i = bind(j, (struct sockaddr *) &sin, sizeof(sin));
++    memcpy(&sin, local_addr, sizeof(sin));
++    switch (sin.ss_family) {
++	case AF_INET6:
++	    sa6->sin6_port = 0;
++	    break;
++	case AF_INET:
++	default:
++	    sa4->sin_port = 0;
++    }
++
++    i = bind(j, (struct sockaddr *) &sin, 
++		    (sin.ss_family == AF_INET6 )
++			? sizeof(struct sockaddr_in6)
++			: sizeof(struct sockaddr_in));
++
+     if (i < 0) {
+ 	snprintf(bleah, BUFLEN, "unknown@%s", remote_addr);
+ 	syslog(LOG_ERR, "rfc1413-socket: %s", strerror(errno));
+ 	return(bleah);
+     }
+ 
+-    sin.sin_family = AF_INET;
+     if ((serv = getservbyname("auth","tcp")) != NULL)
+-	sin.sin_port = serv->s_port;
++	newport = serv->s_port;
+     else
+-	sin.sin_port = htons(113);
+-    sin.sin_addr.s_addr = inet_addr(ip_address);
++	newport = htons(113);
++
++    memcpy(&sin, peer_addr, sizeof(sin));
++    switch (sin.ss_family) {
++	case AF_INET6:
++	    sa6->sin6_port = newport;
++	    break;
++	case AF_INET:
++	default:
++	    sa4->sin_port = newport;
++    }
++
+     signal(SIGALRM, rfc1413_alarm);
+     alarm(5);
+ 
+-    i = connect(j, (struct sockaddr *) &sin, sizeof(sin));
++    i = connect(j, (struct sockaddr *) &sin,
++		    (sin.ss_family == AF_INET6 )
++			? sizeof(struct sockaddr_in6)
++			: sizeof(struct sockaddr_in));
++
+     if (i < 0) {
+ 	syslog(LOG_ERR, "rfc1413-connect: %s", strerror(errno));
+ 	close(j);
+diff -u cfingerd-1.4.3/src/main.c cfingerd-1.4.3/src/main.c
+--- cfingerd-1.4.3/src/main.c
++++ cfingerd-1.4.3/src/main.c
+@@ -20,11 +20,13 @@
+ #include "privs.h"
+ 
+ CONFIG prog_config;
+-char *remote_addr, *localhost, *ident_user, *ip_address;
++char *localhost, *ident_user;
++char ip_address[INET6_ADDRSTRLEN] = "";
++char remote_addr[INET6_ADDRSTRLEN] = "";
+ FILE *top_display, *bottom_display, *noname_display, *nouser_display,
+      *rejected_display, *identd_display;
+ BOOL local_finger, emulated; 
+-int local_port, remote_port;
++unsigned short local_port, remote_port;
+ unsigned short listen_port;
+ unsigned long listen_addr;
+ 
+@@ -62,14 +64,15 @@
+     char line[100], username[80], syslog_str[200];
+     int un_type;
+     char *cp;
+-    struct sockaddr_in local_addr;
++    struct sockaddr_storage local_addr;
++    struct sockaddr_in *sloc4 = (struct sockaddr_in *) &local_addr;
++    struct sockaddr_in6 *sloc6 = (struct sockaddr_in6 *) &local_addr;
+     struct servent *serv;
+ 
+     if ((serv = getservbyname("finger","tcp")) != NULL)
+ 	listen_port = serv->s_port;
+     else
+ 	listen_port = htons(79);
+-    listen_addr = htonl(INADDR_ANY);
+ 
+     /* Initialize CFINGERD */
+     start_handler();
+@@ -108,7 +111,7 @@
+     /* Make sure there is actually data waiting in the finger port */
+     if (!emulated) {
+ 	if (!fgets(username, sizeof(username), stdin)) {
+-	  if (remote_addr != NULL) {
++	  if (remote_addr != NULL && *remote_addr) {
+ 	    syslog(LOG_ERR, "Null query from %s: %m", remote_addr);
+ 	    mylog(LOG_ERROR, remote_addr, strerror(errno));
+ 	  } else {
+@@ -147,33 +150,64 @@
+     /* If we're not doing emulated stuff, we can assume that we are running
+        either as a daemon, or under INETD.  In that case... */
+     if (!emulated) {
+-	struct sockaddr_in socket_addr;
++	struct sockaddr_storage socket_addr;
++	struct sockaddr_in *srem4 = (struct sockaddr_in *) &socket_addr;
++	struct sockaddr_in6 *srem6 = (struct sockaddr_in6 *) &socket_addr;
+ 	struct hostent *host_ent;
+-	int psize = 0;
++	socklen_t locsize = 0, remsize = 0;
+ 
+ 	/* Can't run from command line (but this should already be checked) */
+-	psize = sizeof(socket_addr);
++	locsize = sizeof(local_addr);
+ 
+-	if (getsockname(0, (struct sockaddr *) &local_addr, &psize)) {
++	if (getsockname(0, (struct sockaddr *) &local_addr, &locsize)) {
+ 	    syslog(LOG_WARNING, "getsockname: %s", strerror(errno));
+ 	    local_port = 0;
+ 	} else
+-	    local_port = ntohs(local_addr.sin_port);
++	    switch (local_addr.ss_family) {
++		case AF_INET6:
++		    local_port = ntohs(sloc6->sin6_port);
++		    break;
++		case AF_INET:
++		default:
++		    local_port = ntohs(sloc4->sin_port);
++	    }
++
++	remsize = sizeof(socket_addr);
+ 
+-	if (getpeername(0, (struct sockaddr *) &socket_addr, &psize)) {
++	if (getpeername(0, (struct sockaddr *) &socket_addr, &remsize)) {
+ 	    printf("Internal error - not running as either a daemon or under INETD.\n");
+ 	    printf("Fatal - getpeername: %s\n", strerror(errno));
+ 	    closelog();
+ 	    mylog(LOG_ERROR, "getpeername: ", strerror(errno));
+ 	    exit(PROGRAM_BUG);
+ 	} else
+-	    remote_port = ntohs(socket_addr.sin_port);
++	    switch (socket_addr.ss_family) {
++		case AF_INET6:
++		    remote_port = ntohs(srem6->sin6_port);
++		    break;
++		case AF_INET:
++		default:
++		    remote_port = ntohs(srem4->sin_port);
++	    }
+ 
+-	ip_address = inet_ntoa (socket_addr.sin_addr);
++	inet_ntop(socket_addr.ss_family, &socket_addr,
++			ip_address, INET6_ADDRSTRLEN);
+ 
+ 	/* Get our host entry */
+-	host_ent = (struct hostent *) gethostbyaddr((char *) &socket_addr.sin_addr,
+-		   sizeof(socket_addr.sin_addr), AF_INET);
++	switch (socket_addr.ss_family) {
++	    case AF_INET6:
++		host_ent = (struct hostent *)
++				gethostbyaddr((char *) &srem6->sin6_addr,
++					sizeof(struct in6_addr),
++					socket_addr.ss_family);
++		break;
++	    case AF_INET:
++	    default:
++		host_ent = (struct hostent *)
++				gethostbyaddr((char *) &srem4->sin_addr,
++					sizeof(struct in_addr),
++					socket_addr.ss_family);
++	}
+ 
+ 	/* And get our local-host name */
+ #ifndef	ACTUAL_HOSTNAME
+@@ -184,14 +218,14 @@
+ 
+ 	/* Make sure we can get the remote host's address name */
+ 	if (host_ent == NULL) {
+-	    remote_addr = inettos(socket_addr.sin_addr.s_addr);
++	    strncpy(remote_addr, ip_address, INET6_ADDRSTRLEN);
+ 	    syslog(LOG_WARNING, "%s %s", 
+ 		prog_config.p_strings[D_IP_NO_MATCH],
+ 		remote_addr);
+ 	    if (!(prog_config.config_bits2 & SHOW_IP_MATCH))
+ 		CF_ERROR(E_NOIP);
+ 	} else
+-	    remote_addr = (char *) host_ent->h_name;
++	    strncpy(remote_addr, host_ent->h_name, INET6_ADDRSTRLEN);
+ 
+ 	/* Convert any uppercase letters in the hostname to lowercase */
+ 	for (cp = remote_addr; *cp; cp++)
+@@ -200,14 +234,17 @@
+ 
+ 	/* And find out if this is a local finger */
+ 	if (!strncasecmp(remote_addr, "127.0.0.1", 9) ||
++	    !strncasecmp(remote_addr, "::1", 3) ||
+ 	    !strncasecmp(remote_addr, "localhost", 9) ||
++	    !strncasecmp(remote_addr, "ip6-localhost", 9) ||
++	    !strncasecmp(remote_addr, "ip6-loopback", 9) ||
+ 	    !strncasecmp(remote_addr, "127.0.0.0", 9) || /* KTH 07/26/96 */
+ 	    !strncasecmp(remote_addr, localhost, strlen(localhost)))
+ 	    local_finger = TRUE;
+ 	else
+ 	    local_finger = FALSE;
+ 
+-	ident_user = get_rfc1413_data(local_addr);
++	ident_user = get_rfc1413_data(&local_addr, &socket_addr);
+ 	set_time_format();
+ 
+     } else
+@@ -220,9 +257,9 @@
+ 	memset (ident_user, 0, sizeof (ident_user));
+ 	strcpy (ident_user, "emulated");
+ #ifndef	ACTUAL_LOOPBACK
+-	remote_addr = "127.0.0.1";
++	strcpy(remote_addr,"127.0.0.1");
+ #else
+-	remote_addr = ACTUAL_LOOPBACK;
++	strcpy(remote_addr, ACTUAL_LOOPBACK);
+ #endif
+     }
+ 
+diff -u cfingerd-1.4.3/src/proto.h cfingerd-1.4.3/src/proto.h
+--- cfingerd-1.4.3/src/proto.h
++++ cfingerd-1.4.3/src/proto.h
+@@ -45,7 +45,7 @@
+ void become_nobody(void);
+ void become_user(char *);
+ int wildmat(char *, char *);
+-char *get_rfc1413_data(struct sockaddr_in );
++char *get_rfc1413_data(struct sockaddr_storage *, struct sockaddr_storage *);
+ void check_unknown(char *);
+ void mylog(int, char *, char *);
+ void userlog(uid_t, gid_t, char *, char *);
+only in patch2:
+unchanged:
+--- cfingerd-1.4.3.orig/src/cfingerd.h
++++ cfingerd-1.4.3/src/cfingerd.h
+@@ -278,10 +278,11 @@
+ 
+ extern CONFIG prog_config;
+ extern ECRUFT errors[];
+-extern char *remote_addr, *localhost, *ident_user, *ip_address;
++extern char remote_addr[], ip_address[];
++extern char *localhost, *ident_user;
+ extern int trusted_host_num, rejected_host_num, forward_host_num,
+-	   fakeuser_num, num_finger_sites, num_headers, local_port,
+-	   remote_port, can_log;
++	   fakeuser_num, num_finger_sites, num_headers, can_log;
++extern unsigned short local_port, remote_port;
+ extern FILE *top_display, *bottom_display, *noname_display, *nouser_display,
+ 	    *rejected_display, *identd_display;
+ extern BOOL local_finger, emulated;
+@@ -293,4 +294,4 @@
+ 
+ #include "defines.h"
+ 
+-#endif _CFINGERD_H_
++#endif /* _CFINGERD_H_ */
+only in patch2:
+unchanged:
+--- cfingerd-1.4.3.orig/docs/cfingerd.conf.5
++++ cfingerd-1.4.3/docs/cfingerd.conf.5
+@@ -8,8 +8,8 @@
+ .SH DESCRIPTION
+ .I cfingerd.conf
+ is the configuration file for cfingerd.
+-+.I cfingerd
+-+has been totally rewritten
++.I cfingerd
++has been totally rewritten
+ to support a more readable configuration file.  This version of the new 
+ configuration file is
+ .B NOT
+only in patch2:
+unchanged:
+--- cfingerd-1.4.3.orig/debian/cfingerd.xinetd
++++ cfingerd-1.4.3/debian/cfingerd.xinetd
+@@ -0,0 +1,14 @@
++service finger
++{
++	disable = no
++	socket_type = stream
++	protocol = tcp
++	flags = IPv6
++	wait = no
++	user = root
++	server = /usr/sbin/cfingerd
++	log_type = SYSLOG daemon info
++	log_on_success = HOST
++	log_on_failure = HOST
++}
++

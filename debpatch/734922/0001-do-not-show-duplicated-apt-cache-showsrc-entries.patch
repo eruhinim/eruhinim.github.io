@@ -1,0 +1,117 @@
+From 14042cb47e58bb64afefe67a0d83494191c11a7a Mon Sep 17 00:00:00 2001
+From: Michael Vogt <mvo@debian.org>
+Date: Mon, 13 Jan 2014 17:35:54 +0100
+Subject: [PATCH] do not show duplicated apt-cache showsrc entries
+
+---
+ cmdline/apt-cache.cc                               | 23 +++++++++--
+ .../test-bug-734922-apt-showsrc-duplicate          | 47 ++++++++++++++++++++++
+ 2 files changed, 67 insertions(+), 3 deletions(-)
+ create mode 100755 test/integration/test-bug-734922-apt-showsrc-duplicate
+
+diff --git a/cmdline/apt-cache.cc b/cmdline/apt-cache.cc
+index b8892d2..58864b4 100644
+--- a/cmdline/apt-cache.cc
++++ b/cmdline/apt-cache.cc
+@@ -34,6 +34,7 @@
+ #include <apt-pkg/pkgsystem.h>
+ #include <apt-pkg/indexfile.h>
+ #include <apt-pkg/metaindex.h>
++#include <apt-pkg/hashes.h>
+ 
+ #include <apt-private/private-list.h>
+ #include <apt-private/private-cmndline.h>
+@@ -1475,6 +1476,15 @@ bool ShowPkgNames(CommandLine &CmdL)
+    return true;
+ }
+ 									/*}}}*/
++
++// FIXME: move to hashes.h: HashString::FromString()
++std::string Sha1FromString(std::string input)
++{
++   SHA1Summation sha1;
++   sha1.Add(input.c_str(), input.length());
++   return sha1.Result().Value();
++}
++
+ // ShowSrcPackage - Show source package records				/*{{{*/
+ // ---------------------------------------------------------------------
+ /* */
+@@ -1497,10 +1507,17 @@ bool ShowSrcPackage(CommandLine &CmdL)
+       
+       pkgSrcRecords::Parser *Parse;
+       unsigned found_this = 0;
++      // avoid showing idential records
++      std::set<std::string> seen;
+       while ((Parse = SrcRecs.Find(*I,false)) != 0) {
+-        cout << Parse->AsStr() << endl;;
+-        found++;
+-        found_this++;
++         std::string sha1str = Sha1FromString(Parse->AsStr());
++         if (std::find(seen.begin(), seen.end(), sha1str) == seen.end())
++         {
++            cout << Parse->AsStr() << endl;;
++            found++;
++            found_this++;
++            seen.insert(sha1str);
++         } 
+       }
+       if (found_this == 0) {
+         _error->Warning(_("Unable to locate package %s"),*I);
+diff --git a/test/integration/test-bug-734922-apt-showsrc-duplicate b/test/integration/test-bug-734922-apt-showsrc-duplicate
+new file mode 100755
+index 0000000..66db534
+--- /dev/null
++++ b/test/integration/test-bug-734922-apt-showsrc-duplicate
+@@ -0,0 +1,47 @@
++#!/bin/sh
++set -e
++
++TESTDIR=$(readlink -f $(dirname $0))
++. $TESTDIR/framework
++setupenvironment
++configarchitecture 'i386' 
++
++# foo is identical, show it only once in showsrc
++insertpackage "unstable" "foo" "i386" "1.0"
++insertpackage "testing" "foo" "i386" "1.0"
++insertsource "unstable" "foo" "i386" "1.0"
++insertsource "testing" "foo" "i386" "1.0"
++
++# bar is different, show twice
++insertsource "unstable" "bar" "i386" "1.0"
++insertsource "testing" "bar" "i386" "2.0"
++
++setupaptarchive
++
++testequal "Package: foo
++Binary: foo
++Version: 1.0
++Maintainer: Joe Sixpack <joe@example.org>
++Architecture: i386
++Files:
++ d41d8cd98f00b204e9800998ecf8427e 0 foo_1.0.dsc
++ d41d8cd98f00b204e9800998ecf8427e 0 foo_1.0.tar.gz
++
++Package: bar
++Binary: bar
++Version: 2.0
++Maintainer: Joe Sixpack <joe@example.org>
++Architecture: i386
++Files:
++ d41d8cd98f00b204e9800998ecf8427e 0 bar_2.0.dsc
++ d41d8cd98f00b204e9800998ecf8427e 0 bar_2.0.tar.gz
++
++Package: bar
++Binary: bar
++Version: 1.0
++Maintainer: Joe Sixpack <joe@example.org>
++Architecture: i386
++Files:
++ d41d8cd98f00b204e9800998ecf8427e 0 bar_1.0.dsc
++ d41d8cd98f00b204e9800998ecf8427e 0 bar_1.0.tar.gz
++" aptcache showsrc foo bar
+\ No newline at end of file
+-- 
+1.8.3.2
+

@@ -1,0 +1,203 @@
+diff --git a/apt-pkg/deb/deblistparser.cc b/apt-pkg/deb/deblistparser.cc
+index 68d544e..4fe5919 100644
+--- a/apt-pkg/deb/deblistparser.cc
++++ b/apt-pkg/deb/deblistparser.cc
+@@ -95,44 +95,51 @@ string debListParser::Version()
+    return Section.FindS("Version");
+ }
+ 									/*}}}*/
+-// ListParser::NewVersion - Fill in the version structure		/*{{{*/
+-// ---------------------------------------------------------------------
+-/* */
+-bool debListParser::NewVersion(pkgCache::VerIterator &Ver)
++unsigned char debListParser::ParseMultiArch(bool const showErrors)	/*{{{*/
+ {
+-   // Parse the section
+-   Ver->Section = UniqFindTagWrite("Section");
+-
+-   // Parse multi-arch
++   unsigned char MA;
+    string const MultiArch = Section.FindS("Multi-Arch");
+    if (MultiArch.empty() == true)
+-      Ver->MultiArch = pkgCache::Version::None;
++      MA = pkgCache::Version::None;
+    else if (MultiArch == "same") {
+       // Parse multi-arch
+       if (ArchitectureAll() == true)
+       {
+ 	 /* Arch all packages can't be Multi-Arch: same */
+-	 _error->Warning("Architecture: all package '%s' can't be Multi-Arch: same",
+-			Section.FindS("Package").c_str());
+-	 Ver->MultiArch = pkgCache::Version::None;
++	 if (showErrors == true)
++	    _error->Warning("Architecture: all package '%s' can't be Multi-Arch: same",
++		  Section.FindS("Package").c_str());
++	 MA = pkgCache::Version::None;
+       }
+       else
+-	 Ver->MultiArch = pkgCache::Version::Same;
++	 MA = pkgCache::Version::Same;
+    }
+    else if (MultiArch == "foreign")
+-      Ver->MultiArch = pkgCache::Version::Foreign;
++      MA = pkgCache::Version::Foreign;
+    else if (MultiArch == "allowed")
+-      Ver->MultiArch = pkgCache::Version::Allowed;
++      MA = pkgCache::Version::Allowed;
+    else
+    {
+-      _error->Warning("Unknown Multi-Arch type '%s' for package '%s'",
+-			MultiArch.c_str(), Section.FindS("Package").c_str());
+-      Ver->MultiArch = pkgCache::Version::None;
++      if (showErrors == true)
++	 _error->Warning("Unknown Multi-Arch type '%s' for package '%s'",
++	       MultiArch.c_str(), Section.FindS("Package").c_str());
++      MA = pkgCache::Version::None;
+    }
+ 
+    if (ArchitectureAll() == true)
+-      Ver->MultiArch |= pkgCache::Version::All;
++      MA |= pkgCache::Version::All;
+ 
++   return MA;
++}
++									/*}}}*/
++// ListParser::NewVersion - Fill in the version structure		/*{{{*/
++// ---------------------------------------------------------------------
++/* */
++bool debListParser::NewVersion(pkgCache::VerIterator &Ver)
++{
++   // Parse the section
++   Ver->Section = UniqFindTagWrite("Section");
++   Ver->MultiArch = ParseMultiArch(true);
+    // Archive Size
+    Ver->Size = Section.FindULL("Size");
+    // Unpacked Size (in K)
+@@ -315,6 +322,25 @@ unsigned short debListParser::VersionHash()
+    return Result;
+ }
+ 									/*}}}*/
++bool debListParser::SameVersion(unsigned short const Hash,		/*{{{*/
++      pkgCache::VerIterator const &Ver)
++{
++   if (Hash != Ver->Hash)
++      return false;
++   // status file has no (Download)Size, but all others are fair game
++   // status file is parsed last, so the first version we encounter is
++   // probably also the version we have downloaded
++   unsigned long long const Size = Section.FindULL("Size");
++   if (Size != 0 && Size != Ver->Size)
++      return false;
++   // available everywhere, but easier to check here than to include in VersionHash
++   unsigned char MultiArch = ParseMultiArch(false);
++   if (MultiArch != Ver->MultiArch)
++      return false;
++   // for all practical proposes (we can check): same version
++   return true;
++}
++									/*}}}*/
+ // ListParser::ParseStatus - Parse the status field			/*{{{*/
+ // ---------------------------------------------------------------------
+ /* Status lines are of the form,
+diff --git a/apt-pkg/deb/deblistparser.h b/apt-pkg/deb/deblistparser.h
+index 386d291..aca6fc6 100644
+--- a/apt-pkg/deb/deblistparser.h
++++ b/apt-pkg/deb/deblistparser.h
+@@ -63,6 +63,7 @@ class debListParser : public pkgCacheGenerator::ListParser
+    virtual std::string DescriptionLanguage();
+    virtual MD5SumValue Description_md5();
+    virtual unsigned short VersionHash();
++   virtual bool SameVersion(unsigned short const Hash, pkgCache::VerIterator const &Ver);
+    virtual bool UsePackage(pkgCache::PkgIterator &Pkg,
+ 			   pkgCache::VerIterator &Ver);
+    virtual unsigned long Offset() {return iOffset;};
+@@ -81,6 +82,9 @@ class debListParser : public pkgCacheGenerator::ListParser
+ 
+    debListParser(FileFd *File, std::string const &Arch = "");
+    virtual ~debListParser() {};
++
++   private:
++   unsigned char ParseMultiArch(bool const showErrors);
+ };
+ 
+ #endif
+diff --git a/apt-pkg/pkgcache.cc b/apt-pkg/pkgcache.cc
+index 52e814c..f8959aa 100644
+--- a/apt-pkg/pkgcache.cc
++++ b/apt-pkg/pkgcache.cc
+@@ -52,7 +52,7 @@ pkgCache::Header::Header()
+    /* Whenever the structures change the major version should be bumped,
+       whenever the generator changes the minor version should be bumped. */
+    MajorVersion = 8;
+-   MinorVersion = 1;
++   MinorVersion = 2;
+    Dirty = false;
+    
+    HeaderSz = sizeof(pkgCache::Header);
+diff --git a/apt-pkg/pkgcachegen.cc b/apt-pkg/pkgcachegen.cc
+index 7ce7aba..0df8475 100644
+--- a/apt-pkg/pkgcachegen.cc
++++ b/apt-pkg/pkgcachegen.cc
+@@ -350,7 +350,7 @@ bool pkgCacheGenerator::MergeListVersion(ListParser &List, pkgCache::PkgIterator
+    map_ptrloc *LastVer = &Pkg->VersionList;
+    void const * oldMap = Map.Data();
+ 
+-   unsigned long const Hash = List.VersionHash();
++   unsigned short const Hash = List.VersionHash();
+    if (Ver.end() == false)
+    {
+       /* We know the list is sorted so we use that fact in the search.
+@@ -363,7 +363,7 @@ bool pkgCacheGenerator::MergeListVersion(ListParser &List, pkgCache::PkgIterator
+ 	 if (Res > 0)
+ 	    break;
+ 	 // Versionstrings are equal - is hash also equal?
+-	 if (Res == 0 && Ver->Hash == Hash)
++	 if (Res == 0 && List.SameVersion(Hash, Ver) == true)
+ 	    break;
+ 	 // proceed with the next till we have either the right
+ 	 // or we found another version (which will be lower)
+@@ -552,12 +552,12 @@ bool pkgCacheGenerator::MergeFileProvides(ListParser &List)
+       if (Counter % 100 == 0 && Progress != 0)
+ 	 Progress->Progress(List.Offset());
+ 
+-      unsigned long Hash = List.VersionHash();
++      unsigned short Hash = List.VersionHash();
+       pkgCache::VerIterator Ver = Pkg.VersionList();
+       Dynamic<pkgCache::VerIterator> DynVer(Ver);
+       for (; Ver.end() == false; ++Ver)
+       {
+-	 if (Ver->Hash == Hash && Version == Ver.VerStr())
++	 if (List.SameVersion(Hash, Ver) == true && Version == Ver.VerStr())
+ 	 {
+ 	    if (List.CollectFileProvides(Cache,Ver) == false)
+ 	       return _error->Error(_("Error occurred while processing %s (%s%d)"),
+@@ -1045,6 +1045,12 @@ bool pkgCacheGenerator::ListParser::NewProvides(pkgCache::VerIterator &Ver,
+    return true;
+ }
+ 									/*}}}*/
++bool pkgCacheGenerator::ListParser::SameVersion(unsigned short const Hash,/*{{{*/
++      pkgCache::VerIterator const &Ver)
++{
++   return Hash == Ver->Hash;
++}
++									/*}}}*/
+ // CacheGenerator::SelectFile - Select the current file being parsed	/*{{{*/
+ // ---------------------------------------------------------------------
+ /* This is used to select which file is to be associated with all newly
+diff --git a/apt-pkg/pkgcachegen.h b/apt-pkg/pkgcachegen.h
+index 428e845..4991678 100644
+--- a/apt-pkg/pkgcachegen.h
++++ b/apt-pkg/pkgcachegen.h
+@@ -162,6 +162,12 @@ class pkgCacheGenerator::ListParser
+    virtual std::string DescriptionLanguage() = 0;
+    virtual MD5SumValue Description_md5() = 0;
+    virtual unsigned short VersionHash() = 0;
++   /** compare currently parsed version with given version
++    *
++    * \param Hash of the currently parsed version
++    * \param Ver to compare with
++    */
++   virtual bool SameVersion(unsigned short const Hash, pkgCache::VerIterator const &Ver);
+    virtual bool UsePackage(pkgCache::PkgIterator &Pkg,
+ 			   pkgCache::VerIterator &Ver) = 0;
+    virtual unsigned long Offset() = 0;

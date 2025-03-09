@@ -1,0 +1,87 @@
+diff -Naur dovecot-1.2.15.OLD//debian/changelog dovecot-1.2.15//debian/changelog
+--- dovecot-1.2.15.OLD//debian/changelog	2011-05-25 10:09:22.000000000 +0200
++++ dovecot-1.2.15//debian/changelog	2011-07-06 14:28:17.423342975 +0200
+@@ -1,3 +1,14 @@
++dovecot (1:1.2.15-8) UNRELEASED; urgency=low
++
++  [ Luca Capello ]
++  * debian/patches/series: update.
++  * debian/patches/0012-upstream-b30af25c622d.patch:
++    backport IMAP SELECT QRESYNC fix for Gnus/Emacs
++    <http://debbugs.gnu.org/cgi/bugreport.cgi?bug=8959>
++    (Closes: #632844).
++
++ --
++
+ dovecot (1:1.2.15-7) stable-security; urgency=high
+ 
+   * [2ffd812] Lifted Build-Conflicts with ancient linux-kernel-headers
+diff -Naur dovecot-1.2.15.OLD//debian/patches/0012-upstream-b30af25c622d.patch dovecot-1.2.15//debian/patches/0012-upstream-b30af25c622d.patch
+--- dovecot-1.2.15.OLD//debian/patches/0012-upstream-b30af25c622d.patch	1970-01-01 01:00:00.000000000 +0100
++++ dovecot-1.2.15//debian/patches/0012-upstream-b30af25c622d.patch	2011-06-30 01:31:43.861499534 +0200
+@@ -0,0 +1,57 @@
++
++# HG changeset patch
++# User Timo Sirainen <tss@iki.fi>
++# Date 1288718064 0
++# Node ID b30af25c622d486e36931ded92a29b16ad22bc19
++# Parent  45769d0cc39cb584705ec1320479cc93d134d2cb
++imap: Fixed SELECT QRESYNC not to crash on mailbox close if a lot of changes were being sent.
++
++--- a/src/imap/cmd-select.c	Mon Oct 25 16:22:04 2010 +0100
+++++ b/src/imap/cmd-select.c	Tue Nov 02 17:14:24 2010 +0000
++@@ -252,11 +252,11 @@
++ 
++ 			ctx->cmd->func = cmd_select_continue;
++ 			ctx->cmd->context = ctx;
++-			return FALSE;
+++			return 0;
++ 		}
++ 	}
++ 
++-	return imap_fetch_deinit(fetch_ctx);
+++	return imap_fetch_deinit(fetch_ctx) < 0 ? -1 : 1;
++ }
++ 
++ static int
++@@ -265,6 +265,7 @@
++ 	struct client *client = ctx->cmd->client;
++ 	struct mailbox_status status;
++ 	enum mailbox_open_flags open_flags = 0;
+++	int ret;
++ 
++ 	if (readonly)
++ 		open_flags |= MAILBOX_OPEN_READONLY | MAILBOX_OPEN_KEEP_RECENT;
++@@ -321,10 +322,12 @@
++ 	}
++ 
++ 	if (ctx->qresync_uid_validity == status.uidvalidity) {
++-		if (select_qresync(ctx) < 0)
+++		if ((ret = select_qresync(ctx)) < 0)
++ 			return -1;
+++	} else {
+++		ret = 1;
++ 	}
++-	return 0;
+++	return ret;
++ }
++ 
++ static void close_selected_mailbox(struct client *client)
++@@ -393,6 +396,8 @@
++ 	}
++ 
++ 	ret = select_open(ctx, mailbox, readonly);
+++	if (ret == 0)
+++		return FALSE;
++ 	cmd_select_finish(ctx, ret);
++ 	return TRUE;
++ }
++
+diff -Naur dovecot-1.2.15.OLD//debian/patches/series dovecot-1.2.15//debian/patches/series
+--- dovecot-1.2.15.OLD//debian/patches/series	2011-05-25 10:09:22.000000000 +0200
++++ dovecot-1.2.15//debian/patches/series	2011-06-30 02:00:07.753018810 +0200
+@@ -9,3 +9,4 @@
+ 0009-dovecot-mboxlocking.patch
+ 0010-sendmail-path.patch
+ 0011-CVE-2011-1929.patch
++0012-upstream-b30af25c622d.patch

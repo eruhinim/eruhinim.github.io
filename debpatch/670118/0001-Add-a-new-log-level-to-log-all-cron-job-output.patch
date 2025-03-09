@@ -1,0 +1,209 @@
+From acb04be1e5d49f72b6bf6513b294c393b68f18f9 Mon Sep 17 00:00:00 2001
+From: Josh Triplett <josh@joshtriplett.org>
+Date: Sun, 22 Apr 2012 19:20:54 -0700
+Subject: [PATCH 1/4] Add a new log level to log all cron job output.
+
+---
+ cron.8              |    5 ++--
+ cron.h              |    1 +
+ debian/changelog    |    4 +++
+ debian/cron.default |    1 +
+ do_command.c        |   70 ++++++++++++++++++++++++++-------------------------
+ 5 files changed, 45 insertions(+), 36 deletions(-)
+
+diff --git a/cron.8 b/cron.8
+index 586d9e5..5985700 100644
+--- a/cron.8
++++ b/cron.8
+@@ -54,11 +54,12 @@ will log the end of all cron jobs
+ will log all failed jobs (exit status != 0)
+ .IP \fB8\fR
+ will log the process number of all cron jobs
++.IP \fB16\fR
++will log the full output of all cron jobs
+ .RE
+ .IP
+ The default is to log the start of all jobs (1). Logging will be disabled
+-if \fIlevels\fR is set to zero (0). A value of fifteen (15) will select all
+-options.
++if \fIlevels\fR is set to zero (0). A value of 31 will select all options.
+ .SH NOTES
+ .PP
+ .I cron
+diff --git a/cron.h b/cron.h
+index d1b2bcf..d0cf070 100644
+--- a/cron.h
++++ b/cron.h
+@@ -139,6 +139,7 @@ typedef int time_min;
+ #define	CRON_LOG_JOBEND		0x02
+ #define	CRON_LOG_JOBFAILED	0x04
+ #define	CRON_LOG_JOBPID		0x08
++#define	CRON_LOG_JOBOUTPUT	0x10
+ 
+ #define SECONDS_PER_MINUTE 60
+ 
+diff --git a/debian/changelog b/debian/changelog
+index 139c800..99891b5 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,11 +1,15 @@
+ cron (3.0pl1-122) UNRELEASED; urgency=low
+ 
++  [ Javier Fernández-Sanguino Peña ]
+   * debian/standard.daily: Apply patch from Steve Allison to prevent checking
+      two times the same filesystem. This prevents bogus warnings about missing
+      lost+found in schroot bind mounts (Closes: #660879)
+   * debian/rules: Apply patch from Steve Langasek to add cross compiler support to
+     cron (Closes: #666892)
+ 
++  [ Josh Triplett ]
++  * Add a new log level to log all cron job output.
++
+  -- Javier Fernández-Sanguino Peña <jfs@debian.org>  Mon, 09 Apr 2012 17:23:01 +0200
+ 
+ cron (3.0pl1-121) unstable; urgency=low
+diff --git a/debian/cron.default b/debian/cron.default
+index c69934f..ed4383d 100644
+--- a/debian/cron.default
++++ b/debian/cron.default
+@@ -23,6 +23,7 @@ READ_ENV="yes"
+ #   2   log end of jobs
+ #   4   log jobs with exit status != 0
+ #   8   log the process identifier of child process (in all logs)
++#   16  log the full output of all cron jobs
+ #
+ #EXTRA_OPTS=""
+ 
+diff --git a/do_command.c b/do_command.c
+index 18d097d..c2fc9f7 100644
+--- a/do_command.c
++++ b/do_command.c
+@@ -511,6 +511,7 @@ child_process(e, u)
+ // since sendmail may time out, and to write info about the exit
+ // status.
+ 	
++	register FILE	*mail = NULL;
+ 	long pos;
+ 	struct stat	mcsb;
+ 	int		statret;	
+@@ -522,26 +523,25 @@ child_process(e, u)
+ 	Debug(DPROC|DEXT, ("[%d] got %ld bytes data from grandchild tmpfile\n",
+ 				getpid(), (long) pos))
+ 	if (pos == 0)
+-		goto mail_finished;
++		goto output_finished;
+ 
+ 	// get name of recipient.
+ 	if (mailto == NULL)
+ 		mailto = usernm;
+ 	else if (!*mailto)
+-                goto mail_finished;
++                goto mail_headers_finished;
+ 
+ 	/* Don't send mail if MAILCMD is not available */
+ 	if ((statret = stat(MAILCMD, &mcsb)) != 0) {
+ 		Debug(DPROC|DEXT, ("%s not found, not sending mail\n", MAILCMD))
+ 		if (pos > 0) {
+-			log_it("CRON", getpid(), "info", "No MTA installed, discarding output");
++			log_it("CRON", getpid(), "info", "No MTA installed, not mailing output");
+ 		}
+-		goto mail_finished;
++		goto mail_headers_finished;
+ 	} else {
+ 		Debug(DPROC|DEXT, ("%s found, will send mail\n", MAILCMD))
+ 	}
+ 
+-	register FILE	*mail = NULL;
+ 	register int	bytes = 1;
+ 
+ 	register char	**env;
+@@ -556,7 +556,7 @@ child_process(e, u)
+ 			MAILARGS, MAILCMD, mailto);
+ 	if (!(mail = cron_popen(mailcmd, "w", e))) {
+ 		perror(MAILCMD);
+-		(void) _exit(ERROR_EXIT);
++		goto mail_headers_finished;
+ 	}
+ 	fprintf(mail, "From: root (Cron Daemon)\n");
+ 	fprintf(mail, "To: %s\n", mailto);
+@@ -601,47 +601,49 @@ child_process(e, u)
+ 				*env);
+ 	fputc('\n', mail);
+ 
++mail_headers_finished:
+ // Append the actual output of the child to the mail
+ 	
++	if (!mail && !(log_level & CRON_LOG_JOBOUTPUT))
++		goto output_finished;
++
+ 	char buf[4096];
+-	int ret, remain;
+ 
+-	while(1) {
+-		if ((ret = fread(buf, 1, sizeof(buf), tmpout)) == 0)
+-			break;
+-		for (remain = ret; remain != 0; ) {
+-			ret = fwrite(buf, 1, remain, mail);
+-			if (ret > 0) {
+-				remain -= ret;
+-				continue;
+-			}
+-			// XXX error
+-			break;
+-		}
++	while(fgets(buf, sizeof(buf), tmpout) != NULL) {
++		size_t len;
++		len = strlen(buf);
++		if (buf[len-1] == '\n')
++			buf[len-1] = '\0';
++		if (mail)
++			fprintf(mail, "%s\n", buf);
++		if (log_level & CRON_LOG_JOBOUTPUT)
++			log_it(usernm, job_pid, "CMD OUTPUT", buf);
+ 	}
+ 
+-	Debug(DPROC, ("[%d] closing pipe to mail\n", getpid()))
+-	status = cron_pclose(mail);
++	if (mail) {
++		Debug(DPROC, ("[%d] closing pipe to mail\n", getpid()))
++		status = cron_pclose(mail);
+ 
+-	/* if there was output and we could not mail it,
+-	 * log the facts so the poor user can figure out
+-	 * what's going on.
+-	 */
+-	if (status) {
+-		char buf[MAX_TEMPSTR];
+-		snprintf(buf, MAX_TEMPSTR,
+-				"mailed %d byte%s of output; "
+-				"but got status 0x%04x, "
+-				"\n",
+-				bytes, (bytes==1)?"":"s", status);
+-		log_it(usernm, getpid(), "MAIL", buf);
++		/* if there was output and we could not mail it,
++		 * log the facts so the poor user can figure out
++		 * what's going on.
++		 */
++		if (status) {
++			char buf[MAX_TEMPSTR];
++			snprintf(buf, MAX_TEMPSTR,
++					"mailed %d byte%s of output; "
++					"but got status 0x%04x, "
++					"\n",
++					bytes, (bytes==1)?"":"s", status);
++			log_it(usernm, getpid(), "MAIL", buf);
++		}
+ 	}
+ 
+ 	if (ferror(tmpout)) {
+ 		log_it(usernm, getpid(), "MAIL", "stream error reading output");
+ 	}
+ 
+-mail_finished:
++output_finished:
+ 	fclose(tmpout);
+ 
+ 	if (log_level & CRON_LOG_JOBEND) {
+-- 
+1.7.10
+

@@ -1,0 +1,227 @@
+From ee3da4988680937935a5bbdc4cb7e6004d5d79e8 Mon Sep 17 00:00:00 2001
+From: Joachim Breitner <nomeata@debian.org>
+Date: Sun, 3 Apr 2011 16:32:44 +0530
+Subject: [PATCH] debchange: New option --newupstreamversion
+
+---
+ debian/changelog     |    3 ++
+ scripts/debchange.1  |   24 +++++++++++------
+ scripts/debchange.pl |   69 ++++++++++++++++++++++++++++---------------------
+ 3 files changed, 57 insertions(+), 39 deletions(-)
+
+diff --git a/debian/changelog b/debian/changelog
+index d70aa24..d2b0799 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -43,6 +43,9 @@ devscripts (2.10.72) UNRELEASED; urgency=low
+   * debcheckout: Correctly extract package name from svn://.../trunk/$pkg
+     style URLs.
+ 
++  [ Joachim Breitner ]
++  * debchange: New option --newupstreamversion (Closes: #620641)
++
+  -- James Vega <jamessan@debian.org>  Wed, 02 Mar 2011 00:07:34 -0500
+ 
+ devscripts (2.10.71) unstable; urgency=low
+diff --git a/scripts/debchange.1 b/scripts/debchange.1
+index 3d2773e..b81e187 100644
+--- a/scripts/debchange.1
++++ b/scripts/debchange.1
+@@ -41,7 +41,8 @@ entry can be given on the command line in addition to the closes
+ entries.
+ .PP
+ At most one of \fB\-\-append\fR, \fB\-\-increment\fR, \fB\-\-edit\fR,
+-\fB\-\-release\fR, and \fB\-\-newversion\fR may be specified as listed
++\fB\-\-release\fR, \fB\-\-newversion\fR and \fB\-\-newupstreamversion\fR may be
++specified as listed
+ below. If no options are specified, \fBdebchange\fR will use heuristics to
+ guess whether or not the package has been successfully released, and behave
+ as if \fB\-\-increment\fR had been specified if the package has been
+@@ -63,7 +64,8 @@ default to \fBUNRELEASED\fR in new changelog entries, and the
+ enabled. This can be useful if a package can be released by different
+ maintainers, or if you do not keep the upload logs.
+ .PP
+-If either \fB\-\-increment\fR or \fB\-\-newversion\fR is used, the
++If either \fB\-\-increment\fR, \fB\-\-newversion\fR or
++\fB\-\-newupstreamversion\fR is used, the
+ name and email for the new version will be determined as follows.  If
+ the environment variable \fBDEBFULLNAME\fR is set, this will be used
+ for the maintainer full name; if not, then \fBNAME\fR will be checked.
+@@ -188,7 +190,8 @@ This will create a new \fIdebian/changelog\fR file (or \fINEWS\fR if
+ the \fB\-\-news\fR option is used).  You must be in the top-level
+ directory to use this; no directory name checking will be performed.
+ The package name and version can either be specified using the
+-\fB\-\-package\fR and \fB\-\-newversion\fR options, determined from
++\fB\-\-package\fR and \fB\-\-newversion\fR or \fB\-\-newupstreamversion\fR
++options, determined from
+ the directory name using the \fB\-\-fromdirname\fR option or entered
+ manually into the generated \fIchangelog\fR file.  The maintainer name is
+ determined from the environment if this is possible, and the
+@@ -204,8 +207,8 @@ due to the lack of changes.
+ .TP
+ \fB\-\-package\fR \fIpackage\fR
+ This specifies the package name to be used in the new changelog; this
+-may only be used in conjunction with the \fB\-\-create\fR, \fB\-\-increment\fR and
+-\fB\-\-newversion\fR options.
++may only be used in conjunction with the \fB\-\-create\fR, \fB\-\-increment\fR,
++\fB\-\-newversion\fR and \fB\-\-newupstreamversion\fR options.
+ .TP
+ .BR \-\-nmu ", " \-n
+ Increment the Debian release number for a non-maintainer upload by
+@@ -260,16 +263,19 @@ represents a Non Maintainer Upload.  This is the default.
+ Disable automatic NMU detection.  Equivalent to setting
+ \fBDEBCHANGE_AUTO_NMU\fR to \fIno\fR.
+ .TP
+-.BR \-\-fromdirname ", " \-d
+-This will take the upstream version number from the directory name,
+-which should be of the form \fIpackage\fB-\fIversion\fR.  If the
+-upstream version number has increased from the most recent changelog
++\fB\-\-newupstreamversion \fIversion\fR
++Calculate the version based on the given upstream version.If the upstream
++version number has increased from the most recent changelog
+ entry, then a new entry will be made with version number
+ \fIversion\fB-1\fR (or \fIversion\fR if the package is Debian native),
+ with the same epoch as the previous package version.  If the upstream
+ version number is the same, this option will behave in the same way as
+ \fB\-i\fR.
+ .TP
++.BR \-\-fromdirname ", " \-d
++This will take the upstream version number from the directory name, and
++otherwise behave as \fB\-\-newupstreamversion\fR.
++.TP
+ .BI \-\-closes " nnnnn\fR[\fB,\fInnnnn \fR...]
+ Add changelog entries to close the specified bug numbers.  Also invoke
+ the editor after adding these entries.  Will generate warnings if the
+diff --git a/scripts/debchange.pl b/scripts/debchange.pl
+index f72f4dd..2f64116 100755
+--- a/scripts/debchange.pl
++++ b/scripts/debchange.pl
+@@ -303,7 +303,7 @@ if (@ARGV and $ARGV[0] =~ /^--no-?conf$/) {
+ # We use bundling so that the short option behaviour is the same as
+ # with older debchange versions.
+ my ($opt_help, $opt_version);
+-my ($opt_i, $opt_a, $opt_e, $opt_r, $opt_v, $opt_b, $opt_d, $opt_D, $opt_u, $opt_force_dist);
++my ($opt_i, $opt_a, $opt_e, $opt_r, $opt_v, $opt_b, $opt_d, $opt_D, $opt_u, $opt_force_dist, $opt_uv);
+ my ($opt_n, $opt_bn, $opt_qa, $opt_s, $opt_team, $opt_bpo, $opt_l, $opt_c, $opt_m, $opt_create, $opt_package, @closes);
+ my ($opt_news);
+ my ($opt_level, $opt_regex, $opt_noconf, $opt_empty);
+@@ -322,6 +322,7 @@ GetOptions("help|h" => \$opt_help,
+ 	   "allow-lower-version=s" => \$opt_allow_lower,
+ 	   "force-distribution" => \$opt_force_dist,
+ 	   "d|fromdirname" => \$opt_d,
++	   "newupstreamversion=s" => \$opt_uv,
+ 	   "p" => \$opt_p,
+ 	   "preserve!" => \$opt_p,
+ 	   "D|distribution=s" => \$opt_D,
+@@ -382,7 +383,7 @@ if (defined $opt_regex) { $check_dirname_regex = $opt_regex; }
+ 
+ # Only allow at most one non-help option
+ fatal "Only one of -a, -i, -e, -r, -v, -d, -n/--nmu, --bin-nmu, -q/--qa, -s/--security, --team, --bpo, -l/--local is allowed;\ntry $progname --help for more help"
+-    if ($opt_i?1:0) + ($opt_a?1:0) + ($opt_e?1:0) + ($opt_r?1:0) + ($opt_v?1:0) + ($opt_d?1:0) + ($opt_n?1:0) + ($opt_bn?1:0) + ($opt_qa?1:0) + ($opt_s?1:0) + ($opt_team?1:0) + ($opt_bpo?1:0) + ($opt_l?1:0) > 1;
++    if ($opt_i?1:0) + ($opt_a?1:0) + ($opt_e?1:0) + ($opt_r?1:0) + ($opt_v?1:0) + ($opt_d?1:0) + ($opt_uv?1:0) + ($opt_n?1:0) + ($opt_bn?1:0) + ($opt_qa?1:0) + ($opt_s?1:0) + ($opt_team?1:0) + ($opt_bpo?1:0) + ($opt_l?1:0) > 1;
+ 
+ if ($opt_s) {
+     $opt_u = "high";
+@@ -619,6 +620,9 @@ EOF
+ 	    # don't know anything
+ 	}
+     }
++    if ($opt_uv) {
++	$VERSION="$opt_uv-1";
++    }
+     if ($opt_v) {
+ 	$VERSION=$opt_v;
+     }
+@@ -932,48 +936,53 @@ my $line;
+ my $optionsok=0;
+ my $merge=0;
+ 
+-if (($opt_i || $opt_n || $opt_bn || $opt_qa || $opt_s || $opt_team || $opt_bpo || $opt_l || $opt_v || $opt_d ||
++if (($opt_i || $opt_n || $opt_bn || $opt_qa || $opt_s || $opt_team || $opt_bpo || $opt_l || $opt_v || $opt_d || $opt_uv ||
+     ($opt_news && $VERSION ne $changelog{'Version'})) && ! $opt_create) {
+ 
+     $optionsok=1;
+ 
+     # Check that a given explicit version number is sensible.
+-    if ($opt_v || $opt_d) {
++    if ($opt_v || $opt_d || $opt_uv) {
+ 	if($opt_v) {
+ 	    $NEW_VERSION=$opt_v;
+ 	} else {
+-	    my $pwd = basename(cwd());
+-	    # The directory name should be <package>-<version>
++	    # --fromdirname or --newupstreamversion
+ 	    my $version_chars = '0-9a-zA-Z+\.~';
+ 	    $version_chars .= ':' if defined $EPOCH;
+ 	    $version_chars .= '\-' if $UVERSION ne $SVERSION;
+-	    if ($pwd =~ m/^\Q$PACKAGE\E-([0-9][$version_chars]*)$/) {
+-		$NEW_VERSION=$1;
+-		if ($NEW_VERSION eq $UVERSION) {
+-		    # So it's a Debian-native package
+-		    if ($SVERSION eq $UVERSION) {
+-			fatal "New version taken from directory ($NEW_VERSION) is equal to\n" .
+-			    "the current version number ($UVERSION)!";
+-		    }
+-		    # So we just increment the Debian revision
+-		    warn "$progname warning: Incrementing Debian revision without altering\nupstream version number.\n";
+-		    $VERSION =~ /^(.*?)([a-yA-Y][a-zA-Z]*|\d*)$/;
+-		    my $end = $2;
+-		    if ($end eq '') {
+-			fatal "Cannot determine new Debian revision; please use -v option!";
+-		    }
+-		    $end++;
+-		    $NEW_VERSION="$1$end";
++	    if ($opt_d) {
++		my $pwd = basename(cwd());
++		# The directory name should be <package>-<version>
++		if ($pwd =~ m/^\Q$PACKAGE\E-([0-9][$version_chars]*)$/) {
++		    $NEW_VERSION=$1;
++		    # Don't try renaming the directory in this case!
++		    $opt_p=1;
+ 		} else {
+-		    $NEW_VERSION = "$EPOCH:$NEW_VERSION" if defined $EPOCH;
+-		    $NEW_VERSION .= "-1";
++		    fatal "The directory name must be <package>-<version> for -d to work!\n" .
++			"No underscores allowed!";
++		}
++	    } else {
++		$NEW_VERSION=$opt_uv;
++	    }
++	    if ($NEW_VERSION eq $UVERSION) {
++		# So it's a Debian-native package
++		if ($SVERSION eq $UVERSION) {
++		    fatal "New version taken from directory ($NEW_VERSION) is equal to\n" .
++			"the current version number ($UVERSION)!";
+ 		}
++		# So we just increment the Debian revision
++		warn "$progname warning: Incrementing Debian revision without altering\nupstream version number.\n";
++		$VERSION =~ /^(.*?)([a-yA-Y][a-zA-Z]*|\d*)$/;
++		my $end = $2;
++		if ($end eq '') {
++		    fatal "Cannot determine new Debian revision; please use -v option!";
++		}
++		$end++;
++		$NEW_VERSION="$1$end";
+ 	    } else {
+-		fatal "The directory name must be <package>-<version> for -d to work!\n" .
+-		    "No underscores allowed!";
++		$NEW_VERSION = "$EPOCH:$NEW_VERSION" if defined $EPOCH;
++		$NEW_VERSION .= "-1";
+ 	    }
+-	    # Don't try renaming the directory in this case!
+-	    $opt_p=1;
+ 	}
+ 
+ 	if (system("dpkg --compare-versions $VERSION le $NEW_VERSION" .
+@@ -1096,7 +1105,7 @@ if (($opt_i || $opt_n || $opt_bn || $opt_qa || $opt_s || $opt_team || $opt_bpo |
+     }
+     $urgency ||= 'low';
+ 
+-    if (($opt_v or $opt_i or $opt_l or $opt_d) and
++    if (($opt_v or $opt_i or $opt_l or $opt_d or $opt_uv) and
+ 	$opt_release_heuristic eq "changelog" and
+ 	$changelog{'Distribution'} eq "UNRELEASED" and
+ 	$distribution eq "UNRELEASED") {
+-- 
+1.7.2.3
+

@@ -1,0 +1,108 @@
+--- /usr/share/emacs/site-lisp/debian-el/debian-bug.el	2010-05-08 00:02:49.000000000 +0100
++++ /home/tms/lisp/debian-bug.el	2010-05-25 13:13:56.000000000 +0100
+@@ -336,6 +336,8 @@
+ ;;     debian-bug-find-bts-address
+ ;;     debian-bug-bts-mail
+ ;;    Patch debian-bug-prefill-report to use them
++;; V1.75 25Map2010 Toby Speight <T.M.Speight.90@cantab.net>
++;;    Support bug reporting of remote host over ssh
+ ;;----------------------------------------------------------------------------
+ 
+ ;;; Todo (Peter's list):
+@@ -584,6 +586,10 @@
+   "Buffer local alist of open bug numbers (and description) for this package.")
+ (make-variable-buffer-local 'debian-bug-open-alist)
+ 
++(defvar debian-bug-remote-host nil
++  "The host for which we're writing a bug report.
++Nil for local host (default)")
++
+ (defalias 'report-debian-bug 'debian-bug)
+ 
+ ;;; Functions:
+@@ -639,12 +645,17 @@
+         ("other") ("rmail"))
+     debian-bug-packages-obarray))
+ 
++(defun debian-bug-call-process (program &optional infile buffer display &rest args)
++  (if debian-bug-remote-host
++      (apply 'call-process "ssh" infile buffer display debian-bug-remote-host program args)
++    (apply 'call-process program infile buffer display args)))
++
+ (defun debian-bug-check-for-program (program)
+   "Check if PROGRAM is installed on the system.
+ Done by calling `executable-find' or the external \"which\" utility."
+   (if (fboundp 'executable-find)
+       (executable-find program)
+-    (zerop (call-process "which" nil nil nil program))))
++    (zerop (debian-bug-call-process "which" nil nil nil program))))
+ 
+ (defun debian-bug-helper-program ()
+   "Return helper program found on system.
+@@ -664,7 +675,7 @@
+ doesn't exist, nil is returned."
+   (let ((case-fold-search t))
+     (with-temp-buffer
+-      (call-process "dpkg" nil '(t nil) nil "-s" package)
++      (debian-bug-call-process "dpkg" nil '(t nil) nil "-s" package)
+       (goto-char (point-min))
+       (if (re-search-forward
+            (concat "^" field " *: *\\(.+\\)$") nil t)
+@@ -721,13 +732,13 @@
+    ((and (eq (debian-bug-helper-program) 'bug)
+          (intern-soft package debian-bug-packages-obarray))
+     (save-excursion
+-      (call-process "bug" nil '(t t) nil "-p" "-s" "" "-S" severity package))
++      (debian-bug-call-process "bug" nil '(t t) nil "-p" "-s" "" "-S" severity package))
+     (forward-line 4))
+ 
+    ;; reportbug
+    ((eq (debian-bug-helper-program) 'reportbug)
+     (save-excursion
+-      (call-process "reportbug" nil '(t t) nil
++      (debian-bug-call-process "reportbug" nil '(t t) nil
+                     "--template" "-T" "none" "-s" "none" "-S" "normal" "-b"
+                     "--list-cc=none" "--no-bug-script"
+                     "-q" package)
+@@ -762,7 +773,7 @@
+       (insert "unknwown\n"))
+ 
+     (insert "Kernel Version: ")
+-    (call-process "uname" nil '(t t) nil "-a")
++    (debian-bug-call-process "uname" nil '(t t) nil "-a")
+     (forward-line -5))))
+ 
+ (defun debian-bug-help-presubj (package)
+@@ -2326,7 +2337,7 @@
+       (unwind-protect
+           (progn
+             (condition-case err
+-                (call-process "dlocate" nil '(t nil) nil "-S" expanded-file)
++                (debian-bug-call-process "dlocate" nil '(t nil) nil "-S" expanded-file)
+               (file-error
+                (message "dlocate not installed...")))
+             (goto-char (point-min))
+@@ -2342,7 +2353,7 @@
+                 package
+               (message "Calling dpkg for the search...")
+               (erase-buffer)
+-              (call-process "dpkg" nil '(t nil) nil "-S"
++              (debian-bug-call-process "dpkg" nil '(t nil) nil "-S"
+                             (expand-file-name filename))
+               (message "Calling dpkg for the search...done")
+               (goto-char (point-min))
+@@ -2396,6 +2407,14 @@
+      (t
+       (message "Sorry, try that again")))))
+ 
++;;;###autoload
++(defun debian-bug-other-host (host)
++  "Submit a Debian bug report."
++  (interactive "sReport a bug on host: ")
++  (let ((debian-bug-remote-host host)
++        (debian-bug-status-file (format "/ssh:%s:%s" host debian-bug-status-file)))
++    (debian-bug)))
++
+ (provide 'debian-bug)
+ 
+ ;;; debian-bug.el ends here

@@ -1,0 +1,107 @@
+From 04260a09eedbd3b28ea00809e9bb5c1ad3e3611a Mon Sep 17 00:00:00 2001
+From: Balint Reczey <balint@balintreczey.hu>
+Date: Sat, 6 Sep 2014 13:23:14 +0200
+Subject: [PATCH 2/3] Set ASAN and UBSAN for hardened-amd64 builds by default
+
+Also let maintainers enable/disable them on other architectures
+---
+ scripts/Dpkg/Vendor/Debian.pm | 50 +++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 48 insertions(+), 2 deletions(-)
+
+diff --git a/scripts/Dpkg/Vendor/Debian.pm b/scripts/Dpkg/Vendor/Debian.pm
+index 775f3ac..b57a965 100644
+--- a/scripts/Dpkg/Vendor/Debian.pm
++++ b/scripts/Dpkg/Vendor/Debian.pm
+@@ -74,7 +74,7 @@ sub run_hook {
+ }
+ 
+ sub _parse_feature_area {
+-    my ($self, $area, $use_feature) = @_;
++    my ($self, $area, $use_feature, $use_feature_extra) = @_;
+ 
+     # Adjust features based on Maintainer's desires.
+     my $opts = Dpkg::BuildOptions->new(envvar => 'DEB_BUILD_MAINT_OPTIONS');
+@@ -87,6 +87,8 @@ sub _parse_feature_area {
+ 	    } else {
+ 		if (exists $use_feature->{$feature}) {
+ 		    $use_feature->{$feature} = $value;
++		} elsif (exists $use_feature_extra->{$feature}) {
++		    $use_feature_extra->{$feature} = $value;
+ 		} else {
+ 		    warning(_g('unknown %s feature: %s'), $area, $feature);
+ 		}
+@@ -119,8 +121,23 @@ sub add_hardening_flags {
+ 	bindnow => 0,
+     );
+ 
++    # Extra features disabled by default for all builds.
++    # They are not enabled by using 'all', but can be enabled on-by-one.
++    # They may migrate to %use_feature in the future.
++    my %use_feature_extra = (
++	asan => 0,
++	ubsan => 0,
++    );
++
++    if ($arch =~ /^(?:hardened-amd64)$/) {
++	# Address and undefined sanitizers are enabled for one arch for now
++	# by default.
++	$use_feature_extra{asan} = 1;
++	$use_feature_extra{ubsan} = 1;
++    }
++
+     # Adjust features based on Maintainer's desires.
+-    $self->_parse_feature_area('hardening', \%use_feature);
++    $self->_parse_feature_area('hardening', \%use_feature, \%use_feature_extra);
+ 
+     # Mask features that are not available on certain architectures.
+     if ($os !~ /^(?:linux|knetbsd|hurd)$/ or
+@@ -141,6 +158,10 @@ sub add_hardening_flags {
+ 	# relro not implemented on ia64, hppa, avr32.
+ 	$use_feature{relro} = 0;
+     }
++    if ($cpu !~ /^(?:amd64|i386|arm)$/) {
++	# ASAN is available only for a few architectures
++	$use_feature_extra{asan} = 0;
++    }
+ 
+     # Mask features that might be influenced by other flags.
+     if ($flags->{build_options}->has('noopt')) {
+@@ -217,10 +238,35 @@ sub add_hardening_flags {
+ 	$flags->append('LDFLAGS', '-Wl,-z,now');
+     }
+ 
++    # ASAN
++    if ($use_feature_extra{asan}) {
++	my $flag = '-fsanitize=address';
++	$flags->append('CFLAGS', $flag);
++	$flags->append('OBJCFLAGS', $flag);
++	$flags->append('OBJCXXFLAGS', $flag);
++	$flags->append('FFLAGS', $flag);
++	$flags->append('FCFLAGS', $flag);
++	$flags->append('CXXFLAGS', $flag);
++	$flags->append('LDFLAGS', $flag);
++    }
++
++    # UBSAN
++    if ($use_feature_extra{ubsan}) {
++	my $flag = '-fsanitize=undefined';
++	$flags->append('CFLAGS', $flag);
++	$flags->append('OBJCFLAGS', $flag);
++	$flags->append('OBJCXXFLAGS', $flag);
++	$flags->append('CXXFLAGS', $flag);
++	$flags->append('LDFLAGS', $flag);
++    }
++
+     # Store the feature usage.
+     while (my ($feature, $enabled) = each %use_feature) {
+ 	$flags->set_feature('hardening', $feature, $enabled);
+     }
++    while (my ($feature, $enabled) = each %use_feature_extra) {
++	$flags->set_feature('hardening', $feature, $enabled);
++    }
+ }
+ 
+ 1;
+-- 
+2.1.0
+

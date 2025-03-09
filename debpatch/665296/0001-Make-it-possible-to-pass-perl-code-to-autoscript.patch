@@ -1,0 +1,131 @@
+From a63362de35e09e53f72cc3ebcabb40965ee5c43b Mon Sep 17 00:00:00 2001
+From: Marcin Owsiany <porridge@debian.org>
+Date: Sun, 9 Sep 2012 12:13:20 +0100
+Subject: [PATCH] Make it possible to pass perl code to autoscript.
+
+The shell-quoted sed code passed as parameter 4 is fragile (see Bug#665296).
+Make it possible to pass a sub that operates on each line via $_ instead.
+
+Also add a basic unit test for Dh_Lib, for now just with tests for autoscript.
+---
+ Debian/Debhelper/Dh_Lib.pm |   23 ++++++++++++++++++++---
+ doc/PROGRAMMING            |    9 ++++++---
+ t/dh-lib                   |   31 +++++++++++++++++++++++++++++++
+ 3 files changed, 57 insertions(+), 6 deletions(-)
+ create mode 100755 t/dh-lib
+
+diff --git a/Debian/Debhelper/Dh_Lib.pm b/Debian/Debhelper/Dh_Lib.pm
+index 10ae69f..7b550b0 100644
+--- a/Debian/Debhelper/Dh_Lib.pm
++++ b/Debian/Debhelper/Dh_Lib.pm
+@@ -504,7 +504,8 @@ sub pkgfilename {
+ # 1: package
+ # 2: script to add to
+ # 3: filename of snippet
+-# 4: sed to run on the snippet. Ie, s/#PACKAGE#/$PACKAGE/
++# 4: either text: shell-quoted sed to run on the snippet. Ie, 's/#PACKAGE#/$PACKAGE/'
++#    or a sub to run on each line of the snippet. Ie sub { s/#PACKAGE#/$PACKAGE/ }
+ sub autoscript {
+ 	my $package=shift;
+ 	my $script=shift;
+@@ -533,18 +534,34 @@ sub autoscript {
+ 	   && !compat(5)) {
+ 		# Add fragments to top so they run in reverse order when removing.
+ 		complex_doit("echo \"# Automatically added by ".basename($0)."\"> $outfile.new");
+-		complex_doit("sed \"$sed\" $infile >> $outfile.new");
++		autoscript_sed($sed, $infile, "$outfile.new");
+ 		complex_doit("echo '# End automatically added section' >> $outfile.new");
+ 		complex_doit("cat $outfile >> $outfile.new");
+ 		complex_doit("mv $outfile.new $outfile");
+ 	}
+ 	else {
+ 		complex_doit("echo \"# Automatically added by ".basename($0)."\">> $outfile");
+-		complex_doit("sed \"$sed\" $infile >> $outfile");
++		autoscript_sed($sed, $infile, $outfile);
+ 		complex_doit("echo '# End automatically added section' >> $outfile");
+ 	}
+ }
+ 
++sub autoscript_sed {
++	my $sed = shift;
++	my $infile = shift;
++	my $outfile = shift;
++	if (ref($sed) eq 'CODE') {
++		open(IN, $infile) or die "$infile: $!";
++		open(OUT, ">>$outfile") or die "$outfile: $!";
++		while (<IN>) { $sed->(); print OUT }
++		close(OUT) or die "$outfile: $!";
++		close(IN) or die "$infile: $!";
++	}
++	else {
++		complex_doit("sed \"$sed\" $infile >> $outfile");
++	}
++}
++
+ # Removes a whole substvar line.
+ sub delsubstvar {
+ 	my $package=shift;
+diff --git a/doc/PROGRAMMING b/doc/PROGRAMMING
+index bcf1c13..e1440c9 100644
+--- a/doc/PROGRAMMING
++++ b/doc/PROGRAMMING
+@@ -191,13 +191,16 @@ isnative($package)
+ 	is a native debian package.
+ 	As a side effect, $dh{VERSION} is set to the version number of the
+ 	package.
+-autoscript($package, $scriptname, $snippetname, $sedcommands)
++autoscript($package, $scriptname, $snippetname, $sedcommands || $sub)
+ 	Pass parameters:
+ 	 - binary package to be affected
+ 	 - script to add to
+ 	 - filename of snippet
+-	 - sed commands to run on the snippet. Ie, s/#PACKAGE#/$PACKAGE/
+-	   (optional) Note: Passed to the shell inside double quotes.
++	 - (optional) EITHER sed commands to run on the snippet. Ie,
++	   s/#PACKAGE#/$PACKAGE/ Note: Passed to the shell inside double
++           quotes.
++	   OR a perl sub to invoke with $_ set to each line of the snippet in
++           turn.
+ 	This command automatically adds shell script snippets to a debian
+ 	maintainer script (like the postinst or prerm).
+ 	Note that in v6 mode and up, the snippets are added in reverse
+diff --git a/t/dh-lib b/t/dh-lib
+new file mode 100755
+index 0000000..772b1a1
+--- /dev/null
++++ b/t/dh-lib
+@@ -0,0 +1,31 @@
++#!/usr/bin/perl
++package Debian::Debhelper::Dh_Lib::Test;
++use strict;
++use warnings;
++use Test::More;
++
++plan(tests => 10);
++
++use_ok('Debian::Debhelper::Dh_Lib');
++
++sub ok_autoscript_result {
++	ok(-f 'debian/testpackage.postinst.debhelper');
++	open(F, 'debian/testpackage.postinst.debhelper') or die;
++	my (@c) = <F>;
++	close(F) or die;
++	like(join('',@c), qr{update-rc\.d test-script test parms with"quote >/dev/null});
++}
++
++ok(unlink('debian/testpackage.postinst.debhelper') >= 0);
++
++ok(autoscript('testpackage', 'postinst', 'postinst-init',
++              's/#SCRIPT#/test-script/g; s/#INITPARMS#/test parms with\\"quote/g'));
++ok_autoscript_result;
++
++ok(unlink('debian/testpackage.postinst.debhelper') >= 0);
++
++ok(autoscript('testpackage', 'postinst', 'postinst-init',
++              sub { s/#SCRIPT#/test-script/g; s/#INITPARMS#/test parms with"quote/g } ));
++ok_autoscript_result;
++
++ok(unlink('debian/testpackage.postinst.debhelper') >= 0);
+-- 
+1.7.7.3
+

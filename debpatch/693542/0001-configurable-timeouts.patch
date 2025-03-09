@@ -1,0 +1,110 @@
+From afe10018bea4a254ab090ace09f9c0a7ff58d5b7 Mon Sep 17 00:00:00 2001
+From: Carlos Maddela <maddela@labyrinth.net.au>
+Date: Sun, 18 Nov 2012 04:08:19 +1100
+Subject: =?UTF-8?q?configurable=20timeouts=0AAllow=20curl=20and=20rsync=20ti?=
+ =?UTF-8?q?me=20limits=20to=20be=20configurable.?=
+
+---
+ clamav-unofficial-sigs.conf |   10 ++++++++++
+ clamav-unofficial-sigs.sh   |   21 ++++++++++++++-------
+ 2 files changed, 24 insertions(+), 7 deletions(-)
+
+diff --git a/clamav-unofficial-sigs.conf b/clamav-unofficial-sigs.conf
+index d18f2c4..838d20c 100644
+--- a/clamav-unofficial-sigs.conf
++++ b/clamav-unofficial-sigs.conf
+@@ -254,6 +254,16 @@ log_file_name="clamav-unofficial-sigs.log"
+ rsync_proxy=""
+ curl_proxy=""
+ 
++# Set curl time limits in seconds. Set to 0 to disable.
++# Default values if unset:
++#     curl_connect_timeout=15
++#     curl_max_time=60
++
++# Set rsync time limits in seconds. Set to 0 to disable.
++# Default values if unset:
++#     rsync_contimeout=30
++#     rsync_timeout=30
++
+ # After you have completed the configuration of this file, set the
+ # following variable to "yes".
+ user_configuration_complete="no"
+diff --git a/clamav-unofficial-sigs.sh b/clamav-unofficial-sigs.sh
+index fa801f4..1995041 100755
+--- a/clamav-unofficial-sigs.sh
++++ b/clamav-unofficial-sigs.sh
+@@ -605,9 +605,13 @@ mkdir -p "$work_dir" "$ss_dir" "$si_dir" "$mbl_dir" "$config_dir" "$gpg_dir" "$a
+ # Set secured access permissions to the GPG directory
+ chmod 0700 "$gpg_dir"
+ 
++# Set the time limits for curl.
++curl_connect_timeout="--connect-timeout ${curl_connect_timeout:-15}"
++curl_max_time="--max-time ${curl_max_time:-60}"
++
+ # If we haven't done so yet, download Sanesecurity public GPG key and import to custom keyring.
+ if [ ! -s "$gpg_dir/publickey.gpg" ] ; then
+-   if ! curl -s -S $curl_proxy --connect-timeout 15 --max-time 60 -L -R http://www.sanesecurity.net/publickey.gpg -o $gpg_dir/publickey.gpg
++   if ! curl -s -S $curl_proxy $curl_connect_timeout $curl_max_time -L -R http://www.sanesecurity.net/publickey.gpg -o $gpg_dir/publickey.gpg
+       then
+          echo ""
+          echo "Could not download Sanesecurity public GPG key"
+@@ -800,9 +804,12 @@ fi
+ 
+ # If the local rsync client supports the '--contimeout' flag, then enable it.
+ if rsync --help | grep 'contimeout' > /dev/null ; then
+-   contimeout="--contimeout=30"
++   contimeout="--contimeout=${rsync_contimeout:-30}"
+ fi
+ 
++# Set rsync timeout.
++rsync_timeout="--timeout=${rsync_timeout:-30}"
++
+ # Silence curl output and only report errors - useful if script is run via cron.
+ if [ "$curl_silence" = "yes" ] ; then
+    curl_output_level="-s -S"
+@@ -960,7 +967,7 @@ if [ -n "$ss_dbs" ] ; then
+       comment "Sanesecurity mirror site used: $ss_mirror_site_info"
+       log "INFO - Sanesecurity mirror site used: $ss_mirror_site_info"
+       if rsync $rsync_output_level $no_motd --files-from=$ss_include_dbs -ctuz $contimeout \
+-         --timeout=30 --stats rsync://$ss_mirror_ip/sanesecurity $ss_dir 2>/dev/null
++         $rsync_timeout --stats rsync://$ss_mirror_ip/sanesecurity $ss_dir 2>/dev/null
+          then
+             ss_rsync_success="1"
+             for db_file in $ss_dbs ; do
+@@ -1102,7 +1109,7 @@ if [ -n "$si_dbs" ] ; then
+                else
+                   z_opt=""
+             fi
+-            if curl $curl_proxy $curl_output_level --connect-timeout 15 --max-time 60 \
++            if curl $curl_proxy $curl_output_level $curl_connect_timeout $curl_max_time \
+                -L -R $z_opt -o $si_dir/$db_file http://$si_url/$db_file
+                then
+                   loop="1"
+@@ -1225,7 +1232,7 @@ if [ -n "$mbl_dbs" ] ; then
+             comment "MalwarePatrol $db_file Database File Update"
+             comment "======================================================================"
+             comment ""
+-            if curl $curl_proxy $curl_output_level --connect-timeout 15 --max-time 60 -R \
++            if curl $curl_proxy $curl_output_level $curl_connect_timeout $curl_max_time -R \
+                -o $mbl_dir/$db_file http://$mbl_url/cgi/submit?action=list_clamav_ext
+                then
+                   if ! cmp -s $mbl_dir/$db_file $clam_dbs/$db_file 
+@@ -1328,7 +1335,7 @@ if [ -n "$add_dbs" ] ; then
+       db_file=`basename $db_url`
+       if [ "`echo $db_url | cut -d ":" -f1`" = "rsync" ]
+          then
+-            if ! rsync $rsync_output_level $no_motd $contimeout --timeout=30 -crtuz --exclude=*.txt \
++            if ! rsync $rsync_output_level $no_motd $contimeout $rsync_timeout -crtuz --exclude=*.txt \
+                  --stats --exclude=*.sha256 --exclude=*.sig --exclude=*.gz $db_url $add_dir ; then
+                echo "Failed rsync connection to $base_url - SKIPPED $db_file update"
+                log "WARNING - Failed rsync connection to $base_url - SKIPPED $db_file update"
+@@ -1336,7 +1343,7 @@ if [ -n "$add_dbs" ] ; then
+          else
+             if [ -s "$add_dir/$db_file" ] ; then
+                z_opt="-z $add_dir/$db_file"
+-               if ! curl $curl_output_level --connect-timeout 15 --max-time 60 \
++               if ! curl $curl_output_level $curl_connect_timeout $curl_max_time \
+                     -L -R $z_opt -o $add_dir/$db_file $db_url ; then
+                   echo "Failed curl connection to $base_url - SKIPPED $db_file update"
+                   log "WARNING - Failed curl connection to $base_url - SKIPPED $db_file update"

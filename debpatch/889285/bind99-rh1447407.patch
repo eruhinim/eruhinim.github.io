@@ -1,0 +1,150 @@
+From 1d31a0cf1712d3eb001a686c06fe1225ba48fd04 Mon Sep 17 00:00:00 2001
+From: Mark Andrews <marka@isc.org>
+Date: Sat, 6 Oct 2012 14:56:33 +1000
+Subject: [PATCH] 3391. [bug] DNSKEY that encountered a CNAME failed. [RT
+ #31262]
+
+(original commit 07dbb507d2913fc35c7edbe3692a976e3248a911)
+---
+ bin/tests/system/dnssec/clean.sh                 |  1 +
+ bin/tests/system/dnssec/ns3/secure.example.db.in |  4 ++
+ bin/tests/system/dnssec/ns3/sign.sh              |  4 +-
+ bin/tests/system/dnssec/tests.sh                 | 66 ++++++++++++++++++++++++
+ lib/dns/validator.c                              |  4 ++
+ 5 files changed, 78 insertions(+), 1 deletion(-)
+
+diff --git a/bin/tests/system/dnssec/clean.sh b/bin/tests/system/dnssec/clean.sh
+index a1c5752..a6b1212 100644
+--- a/bin/tests/system/dnssec/clean.sh
++++ b/bin/tests/system/dnssec/clean.sh
+@@ -35,6 +35,7 @@ rm -f ns3/optout-unknown.example.db ns3/optout.example.db
+ rm -f ns3/expired.example.db ns3/update-nsec3.example.db
+ rm -f ns7/multiple.example.bk ns7/nsec3.example.bk ns7/optout.example.bk
+ rm -f */named.memstats
++rm -f */named.run
+ rm -f ns3/nsec3.nsec3.example.db
+ rm -f ns3/nsec3.optout.example.db
+ rm -f ns3/optout.nsec3.example.db
+diff --git a/bin/tests/system/dnssec/ns3/secure.example.db.in b/bin/tests/system/dnssec/ns3/secure.example.db.in
+index 80b7dd3..1abb69d 100644
+--- a/bin/tests/system/dnssec/ns3/secure.example.db.in
++++ b/bin/tests/system/dnssec/ns3/secure.example.db.in
+@@ -44,3 +44,7 @@ ns.nosoa		A	10.53.0.7
+ 
+ normalthenrrsig		A	10.0.0.28
+ rrsigonly		A	10.0.0.29
++
++cnameandkey		CNAME	@
++cnamenokey		CNAME	@
++dnameandkey		DNAME	@
+diff --git a/bin/tests/system/dnssec/ns3/sign.sh b/bin/tests/system/dnssec/ns3/sign.sh
+index db5da68..6394ea0 100644
+--- a/bin/tests/system/dnssec/ns3/sign.sh
++++ b/bin/tests/system/dnssec/ns3/sign.sh
+@@ -26,9 +26,11 @@ zone=secure.example.
+ infile=secure.example.db.in
+ zonefile=secure.example.db
+ 
++cnameandkey=`$KEYGEN -T KEY -q -r $RANDFILE -a RSASHA1 -b 768 -n host cnameandkey.$zone`
++dnameandkey=`$KEYGEN -T KEY -q -r $RANDFILE -a RSASHA1 -b 768 -n host dnameandkey.$zone`
+ keyname=`$KEYGEN -q -r $RANDFILE -a RSASHA1 -b 768 -n zone $zone`
+ 
+-cat $infile $keyname.key >$zonefile
++cat $infile $cnameandkey.key $dnameandkey.key $keyname.key >$zonefile
+ 
+ $SIGNER -P -r $RANDFILE -o $zone $zonefile > /dev/null 2>&1
+ 
+diff --git a/bin/tests/system/dnssec/tests.sh b/bin/tests/system/dnssec/tests.sh
+index ad176e0..35ecc3b 100644
+--- a/bin/tests/system/dnssec/tests.sh
++++ b/bin/tests/system/dnssec/tests.sh
+@@ -1350,5 +1350,71 @@ $DIG +noall +answer +dnssec +nottl -p 5300 expiring.example ns @10.53.0.3 | grep
+ if [ $ret != 0 ]; then echo "I:failed"; fi
+ status=`expr $status + $ret`
+ 
++echo "I:testing DNSKEY lookup via CNAME ($n)"
++ret=0
++$DIG $DIGOPTS +noauth cnameandkey.secure.example. \
++	@10.53.0.3 dnskey > dig.out.ns3.test$n || ret=1
++$DIG $DIGOPTS +noauth cnameandkey.secure.example. \
++	@10.53.0.4 dnskey > dig.out.ns4.test$n || ret=1
++$PERL ../digcomp.pl dig.out.ns3.test$n dig.out.ns4.test$n || ret=1
++grep "flags:.*ad.*QUERY" dig.out.ns4.test$n > /dev/null || ret=1
++grep "CNAME" dig.out.ns4.test$n > /dev/null || ret=1
++n=`expr $n + 1`
++if [ $ret != 0 ]; then echo "I:failed"; fi
++status=`expr $status + $ret`
++
++echo "I:testing KEY lookup at CNAME (present) ($n)"
++ret=0
++$DIG $DIGOPTS +noauth cnameandkey.secure.example. \
++	@10.53.0.3 key > dig.out.ns3.test$n || ret=1
++$DIG $DIGOPTS +noauth cnameandkey.secure.example. \
++	@10.53.0.4 key > dig.out.ns4.test$n || ret=1
++$PERL ../digcomp.pl dig.out.ns3.test$n dig.out.ns4.test$n || ret=1
++grep "flags:.*ad.*QUERY" dig.out.ns4.test$n > /dev/null || ret=1
++grep "CNAME" dig.out.ns4.test$n > /dev/null && ret=1
++n=`expr $n + 1`
++if [ $ret != 0 ]; then echo "I:failed"; fi
++status=`expr $status + $ret`
++
++echo "I:testing KEY lookup at CNAME (not present) ($n)"
++ret=0
++$DIG $DIGOPTS +noauth cnamenokey.secure.example. \
++	@10.53.0.3 key > dig.out.ns3.test$n || ret=1
++$DIG $DIGOPTS +noauth cnamenokey.secure.example. \
++	@10.53.0.4 key > dig.out.ns4.test$n || ret=1
++$PERL ../digcomp.pl dig.out.ns3.test$n dig.out.ns4.test$n || ret=1
++grep "flags:.*ad.*QUERY" dig.out.ns4.test$n > /dev/null || ret=1
++grep "CNAME" dig.out.ns4.test$n > /dev/null && ret=1
++n=`expr $n + 1`
++if [ $ret != 0 ]; then echo "I:failed"; fi
++status=`expr $status + $ret`
++
++echo "I:testing DNSKEY lookup via DNAME ($n)"
++ret=0
++$DIG $DIGOPTS a.dnameandkey.secure.example. \
++	@10.53.0.3 dnskey > dig.out.ns3.test$n || ret=1
++$DIG $DIGOPTS a.dnameandkey.secure.example. \
++	@10.53.0.4 dnskey > dig.out.ns4.test$n || ret=1
++$PERL ../digcomp.pl dig.out.ns3.test$n dig.out.ns4.test$n || ret=1
++grep "flags:.*ad.*QUERY" dig.out.ns4.test$n > /dev/null || ret=1
++grep "CNAME" dig.out.ns4.test$n > /dev/null || ret=1
++grep "DNAME" dig.out.ns4.test$n > /dev/null || ret=1
++n=`expr $n + 1`
++if [ $ret != 0 ]; then echo "I:failed"; fi
++status=`expr $status + $ret`
++
++echo "I:testing KEY lookup via DNAME ($n)"
++ret=0
++$DIG $DIGOPTS b.dnameandkey.secure.example. \
++	@10.53.0.3 key > dig.out.ns3.test$n || ret=1
++$DIG $DIGOPTS b.dnameandkey.secure.example. \
++	@10.53.0.4 key > dig.out.ns4.test$n || ret=1
++$PERL ../digcomp.pl dig.out.ns3.test$n dig.out.ns4.test$n || ret=1
++grep "flags:.*ad.*QUERY" dig.out.ns4.test$n > /dev/null || ret=1
++grep "DNAME" dig.out.ns4.test$n > /dev/null || ret=1
++n=`expr $n + 1`
++if [ $ret != 0 ]; then echo "I:failed"; fi
++status=`expr $status + $ret`
++
+ echo "I:exit status: $status"
+ exit $status
+diff --git a/lib/dns/validator.c b/lib/dns/validator.c
+index 8f9a566..864301b 100644
+--- a/lib/dns/validator.c
++++ b/lib/dns/validator.c
+@@ -1858,6 +1858,10 @@ isselfsigned(dns_validator_t *val) {
+ 	name = val->event->name;
+ 	mctx = val->view->mctx;
+ 
++	if (rdataset->type == dns_rdatatype_cname ||
++	    rdataset->type == dns_rdatatype_dname)
++		return (answer);
++
+ 	INSIST(rdataset->type == dns_rdatatype_dnskey);
+ 
+ 	for (result = dns_rdataset_first(rdataset);
+-- 
+2.9.3
+

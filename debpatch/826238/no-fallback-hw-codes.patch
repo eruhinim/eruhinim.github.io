@@ -1,0 +1,50 @@
+From 83c2b41f1a06ca226a05edf0602d5c6efea32a8b Mon Sep 17 00:00:00 2001
+From: yukishiino <yukishiino@chromium.org>
+Date: Tue, 7 Oct 2014 14:56:31 +0000
+Subject: [PATCH] linux: Do not fallback to the hardware keycodes for modifiers.
+
+Previously Chrome would fall-back to deriving VKEY values directly from the
+hardware keycode if it was unable to derive a value from the X KeySym. While
+that is necessary for e.g. providing valid VKEYs for printable character
+keys under non-Latin keyboard layouts (such as Hebrew or Arabic), it had the
+side-effect of causing KeySyms with no VKEY equivalent to be mapped to
+incorrect meanings.
+
+In issue 402320, for example, the ISO_Level3_Latch KeySym has no VKEY
+equivalent, so should result in VKEY_UNKNOWN, but was instead having an
+incorrect VKEY derived from the X11 keycode instead.
+
+Note that there is no clear reason why we don't allow the modifier keys to
+fall back to the hardware keycode while we allow the printable character
+keys to fall back.  It's just close to what users expect.  There could be a
+problem if a keyboard layout had a composition character on Control + Ч
+(which falls back to VKEY_X).  Users cannot type that composition character
+because a Cut accelerator triggers instead.
+
+This approach is a heuristic designed to approximate the VKEY values that a
+Windows system would generate, to ensure compatibility.
+
+BUG=402320
+TEST=Done manually (assigning ISO_Level3_Latch to key code 108).
+
+Review URL: https://codereview.chromium.org/611993002
+
+Cr-Commit-Position: refs/heads/master@{#298478}
+
+diff --git a/ui/events/keycodes/keyboard_code_conversion_x.cc b/ui/events/keycodes/keyboard_code_conversion_x.cc
+index 4e0882b..daba8115 100644
+--- a/ui/events/keycodes/keyboard_code_conversion_x.cc
++++ b/ui/events/keycodes/keyboard_code_conversion_x.cc
+@@ -545,8 +545,11 @@
+   }
+ 
+   keycode = KeyboardCodeFromXKeysym(keysym);
+-  if (keycode == VKEY_UNKNOWN)
++  if (keycode == VKEY_UNKNOWN && !IsModifierKey(keysym)) {
++    // Modifier keys should not fall back to the hardware-keycode-based US
++    // layout.  See crbug.com/402320
+     keycode = DefaultKeyboardCodeFromHardwareKeycode(xkey.keycode);
++  }
+ 
+   return keycode;
+ }

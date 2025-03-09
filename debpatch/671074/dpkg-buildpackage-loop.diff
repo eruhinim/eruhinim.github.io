@@ -1,0 +1,377 @@
+diff --git a/man/dpkg-buildpackage.1 b/man/dpkg-buildpackage.1
+--- a/man/dpkg-buildpackage.1
++++ b/man/dpkg-buildpackage.1
+@@ -68,6 +68,9 @@
+ .IP \fB9.\fP 3
+ If \fB\-tc\fP is specified, it will call \fBfakeroot debian/rules clean\fP
+ again. Finally it calls \fBdpkg\-source \-\-after\-build\fP.
++.P
++If \fB\-l\fP\fIN\fP is specified, steps 1-9 are repeated \fIN\fP times, with
++the exception that steps 6 and 8 are only executed in the last iteration.
+ .
+ .SH OPTIONS
+ .TP
+@@ -90,6 +93,10 @@
+ .B \-F
+ Specifies a normal full build, binary and source packages will be built.
+ This is the same as the default case when no build option is specified.
++.TP
++.BI \-l N
++Build the package \fIN\fP times in a row.  This is useful for testing the
++clean target.
+ .P
+ .BI \-\-target= target
+ .br
+diff --git a/scripts/dpkg-buildpackage.pl b/scripts/dpkg-buildpackage.pl
+--- a/scripts/dpkg-buildpackage.pl
++++ b/scripts/dpkg-buildpackage.pl
+@@ -73,6 +73,7 @@
+   -A             binary-only, only arch-indep files. }
+   -S             source only, no binary files.     }
+   -F             normal full build (binaries and sources).
++  -l<n>          build <n> times in a row
+   -t<system>     set GNU system type.           } passed to dpkg-architecture
+   -v<version>    changes since version <version>.      }
+   -m<maint>      maintainer for package is <maint>.    }
+@@ -123,6 +124,7 @@
+ my $targetarch = my $targetgnusystem = '';
+ my $call_target = '';
+ my $call_target_as_root = 0;
++my $nloops = 1;
+ my (@checkbuilddep_opts, @changes_opts, @source_opts);
+ 
+ use constant BUILD_DEFAULT    => 1;
+@@ -229,6 +231,8 @@
+ 	!build_normal && usageerr(_g("cannot combine %s and %s"), $_, build_opt);
+ 	$include = BUILD_ALL;
+ 	@checkbuilddep_opts = ();
++    } elsif (/^-l(\d+)$/) {
++	$nloops = int($1);
+     } elsif (/^-v(.*)$/) {
+ 	$since = $1;
+     } elsif (/^-m(.*)$/) {
+@@ -352,162 +356,172 @@
+     chmod(0755, "debian/rules"); # No checks of failures, non fatal
+ }
+ 
+-unless ($call_target) {
++for my $iter (1 .. $nloops) {
++
++    unless ($call_target) {
++	chdir('..') or syserr('chdir ..');
++	withecho('dpkg-source', @source_opts, '--before-build', $dir);
++	chdir($dir) or syserr("chdir $dir");
++    }
++
++    if ($checkbuilddep) {
++	if ($admindir) {
++	    push @checkbuilddep_opts, "--admindir=$admindir";
++	}
++
++	system('dpkg-checkbuilddeps', @checkbuilddep_opts);
++	if (not WIFEXITED($?)) {
++	    subprocerr('dpkg-checkbuilddeps');
++	} elsif (WEXITSTATUS($?)) {
++	    warning(_g("Build dependencies/conflicts unsatisfied; aborting."));
++	    warning(_g("(Use -d flag to override.)"));
++
++	    if (build_sourceonly) {
++		warning(_g("This is currently a non-fatal warning with -S, but"));
++		warning(_g("will probably become fatal in the future."));
++	    } else {
++		exit 3;
++	    }
++	}
++    }
++
++    if ($call_target) {
++	if ($call_target_as_root or
++	    $call_target =~ /^(clean|binary(|-arch|-indep))$/)
++	{
++	    withecho(@rootcommand, @debian_rules, $call_target);
++	} else {
++	    withecho(@debian_rules, $call_target);
++	}
++	exit 0;
++    }
++
++    unless ($noclean) {
++	withecho(@rootcommand, @debian_rules, 'clean');
++    }
++    unless (build_binaryonly) {
++	warning(_g("it is a bad idea to generate a source package " .
++		   "without cleaning up first, it might contain undesired " .
++		   "files.")) if $noclean;
++	chdir('..') or syserr('chdir ..');
++	withecho('dpkg-source', @source_opts, '-b', $dir);
++	chdir($dir) or syserr("chdir $dir");
++    }
++
++    unless ($buildtarget eq "build" or scalar(@debian_rules) > 1) {
++	# Verify that build-{arch,indep} are supported. If not, fallback to build.
++	# This is a temporary measure to not break too many packages on a flag day.
++	my $pid = spawn(exec => [ "make", "-f", @debian_rules, "-qn", $buildtarget ],
++			from_file => "/dev/null", to_file => "/dev/null",
++			error_to_file => "/dev/null");
++	my $cmdline = "make -f @debian_rules -qn $buildtarget";
++	wait_child($pid, nocheck => 1, cmdline => $cmdline);
++	my $exitcode = WEXITSTATUS($?);
++	subprocerr($cmdline) unless WIFEXITED($?);
++	if ($exitcode == 2) {
++	    warning(_g("%s must be updated to support the 'build-arch' and " .
++		       "'build-indep' targets (at least '%s' seems to be " .
++		       "missing)"), "@debian_rules", $buildtarget);
++	    $buildtarget = "build";
++	}
++    }
++
++    unless (build_sourceonly) {
++	withecho(@debian_rules, $buildtarget);
++	withecho(@rootcommand, @debian_rules, $binarytarget);
++    }
++
++    my $signerrors;
++    if ($iter == $nloops) {
++	if ($usepause &&
++	    ($signchanges || (!build_binaryonly && $signsource))) {
++	    print _g("Press the return key to start signing process\n");
++	    getc();
++	}
++
++	unless (build_binaryonly) {
++	    if ($signsource && signfile("$pv.dsc")) {
++		$signerrors = _g("Failed to sign .dsc and .changes file");
++		$signchanges = 0;
++	    }
++	}
++    }
++
++    if (defined($maint)) { push @changes_opts, "-m$maint" }
++    if (defined($changedby)) { push @changes_opts, "-e$changedby" }
++    if (defined($since)) { push @changes_opts, "-v$since" }
++    if (defined($desc)) { push @changes_opts, "-C$desc" }
++
++    my $chg = "../$pva.changes";
++    print STDERR " dpkg-genchanges @changes_opts >$chg\n";
++    open CHANGES, '-|', 'dpkg-genchanges', @changes_opts
++	or subprocerr('dpkg-genchanges');
++
++    open OUT, '>', $chg or syserr(_g('write changes file'));
++
++    my $infiles = my $files = '';
++    while ($_ = <CHANGES>) {
++	print OUT $_ or syserr(_g('write changes file'));
++	chomp;
++
++	if (/^Files:/i) {
++	    $infiles = 1;
++	} elsif ($infiles && /^\s+(.*)$/) {
++	    $files .= " $1 ";
++	} elsif ($infiles && /^\S/) {
++	    $infiles = 0;
++	}
++    }
++
++    close CHANGES or subprocerr(_g('dpkg-genchanges'));
++    close OUT or syserr(_g('write changes file'));
++
++    my $srcmsg;
++    sub fileomitted($) { return $files !~ /$_[0]/ }
++    my $ext = $compression_re_file_ext;
++    if (fileomitted '\.deb') {
++	# source only upload
++	if (fileomitted "\.diff\.$ext" and fileomitted "\.debian\.tar\.$ext") {
++	    $srcmsg = _g('source only upload: Debian-native package');
++	} elsif (fileomitted "\.orig\.tar\.$ext") {
++	    $srcmsg = _g('source only, diff-only upload (original source NOT included)');
++	} else {
++	    $srcmsg = _g('source only upload (original source is included)');
++	}
++    } else {
++	$srcmsg = _g('full upload (original source is included)');
++	if (fileomitted '\.dsc') {
++	    $srcmsg = _g('binary only upload (no source included)');
++	} elsif (fileomitted "\.diff\.$ext" and fileomitted "\.debian\.tar\.$ext") {
++	    $srcmsg = _g('full upload; Debian-native package (full source is included)');
++	} elsif (fileomitted "\.orig\.tar\.$ext") {
++	    $srcmsg = _g('binary and diff upload (original source NOT included)');
++	} else {
++	    $srcmsg = _g('full upload (original source is included)');
++	}
++    }
++
++    if ($iter == $nloops) {
++	if ($signchanges && signfile("$pva.changes")) {
++	    $signerrors = _g("Failed to sign .changes file");
++	}
++    }
++
++    if ($cleansource) {
++	withecho(@rootcommand, @debian_rules, 'clean');
++    }
+     chdir('..') or syserr('chdir ..');
+-    withecho('dpkg-source', @source_opts, '--before-build', $dir);
++    withecho('dpkg-source', @source_opts, '--after-build', $dir);
+     chdir($dir) or syserr("chdir $dir");
++
++    print "$progname: $srcmsg\n";
++    if ($signerrors) {
++	warning($signerrors);
++	exit 1;
++    }
++
+ }
+ 
+-if ($checkbuilddep) {
+-    if ($admindir) {
+-	push @checkbuilddep_opts, "--admindir=$admindir";
+-    }
+-
+-    system('dpkg-checkbuilddeps', @checkbuilddep_opts);
+-    if (not WIFEXITED($?)) {
+-        subprocerr('dpkg-checkbuilddeps');
+-    } elsif (WEXITSTATUS($?)) {
+-	warning(_g("Build dependencies/conflicts unsatisfied; aborting."));
+-	warning(_g("(Use -d flag to override.)"));
+-
+-	if (build_sourceonly) {
+-	    warning(_g("This is currently a non-fatal warning with -S, but"));
+-	    warning(_g("will probably become fatal in the future."));
+-	} else {
+-	    exit 3;
+-	}
+-    }
+-}
+-
+-if ($call_target) {
+-    if ($call_target_as_root or
+-        $call_target =~ /^(clean|binary(|-arch|-indep))$/)
+-    {
+-        withecho(@rootcommand, @debian_rules, $call_target);
+-    } else {
+-        withecho(@debian_rules, $call_target);
+-    }
+-    exit 0;
+-}
+-
+-unless ($noclean) {
+-    withecho(@rootcommand, @debian_rules, 'clean');
+-}
+-unless (build_binaryonly) {
+-    warning(_g("it is a bad idea to generate a source package " .
+-               "without cleaning up first, it might contain undesired " .
+-               "files.")) if $noclean;
+-    chdir('..') or syserr('chdir ..');
+-    withecho('dpkg-source', @source_opts, '-b', $dir);
+-    chdir($dir) or syserr("chdir $dir");
+-}
+-
+-unless ($buildtarget eq "build" or scalar(@debian_rules) > 1) {
+-    # Verify that build-{arch,indep} are supported. If not, fallback to build.
+-    # This is a temporary measure to not break too many packages on a flag day.
+-    my $pid = spawn(exec => [ "make", "-f", @debian_rules, "-qn", $buildtarget ],
+-                    from_file => "/dev/null", to_file => "/dev/null",
+-                    error_to_file => "/dev/null");
+-    my $cmdline = "make -f @debian_rules -qn $buildtarget";
+-    wait_child($pid, nocheck => 1, cmdline => $cmdline);
+-    my $exitcode = WEXITSTATUS($?);
+-    subprocerr($cmdline) unless WIFEXITED($?);
+-    if ($exitcode == 2) {
+-        warning(_g("%s must be updated to support the 'build-arch' and " .
+-                   "'build-indep' targets (at least '%s' seems to be " .
+-                   "missing)"), "@debian_rules", $buildtarget);
+-        $buildtarget = "build";
+-    }
+-}
+-
+-unless (build_sourceonly) {
+-    withecho(@debian_rules, $buildtarget);
+-    withecho(@rootcommand, @debian_rules, $binarytarget);
+-}
+-if ($usepause &&
+-    ($signchanges || (!build_binaryonly && $signsource))) {
+-    print _g("Press the return key to start signing process\n");
+-    getc();
+-}
+-
+-my $signerrors;
+-unless (build_binaryonly) {
+-    if ($signsource && signfile("$pv.dsc")) {
+-	$signerrors = _g("Failed to sign .dsc and .changes file");
+-	$signchanges = 0;
+-    }
+-}
+-
+-if (defined($maint)) { push @changes_opts, "-m$maint" }
+-if (defined($changedby)) { push @changes_opts, "-e$changedby" }
+-if (defined($since)) { push @changes_opts, "-v$since" }
+-if (defined($desc)) { push @changes_opts, "-C$desc" }
+-
+-my $chg = "../$pva.changes";
+-print STDERR " dpkg-genchanges @changes_opts >$chg\n";
+-open CHANGES, '-|', 'dpkg-genchanges', @changes_opts
+-    or subprocerr('dpkg-genchanges');
+-
+-open OUT, '>', $chg or syserr(_g('write changes file'));
+-
+-my $infiles = my $files = '';
+-while ($_ = <CHANGES>) {
+-    print OUT $_ or syserr(_g('write changes file'));
+-    chomp;
+-
+-    if (/^Files:/i) {
+-	$infiles = 1;
+-    } elsif ($infiles && /^\s+(.*)$/) {
+-	$files .= " $1 ";
+-    } elsif ($infiles && /^\S/) {
+-	$infiles = 0;
+-    }
+-}
+-
+-close CHANGES or subprocerr(_g('dpkg-genchanges'));
+-close OUT or syserr(_g('write changes file'));
+-
+-my $srcmsg;
+-sub fileomitted($) { return $files !~ /$_[0]/ }
+-my $ext = $compression_re_file_ext;
+-if (fileomitted '\.deb') {
+-    # source only upload
+-    if (fileomitted "\.diff\.$ext" and fileomitted "\.debian\.tar\.$ext") {
+-	$srcmsg = _g('source only upload: Debian-native package');
+-    } elsif (fileomitted "\.orig\.tar\.$ext") {
+-	$srcmsg = _g('source only, diff-only upload (original source NOT included)');
+-    } else {
+-	$srcmsg = _g('source only upload (original source is included)');
+-    }
+-} else {
+-    $srcmsg = _g('full upload (original source is included)');
+-    if (fileomitted '\.dsc') {
+-	$srcmsg = _g('binary only upload (no source included)');
+-    } elsif (fileomitted "\.diff\.$ext" and fileomitted "\.debian\.tar\.$ext") {
+-	$srcmsg = _g('full upload; Debian-native package (full source is included)');
+-    } elsif (fileomitted "\.orig\.tar\.$ext") {
+-	$srcmsg = _g('binary and diff upload (original source NOT included)');
+-    } else {
+-	$srcmsg = _g('full upload (original source is included)');
+-    }
+-}
+-
+-if ($signchanges && signfile("$pva.changes")) {
+-    $signerrors = _g("Failed to sign .changes file");
+-}
+-
+-if ($cleansource) {
+-    withecho(@rootcommand, @debian_rules, 'clean');
+-}
+-chdir('..') or syserr('chdir ..');
+-withecho('dpkg-source', @source_opts, '--after-build', $dir);
+-chdir($dir) or syserr("chdir $dir");
+-
+-print "$progname: $srcmsg\n";
+-if ($signerrors) {
+-    warning($signerrors);
+-    exit 1;
+-}
+ 
+ sub mustsetvar {
+     my ($var, $text) = @_;

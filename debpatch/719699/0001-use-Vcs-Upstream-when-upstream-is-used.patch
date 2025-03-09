@@ -1,0 +1,109 @@
+>From fb0201a084c5e1705580bc9915b9535207e76acf Mon Sep 17 00:00:00 2001
+From: Michael Stapelberg <stapelberg@debian.org>
+Date: Wed, 14 Aug 2013 13:58:14 +0200
+Subject: [PATCH] use Vcs-Upstream-* when --upstream is used
+
+---
+ scripts/debcheckout.pl |   30 ++++++++++++++++++++++--------
+ 1 file changed, 22 insertions(+), 8 deletions(-)
+
+diff --git a/scripts/debcheckout.pl b/scripts/debcheckout.pl
+index 8e1dd61..6bed620 100755
+--- a/scripts/debcheckout.pl
++++ b/scripts/debcheckout.pl
+@@ -80,6 +80,11 @@ for Subversion repositories hosted on alioth this means that
+ S<I<svn+ssh://svn.debian.org/...>> will be used instead of
+ S<I<svn://svn.debian.org/...>>.
+ 
++=item B<-U>, B<--upstream>
++
++Instead of looking for Vcs-* tags, look for Vcs-Upstream-* tags. If set, these
++point to the upstream repository/browser.
++
+ =item B<-d>, B<--details>
+ 
+ Only print a list of detailed information about the package
+@@ -316,8 +321,8 @@ sub recurs_mkdir {
+ 
+ # Find the repository URL (and type) for a given package name, parsing Vcs-*
+ # fields.  Returns (version, type, url, origtgz_name) tuple.
+-sub find_repo($$) {
+-    my ($pkg, $desired_ver) = @_;
++sub find_repo($$$) {
++    my ($pkg, $desired_ver, $upstream) = @_;
+     my @repo = ("", 0, "", "");
+     my $found = 0;
+     my ($nonepoch_version, $version) = ("", "");
+@@ -330,7 +335,10 @@ sub find_repo($$) {
+     while (my $line = <APT>) {
+ 	$found = 1;
+ 	chomp($line);
+-	if ($line =~ /^(x-)?vcs-(\w+):\s*(.*)$/i) {
++	if ($upstream && $line =~ /^(x-)?vcs-upstream-(\w+):\s*(.*)$/i) {
++	    next if lc($2) eq "browser";
++	    ($type, $url) = (lc($2), $3);
++	} elsif (!$upstream && $line =~ /^(x-)?vcs-(\w+):\s*(.*)$/i) {
+ 	    next if lc($2) eq "browser";
+ 	    ($type, $url) = (lc($2), $3);
+ 	} elsif ($line =~ /^Version:\s*(.*)$/i) {
+@@ -359,8 +367,8 @@ sub find_repo($$) {
+ }
+ 
+ # Find the browse URL for a given package name, parsing Vcs-* fields.
+-sub find_browse($$) {
+-    my ($pkg, $desired_ver) = @_;
++sub find_browse($$$) {
++    my ($pkg, $desired_ver, $upstream) = @_;
+     my $browse = "";
+     my $found = 0;
+     my $version = "";
+@@ -370,7 +378,11 @@ sub find_browse($$) {
+     while (my $line = <APT>) {
+ 	$found = 1;
+ 	chomp($line);
+-	if ($line =~ /^(x-)?vcs-(\w+):\s*(.*)$/i) {
++	if ($upstream && $line =~ /^(x-)?vcs-upstream-(\w+):\s*(.*)$/i) {
++	    if (lc($2) eq "browser") {
++		$browse = $3;
++	    }
++	} elsif (!$upstream && $line =~ /^(x-)?vcs-(\w+):\s*(.*)$/i) {
+ 	    if (lc($2) eq "browser") {
+ 		$browse = $3;
+ 	    }
+@@ -982,6 +994,7 @@ sub main() {
+     my $user = "";	  # login name (authenticated mode only)
+     my $browse_url = "";    # online browsable repository URL
+     my $git_track = "";     # list of remote GIT branches to --track
++    my $upstream = 0;       # whether to check out the upstream git
+     my $unpack_source = $config_vars{DEBCHECKOUT_SOURCE}; # retrieve and unpack orig.tar.gz
+     GetOptions(
+ 	"auth|a" => \$auth,
+@@ -994,6 +1007,7 @@ sub main() {
+ 	"file|f=s" => sub { push(@files, $_[1]); },
+ 	"git-track=s" => \$git_track,
+ 	"source=s" => \$unpack_source,
++	"upstream|U" => \$upstream,
+ 	) or pod2usage({-exitval => 3});
+     pod2usage({-exitval => 3}) if ($#ARGV < 0 or $#ARGV > 1);
+     pod2usage({-exitval => 3,
+@@ -1033,7 +1047,7 @@ sub main() {
+ 	}
+ 
+     } else {  # package name passed on the command line
+-	($version, $repo_type, $repo_url, $origtgz_name) = find_repo($pkg, $version);
++	($version, $repo_type, $repo_url, $origtgz_name) = find_repo($pkg, $version, $upstream);
+ 	unless ($repo_type) {
+ 	    my $vermsg = "";
+ 	    $vermsg = ", version $version" if length $version;
+@@ -1058,7 +1072,7 @@ and it will not be possible to commit them directly.
+ EOF
+             exit(1);
+ 	}
+-	$browse_url = find_browse($pkg, $version) if @files;
++	$browse_url = find_browse($pkg, $version, $upstream) if @files;
+     }
+ 
+     $repo_url = munge_url($repo_type, $repo_url);
+-- 
+1.7.10.4
+

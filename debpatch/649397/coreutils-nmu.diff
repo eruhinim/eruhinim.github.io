@@ -1,0 +1,159 @@
+diff -u coreutils-8.13/debian/control coreutils-8.13/debian/control
+--- coreutils-8.13/debian/control
++++ coreutils-8.13/debian/control
+@@ -7,6 +7,7 @@
+ 
+ Package: coreutils
+ Architecture: any
++Multi-Arch: foreign
+ Pre-Depends: ${shlibs:Depends}
+ Essential: yes
+ Replaces: mktemp, timeout
+diff -u coreutils-8.13/debian/changelog coreutils-8.13/debian/changelog
+--- coreutils-8.13/debian/changelog
++++ coreutils-8.13/debian/changelog
+@@ -1,3 +1,23 @@
++coreutils (8.13-3.2) unstable; urgency=low
++
++  * Non-maintainer upload.
++  * Don't declare separate build-arch/build-indep targets when they just
++    fall through to the same common build rule, since they don't have correct
++    target dependencies themselves.  Closes: #670481.
++  * Enable hardening build flags.  Thanks to Moritz Muehlenhoff for the
++    patch.  Closes: #653743.
++  * debian/patches/99_Werror-format-string.dpatch: fix the gnulib test suite
++    so that it doesn't fail to build with hardening flags on.
++  * Mark coreutils Multi-Arch: foreign.  Thanks to Colin Watson.
++    Closes: #649397.
++  * debian/patches/99_tests-misc-sort-continue-Port-to-Fedora-15.dpatch:
++    cherry-pick from upstream to fix a build failure whenever the build
++    system happens to be holding an fd open, as happens when running in
++    certain environments (e.g., Lucas's test rebuild farm, or bzr-builddeb).
++    Closes: #669555.
++
++ -- Steve Langasek <vorlon@debian.org>  Wed, 02 May 2012 02:27:43 +0000
++
+ coreutils (8.13-3.1) unstable; urgency=low
+ 
+   * Non-maintainer upload.
+diff -u coreutils-8.13/debian/rules coreutils-8.13/debian/rules
+--- coreutils-8.13/debian/rules
++++ coreutils-8.13/debian/rules
+@@ -20,12 +20,10 @@
+   endif
+ endif
+ 
+-# implement no optimization build option
+-ifneq (,$(findstring noopt,$(DEB_BUILD_OPTIONS)))
+-CFLAGS = -g -O0
+-else
+-CFLAGS ?= -g -O2
+-endif
++CFLAGS = $(shell dpkg-buildflags --get CFLAGS)
++LDFLAGS = $(shell dpkg-buildflags --get LDFLAGS)
++CPPFLAGS = $(shell dpkg-buildflags --get CPPFLAGS)
++
+ CFLAGS += -DSYSLOG_SUCCESS -DSYSLOG_FAILURE -DSYSLOG_NON_ROOT
+ 
+ # Renesas SH(sh4) need -mieee option.
+@@ -51,7 +49,7 @@
+ configure-stamp: 
+ 	dh_testdir
+ 
+-	CFLAGS="$(CFLAGS)" \
++	CFLAGS="$(CFLAGS)" CPPFLAGS="$(CPPFLAGS)" \
+ 		LDFLAGS='$(LDFLAGS)' ./configure \
+ 		--build=$(DEB_BUILD_GNU_TYPE) --host=$(DEB_HOST_GNU_TYPE) \
+ 		--prefix=/usr -v \
+@@ -61,9 +59,7 @@
+ 
+ 	echo configured > configure-stamp
+ 
+-build: patch configure build-arch build-indep
+-build-arch: build-stamp
+-build-indep: build-stamp
++build: patch configure build-stamp
+ build-stamp: 
+ 	dh_testdir
+ 	$(MAKE)
+diff -u coreutils-8.13/debian/patches/00list coreutils-8.13/debian/patches/00list
+--- coreutils-8.13/debian/patches/00list
++++ coreutils-8.13/debian/patches/00list
+@@ -10,0 +11,2 @@
++99_tests-misc-sort-continue-Port-to-Fedora-15
++99_Werror-format-string
+only in patch2:
+unchanged:
+--- coreutils-8.13.orig/debian/patches/99_Werror-format-string.dpatch
++++ coreutils-8.13/debian/patches/99_Werror-format-string.dpatch
+@@ -0,0 +1,19 @@
++#! /bin/sh /usr/share/dpatch/dpatch-run
++## 99_Werror-format-string.dpatch by Steve Langasek <vorlon@debian.org>
++##
++## DP: Fix gnulib test suite to work with -Werror=format-string.
++
++@DPATCH@
++diff -urNad '--exclude=CVS' '--exclude=.svn' '--exclude=.git' '--exclude=.arch' '--exclude=.hg' '--exclude=_darcs' '--exclude=.bzr' debian~/gnulib-tests/test-xvasprintf.c debian/gnulib-tests/test-xvasprintf.c
++--- debian~/gnulib-tests/test-xvasprintf.c	2012-03-31 21:51:00.000000000 +0000
+++++ debian/gnulib-tests/test-xvasprintf.c	2012-05-02 00:01:49.018631894 +0000
++@@ -96,8 +96,7 @@
++ 
++   {
++     /* Silence gcc warning about zero-length format string.  */
++-    const char *empty = "";
++-    result = xasprintf (empty);
+++    result = xasprintf ("%s", "");
++     ASSERT (result != NULL);
++     ASSERT (strcmp (result, "") == 0);
++     free (result);
+only in patch2:
+unchanged:
+--- coreutils-8.13.orig/debian/patches/99_tests-misc-sort-continue-Port-to-Fedora-15.dpatch
++++ coreutils-8.13/debian/patches/99_tests-misc-sort-continue-Port-to-Fedora-15.dpatch
+@@ -0,0 +1,46 @@
++#! /bin/sh /usr/share/dpatch/dpatch-run
++## From 91a5badc7b8b96916147f28b1d094af98efa5aa7 Mon Sep 17 00:00:00 2001
++## From: Paul Eggert <eggert@cs.ucla.edu>
++## Date: Sat, 12 Nov 2011 00:20:01 -0800
++## Subject: [PATCH] * tests/misc/sort-continue: Port to Fedora 15.
++## 
++## Redirect with the shell command, not in a separate 'exec'.
++## Without this patch, Fedora 15 x86-64 /bin/sh (i.e., Bash 4.2.10)
++## complained about running out of file descriptors in the shell.
++
++diff --git a/tests/misc/sort-continue b/tests/misc/sort-continue
++index 42db01e..2ea06b7 100755
++--- a/tests/misc/sort-continue
+++++ b/tests/misc/sort-continue
++@@ -20,7 +20,7 @@
++ print_ver_ sort
++ 
++ # Skip the test when running under valgrind.
++-( ulimit -n 6; sort < /dev/null ) \
+++( ulimit -n 6; sort 3<&- 4<&- 5<&- < /dev/null ) \
++   || skip_ 'fd-limited sort failed; are you running under valgrind?'
++ 
++ for i in $(seq 31); do
++@@ -30,8 +30,7 @@ done
++ 
++ (
++  ulimit -n 6
++- exec 0</dev/null 3<&- 4<&- 5<&-
++- sort -n -m __test.* > out
+++ sort -n -m __test.* 3<&- 4<&- 5<&- < /dev/null > out
++ ) &&
++ compare in out ||
++   { fail=1; echo 'file descriptor exhaustion not handled' 1>&2; }
++@@ -39,8 +38,7 @@ compare in out ||
++ echo 32 | tee -a in > in1
++ (
++  ulimit -n 6
++- exec 3<&- 4<&- 5<&-
++- sort -n -m __test.* - < in1 > out
+++ sort -n -m __test.* - 3<&- 4<&- 5<&- < in1 > out
++ ) &&
++ compare in out || { fail=1; echo 'stdin not handled properly' 1>&2; }
++ 
++-- 
++1.7.9.5
++

@@ -1,0 +1,181 @@
+From d091f958e1a61cbf4d3296c4267d011ba3c6dbd4 Mon Sep 17 00:00:00 2001
+From: Christian Seiler <christian@iwakd.de>
+Date: Sun, 4 Oct 2015 12:25:39 +0200
+Subject: [PATCH 1/2] Add 'needs-qcow2-baseimage' restriction
+
+Add restrictions that allows tests to require a qcow2 base image be
+present inside the test environment, so that e.g. nested VM tests are
+possible.
+---
+ doc/README.package-tests.rst | 20 ++++++++++++++++++++
+ lib/testdesc.py              |  9 ++++++++-
+ virt-subproc/adt-virt-qemu   | 25 ++++++++++++++++++++++---
+ virt-subproc/adt-virt-qemu.1 | 10 ++++++++++
+ 4 files changed, 60 insertions(+), 4 deletions(-)
+
+diff --git a/doc/README.package-tests.rst b/doc/README.package-tests.rst
+index e1127cb..5872617 100644
+--- a/doc/README.package-tests.rst
++++ b/doc/README.package-tests.rst
+@@ -202,6 +202,26 @@ needs-recommends
+     Enable installation of recommended packages in apt for the test
+     dependencies. This does not affect build dependencies.
+ 
++needs-qcow2-baseimage
++    The test needs to have a read-only qcow2 base image available so it
++    may create an overlay and start a qemu/KVM virtual machine inside
++    the test environment.
++
++    This is useful for testing network client packages that require
++    kernel support (NFS, CIFS, iSCSI, NBD, etc.): the external testing
++    environment sets up a minimalistic server environment and then
++    starts a virtual machine that tests the client.
++
++    While currently only adt-virt-qemu supports this, this options is
++    independent of the isolation level. If the setup of the server also
++    needs a specific isolation level, that should be specified
++    additionally.
++
++    The environment variable ADT_QCOW2_BASEIMAGE will be set to the
++    absolute path of the qcow2 base image. If the test environment
++    supports it, this variable will be available irrespective of
++    whether this restriction was added to the test or not.
++
+ Defined features
+ ----------------
+ 
+diff --git a/lib/testdesc.py b/lib/testdesc.py
+index 260b2fa..33fdb7f 100644
+--- a/lib/testdesc.py
++++ b/lib/testdesc.py
+@@ -42,7 +42,8 @@ import adtlog
+ 
+ known_restrictions = ['rw-build-tree', 'breaks-testbed', 'needs-root',
+                       'build-needed', 'allow-stderr', 'isolation-container',
+-                      'isolation-machine', 'needs-recommends']
++                      'isolation-machine', 'needs-recommends',
++                      'needs-qcow2-baseimage']
+ 
+ 
+ class Unsupported(Exception):
+@@ -161,6 +162,12 @@ class Test:
+                               'Test needs root on testbed which is not '
+                               'available')
+ 
++        if 'needs-qcow2-baseimage' in self.restrictions and \
++           'provides-qcow2-baseimage' not in caps:
++            raise Unsupported(self.name,
++                              'Test needs qcow2 testimage inside testbed which '
++                              'is not available')
++
+ #
+ # Parsing for Debian source packages
+ #
+diff --git a/virt-subproc/adt-virt-qemu b/virt-subproc/adt-virt-qemu
+index 6e3989a..2bed237 100755
+--- a/virt-subproc/adt-virt-qemu
++++ b/virt-subproc/adt-virt-qemu
+@@ -80,6 +80,8 @@ def parse_args():
+                         help='Enable debugging output')
+     parser.add_argument('--qemu-options',
+                         help='Pass through arguments to QEMU command.')
++    parser.add_argument('--nested-qcow2-baseimage',
++                        help='qcow2 VM base image for use inside the VM (nested VMs)')
+     parser.add_argument('image', nargs='+',
+                         help='disk image to add to the VM (in order)')
+ 
+@@ -87,6 +89,8 @@ def parse_args():
+ 
+     if args.debug:
+         adtlog.verbosity = 2
++    if args.nested_qcow2_baseimage == None and len(args.image) == 1:
++        args.nested_qcow2_baseimage = args.image[0]
+ 
+ 
+ def prepare_overlay():
+@@ -274,6 +278,10 @@ EOF
+ def make_auxverb(shared_dir):
+     '''Create auxverb script'''
+ 
++    envvars = ''
++    if args.nested_qcow2_baseimage != None:
++        envvars += 'export ADT_QCOW2_BASEIMAGE=/dev/vd%c ; ' % chr(ord('a') + len(args.image))
++
+     auxverb = os.path.join(workdir, 'runcmd')
+     with open(auxverb, 'w') as f:
+         f.write('''#!%(py)s
+@@ -340,7 +348,8 @@ t_stderr.start()
+ s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+ s.connect('%(tty)s')
+ cmd = '/bin/eofcat %%(d)s/stdin_eof %%(d)s/exit.tmp < %%(d)s/stdin | ' \\
+-      '(%%(c)s >> %%(d)s/stdout 2>> %%(d)s/stderr; echo $? > %%(d)s/exit.tmp);' \\
++      '(%(envvars)s ' \\
++      '%%(c)s >> %%(d)s/stdout 2>> %%(d)s/stderr; echo $? > %%(d)s/exit.tmp);' \\
+       'mv %%(d)s/exit.tmp %%(d)s/exit\\n' %% \\
+        {'d': job_guest, 'c': ' '.join(map(pipes.quote, sys.argv[1:]))}
+ s.send(cmd.encode())
+@@ -369,7 +378,8 @@ t_stdin.join()
+ t_stdout.join()
+ t_stderr.join()
+ sys.exit(rc)
+-''' % {'py': sys.executable, 'tty': os.path.join(workdir, 'ttyS1'), 'dir': shared_dir})
++''' % {'py': sys.executable, 'tty': os.path.join(workdir, 'ttyS1'), 'dir': shared_dir,
++       'envvars' : envvars})
+ 
+     os.chmod(auxverb, 0o755)
+ 
+@@ -475,6 +485,13 @@ def hook_open():
+     for i, image in enumerate(args.image[1:]):
+         argv.append('-drive')
+         argv.append('file=%s,if=virtio,index=%i,readonly' % (image, i + 1))
++    if args.nested_qcow2_baseimage != None:
++        # export base image as drive (it's the easiest way to get
++        # it into QEMU), but make sure format=raw is set, because
++        # we want the VM to be able to see it as a qcow2 image and
++        # not have QEMU interpret it
++        argv.append('-drive')
++        argv.append('file=%s,if=virtio,index=%i,readonly,format=raw' % (args.nested_qcow2_baseimage, len(args.image)))
+ 
+     if os.path.exists('/dev/kvm'):
+         argv.append('-enable-kvm')
+@@ -550,13 +567,15 @@ def hook_forked_inchild():
+ 
+ 
+ def hook_capabilities():
+-    global normal_user
++    global normal_user, args
+     caps = ['revert', 'revert-full-system', 'root-on-testbed',
+             'isolation-machine', 'reboot']
+     # disabled, see hook_downtmp()
+     # caps.append('downtmp-host=%s' % os.path.join(workdir, 'shared', 'tmp'))
+     if normal_user:
+         caps.append('suggested-normal-user=' + normal_user)
++    if args.nested_qcow2_baseimage != None:
++        caps.append('provides-qcow2-baseimage')
+     return caps
+ 
+ 
+diff --git a/virt-subproc/adt-virt-qemu.1 b/virt-subproc/adt-virt-qemu.1
+index 0c5718f..19f2f1d 100644
+--- a/virt-subproc/adt-virt-qemu.1
++++ b/virt-subproc/adt-virt-qemu.1
+@@ -97,6 +97,16 @@ Enable debugging output.
+ .BI "--qemu-options=" arguments
+ Pass through arguments to QEMU command; e. g. --qemu-options='-readconfig qemu.cfg'
+ 
++.TP
++.BI "--nested-qcow2-baseimage=" image
++Base image (in qcow2 format) that is passed through to the VM in read-only
++mode. It may then be used by the container to create an overlay qcow2 image on
++top of it and start a nested VM. If there is only one image specified to
++.BR adt-virt-qemu ,
++this option defaults to that image. If there is more one image specified, it
++doesn't have a default value, so the option should be specified if running
++tests that require nested VMs is to be supported.
++
+ .SH CONFIGURATION FILES
+ If you use lots of options or images, you can put parts of, or the whole
+ command line into a text file, with one line per option. E. g. you can create a
+-- 
+2.1.4
+

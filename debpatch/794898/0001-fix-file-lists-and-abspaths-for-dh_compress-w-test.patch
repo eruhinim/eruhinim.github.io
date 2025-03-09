@@ -1,0 +1,177 @@
+>From 56170156289feee6bea1fb34afee415e5aa3ecb6 Mon Sep 17 00:00:00 2001
+From: Rafael Kitover <rkitover@gmail.com>
+Date: Fri, 7 Aug 2015 14:04:58 -0400
+Subject: [PATCH] fix file lists and abspaths for dh_compress w/test
+
+Fix dh_compress to accept file names on the command line that it would
+otherwise compress anyway, by removing duplicates.
+
+Also allow dh_compress to accept absolute paths, by stripping the
+leading slashes.
+
+Add tests for the desired behavior in t/dh_compress.t .
+
+Fix an undefined warning in dh_compress that is sometimes triggered.
+
+Add a . -> lib symlink so that prove -vwlr t works.
+---
+ dh_compress     | 13 +++++++--
+ lib             |  1 +
+ t/dh_compress.t | 91 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 102 insertions(+), 3 deletions(-)
+ create mode 120000 lib
+ create mode 100755 t/dh_compress.t
+
+diff --git a/dh_compress b/dh_compress
+index 1b33ac9..4b59e7c 100755
+--- a/dh_compress
++++ b/dh_compress
+@@ -8,7 +8,8 @@ dh_compress - compress files and fix symlinks in package build directories
+ 
+ use strict;
+ use warnings;
+-use Cwd;
++use Cwd qw/getcwd abs_path/;
++use File::Spec::Functions 'abs2rel';
+ use Debian::Debhelper::Dh_Lib;
+ 
+ =head1 SYNOPSIS
+@@ -92,7 +93,7 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 	my @files;
+ 	# First of all, deal with any files specified right on the command line.
+ 	if (($package eq $dh{FIRSTPACKAGE} || $dh{PARAMS_ALL}) && @ARGV) {
+-		push @files, @ARGV;
++		push @files, map { s{^/+}{}; $_ } @ARGV;
+ 	}
+ 	if ($compress) {
+ 		# The compress file is a sh script that outputs the files to be compressed
+@@ -155,7 +156,7 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 	my %seen;
+ 	foreach (@files) {
+ 		my ($dev, $inode, undef, $nlink)=stat($_);
+-		if ($nlink > 1) {
++		if (defined $nlink && $nlink > 1) {
+ 			if (! $seen{"$inode.$dev"}) {
+ 				$seen{"$inode.$dev"}=$_;
+ 				push @f, $_;
+@@ -170,6 +171,12 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 		}
+ 	}
+ 
++	# normalize file names and remove duplicates
++	my @normalized = map abs2rel(abs_path($_)), @f;
++	my %uniq_f; @uniq_f{@normalized} = ();
++	@f = sort keys %uniq_f;
++
++	# do it
+ 	if (@f) {
+ 		# Make executables not be anymore.
+ 		xargs(\@f,"chmod","a-x");
+diff --git a/lib b/lib
+new file mode 120000
+index 0000000..945c9b4
+--- /dev/null
++++ b/lib
+@@ -0,0 +1 @@
++.
+\ No newline at end of file
+diff --git a/t/dh_compress.t b/t/dh_compress.t
+new file mode 100755
+index 0000000..e6ba644
+--- /dev/null
++++ b/t/dh_compress.t
+@@ -0,0 +1,91 @@
++#!/usr/bin/perl
++
++use strict;
++use warnings;
++use File::Basename 'dirname';
++use lib dirname(__FILE__).'/..';
++use File::Path qw/make_path remove_tree/;
++use Test::More;
++
++chdir dirname(__FILE__).'/..';
++$ENV{PERL5OPT} = '-I'.dirname(__FILE__).'/..';
++my $PREFIX = 'debian/debhelper/usr/share/doc/debhelper';
++
++# we are testing compressing doc txt files
++# foo.txt is 2k and bar.txt is 5k
++mk_test_dir();
++
++# default operation, bar.txt becomes bar.txt.gz and foo.txt is unchanged
++dh_compress();
++
++is_deeply(
++    [map { s{${PREFIX}/}{}; $_ } sort glob "$PREFIX/*"],
++    [qw|bar.txt.gz foo.txt|],
++    '5k txt doc compressed, 2k txt doc not compressed'
++);
++
++mk_test_dir();
++
++# now if I want to pass both on the command line to dh_compress, it should
++# compress both
++dh_compress(qw|
++    --
++    usr/share/doc/debhelper/foo.txt
++    usr/share/doc/debhelper/bar.txt
++|);
++
++is_deeply(
++    [map { s{${PREFIX}/}{}; $_ } sort glob "$PREFIX/*"],
++    [qw|bar.txt.gz foo.txt.gz|],
++    'both 5k and 2k txt docs compressed'
++);
++
++mk_test_dir();
++
++# absolute paths should also work
++dh_compress(qw|
++    --
++    /usr/share/doc/debhelper/foo.txt
++    /usr/share/doc/debhelper/bar.txt
++|);
++
++is_deeply(
++    [map { s{${PREFIX}/}{}; $_ } sort glob "$PREFIX/*"],
++    [qw|bar.txt.gz foo.txt.gz|],
++    'both 5k and 2k txt docs compressed by absolute path args'
++);
++
++rm_test_dir();
++
++done_testing;
++
++sub mk_test_dir {
++    rm_test_dir();
++
++    make_path('debian/debhelper/usr/share/doc/debhelper');
++
++    my $fh;
++
++    # write 2k to foo.txt
++    open $fh, '>', 'debian/debhelper/usr/share/doc/debhelper/foo.txt'
++	or die "Could not write to debian/debhelper/usr/share/doc/debhelper/foo.txt: $!";
++    print $fh 'X' x 2048;
++    close $fh;
++
++    # write 5k to bar.txt
++    open $fh, '>', 'debian/debhelper/usr/share/doc/debhelper/bar.txt'
++	or die "Could not write to debian/debhelper/usr/share/doc/debhelper/bar.txt: $!";
++    print $fh 'X' x 5120;
++    close $fh;
++}
++
++sub rm_test_dir {
++    remove_tree('debian/debhelper');
++
++    unlink 'debian/debhelper.debhelper.log'; # ignore error, it may not exist
++}
++
++sub dh_compress {
++    system('./dh_compress', @_) == 0
++	or fail("Could not run ./dh_compress @_: $?");
++}
+-- 
+2.1.4
+

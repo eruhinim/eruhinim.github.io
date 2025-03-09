@@ -1,0 +1,382 @@
+diff --git a/src/ahttpurl.cc b/src/ahttpurl.cc
+index b8ec14a..50f46a8 100644
+--- a/src/ahttpurl.cc
++++ b/src/ahttpurl.cc
+@@ -6,6 +6,7 @@ namespace acng {
+
+ using namespace std;
+
++// See RFC3986
+ bool tHttpUrl::SetHttpUrl(cmstring &sUrlRaw, bool unescape)
+ {
+ 	clear();
+@@ -92,6 +93,11 @@ extract_host_check_port:
+ 		sHost.erase(0, l+1);
+ 	}
+
++	if (!bCheckBrac && 2 <= count(sHost.begin(), sHost.end(), ':'))
++	{
++		noPort=true;
++	}
++
+ 	l=sHost.size();
+ 	if (!noPort)
+ 	{
+diff --git a/tests/src/ut_http.cc b/tests/src/ut_http.cc
+index 4569c3e..55c69b8 100644
+--- a/tests/src/ut_http.cc
++++ b/tests/src/ut_http.cc
+@@ -212,30 +212,324 @@ TEST(http, misc)
+ 	ASSERT_GE(n, sizeof(::sockaddr_in6) + 3*sizeof(int));
+ }
+
+-TEST(http, url_host_port)
++TEST(http, url_url)
+ {
+-        tHttpUrl url;
+-		std::string ti="127.0.0.1";
+-        ASSERT_TRUE(url.SetHttpUrl(ti));
+-		ASSERT_EQ(url.sHost, ti);
+-		ASSERT_EQ(url.GetPort(), 80);
+-		ti="127.0.0.2:8080";
+-		ASSERT_TRUE(url.SetHttpUrl(ti));
+-		ASSERT_EQ(url.sHost, "127.0.0.2");
+-		ASSERT_EQ(url.GetPort(), 8080);
+-		ti="::1999";
+-		ASSERT_TRUE(url.SetHttpUrl(ti));
+-		ASSERT_EQ(url.sHost, "::1999");
++		tHttpUrl url;
++
++		ASSERT_TRUE(url.SetHttpUrl("example.org"));
++		ASSERT_EQ(url.sUserPass, "");
++		ASSERT_EQ(url.sHost, "example.org");
+ 		ASSERT_EQ(url.GetPort(), 80);
++		ASSERT_EQ(url.sPath, "/");
+
+-		ASSERT_TRUE(url.SetHttpUrl("[::fefe]"));
+-		ASSERT_EQ(url.sHost, "::fefe");
++		ASSERT_TRUE(url.SetHttpUrl("https://example.net"));
++		ASSERT_EQ(url.sUserPass, "");
++		ASSERT_EQ(url.sHost, "example.net");
++		ASSERT_EQ(url.GetPort(), 443);
++		ASSERT_EQ(url.sPath, "/");
++
++		ASSERT_TRUE(url.SetHttpUrl("http://example.org"));
++		ASSERT_EQ(url.sUserPass, "");
++		ASSERT_EQ(url.sHost, "example.org");
+ 		ASSERT_EQ(url.GetPort(), 80);
++		ASSERT_EQ(url.sPath, "/");
+
+-		ASSERT_TRUE(url.SetHttpUrl("[::abcd]:8080"));
+-		ASSERT_EQ(url.sHost, "::abcd");
++		ASSERT_TRUE(url.SetHttpUrl("http://alice:sec::::ret@example.net:8080/foo/bar.html?abc=123&def=456"));
++		ASSERT_EQ(url.sUserPass, "alice:sec::::ret");
++		ASSERT_EQ(url.sHost, "example.net");
+ 		ASSERT_EQ(url.GetPort(), 8080);
++		ASSERT_EQ(url.sPath, "/foo/bar.html?abc=123&def=456");
++
++		// Non-RFC3986-compliant case: undelimited IPv6 literal
++		ASSERT_TRUE(url.SetHttpUrl("https://alice:se::cret@2001:db8::/bar"));
++		ASSERT_EQ(url.sUserPass, "alice:se::cret");
++		ASSERT_EQ(url.sHost, "2001:db8::");
++		ASSERT_EQ(url.GetPort(), 443);
++		ASSERT_EQ(url.sPath, "/bar");
++}
++
++TEST(http, url_host_port_ipv4)
++{
++		tHttpUrl url;
++		uint16_t defaultPort = url.GetPort();
++
++		ASSERT_TRUE(url.SetHttpUrl("0.0.0.0"));
++		ASSERT_EQ(url.sHost, "0.0.0.0");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("127.0.0.1"));
++		ASSERT_EQ(url.sHost, "127.0.0.1");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("10.20.30.40"));
++		ASSERT_EQ(url.sHost, "10.20.30.40");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("255.255.255.255"));
++		ASSERT_EQ(url.sHost, "255.255.255.255");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++}
++
++TEST(http, url_host_port_ipv4_port)
++{
++		tHttpUrl url;
++
++		ASSERT_TRUE(url.SetHttpUrl("0.0.0.0:8000"));
++		ASSERT_EQ(url.sHost, "0.0.0.0");
++		ASSERT_EQ(url.GetPort(), 8000);
++
++		ASSERT_TRUE(url.SetHttpUrl("127.0.0.1:8001"));
++		ASSERT_EQ(url.sHost, "127.0.0.1");
++		ASSERT_EQ(url.GetPort(), 8001);
++
++		ASSERT_TRUE(url.SetHttpUrl("10.20.30.40:8002"));
++		ASSERT_EQ(url.sHost, "10.20.30.40");
++		ASSERT_EQ(url.GetPort(), 8002);
++
++		ASSERT_TRUE(url.SetHttpUrl("255.255.255.255:8003"));
++		ASSERT_EQ(url.sHost, "255.255.255.255");
++		ASSERT_EQ(url.GetPort(), 8003);
++}
++
++TEST(http, url_host_port_hostname)
++{
++		tHttpUrl url;
++		uint16_t defaultPort = url.GetPort();
++
++		ASSERT_TRUE(url.SetHttpUrl("a"));
++		ASSERT_EQ(url.sHost, "a");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("1"));
++		ASSERT_EQ(url.sHost, "1");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("localhost"));
++		ASSERT_EQ(url.sHost, "localhost");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("example.org"));
++		ASSERT_EQ(url.sHost, "example.org");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("42.example.org"));
++		ASSERT_EQ(url.sHost, "42.example.org");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("foo.bar.example.org"));
++		ASSERT_EQ(url.sHost, "foo.bar.example.org");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++}
++
++TEST(http, url_host_port_hostname_port)
++{
++		tHttpUrl url;
++
++		ASSERT_TRUE(url.SetHttpUrl("a:8000"));
++		ASSERT_EQ(url.sHost, "a");
++		ASSERT_EQ(url.GetPort(), 8000);
++
++		ASSERT_TRUE(url.SetHttpUrl("1:8001"));
++		ASSERT_EQ(url.sHost, "1");
++		ASSERT_EQ(url.GetPort(), 8001);
++
++		ASSERT_TRUE(url.SetHttpUrl("localhost:8002"));
++		ASSERT_EQ(url.sHost, "localhost");
++		ASSERT_EQ(url.GetPort(), 8002);
++
++		ASSERT_TRUE(url.SetHttpUrl("example.org:8003"));
++		ASSERT_EQ(url.sHost, "example.org");
++		ASSERT_EQ(url.GetPort(), 8003);
++
++		ASSERT_TRUE(url.SetHttpUrl("42.example.org:8003"));
++		ASSERT_EQ(url.sHost, "42.example.org");
++		ASSERT_EQ(url.GetPort(), 8003);
++
++		ASSERT_TRUE(url.SetHttpUrl("foo.bar.example.org:8005"));
++		ASSERT_EQ(url.sHost, "foo.bar.example.org");
++		ASSERT_EQ(url.GetPort(), 8005);
++}
++
++TEST(http, url_host_port_ipv6)
++{
++		tHttpUrl url;
++		uint16_t defaultPort = url.GetPort();
++
++		ASSERT_TRUE(url.SetHttpUrl("[::]"));
++		ASSERT_EQ(url.sHost, "::");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("[::1]"));
++		ASSERT_EQ(url.sHost, "::1");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("[1::]"));
++		ASSERT_EQ(url.sHost, "1::");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("[1::1]"));
++		ASSERT_EQ(url.sHost, "1::1");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("[::a]"));
++		ASSERT_EQ(url.sHost, "::a");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("[a::]"));
++		ASSERT_EQ(url.sHost, "a::");
++		ASSERT_EQ(url.GetPort(), defaultPort);
+
++		ASSERT_TRUE(url.SetHttpUrl("[a::a]"));
++		ASSERT_EQ(url.sHost, "a::a");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("[1:2:3:4:5:6:7:8]"));
++		ASSERT_EQ(url.sHost, "1:2:3:4:5:6:7:8");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("[1111:2222:3333:4444:5555:6666:7777:8888]"));
++		ASSERT_EQ(url.sHost, "1111:2222:3333:4444:5555:6666:7777:8888");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("[a:a:b:b:c:d:e:f]"));
++		ASSERT_EQ(url.sHost, "a:a:b:b:c:d:e:f");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("[aaaa:aabb:bbaa:bbbb:cccc:dddd:eeee:ffff]"));
++		ASSERT_EQ(url.sHost, "aaaa:aabb:bbaa:bbbb:cccc:dddd:eeee:ffff");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("[1:a::b:2]"));
++		ASSERT_EQ(url.sHost, "1:a::b:2");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++}
++
++TEST(http, url_host_port_ipv6_port)
++{
++		tHttpUrl url;
++
++		ASSERT_TRUE(url.SetHttpUrl("[::]:8000"));
++		ASSERT_EQ(url.sHost, "::");
++		ASSERT_EQ(url.GetPort(), 8000);
++
++		ASSERT_TRUE(url.SetHttpUrl("[::1]:8001"));
++		ASSERT_EQ(url.sHost, "::1");
++		ASSERT_EQ(url.GetPort(), 8001);
++
++		ASSERT_TRUE(url.SetHttpUrl("[1::]:8002"));
++		ASSERT_EQ(url.sHost, "1::");
++		ASSERT_EQ(url.GetPort(), 8002);
++
++		ASSERT_TRUE(url.SetHttpUrl("[1::1]:8003"));
++		ASSERT_EQ(url.sHost, "1::1");
++		ASSERT_EQ(url.GetPort(), 8003);
++
++		ASSERT_TRUE(url.SetHttpUrl("[::a]:8004"));
++		ASSERT_EQ(url.sHost, "::a");
++		ASSERT_EQ(url.GetPort(), 8004);
++
++		ASSERT_TRUE(url.SetHttpUrl("[a::]:8005"));
++		ASSERT_EQ(url.sHost, "a::");
++		ASSERT_EQ(url.GetPort(), 8005);
++
++		ASSERT_TRUE(url.SetHttpUrl("[a::a]:8006"));
++		ASSERT_EQ(url.sHost, "a::a");
++		ASSERT_EQ(url.GetPort(), 8006);
++
++		ASSERT_TRUE(url.SetHttpUrl("[1:2:3:4:5:6:7:8]:8007"));
++		ASSERT_EQ(url.sHost, "1:2:3:4:5:6:7:8");
++		ASSERT_EQ(url.GetPort(), 8007);
++
++		ASSERT_TRUE(url.SetHttpUrl("[1111:2222:3333:4444:5555:6666:7777:8888]:8008"));
++		ASSERT_EQ(url.sHost, "1111:2222:3333:4444:5555:6666:7777:8888");
++		ASSERT_EQ(url.GetPort(), 8008);
++
++		ASSERT_TRUE(url.SetHttpUrl("[a:a:b:b:c:d:e:f]:8009"));
++		ASSERT_EQ(url.sHost, "a:a:b:b:c:d:e:f");
++		ASSERT_EQ(url.GetPort(), 8009);
++
++		ASSERT_TRUE(url.SetHttpUrl("[aaaa:aabb:bbaa:bbbb:cccc:dddd:eeee:ffff]:8010"));
++		ASSERT_EQ(url.sHost, "aaaa:aabb:bbaa:bbbb:cccc:dddd:eeee:ffff");
++		ASSERT_EQ(url.GetPort(), 8010);
++
++		ASSERT_TRUE(url.SetHttpUrl("[1:a::b:2]:8011"));
++		ASSERT_EQ(url.sHost, "1:a::b:2");
++		ASSERT_EQ(url.GetPort(), 8011);
++}
++
++// RFC6874
++TEST(http, url_host_port_ipv6_zone)
++{
++		tHttpUrl url;
++		uint16_t defaultPort = url.GetPort();
++
++		ASSERT_TRUE(url.SetHttpUrl("[fe80::1%eth0]", false));
++		ASSERT_EQ(url.sHost, "fe80::1%eth0");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("[fe80::2%25eth1]", true));
++		ASSERT_EQ(url.sHost, "fe80::2%eth1");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++}
++
++// Non-RFC3986-compliant case: undelimited IPv6 literal (always without a port)
++TEST(http, url_host_port_ipv6_undelimited)
++{
++		tHttpUrl url;
++		uint16_t defaultPort = url.GetPort();
++
++		ASSERT_TRUE(url.SetHttpUrl("::"));
++		ASSERT_EQ(url.sHost, "::");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("::1"));
++		ASSERT_EQ(url.sHost, "::1");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("1::"));
++		ASSERT_EQ(url.sHost, "1::");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("1::1"));
++		ASSERT_EQ(url.sHost, "1::1");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("::a"));
++		ASSERT_EQ(url.sHost, "::a");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("a::"));
++		ASSERT_EQ(url.sHost, "a::");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("a::a"));
++		ASSERT_EQ(url.sHost, "a::a");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("1:2:3:4:5:6:7:8"));
++		ASSERT_EQ(url.sHost, "1:2:3:4:5:6:7:8");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("1111:2222:3333:4444:5555:6666:7777:8888"));
++		ASSERT_EQ(url.sHost, "1111:2222:3333:4444:5555:6666:7777:8888");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("a:a:b:b:c:d:e:f"));
++		ASSERT_EQ(url.sHost, "a:a:b:b:c:d:e:f");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("aaaa:aabb:bbaa:bbbb:cccc:dddd:eeee:ffff"));
++		ASSERT_EQ(url.sHost, "aaaa:aabb:bbaa:bbbb:cccc:dddd:eeee:ffff");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++
++		ASSERT_TRUE(url.SetHttpUrl("1:a::b:2"));
++		ASSERT_EQ(url.sHost, "1:a::b:2");
++		ASSERT_EQ(url.GetPort(), defaultPort);
++}
++
++TEST(http, url_host_port_invalid)
++{
++		tHttpUrl url;
+ 		ASSERT_FALSE(url.SetHttpUrl(":foo]"));
+ 		ASSERT_FALSE(url.SetHttpUrl(":1111]"));
+ 		ASSERT_FALSE(url.SetHttpUrl("[1111"));
+@@ -245,4 +539,10 @@ TEST(http, url_host_port)
+ 		ASSERT_FALSE(url.SetHttpUrl("[:::1] :1234"));
+ 		ASSERT_FALSE(url.SetHttpUrl("[:::1]lol:1234"));
+ 		ASSERT_FALSE(url.SetHttpUrl("[:::1]lol?=asdf"));
++		/* currently not catched because not validating in detail
++		ASSERT_FALSE(url.SetHttpUrl("[1:2:3:4:5:6:7:8:9]"));
++		ASSERT_FALSE(url.SetHttpUrl("1:2:3:4:5:6:7:8:9"));
++		ASSERT_FALSE(url.SetHttpUrl("[1::2::3::4]"));
++		ASSERT_FALSE(url.SetHttpUrl("1::2::3::4"));
++		*/
+ }
+

@@ -1,0 +1,249 @@
+From d56d5af7fa1a01a581d0cc1901572ca9c407f538 Mon Sep 17 00:00:00 2001
+From: Nicolas Boulenguez <nicolas@debian.org>
+Date: Mon, 29 Jul 2019 14:38:32 +0200
+Subject: [PATCH 1/8] scripts/mk: stop hard-coding dpkg_datadir, protect from
+ double inclusion
+
+The Makefile snippets include each other from their common directory,
+but the path differ during tests and after installation.  Instead of
+rewriting the file with a hardcoded path, compute it within Make.
+
+Use the same variables to avoid 'include' when possible, as it
+involves system calls.
+
+When setting dpkg_datadir, prefer 'ifndef' and ':=' to '?=', so that
+the value is computed at most once.
+---
+ build-aux/subst.am         |  6 ------
+ scripts/mk/Makefile.am     | 21 ---------------------
+ scripts/mk/architecture.mk |  5 +++++
+ scripts/mk/buildapi.mk     |  5 +++++
+ scripts/mk/buildflags.mk   |  6 ++++++
+ scripts/mk/buildopts.mk    |  5 +++++
+ scripts/mk/buildtools.mk   | 11 ++++++++++-
+ scripts/mk/default.mk      | 10 +++++++++-
+ scripts/mk/pkg-info.mk     |  5 +++++
+ scripts/mk/vendor.mk       | 11 ++++++++++-
+ 10 files changed, 55 insertions(+), 30 deletions(-)
+
+diff --git a/build-aux/subst.am b/build-aux/subst.am
+index 5515930d0..167a71257 100644
+--- a/build-aux/subst.am
++++ b/build-aux/subst.am
+@@ -39,9 +39,3 @@ SUFFIXES += .pl
+ 	@test -d `dirname $@` || $(MKDIR_P) `dirname $@`
+ 	$(do_perl_subst) <$< >$@
+ 	$(AM_V_at) chmod +x $@
+-
+-# Makefile support.
+-
+-do_make_subst = $(AM_V_GEN) $(SED) \
+-	-e "s:dpkg_datadir[[:space:]]*=[[:space:]]*[^[:space:]]*:dpkg_datadir = $(pkgdatadir):" \
+-	# EOL
+diff --git a/scripts/mk/Makefile.am b/scripts/mk/Makefile.am
+index 257ba5252..6e85e17b9 100644
+--- a/scripts/mk/Makefile.am
++++ b/scripts/mk/Makefile.am
+@@ -10,24 +10,3 @@ dist_pkgdata_DATA = \
+ 	pkg-info.mk \
+ 	vendor.mk \
+ 	# EOL
+-
+-SUFFIXES =
+-
+-include $(top_srcdir)/build-aux/subst.am
+-
+-# Ideally we'd use '$(SED) -i', but unfortunately that's not portable.
+-install-data-hook:
+-	$(do_make_subst) <$(DESTDIR)$(pkgdatadir)/default.mk \
+-	                 >$(DESTDIR)$(pkgdatadir)/default.mk.new
+-	mv $(DESTDIR)$(pkgdatadir)/default.mk.new \
+-	   $(DESTDIR)$(pkgdatadir)/default.mk
+-
+-	$(do_make_subst) <$(DESTDIR)$(pkgdatadir)/buildtools.mk \
+-	                 >$(DESTDIR)$(pkgdatadir)/buildtools.mk.new
+-	mv $(DESTDIR)$(pkgdatadir)/buildtools.mk.new \
+-	   $(DESTDIR)$(pkgdatadir)/buildtools.mk
+-
+-	$(do_make_subst) <$(DESTDIR)$(pkgdatadir)/vendor.mk \
+-			 >$(DESTDIR)$(pkgdatadir)/vendor.mk.new
+-	mv $(DESTDIR)$(pkgdatadir)/vendor.mk.new \
+-	   $(DESTDIR)$(pkgdatadir)/vendor.mk
+diff --git a/scripts/mk/architecture.mk b/scripts/mk/architecture.mk
+index c11cada16..2ffcee287 100644
+--- a/scripts/mk/architecture.mk
++++ b/scripts/mk/architecture.mk
+@@ -2,6 +2,9 @@
+ # DEB_BUILD_* variables that dpkg-architecture can return. Existing values
+ # of those variables are preserved as per policy.
+ 
++ifndef dpkg_architecture.mk_included
++dpkg_architecture.mk_included :=
++
+ dpkg_lazy_eval ?= $$(or $$(value DPKG_CACHE_$(1)),$$(eval DPKG_CACHE_$(1) := $$(shell $(2)))$$(value DPKG_CACHE_$(1)))
+ 
+ dpkg_architecture_setvar = export $(1) ?= $(call dpkg_lazy_eval,$(1),dpkg-architecture -q$(1))
+@@ -9,3 +12,5 @@ dpkg_architecture_setvar = export $(1) ?= $(call dpkg_lazy_eval,$(1),dpkg-archit
+ $(foreach machine,BUILD HOST TARGET,\
+   $(foreach var,ARCH ARCH_ABI ARCH_LIBC ARCH_OS ARCH_CPU ARCH_BITS ARCH_ENDIAN GNU_CPU GNU_SYSTEM GNU_TYPE MULTIARCH,\
+     $(eval $(call dpkg_architecture_setvar,DEB_$(machine)_$(var)))))
++
++endif
+diff --git a/scripts/mk/buildapi.mk b/scripts/mk/buildapi.mk
+index 668e325c8..ba6b43543 100644
+--- a/scripts/mk/buildapi.mk
++++ b/scripts/mk/buildapi.mk
+@@ -1,5 +1,8 @@
+ # This Makefile fragment (since dpkg 1.22.0) handles the build API.
+ 
++ifndef dpkg_buildapi.mk_included
++dpkg_buildapi.mk_included :=
++
+ # Default API level when not set.
+ DPKG_BUILD_API ?= $(shell dpkg-buildapi)
+ 
+@@ -7,3 +10,5 @@ DPKG_BUILD_API ?= $(shell dpkg-buildapi)
+ # complexity given no integer operators, given that we currently have to
+ # fetch the build API level anyway.
+ dpkg_build_api_ge = $(shell test "$(DPKG_BUILD_API)" -ge "$(1)" && echo yes)
++
++endif
+diff --git a/scripts/mk/buildflags.mk b/scripts/mk/buildflags.mk
+index 4b8a3d8c4..02baa53f2 100644
+--- a/scripts/mk/buildflags.mk
++++ b/scripts/mk/buildflags.mk
+@@ -28,6 +28,10 @@
+ # You can also export them in the environment by setting
+ # DPKG_EXPORT_BUILDFLAGS to a non-empty value.
+ #
++
++ifndef dpkg_buildflags.mk_included
++dpkg_buildflags.mk_included :=
++
+ # This list is kept in sync with the default set of flags returned
+ # by dpkg-buildflags.
+ 
+@@ -77,3 +81,5 @@ $(foreach flag,$(DPKG_BUILDFLAGS_LIST),\
+ ifdef DPKG_EXPORT_BUILDFLAGS
+   export $(DPKG_BUILDFLAGS_LIST)
+ endif
++
++endif
+diff --git a/scripts/mk/buildopts.mk b/scripts/mk/buildopts.mk
+index c95777719..6787da76f 100644
+--- a/scripts/mk/buildopts.mk
++++ b/scripts/mk/buildopts.mk
+@@ -5,6 +5,11 @@
+ #
+ #   DEB_BUILD_OPTION_PARALLEL: the argument for the parallel=N option.
+ 
++ifndef dpkg_buildopts.mk_included
++dpkg_buildopts.mk_included :=
++
+ ifneq (,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+   DEB_BUILD_OPTION_PARALLEL = $(patsubst parallel=%,%,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+ endif
++
++endif
+diff --git a/scripts/mk/buildtools.mk b/scripts/mk/buildtools.mk
+index 933fdcfaa..90770a872 100644
+--- a/scripts/mk/buildtools.mk
++++ b/scripts/mk/buildtools.mk
+@@ -25,8 +25,15 @@
+ # The variables are not exported by default. This can be changed by
+ # defining DPKG_EXPORT_BUILDTOOLS.
+ 
+-dpkg_datadir = $(srcdir)/mk
++ifndef dpkg_buildtools.mk_included
++dpkg_buildtools.mk_included :=
++
++ifndef dpkg_architecture.mk_included
++ifndef dpkg_datadir
++  dpkg_datadir := $(patsubst %/buildtools.mk,%,$(lastword $(MAKEFILE_LIST)))
++endif
+ include $(dpkg_datadir)/architecture.mk
++endif
+ 
+ # We set the TOOL_FOR_BUILD variables to the specified value, and the TOOL
+ # variables (for the host) to their triplet-prefixed form iff they are
+@@ -74,3 +81,5 @@ $(eval $(call dpkg_buildtool_setvar,AR,ar))
+ $(eval $(call dpkg_buildtool_setvar,RANLIB,ranlib))
+ $(eval $(call dpkg_buildtool_setvar,PKG_CONFIG,pkgconf))
+ $(eval $(call dpkg_buildtool_setvar,QMAKE,qmake))
++
++endif
+diff --git a/scripts/mk/default.mk b/scripts/mk/default.mk
+index 0b2fd4aca..61921e30e 100644
+--- a/scripts/mk/default.mk
++++ b/scripts/mk/default.mk
+@@ -1,7 +1,13 @@
+ # This Makefile fragment (since dpkg 1.16.1) includes all the Makefile
+ # fragments that define variables that can be useful within debian/rules.
+ 
+-dpkg_datadir = $(srcdir)/mk
++ifndef dpkg_default.mk_included
++dpkg_default.mk_included :=
++
++ifndef dpkg_datadir
++  dpkg_datadir := $(patsubst %/default.mk,%,$(lastword $(MAKEFILE_LIST)))
++endif
++
+ include $(dpkg_datadir)/architecture.mk
+ include $(dpkg_datadir)/buildapi.mk
+ ifeq ($(call dpkg_build_api_ge,1),yes)
+@@ -11,3 +17,5 @@ include $(dpkg_datadir)/buildflags.mk
+ include $(dpkg_datadir)/buildopts.mk
+ include $(dpkg_datadir)/pkg-info.mk
+ include $(dpkg_datadir)/vendor.mk
++
++endif
+diff --git a/scripts/mk/pkg-info.mk b/scripts/mk/pkg-info.mk
+index bccde2317..5b38d84e9 100644
+--- a/scripts/mk/pkg-info.mk
++++ b/scripts/mk/pkg-info.mk
+@@ -13,6 +13,9 @@
+ #     specified by <https://reproducible-builds.org/specs/source-date-epoch/>
+ #     (since dpkg 1.18.8).
+ 
++ifndef dpkg_pkg-info.mk_included
++dpkg_pkg-info.mk_included :=
++
+ dpkg_late_eval ?= $(or $(value DPKG_CACHE_$(1)),$(eval DPKG_CACHE_$(1) := $(shell $(2)))$(value DPKG_CACHE_$(1)))
+ 
+ DEB_SOURCE = $(call dpkg_late_eval,DEB_SOURCE,dpkg-parsechangelog -SSource)
+@@ -25,3 +28,5 @@ DEB_DISTRIBUTION = $(call dpkg_late_eval,DEB_DISTRIBUTION,dpkg-parsechangelog -S
+ SOURCE_DATE_EPOCH ?= $(call dpkg_late_eval,SOURCE_DATE_EPOCH,dpkg-parsechangelog -STimestamp)
+ 
+ export SOURCE_DATE_EPOCH
++
++endif
+diff --git a/scripts/mk/vendor.mk b/scripts/mk/vendor.mk
+index f3241a57b..0ef79dace 100644
+--- a/scripts/mk/vendor.mk
++++ b/scripts/mk/vendor.mk
+@@ -33,8 +33,15 @@
+ #     ...
+ #   endif
+ 
+-dpkg_datadir = $(srcdir)/mk
++ifndef dpkg_vendor.mk_included
++dpkg_vendor.mk_included :=
++
++ifndef dpkg_buildapi.mk_included
++ifndef dpkg_datadir
++  dpkg_datadir := $(patsubst %/vendor.mk,%,$(lastword $(MAKEFILE_LIST)))
++endif
+ include $(dpkg_datadir)/buildapi.mk
++endif
+ 
+ dpkg_late_eval ?= $(or $(value DPKG_CACHE_$(1)),$(eval DPKG_CACHE_$(1) := $(shell $(2)))$(value DPKG_CACHE_$(1)))
+ 
+@@ -49,3 +56,5 @@ dpkg_vendor_derives_from ?= $(dpkg_vendor_derives_from_v1)
+ else
+ dpkg_vendor_derives_from ?= $(dpkg_vendor_derives_from_v0)
+ endif
++
++endif
+-- 
+2.39.2
+

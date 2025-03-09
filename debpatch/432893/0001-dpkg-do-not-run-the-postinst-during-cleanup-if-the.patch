@@ -1,0 +1,138 @@
+From e36c4b06e7779aa1eccf9df7e0bb16e081984ae0 Mon Sep 17 00:00:00 2001
+From: Ian Jackson <ian@davenant.greenend.org.uk>
+Date: Sun, 1 Jun 2008 14:35:27 +0200
+Subject: [PATCH] dpkg: do not run the postinst during cleanup if the previous state was bad
+
+* src/processarc.c (process_archive): Only call the postinst's
+abort-upgrade in cleanup if the status was good before-hand. Same goes
+for postinst's abort-remove when package was about to be removed due to a
+conflict. If the package was halfconfigured, we don't run the postinst and
+that way there are no surprises. When we do run the postinst we know that
+we can without fear set the package to installed (or trig*, as the case
+may be). We achieve this by not registering the cu_prerm* handlers unless
+the package was >stat_halfconfigured beforehand.  We have no more need to
+pass the previous state into the cu_prerm* postinst invocations.
+
+Mark reinstreq during unpack as late as possible, not before prerm.
+Previously the package would be reinstreq while we deal with conflictors'
+prerms and deconfiguration, but that's unnecessary.
+
+* src/remove.c (deferred_remove): Only call the postinst's abort-remove in
+cleanup if the status was good before-hand (same logic than above).
+
+* src/cleanup.c (cu_prermupgrade): Do not pointlessly clear reinstreq flag on postinst
+abort-upgrade. cu_prermupgrade is only be called via a push_cleanup in
+processarc.c which is only executed if the package is at least
+halfconfigured so reinstreq must be clear to start with.
+(cu_prerminfavour): Same with "abort-remove in-favour" from cleanup in
+processarc.c.
+(cu_prermremove): Same with abort-remove called from cleanup in remove.c.
+Always mark the package status as intalled if abort-remove succeeds as
+this will only be called if the status was greater than halfconfigured.
+Thus the oldpkgstatus parameter is now useless, drop it.
+---
+ src/cleanup.c    |    6 +-----
+ src/processarc.c |   19 +++++++++++--------
+ src/remove.c     |    4 ++--
+ 3 files changed, 14 insertions(+), 15 deletions(-)
+
+diff --git a/src/cleanup.c b/src/cleanup.c
+index a61aa80..e8d6092 100644
+--- a/src/cleanup.c
++++ b/src/cleanup.c
+@@ -111,7 +111,6 @@ void cu_prermupgrade(int argc, void **argv) {
+                              versiondescribe(&pkg->available.version,
+                                              vdew_nonambig),
+                              NULL);
+-  pkg->eflag &= ~eflagf_reinstreq;
+   post_postinst_tasks(pkg, stat_installed);
+   cleanup_pkg_failed--;
+ }
+@@ -160,7 +159,6 @@ void cu_prerminfavour(int argc, void **argv) {
+                              versiondescribe(&infavour->available.version,
+                                              vdew_nonambig),
+                              NULL);
+-  conflictor->eflag &= ~eflagf_reinstreq;
+   post_postinst_tasks(conflictor, stat_installed);
+   cleanup_conflictor_failed--;
+ }
+@@ -227,11 +225,9 @@ void cu_postrmupgrade(int argc, void **argv) {
+ 
+ void cu_prermremove(int argc, void **argv) {
+   struct pkginfo *pkg= (struct pkginfo*)argv[0];
+-  enum pkgstatus *oldpkgstatus= (enum pkgstatus*)argv[1];
+ 
+   if (cleanup_pkg_failed++) return;
+   maintainer_script_postinst(pkg, "abort-remove", NULL);
+-  pkg->eflag &= ~eflagf_reinstreq;
+-  post_postinst_tasks(pkg, *oldpkgstatus);
++  post_postinst_tasks(pkg, stat_installed);
+   cleanup_pkg_failed--;
+ }
+diff --git a/src/processarc.c b/src/processarc.c
+index 3085962..0600041 100644
+--- a/src/processarc.c
++++ b/src/processarc.c
+@@ -398,10 +398,10 @@ void process_archive(const char *filename) {
+       oldversionstatus == stat_triggersawaited ||
+       oldversionstatus == stat_triggerspending ||
+       oldversionstatus == stat_installed) {
+-    pkg->eflag |= eflagf_reinstreq;
+     pkg->status= stat_halfconfigured;
+     modstatdb_note(pkg);
+-    push_cleanup(cu_prermupgrade, ~ehflag_normaltidy, NULL, 0, 1, (void *)pkg);
++    if (oldversionstatus > stat_halfconfigured)
++      push_cleanup(cu_prermupgrade, ~ehflag_normaltidy, NULL, 0, 1, (void *)pkg);
+     maintainer_script_alternative(pkg, PRERMFILE, "pre-removal", cidir, cidirrest,
+                                   "upgrade", "failed-upgrade");
+     pkg->status= stat_unpacked;
+@@ -418,6 +418,7 @@ void process_archive(const char *filename) {
+     else
+       printf(_("De-configuring %s ...\n"), deconpil->pkg->name);
+ 
++    assert(deconpil->pkg->status > stat_halfconfigured);
+     trig_activate_packageprocessing(deconpil->pkg);
+     deconpil->pkg->status= stat_halfconfigured;
+     modstatdb_note(deconpil->pkg);
+@@ -449,15 +450,17 @@ void process_archive(const char *filename) {
+   }
+ 
+   for (i = 0 ; i < cflict_index; i++) {
+-    if (!(conflictor[i]->status == stat_halfconfigured ||
+-          conflictor[i]->status == stat_triggersawaited ||
+-          conflictor[i]->status == stat_triggerspending ||
+-          conflictor[i]->status == stat_installed)) continue;
++    enum pkgstatus conflictoroldstatus = conflictor[i]->status;
++    if (!(conflictoroldstatus == stat_halfconfigured ||
++          conflictoroldstatus == stat_triggersawaited ||
++          conflictoroldstatus == stat_triggerspending ||
++          conflictoroldstatus == stat_installed)) continue;
+     trig_activate_packageprocessing(conflictor[i]);
+     conflictor[i]->status= stat_halfconfigured;
+     modstatdb_note(conflictor[i]);
+-    push_cleanup(cu_prerminfavour, ~ehflag_normaltidy, NULL, 0,
+-                 2,(void*)conflictor[i],(void*)pkg);
++    if (conflictoroldstatus > stat_halfconfigured)
++      push_cleanup(cu_prerminfavour, ~ehflag_normaltidy, NULL, 0,
++                   2, (void*)conflictor[i], (void*)pkg);
+     maintainer_script_installed(conflictor[i], PRERMFILE, "pre-removal",
+                                 "remove", "in-favour", pkg->name,
+                                 versiondescribe(&pkg->available.version,
+diff --git a/src/remove.c b/src/remove.c
+index 1e92d62..4a09c2c 100644
+--- a/src/remove.c
++++ b/src/remove.c
+@@ -173,8 +173,8 @@ void deferred_remove(struct pkginfo *pkg) {
+     oldpkgstatus= pkg->status;
+     pkg->status= stat_halfconfigured;
+     modstatdb_note(pkg);
+-    push_cleanup(cu_prermremove, ~ehflag_normaltidy, NULL, 0, 2,
+-                 (void *)pkg, (void *)&oldpkgstatus);
++    if (oldpkgstatus > stat_halfconfigured)
++      push_cleanup(cu_prermremove, ~ehflag_normaltidy, NULL, 0, 1, (void *)pkg);
+     maintainer_script_installed(pkg, PRERMFILE, "pre-removal",
+                                 "remove", NULL);
+ 
+-- 
+1.5.5.3
+

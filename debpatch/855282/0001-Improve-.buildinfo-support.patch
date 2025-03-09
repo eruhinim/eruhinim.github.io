@@ -1,0 +1,98 @@
+From 8ccb601c3e3f1cb16db923b8464e8a73b4cf03df Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Fri, 17 Feb 2017 06:04:27 +0100
+Subject: [PATCH] Improve .buildinfo support
+
+---
+ scripts/debsign.sh   | 19 +++++++++++++------
+ scripts/dscverify.pl |  7 ++++---
+ 2 files changed, 17 insertions(+), 9 deletions(-)
+
+diff --git a/scripts/debsign.sh b/scripts/debsign.sh
+index ede3aa79..4b2b22cb 100755
+--- a/scripts/debsign.sh
++++ b/scripts/debsign.sh
+@@ -418,7 +418,7 @@ fixup_control() {
+     '" \$file=\"$child\"; \$md5=\"$md5\"; "'
+     '" \$sha1=\"$sha1\"; \$sha256=\"$sha256\"; "'
+     $size=(-s $file); ($base=$file) =~ s|.*/||;
+-    $infiles=0; $insha1=0; $insha256=0; $format="";
++    $infiles=0; $inmd5=0; $insha1=0; $insha256=0; $format="";
+     }
+     if(/^Format:\s+(.*)/) {
+ 	$format=$1;
+@@ -429,19 +429,26 @@ fixup_control() {
+ 	die "Unsupported .$parenttype format: $format\n"
+ 	    if('"$filter_out"');
+     }
+-    /^Files:/i && ($infiles=1,$insha1=0,$insha256=0);
+-    if(/^Checksums-Sha1:/i) {$insha1=1;$infiles=0;$insha256=0;}
++    /^Files:/i && ($infiles=1,$inmd5=0,$insha1=0,$insha256=0);
++    if(/^Checksums-Sha1:/i) {$insha1=1;$infiles=0;$inmd5=0;$insha256=0;}
+     elsif(/^Checksums-Sha256:/i) {
+-	$insha256=1;$infiles=0;$insha1=0;
++	$insha256=1;$infiles=0;$inmd5=0;$insha1=0;
++    } elsif(/^Checksums-Md5:/i) {
++	$inmd5=1;$infiles=0;$insha1=0;$insha256=0;
+     } elsif(/^Checksums-.*?:/i) {
+ 	die "Unknown checksum format: $_\n";
+     }
+-    /^\s*$/ && ($infiles=0,$insha1=0,$insha256=0);
++    /^\s*$/ && ($infiles=0,$inmd5=0,$insha1=0,$insha256=0);
+     if ($infiles &&
+ 	/^ (\S+) (\d+) (\S+) (\S+) \Q$base\E\s*$/) {
+ 	$_ = " $md5 $size $3 $4 $base\n";
+ 	$infiles=0;
+     }
++    if ($inmd5 &&
++	/^ (\S+) (\d+) \Q$base\E\s*$/) {
++        $_ = " $md5 $size $base\n";
++        $inmd5=0;
++    }
+     if ($insha1 &&
+ 	/^ (\S+) (\d+) \Q$base\E\s*$/) {
+ 	$_ = " $sha1 $size $base\n";
+@@ -455,7 +462,7 @@ fixup_control() {
+ }
+ 
+ fixup_buildinfo() {
+-    fixup_control '$major < 1 and $minor < 2' dsc buildinfo "$@"
++    fixup_control '$major != 0 or $minor > 2' dsc buildinfo "$@"
+ }
+ 
+ fixup_changes() {
+diff --git a/scripts/dscverify.pl b/scripts/dscverify.pl
+index 8bc0857c..381ebff5 100755
+--- a/scripts/dscverify.pl
++++ b/scripts/dscverify.pl
+@@ -198,7 +198,7 @@ sub process_file {
+ 	}
+     }
+ 
+-    if ($file =~ /\.changes$/ and $out =~ /^Format:\s*(.*)$/mi) {
++    if ($file =~ /\.(changes|buildinfo)$/ and $out =~ /^Format:\s*(.*)$/mi) {
+ 	my $format = $1;
+ 	unless ($format =~ /^(\d+)\.(\d+)$/) {
+ 	    xwarn "$file has an unrecognised format: $format\n";
+@@ -207,7 +207,8 @@ sub process_file {
+ 	my ($major, $minor) = split /\./, $format;
+ 	$major += 0;
+ 	$minor += 0;
+-	unless ($major == 1 and $minor <= 8) {
++	if ($file =~ /\.changes$/ and ($major != 1 or $minor > 8) or
++	    $file =~ /\.buildinfo$/ and ($major != 0 or $minor > 2)) {
+ 	    xwarn "$file is an unsupported format: $format\n";
+ 	    return;
+ 	}
+@@ -220,7 +221,7 @@ sub process_file {
+     }
+ 
+     my @checksums = map { split /\n/ } $out =~ /^Checksums-(\S+):\s*\n/mgi;
+-    @checksums = grep {!/^Sha(1|256)$/i} @checksums;
++    @checksums = grep {!/^(Md5|Sha(1|256))$/i} @checksums;
+     if (@checksums) {
+ 	xwarn "$file contains unsupported checksums:\n"
+ 	    . join (", ", @checksums) . "\n";
+-- 
+2.11.0.483.g087da7b7c
+

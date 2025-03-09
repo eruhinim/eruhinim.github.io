@@ -1,0 +1,30 @@
+--- /usr/share/initramfs-tools/scripts/local-top/cryptroot.orig	2023-04-21 00:54:29.000000000 +0200
++++ /usr/share/initramfs-tools/scripts/local-top/cryptroot	2023-06-12 19:38:06.706673696 +0200
+@@ -148,8 +148,16 @@
+         fi
+     fi
+ 
+-    local count=0 maxtries="${CRYPTTAB_OPTION_tries:-3}" fstype vg rv
++    local count=0 maxtries="${CRYPTTAB_OPTION_tries:-3}" poweroffpid=0 fstype vg rv
+     while [ $maxtries -le 0 ] || [ $count -lt $maxtries ]; do
++        if [ "${CRYPTTAB_OPTION_timeout:-0}" -gt 15 ]; then
++            # Power down if not key has been entered within $timeout seconds.
++            # Ignore values below 15 seconds to give the user a chance
++            # to enter his passphrase in case of a typo in /etc/crypttab.
++            cryptsetup_message "Timeout in $CRYPTTAB_OPTION_timeout seconds"
++	    (sleep "$CRYPTTAB_OPTION_timeout" && cryptsetup_message "poweroff" && /usr/sbin/poweroff -f) &
++            poweroffpid=$!
++        fi
+         if [ -z "${CRYPTTAB_OPTION_keyscript+x}" ] && [ "$CRYPTTAB_KEY" != "none" ]; then
+             # unlock via keyfile
+             unlock_mapping "$CRYPTTAB_KEY"
+@@ -159,6 +167,9 @@
+         fi
+         rv=$?
+         count=$(( $count + 1 ))
++        if [ "$poweroffpid" -gt 0 ]; then
++            kill "$poweroffpid"
++        fi
+ 
+         if [ $rv -ne 0 ]; then
+             cryptsetup_message "ERROR: $CRYPTTAB_NAME: cryptsetup failed, bad password or options?"

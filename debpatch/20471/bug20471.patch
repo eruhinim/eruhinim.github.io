@@ -1,0 +1,236 @@
+From 17b87fa14197059c72d3e61e277e349dfd048f49 Mon Sep 17 00:00:00 2001
+From: Ian Jackson <ian@anarres.relativity.greenend.org.uk>
+Date: Tue, 30 Oct 2007 19:50:06 +0000
+Subject: [PATCH] Check dependencies _on_ the package we're to upgrade.  Closes: #20471.
+
+This ensures that the new package will (when it is configured)
+satisfy the current setup.  We don't mind already-broken dependencies.
+
+Some additional useful comments about dependencies in processarc.c.
+---
+ debian/changelog |    6 +++++
+ src/archives.c   |   49 +++++++++++++++++++++++++++++++++++++++++++++++
+ src/archives.h   |    2 +
+ src/depcon.c     |   17 +++++++++++----
+ src/processarc.c |   56 +++++++++++++++++++++++++++++++++++++++++++++++------
+ 5 files changed, 118 insertions(+), 12 deletions(-)
+
+diff --git a/debian/changelog b/debian/changelog
+index 8b78abb..31b8ccb 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -68,6 +68,12 @@ dpkg (1.14.8) UNRELEASED; urgency=low
+   * Swedish (Peter Karlsson).
+   * German added (Helge Kreutzmann). Closes: #448353
+ 
++  [ Ian Jackson ]
++  * Check dependencies _on_ the package we're to upgrade.  Closes: #20471.
++    This ensures that the new package will (when it is configured)
++    satisfy the current setup.  We don't mind already-broken dependencies.
++  * Some additional useful comments about dependencies in processarc.c.
++
+  -- Raphael Hertzog <hertzog@debian.org>  Mon, 08 Oct 2007 20:49:51 +0200
+ 
+ dpkg (1.14.8~newshlib) experimental; urgency=low
+diff --git a/src/archives.c b/src/archives.c
+index df21d27..2a79b53 100644
+--- a/src/archives.c
++++ b/src/archives.c
+@@ -1055,6 +1055,55 @@ void check_conflict(struct dependency *dep, struct pkginfo *pkg,
+   return;
+ }
+ 
++static void cu_rdepends_istobe(int argc, void **argv) {
++  struct pkginfo *pkg= argv[0];
++  assert(pkg->clientdata->istobe == itb_normal);
++  pkg->clientdata->istobe= itb_installnew;
++}
++
++void check_rdepends(struct dependency *dep, struct pkginfo *pkg,
++                    const char *pfilename) {
++  static struct varbuf whynot;
++  int originally, afterwards;
++
++  /* Was this dependency previously satisfied ?  If not we don't worry
++   * if it's not going to be satisfied, either.  But we count it as
++   * having been previously satisfied even if it technically isn't
++   * because a satisfying package is only unpacked.  That avoids
++   * accidentally permanently breaking the dependency just because the
++   * satisfying package happens not to be configured for some reason
++   * (eg because you have just unpacked the good version but haven't
++   * yet configured it).
++   */
++  assert(pkg->clientdata->istobe == itb_installnew);
++  pkg->clientdata->istobe= itb_normal;
++  push_cleanup(cu_rdepends_istobe,~0, 0,0, 1,(void*)pkg);
++  originally= depisok(dep,&whynot,0,1);
++  pop_cleanup(ehflag_normaltidy);
++
++  if (!originally) {
++    varbufaddc(&whynot,0);
++    debug(dbg_depcon, "disregarding rdepends; dependency already"
++	  " broken:\n %s", whynot.buf);
++    return;
++  }
++
++  afterwards= depisok(dep,&whynot,0,1);
++  if (afterwards)
++    return;
++
++  varbufaddc(&whynot,0);
++  fprintf(stderr, _("dpkg: %s containing %s breaks existing dependency:\n%s"),
++	  pfilename, pkg->name, whynot.buf);
++  if (!(fc_depends ||
++	ignore_depends(dep->up) ||
++	ignore_depends(pkg))) {
++    ohshit(_("existing dependency problem - not installing %.250s"),pkg->name);
++    fprintf(stderr, _("dpkg: warning - ignoring"
++		      " existing dependency problem!\n"));
++  }
++}
++
+ void cu_cidir(int argc, void **argv) {
+   char *cidir= (char*)argv[0];
+   char *cidirrest= (char*)argv[1];
+diff --git a/src/archives.h b/src/archives.h
+index 5696c19..2824f2e 100644
+--- a/src/archives.h
++++ b/src/archives.h
+@@ -67,6 +67,8 @@ void check_conflict(struct dependency *dep, struct pkginfo *pkg,
+                     const char *pfilename);
+ void check_breaks(struct dependency *dep, struct pkginfo *pkg,
+                   const char *pfilename);
++void check_rdepends(struct dependency *dep, struct pkginfo *pkg,
++                    const char *pfilename);
+ 
+ struct fileinlist *addfiletolist(struct tarcontext *tc,
+ 				 struct filenamenode *namenode);
+diff --git a/src/depcon.c b/src/depcon.c
+index 5f7f285..a8496b9 100644
+--- a/src/depcon.c
++++ b/src/depcon.c
+@@ -340,12 +340,19 @@ int depisok(struct dependency *dep, struct varbuf *whynot,
+           
+           switch (provider->up->up->clientdata->istobe) {
+           case itb_installnew:
+-            /* Don't pay any attention to the Provides field of the
+-             * currently-installed version of the package we're trying
+-             * to install.  We dealt with that by using the available
+-             * information above.
++            /* The Provides field of the currently-installed version
++             * of the package we're trying to install doesn't really
++             * help, but we should at least mention it.  We dealt with
++             * the possibility that the to-be-installed version would
++             * help when we checked the available information, above.
+              */
+-            continue; 
++            sprintf(linebuf, _("  %.250s %.250s provides %.250s"
++			       " but is to be supplanted.\n"),
++		    provider->up->up->name,
++		    versiondescribe(&provider->up->up->installed.version,
++				    vdew_nonambig),
++		    possi->ed->name);
++            break;
+           case itb_remove:
+             sprintf(linebuf, _("  %.250s provides %.250s but is to be removed.\n"),
+                     provider->up->up->name, possi->ed->name);
+diff --git a/src/processarc.c b/src/processarc.c
+index cb69504..27c96f3 100644
+--- a/src/processarc.c
++++ b/src/processarc.c
+@@ -65,7 +65,7 @@ void process_archive(const char *filename) {
+   
+   int c1, r, admindirlen, i, infodirlen, infodirbaseused, status;
+   struct pkgiterator *it;
+-  struct pkginfo *pkg, *otherpkg, *divpkg;
++  struct pkginfo *pkg, *otherpkg, *divpkg, *virtpkg;
+   char *cidir, *cidirrest, *p;
+   char *pfilenamebuf, conffilenamebuf[MAXCONFFILENAME];
+   const char *pfilename, *newinfofilename, *failed;
+@@ -238,15 +238,23 @@ void process_archive(const char *filename) {
+   for (dsearch= pkg->available.depends; dsearch; dsearch= dsearch->next) {
+     switch (dsearch->type) {
+     case dep_conflicts:
+-      /* Look for things we conflict with. */
++      /* Look for things we conflict with.
++       *    NEW --Conflicts--> SOMETHING
++       *    NEW --Conflicts--> VIRTUAL <--Provides-- SOMETHING
++       */
+       check_conflict(dsearch, pkg, pfilename);
+       break;
+     case dep_breaks:
+-      /* Look for things we break. */
++      /* Look for things we break.
++       *    NEW --Breaks--> SOMETHING
++       *    NEW --Breaks--> VIRTUAL <--Provides-- SOMETHING
++       */
+       check_breaks(dsearch, pkg, pfilename);
+       break;
+     case dep_provides:
+-      /* Look for things that conflict with what we provide. */
++      /* Look for things that conflict with what we provide.
++       *    NEW --Provides--> VIRTUAL <--Conflicts-- SOMETHING
++       */
+       if (dsearch->list->ed->installed.valid) {
+         for (psearch= dsearch->list->ed->installed.depended;
+              psearch;
+@@ -264,6 +272,9 @@ void process_archive(const char *filename) {
+       /* Ignore these here. */
+       break;
+     case dep_predepends:
++      /*    NEW --Pre-Depends--> SOMETHING
++       *    NEW --Pre-Depends--> VIRTUAL <--Provides-- SOMETHING
++       */
+       if (!depisok(dsearch,&depprobwhy,0,1)) {
+         varbufaddc(&depprobwhy,0);
+         fprintf(stderr, _("dpkg: regarding %s containing %s, pre-dependency problem:\n%s"),
+@@ -274,12 +285,43 @@ void process_archive(const char *filename) {
+       }
+     }
+   }
+-  /* Look for things that conflict with us. */
++
++  /* Look for things that conflict with us, or which depend on an
++   * already-installed version of us but which aren't satisfied by
++   * the new version. */
+   for (psearch= pkg->installed.depended; psearch; psearch= psearch->nextrev) {
+-    if (psearch->up->type != dep_conflicts) continue;
+-    check_conflict(psearch->up, pkg, pfilename);
++    switch (psearch->up->type) {
++    case dep_conflicts:
++      /*  SOMETHING --Conflicts--> US  */
++      check_conflict(psearch->up, pkg, pfilename);
++      break;
++    case dep_depends:
++    case dep_predepends:
++      /*  SOMETHING --(Pre-)Depends--> US  */
++      check_rdepends(psearch->up, pkg, pfilename);
++      break;
++    case dep_provides:
++    case dep_suggests:
++    case dep_recommends:
++    case dep_replaces:
++    case dep_breaks:
++    case dep_enhances:
++      break;
++    }
+   }
+   
++  for (dsearch= pkg->installed.depends; dsearch; dsearch= dsearch->next) {
++    /*  OLD --Provides--> VIRTUAL <--(Pre-)Depends-- SOMETHING  */
++    if (dsearch->type != dep_provides) continue;
++    virtpkg= dsearch->list->ed;
++    for (psearch= virtpkg->installed.depended;
++	 psearch;
++	 psearch= psearch->nextrev) {
++      if (psearch->up->up == pkg) continue; /* reflexive via Provides */
++      check_rdepends(psearch->up, pkg, pfilename);
++    }
++  }
++
+   ensure_allinstfiles_available();
+   filesdbinit();
+   
+-- 
+1.5.3.4
+

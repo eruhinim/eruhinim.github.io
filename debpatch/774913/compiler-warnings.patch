@@ -1,0 +1,235 @@
+# Description: Get rid of compiler warnings. One accessing an invalid pointer.
+# Author: Russell Stuart <russell-debian@stuart.id.au>
+
+--- a/options.h
++++ b/options.h
+@@ -27,7 +27,7 @@
+      int enabled;               /* enabled for use by server or client */
+ };
+ 
+-extern struct tftp_opt tftp_default_options[OPT_NUMBER];
++extern struct tftp_opt tftp_default_options[OPT_NUMBER + 1];
+ 
+ int opt_parse_request(char *data, int data_size, struct tftp_opt *options);
+ int opt_parse_options(char *data, int data_size, struct tftp_opt *options);
+--- a/tftp_def.c
++++ b/tftp_def.c
+@@ -32,7 +32,7 @@
+  */
+ 
+ // FIXME: is there a way to use TIMEOUT and SEGSIZE here?
+-struct tftp_opt tftp_default_options[OPT_NUMBER] = {
++struct tftp_opt tftp_default_options[OPT_NUMBER + 1] = {
+      { "filename", "", 0, 1},   /* file to transfer */
+      { "mode", "octet", 0, 1},  /* mode for transfer */
+      { "tsize", "0", 0, 1 },    /* RFC1350 options. See RFC2347, */
+@@ -67,44 +67,36 @@
+  */ 
+ int timeval_diff(struct timeval *res, struct timeval *t1, struct timeval *t0)
+ {
++     int neg = 1;
+      res->tv_sec = t1->tv_sec - t0->tv_sec;
+      res->tv_usec = t1->tv_usec - t0->tv_usec;
+      
+-     if (res->tv_sec > 0)
++     while (res->tv_sec < 0 || res->tv_usec < 0)
+      {
+-          if (res->tv_usec >= 0)
+-          {
+-               return 1;
+-          }
+-          else
+-          {
+-               res->tv_sec -= 1;
+-               res->tv_usec += 1000000;
+-               return 1;
+-          }
+-     }
+-     else if (res->tv_sec < 0)
+-     {
+-          if (res->tv_usec > 0)
+-          {
+-               res->tv_sec += 1;
+-               res->tv_usec -= 1000000;
+-               return -1;
+-          }
+-          else if (res->tv_usec <= 0);
+-          {
+-               return -1;
+-          }
+-     }
+-     else
+-     {
+-          if (res->tv_usec > 0)
+-               return 1;
+-          else if (res->tv_usec < 0)
+-               return -1;
+-          else
+-               return 0;
+-     }
++	  if (res->tv_sec < 0 || (res->tv_sec == 0 && res->tv_usec < 0))
++	  {
++	      neg = -neg;
++	      res->tv_sec = -res->tv_sec;
++	      res->tv_usec = -res->tv_usec;
++	  }
++	  if (res->tv_usec < 0)
++	  {
++	      long s = (res->tv_usec - 999999) / 1000000;
++	      res->tv_sec += s;
++	      res->tv_usec -= s * 1000000;
++	  }
++      }
++      if (res->tv_usec >= 1000000)
++      {
++	  long s = res->tv_usec / 1000000;
++	  res->tv_sec += s;
++	  res->tv_usec -= s * 1000000;
++      }
++      if (res->tv_sec == 0 && res->tv_usec == 0)
++      {
++	  return 0;
++      }
++      return neg;
+ }
+ 
+ /*
+--- a/tftp_io.c
++++ b/tftp_io.c
+@@ -320,7 +320,7 @@
+                memcpy(sa_from, &from, sizeof(from));
+ 
+           /* if sa as never been initialised, port is still 0 */
+-          if (sockaddr_get_port(&sa) == 0)
++          if (sockaddr_get_port(sa) == 0)
+                memcpy(sa, &from, sizeof(from));
+ 
+ 
+--- a/tftpd_list.c
++++ b/tftpd_list.c
+@@ -149,7 +149,7 @@
+ 
+      opt_request_to_string(tftp_options, options, MAXLEN);
+      index = strstr(options, "multicast");
+-     len = (int)index - (int)options;
++     len = (int)((unsigned long)index - (unsigned long)options);
+ 
+      /* lock the whole list before walking it */
+      pthread_mutex_lock(&thread_list_mutex);
+--- a/tftp_mtftp.c
++++ b/tftp_mtftp.c
+@@ -63,7 +63,7 @@
+  * If mode = 0, count missed packet from block 0. Else, start after first
+  * received block.
+  */
+-int tftp_mtftp_missed_packet(int file_bitmap[], long last_block, int mode)
++int tftp_mtftp_missed_packet(unsigned int file_bitmap[], long last_block, int mode)
+ {
+      int missed_block = 0;
+      int block_number = 0;
+@@ -449,7 +449,7 @@
+                             block_number, data_size - 4);
+                fseek(fp, (block_number - 1) * (data->data_buffer_size - 4),
+                      SEEK_SET);
+-               if (fwrite(tftphdr->th_data, 1, data_size - 4, fp) !=
++               if ((int)fwrite(tftphdr->th_data, 1, data_size - 4, fp) !=
+                    (data_size - 4))
+                {
+                     
+--- a/configure.ac
++++ b/configure.ac
+@@ -67,14 +67,14 @@
+ dnl Check for AIX
+ AC_AIX
+ 
+-CFLAGS="-g -Wall -D_REENTRANT"
++CFLAGS="-g -Wall -Wextra -Wno-unused-parameter -D_REENTRANT"
+ 
+ if test x$debug = xtrue; then
+    CFLAGS="$CFLAGS -O0 -DDEBUG"
+ else
+   if test -n "$auto_cflags"; then
+     if test -n "$GCC"; then
+-      CFLAGS="$CFLAGS -g -O2 -Wall -Wno-implicit"
++      CFLAGS="$CFLAGS -g -O2 -Wall -Wextra -Wno-implicit -Wno-unused-parameter"
+     else
+       case "$host_os" in
+         *hpux*)  CFLAGS="$CFLAGS +O3"
+--- a/tftpd_pcre.c
++++ b/tftpd_pcre.c
+@@ -245,7 +245,6 @@
+ /* if no match is found return -1 */
+ int tftpd_pcre_sub(tftpd_pcre_self_t *self, char *outstr, int outlen, char *str)
+ {
+-     int rc;
+      int ovector[OVECCOUNT];
+      int matches;
+      tftpd_pcre_pattern_t *pat;
+@@ -276,7 +275,7 @@
+           }
+           /* we have a match  - carry out substitution */
+           logger(LOG_DEBUG,"Pattern \"%s\" matches", pat->pattern);
+-          rc = tftpd_pcre_makesub(pat,
++          tftpd_pcre_makesub(pat,
+                                   outstr, outlen,
+                                   str,
+                                   ovector, matches);
+--- a/options.c
++++ b/options.c
+@@ -304,14 +304,14 @@
+ 
+      for (i = 0; i < 2; i++)
+      {
+-          if ((index + strlen(options[i].option) + 2) < len)
++          if ((index + (int)strlen(options[i].option) + 2) < len)
+           {
+                Strncpy(string + index, options[i].option, len - index);
+                index += strlen(options[i].option);
+                Strncpy(string + index, ": ", len - index);
+                index += 2;
+           }
+-          if ((index + strlen(options[i].value) + 2) < len)
++          if ((index + (int)strlen(options[i].value) + 2) < len)
+           {
+                Strncpy(string + index, options[i].value, len - index);
+                index += strlen(options[i].value);
+@@ -333,14 +333,14 @@
+      {
+           if (options[i].specified && options[i].enabled)
+           {
+-               if ((index + strlen(options[i].option) + 2) < len)
++               if ((index + (int)strlen(options[i].option) + 2) < len)
+                {
+                     Strncpy(string + index, options[i].option, len - index);
+                     index += strlen(options[i].option);
+                     Strncpy(string + index, ": ", len - index);
+                     index += 2;
+                }
+-               if ((index + strlen(options[i].value) + 2) < len)
++               if ((index + (int)strlen(options[i].value) + 2) < len)
+                {
+                     Strncpy(string + index, options[i].value, len - index);
+                     index += strlen(options[i].value);
+--- a/tftpd.c
++++ b/tftpd.c
+@@ -326,8 +326,18 @@
+ 	       }
+           }
+ 
+-          setgid(group->gr_gid);
+-          setuid(user->pw_uid);
++	  if (setgid(group->gr_gid) != OK) {
++	      logger(LOG_ERR,
++		      "atftpd: failed to setgid to group %d (%s).",
++		      group->gr_gid, group_name);
++	      exit(1);
++	  }
++	  if (setuid(user->pw_uid) != OK) {
++	      logger(LOG_ERR,
++		      "atftpd: failed to setuid to user %d (%s).",
++		      user->pw_uid, user_name);
++	      exit(1);
++	  }
+ 
+           /* Reopen log file now that we changed user, and that we've
+            * open and dup2 the socket. */

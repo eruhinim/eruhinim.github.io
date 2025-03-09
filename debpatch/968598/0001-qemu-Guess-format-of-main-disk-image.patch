@@ -1,0 +1,114 @@
+From 4c6ac09af05cc6f9a88a034c089e2629e8936310 Mon Sep 17 00:00:00 2001
+From: Simon McVittie <smcv@debian.org>
+Date: Tue, 18 Aug 2020 11:01:42 +0100
+Subject: [PATCH 1/2] qemu: Guess format of main disk image
+
+In qemu 5.1, qemu-img outputs a deprecation warning if it is made to
+guess the format of a disk image, on the basis that untrusted disk
+images can be crafted to have ambiguous contents: for example, if an
+image is guessed to be in raw format, a guest can overwrite suitable
+magic numbers to turn it into something that qemu will guess to be
+qcow2.
+
+autopkgtest-virt-qemu has historically accepted either raw or qcow2
+images, and our images are presumably at least somewhat trusted, so
+explicitly guess using qemu-info to suppress the warning. A future
+enhancement would be to provide a way for the user to specify the
+format of the disk image(s) they are providing, removing the need
+to guess.
+
+Signed-off-by: Simon McVittie <smcv@debian.org>
+---
+ virt/autopkgtest-virt-qemu | 34 ++++++++++++++++++++++++++++++----
+ 1 file changed, 30 insertions(+), 4 deletions(-)
+
+diff --git a/virt/autopkgtest-virt-qemu b/virt/autopkgtest-virt-qemu
+index affe094..ded7fa2 100755
+--- a/virt/autopkgtest-virt-qemu
++++ b/virt/autopkgtest-virt-qemu
+@@ -36,6 +36,7 @@ import errno
+ import fcntl
+ import re
+ import argparse
++import json
+ 
+ sys.path.insert(0, '/usr/share/autopkgtest/lib')
+ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+@@ -51,6 +52,7 @@ p_qemu = None
+ ssh_port = None
+ normal_user = None
+ qemu_cmd_default = None
++image0_format = None
+ 
+ 
+ def parse_args():
+@@ -104,15 +106,37 @@ def parse_args():
+ def prepare_overlay():
+     '''Generate a temporary overlay image'''
+ 
++    global image0_format
++
+     # generate a temporary overlay
+     if args.overlay_dir:
+         overlay = os.path.join(args.overlay_dir, os.path.basename(
+             args.image[0]) + '.overlay-%s' % time.time())
+     else:
+         overlay = os.path.join(workdir, 'overlay.img')
++
++    # TODO: Ideally we would specify format= for these rather than
++    # having qemu guess... but for now, to avoid warnings from qemu-img,
++    # explicitly guess rather than having qemu-img do it
++    info = json.loads(
++        VirtSubproc.check_exec([
++            'qemu-img', 'info',
++            '--output=json',
++            args.image[0],
++        ], outp=True, timeout=5)
++    )
++
++    if 'format' not in info:
++        VirtSubproc.bomb('Unable to determine format of %s' % args.image[0])
++
++    image0_format = info['format']
++
+     adtlog.debug('Creating temporary overlay image in %s' % overlay)
+-    VirtSubproc.check_exec(['qemu-img', 'create', '-f', 'qcow2', '-b',
+-                            os.path.abspath(args.image[0]), overlay],
++    VirtSubproc.check_exec(['qemu-img', 'create',
++                            '-f', 'qcow2',
++                            '-F', image0_format,
++                            '-b', os.path.abspath(args.image[0]),
++                            overlay],
+                            outp=True, timeout=300)
+     return overlay
+ 
+@@ -212,7 +236,7 @@ def setup_baseimage():
+ 
+     # Add the base image as an additional drive
+     monitor = VirtSubproc.get_unix_socket(os.path.join(workdir, 'monitor'))
+-    monitor.sendall(('drive_add 0 file=%s,if=none,readonly=on,serial=BASEIMAGE,id=drive-baseimage\n' % args.image[0]).encode())
++    monitor.sendall(('drive_add 0 file=%s,if=none,readonly=on,serial=BASEIMAGE,id=drive-baseimage,format=%s\n' % (args.image[0], image0_format)).encode())
+     VirtSubproc.expect(monitor, b'(qemu)', 10)
+     monitor.sendall(b'device_add virtio-blk-pci,drive=drive-baseimage,id=virtio-baseimage\n')
+     VirtSubproc.expect(monitor, b'(qemu)', 10)
+@@ -557,7 +581,7 @@ def hook_open():
+             '-serial', 'unix:%s/ttyS1,server,nowait' % workdir,
+             '-virtfs',
+             'local,id=autopkgtest,path=%s,security_model=none,mount_tag=autopkgtest' % shareddir,
+-            '-drive', 'file=%s,cache=unsafe,if=virtio,index=0' % overlay]
++            '-drive', 'file=%s,cache=unsafe,if=virtio,index=0,format=qcow2' % overlay]
+ 
+     if args.efi:
+         code = None
+@@ -583,6 +607,8 @@ def hook_open():
+         argv.append('if=pflash,format=raw,file=%s/efivars.fd' % workdir)
+ 
+     for i, image in enumerate(args.image[1:]):
++        # TODO: Ideally we would specify format= for these rather than
++        # having qemu guess
+         argv.append('-drive')
+         argv.append('file=%s,if=virtio,index=%i,readonly' % (image, i + 1))
+ 
+-- 
+2.28.0
+

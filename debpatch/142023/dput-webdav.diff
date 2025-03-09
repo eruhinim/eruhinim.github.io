@@ -1,0 +1,88 @@
+diff -Nru /tmp/O2fg8E7GQU/dput-0.9.2.25ubuntu1/debian/rules /tmp/uWi5WB2aD6/dput-0.9.2.25ubuntu1~rb1/debian/rules
+--- /tmp/O2fg8E7GQU/dput-0.9.2.25ubuntu1/debian/rules	2006-07-07 17:36:44.000000000 +0100
++++ /tmp/uWi5WB2aD6/dput-0.9.2.25ubuntu1~rb1/debian/rules	2006-12-02 19:21:13.000000000 +0000
+@@ -37,6 +37,8 @@
+ 	install --mode=0644 dcut.1 $(TMPDIR)/usr/share/man/man1
+ 	install --mode=0644 dput.cf.5 $(TMPDIR)/usr/share/man/man5
+ 	install --mode=0644 ftp.py $(TMPDIR)/usr/share/dput
++	install --mode=0644 http.py $(TMPDIR)/usr/share/dput
++	install --mode=0644 https.py $(TMPDIR)/usr/share/dput
+ 	install --mode=0644 scp.py $(TMPDIR)/usr/share/dput
+ 	install --mode=0644 local.py $(TMPDIR)/usr/share/dput
+ 	install --mode=0644 rsync.py $(TMPDIR)/usr/share/dput
+diff -Nru /tmp/O2fg8E7GQU/dput-0.9.2.25ubuntu1/http.py /tmp/uWi5WB2aD6/dput-0.9.2.25ubuntu1~rb1/http.py
+--- /tmp/O2fg8E7GQU/dput-0.9.2.25ubuntu1/http.py	1970-01-01 01:00:00.000000000 +0100
++++ /tmp/uWi5WB2aD6/dput-0.9.2.25ubuntu1~rb1/http.py	2006-12-02 19:29:25.000000000 +0000
+@@ -0,0 +1,61 @@
++import os, sys, urllib2, urlparse, getpass, dputhelper
++
++# Handle valid WebDAV success return values.
++class DavErrorProcessor(urllib2.HTTPErrorProcessor):
++    def http_response(self, request, response):
++        code, msg, hdrs = response.code, response.msg, response.info()
++        if code not in range(200, 208):
++            response = self.parent.error('http', request, response, code, msg, hdrs)
++        return response
++    https_response = http_response
++
++# Mad crack to support PUT requests in urllib2.
++class HttpCrackDavRequest(urllib2.Request):
++    def __init__(self, url, data=None, headers={}, origin_req_host=None, unverifiable=False):
++        urllib2.Request.__init__(self, url, data, headers, origin_req_host, unverifiable)
++    
++    def get_method(self):
++        # This is very, very nasty.
++        if self.has_data():
++            return "PUT"
++        else:
++            return "GET"
++
++# Custom password manager that prompts for a password using getpass() if
++# required, and mangles the saved URL so that only one password is prompted for.
++class PromptingPasswordMgr(urllib2.HTTPPasswordMgr):
++    def __init__(self, username):
++        urllib2.HTTPPasswordMgr.__init__(self)
++        self.username = username
++
++    def find_user_password(self, realm, authuri):
++        # Hack so that we only prompt for a password once
++        authuri = self.reduce_uri(authuri)[0]
++        authinfo = urllib2.HTTPPasswordMgr.find_user_password(self, realm, authuri)
++        if authinfo != (None, None):
++            return authinfo
++
++        password = getpass.getpass("Password for %s:" % realm)
++        self.add_password(realm, authuri, self.username, password)
++        return (self.username, password)
++
++
++# Upload the files via WebDAV
++def upload(fqdn, login, incoming, files_to_upload, debug, dummy, protocol="http"):
++    authhandler = urllib2.HTTPBasicAuthHandler(PromptingPasswordMgr(login))
++    opener = urllib2.build_opener(authhandler, DavErrorProcessor())
++    urllib2.install_opener(opener)
++
++    baseurl = urlparse.urlunsplit((protocol, fqdn, incoming, None, None))
++
++    for afile in files_to_upload:
++        path_to_package, package_name = os.path.split(afile)
++        url = urlparse.urljoin(baseurl, package_name)
++        try:
++            if debug:
++                print "D: HTTP-Connection to URL: %s" % url
++            request = HttpCrackDavRequest(url, ''.join(open(afile).readlines()))
++            response = opener.open(request)
++        except Exception, e:
++            print "Connection failed, aborting. Check your network", e
++            sys.exit(1)
+diff -Nru /tmp/O2fg8E7GQU/dput-0.9.2.25ubuntu1/https.py /tmp/uWi5WB2aD6/dput-0.9.2.25ubuntu1~rb1/https.py
+--- /tmp/O2fg8E7GQU/dput-0.9.2.25ubuntu1/https.py	1970-01-01 01:00:00.000000000 +0100
++++ /tmp/uWi5WB2aD6/dput-0.9.2.25ubuntu1~rb1/https.py	2006-12-02 19:28:17.000000000 +0000
+@@ -0,0 +1,7 @@
++# Bit of a hack, really dput should add /usr/share/dput to the import path.
++d = {}
++exec open("/usr/share/dput/http.py") in d
++real_upload = d["upload"]
++
++def upload(fqdn, login, incoming, files_to_upload, debug, dummy):
++    return real_upload(fqdn, login, incoming, files_to_upload, debug, dummy, "https")

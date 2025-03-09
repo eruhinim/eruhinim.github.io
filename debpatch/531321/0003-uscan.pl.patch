@@ -1,0 +1,371 @@
+From 6b9928f8c70b38d8c46a0a2a30f51bf39986e56f Mon Sep 17 00:00:00 2001
+From: Osamu Aoki <osamu@debian.org>
+Date: Wed, 26 Aug 2015 09:02:44 +0000
+Subject: [PATCH 3/3] uscan.pl
+
+---
+ scripts/uscan.pl | 198 ++++++++++++++++++++++++++++++++++++++++++-------------
+ 1 file changed, 152 insertions(+), 46 deletions(-)
+
+diff --git a/scripts/uscan.pl b/scripts/uscan.pl
+index ef21e2c..3e3f499 100755
+--- a/scripts/uscan.pl
++++ b/scripts/uscan.pl
+@@ -50,7 +50,7 @@ BEGIN {
+ }
+ use Dpkg::Control::Hash;
+ 
+-my $CURRENT_WATCHFILE_VERSION = 3;
++my $CURRENT_WATCHFILE_VERSION = 4;
+ 
+ my $progname = basename($0);
+ my $modified_conf_msg;
+@@ -67,7 +67,11 @@ my $havegpg = first { -x $_ } qw(/usr/bin/gpg2 /usr/bin/gpg);
+ # Did we find any new upstream versions on our wanderings?
+ our $found = 0;
+ 
+-sub process_watchline ($$$$$$);
++# For multi tarball case, the upstream version of the main tarball is used
++# for the source package as $commonversion (with epoch and suffix)
++our $commonversion = undef;
++
++sub process_watchline ($$$$$$$);
+ sub process_watchfile ($$$$);
+ sub recursive_regex_dir ($$$);
+ sub newest_dir ($$$$$);
+@@ -729,15 +733,41 @@ exit ($found ? 0 : 1);
+ # opts=downloadurlmangle=s/prdownload/download/ \
+ #   http://developer.berlios.de/project/showfiles.php?group_id=2051 \
+ #   http://prdownload.berlios.de/softdevice/vdr-softdevice-(.+).tgz
++#
++# watch_version=4:
++#
++# This version supports the source package with multiple upstream tarballs
++# by explicitly supporting multiple URL matching entry lines.  The first entry
++# line is for the main tarball and the following entry lines are for the
++# secondary tarballs.
++#
++# The option is extended to support the component name of the secondary
++# tarballs as:
++# opts=component=<componentname> \
++# http://some.site.org/some/path/foobar-(.+)\.tar\.gz
++# The downloaded file foobar-<realversion>.tar.gz is linked to
++# <sourcepackagename>-<sourcepackageversion>.orig-<componentname>.tar.gz
++#
++# This version supports "ignore" and "match" in addition for "debian"
++# in watchfile for the secondary tarballs.
+ 
+-
+-sub process_watchline ($$$$$$)
++sub process_watchline ($$$$$$$)
+ {
+-    my ($line, $watch_version, $pkg_dir, $pkg, $pkg_version, $watchfile) = @_;
++    my ($line, $watch_version, $pkg_dir, $pkg, $pkg_version, $lineindex, $watchfile) = @_;
++    # calling arguments
++    # $1 = String containing a line of watchfile to be processed
++    # $2 = Syntactic version of watchfile
++    # $3 = Directory on the local system to check (CWD, undef, ...)
++    # $4 = Current source package name set from debian/changelog
++    # $5 = Current source package version from debian/changelog
++    # $6 = Line index: 1 for orig.tar.gz ; 2,3,... for orig-componentX.tar.gz
++    # $7 = Path to watchfile
+ 
+     my $origline = $line;
+     my ($base, $site, $dir, $filepattern, $pattern, $lastversion, $action);
+     my $basedir;
++    my $orig="orig";
++    my $matchmode="newer";
+     my (@patterns, @sites, @redirections, @basedirs);
+     my %options = ();
+ 
+@@ -788,7 +818,7 @@ sub process_watchline ($$$$$$)
+ 	$site = $1;
+ 	$pattern = $filepattern;
+     } else {
+-	# version 2/3 watchfile
++	# version 2/3/4 watchfile
+ 	if ($line =~ s/^opt(?:ion)?s=//) {
+ 	    my $opts;
+ 	    if ($line =~ s/^"(.*?)"\s+//) {
+@@ -809,6 +839,9 @@ sub process_watchline ($$$$$$)
+ 		       or $opt eq 'nopassive') {
+ 		    $options{'pasv'}=0;
+ 		}
++		elsif ($watch_version>3 and $opt =~ /^suffix\s*=\s*(.+)/) {
++		    $options{'suffix'} = $1;
++		}
+ 		elsif ($opt =~ /^repacksuffix\s*=\s*(.+)/) {
+ 		    $options{'repacksuffix'} = $1;
+ 		}
+@@ -831,10 +864,16 @@ sub process_watchline ($$$$$$)
+ 		elsif ($opt =~ /^pgpsigurlmangle\s*=\s*(.+)/) {
+ 		    @{$options{'pgpsigurlmangle'}} = split /;/, $1;
+ 		}
++		elsif ($lineindex > 1) {
++		    if ($opt =~ /^component\s*=\s*(.+)/) {
++			$options{'component'} = $1;
++		    }
++		}
+ 		else {
+ 		    uscan_warn "$progname warning: unrecognised option $opt\n";
+ 		}
+ 	    }
++	    $options{'repacksuffix'} = undef if defined $options{'suffix'};
+ 	}
+ 
+ 	($base, $filepattern, $lastversion, $action) = split ' ', $line, 4;
+@@ -847,9 +886,20 @@ sub process_watchline ($$$$$$)
+ 	    (undef, $lastversion, $action) = split ' ', $line, 3;
+ 	}
+ 
+-	if ((! defined $lastversion or $lastversion eq 'debian') and not defined $pkg_version) {
+-	    uscan_warn "$progname warning: Unable to determine current version\n  in $watchfile, skipping:\n  $line\n";
+-	    return 1;
++	if ($lineindex>1 and defined $lastversion and $lastversion eq 'match') {
++	    $matchmode = "match";
++	    $lastversion=$commonversion;
++	} elsif ($lineindex>1 and defined $lastversion and $lastversion eq 'ignore') {
++	    $matchmode = "ignore";
++	    $lastversion="~0";
++	} elsif (! defined $lastversion or $lastversion eq 'debian') {
++	    if (defined $pkg_version) {
++		$lastversion=$pkg_version;
++	    } else {
++		uscan_warn "$progname warning: Unable to determine current version\n  in $watchfile, skipping:\n  $line\n";
++		return 1;
++	    }
++	    # $matchmode = "newer"
+ 	}
+ 
+ 	# Check all's OK
+@@ -915,14 +965,6 @@ sub process_watchline ($$$$$$)
+ 	$pattern = "(?:(?:$site)?" . quotemeta($basedir) . ")?$filepattern";
+     }
+ 
+-    if (! defined $lastversion or $lastversion eq 'debian') {
+-	if (defined $pkg_version) {
+-	    $lastversion=$pkg_version;
+-	} else {
+-	    uscan_warn "$progname warning: Unable to determine current version\n  in $watchfile, skipping:\n  $line\n";
+-	    return 1;
+-	}
+-    }
+     # And mangle it if requested
+     my $mangled_lastversion;
+     $mangled_lastversion = $lastversion;
+@@ -1326,14 +1368,34 @@ EOF
+ 	if ($verbose or ($download == 0 and $report and ! $dehs)) {
+ 	    print $pkg_report_header;
+ 	    $pkg_report_header = '';
+-	    print "Newest version on remote site is $newversion, local version is $lastversion\n" .
+-		($mangled_lastversion eq $lastversion ? "" : " (mangled local version number $mangled_lastversion)\n");
+-	    print " => Package is up to date\n";
++	    if ($matchmode eq "newer") {
++		print "Newest version on remote site is $newversion, local version is $lastversion\n" .
++		    ($mangled_lastversion eq $lastversion ? "" : " (mangled local version number $mangled_lastversion)\n");
++		print " => Package is up to date\n";
++	    } elsif ($matchmode eq "ignore") {
++		print "Newest version on remote site is $newversion, ignore local version\n";
++	    } elsif ($matchmode eq "match") {
++		print "Newest version on remote site sub archive is $newversion, downloaded main archive version is $lastversion\n" .
++		    ($mangled_lastversion eq $lastversion ? "" : " (mangled downloaded version number $mangled_lastversion)\n");
++		print " => Package matched\n";
++	    } else {
++		uscan_warn "$progname: strange matching mode: $matchmode\n";
++		return 1;
++	    }
+ 	}
+-	$dehs_tags{'status'} = "up to date";
+-	if (! $force_download) {
+-	    return 0;
+-	} else {
++
++	if ($matchmode eq "newer") {
++	    $dehs_tags{'status'} = "up to date";
++	    if (! $force_download) {
++		return 0;
++	    } else {
++		$download = 1;
++	    }
++	} elsif ($matchmode eq "ignore") {
++	    $dehs_tags{'status'} = "version ignored";
++	    $download = 1;
++	} elsif ($matchmode eq "match") {
++	    $dehs_tags{'status'} = "version matched";
+ 	    $download = 1;
+ 	}
+     }
+@@ -1342,20 +1404,27 @@ EOF
+     if ($verbose or ($download == 0 and ! $dehs)) {
+ 	print $pkg_report_header;
+ 	$pkg_report_header = '';
+-	print "Newest version on remote site is $newversion, local version is $lastversion\n" .
+-	    ($mangled_lastversion eq $lastversion ? "" : " (mangled local version number $mangled_lastversion)\n");
++	if ($matchmode eq "newer") {
++	    print "Newest version on remote site is $newversion, local version is $lastversion\n" .
++		($mangled_lastversion eq $lastversion ? "" : " (mangled local version number $mangled_lastversion)\n");
++	} elsif ($matchmode eq "ignore") {
++	    print "Newest version on remote site is $newversion, ignore local version\n";
++	} elsif ($matchmode eq "match") {
++	    print "Newest version on remote site is $newversion, main archive version is $lastversion\n" .
++		($mangled_lastversion eq $lastversion ? "" : " (mangled main archive version number $mangled_lastversion)\n");
++	} else {
++	    uscan_warn "$progname: strange matching mode: $matchmode\n";
++	    return 1;
++	}
+     }
+-
+     # We use dpkg's rules to determine whether our current version
+     # is newer or older than the remote version.
+-    if (!defined $download_version) {
++    if (!defined $download_version and $matchmode eq "newer") {
+ 	if (system("dpkg", "--compare-versions", "1:${mangled_lastversion}-0", "gt", "1:${newversion}-0") == 0) {
+-	    if ($verbose) {
+-		print " => remote site does not even have current version\n";
+-	    } elsif ($dehs) {
++	    if ($dehs) {
+ 		$dehs_tags{'status'} = "Debian version newer than remote site";
+ 	    } else {
+-		print "$pkg: remote site does not even have current version\n";
++		print " => $pkg: remote site does not even have current version\n";
+ 	    }
+ 	    return 0;
+ 	} else {
+@@ -1363,6 +1432,10 @@ EOF
+ 	    # be on our system or may not be
+ 	    $found++;
+ 	}
++    } elsif ($matchmode eq "ignore") {
++	$found++;
++    } elsif ($matchmode eq "match") {
++	$found++;
+     } else {
+ 	# Flag that we found a newer upstream version, so that the exit status
+ 	# is set correctly
+@@ -1379,9 +1452,15 @@ EOF
+ 		if $verbose or ($download == 0 and ! $dehs);
+ 	    return 0;
+ 	}
++	if ($lineindex>1) {
++	    if (not defined $options{'component'}) {
++		$options{'component'} = "component$lineindex";
++	    }
++	    $orig = "orig-$options{'component'}";
++	}
+ 	foreach my $suffix (qw(gz bz2 lzma xz)) {
+-	    if (-f "$destdir/${pkg}_${newversion}.orig.tar.$suffix") {
+-		print " => ${pkg}_${newversion}.orig.tar.$suffix already in package directory '$destdir'\n"
++	    if (-f "$destdir/${pkg}_${newversion}.${orig}.tar.$suffix") {
++		print " => ${pkg}_${newversion}.${orig}.tar.$suffix already in package directory '$destdir'\n"
+ 		    if $verbose or ($download == 0 and ! $dehs);
+ 		return 0;
+ 	    }
+@@ -1493,6 +1572,9 @@ EOF
+ 	}
+     }
+ 
++    if ($lineindex==1) {
++	$commonversion=$newversion;
++    }
+     # Call mk-origtargz (renames, repacks, etc.)
+     my $mk_origtargz_out;
+     my $path = "$destdir/$newfile_base";
+@@ -1500,11 +1582,13 @@ EOF
+     unless ($symlink eq "no") {
+ 	my @cmd = ("mk-origtargz");
+ 	push @cmd, "--package", $pkg;
+-	push @cmd, "--version", $newversion;
++	push @cmd, "--version", $commonversion;
++	push @cmd, '--suffix', $options{suffix} if defined $options{suffix};
+ 	push @cmd, '--repack-suffix', $options{repacksuffix} if defined $options{repacksuffix};
+ 	push @cmd, "--rename" if $symlink eq "rename";
+ 	push @cmd, "--copy"   if $symlink eq "copy";
+ 	push @cmd, "--repack" if $repack;
++	push @cmd, "--component", $options{'component'} if defined $options{'component'};
+ 	push @cmd, "--compression", $repack_compression;
+ 	push @cmd, "--directory", $destdir;
+ 	push @cmd, "--copyright-file", "debian/copyright"
+@@ -1522,7 +1606,9 @@ EOF
+ 	$target = basename($path);
+     }
+ 
+-    if (defined $options{'repacksuffix'}) {
++    if (defined $options{'suffix'}) {
++	$newversion = $newversion . $options{'suffix'}
++    } elsif (defined $options{'repacksuffix'}) {
+ 	# assume it was repacked (if wasn't, remove opts=repacksuffix in watchfile)
+ 	$newversion = $newversion . $options{'repacksuffix'}
+     }
+@@ -1548,15 +1634,27 @@ EOF
+     if ($action) {
+ 	my @cmd = shellwords($action);
+ 
+-	# Any symlink requests are already handled by uscan
+-	if ($action =~ /^uupdate(\s|$)/) {
+-	    push @cmd, "--no-symlink";
+-	}
+ 
+-	if ($watch_version > 1) {
+-	    push @cmd, "--upstream-version", $newversion, $path;
++	# script invocation changed in $watch_version=4
++	if ($watch_version > 3) {
++	    # invoke uupdate2 which takes version string with suffix
++	    if ($action =~ /^uupdate(\s|$)/) {
++		uscan_warn "$progname warning: use uupdate2 instead of uupdate in debian/watch for version=4.\n";
++		return 1;
++	    }
++	    push @cmd, $newversion;
++	    # components
+ 	} else {
+-	    push @cmd, $path, $newversion;
++	    # Any symlink requests are already handled by uscan
++	    if ($action =~ /^uupdate(\s|$)/) {
++		push @cmd, "--no-symlink";
++	    }
++
++	    if ($watch_version > 1) {
++		push @cmd, "--upstream-version", $newversion, $path;
++	    } else {
++		push @cmd, $path, $newversion;
++	    }
+ 	}
+ 	my $actioncmd = join(" ", @cmd);
+ 	print "-- Executing user specified script\n     $actioncmd\n" if $verbose;
+@@ -1736,6 +1834,7 @@ sub process_watchfile ($$$$)
+     my ($dir, $package, $version, $watchfile) = @_;
+     my $watch_version=0;
+     my $status=0;
++    my $lineindex=0;
+     %dehs_tags = ();
+ 
+     unless (open WATCH, $watchfile) {
+@@ -1778,16 +1877,23 @@ sub process_watchfile ($$$$)
+ 	# Are there any warnings from this part to give if we're using dehs?
+ 	dehs_output if $dehs;
+ 
++	$lineindex+=1; # number of watch entries
++	if ($watch_version<4 and $lineindex>1) {
++	    # This ensures $lineindex=1 for $watch_version=2 and 3 in process_watchline()
++	    uscan_warn "$progname warning: $watchfile has multiple entries for version=$watch_version (see uscan(1) for details).\n";
++	    last;
++	}
++
+ 	# Handle shell \\ -> \
+ 	s/\\\\/\\/g if $watch_version==1;
+ 	if ($verbose) {
+-	    print "-- In $watchfile, processing watchfile line:\n   $_\n";
++	    print "-- In $watchfile, processing watchfile line: $lineindex\n   $_\n";
+ 	} elsif ($download == 0 and ! $dehs) {
+-	    $pkg_report_header = "Processing watchfile line for package $package...\n";
++	    $pkg_report_header = "Processing watchfile line $lineindex for package $package...\n";
+ 	}
+ 
+ 	$status +=
+-	    process_watchline($_, $watch_version, $dir, $package, $version,
++	    process_watchline($_, $watch_version, $dir, $package, $version, $lineindex,
+ 			      $watchfile);
+ 	dehs_output if $dehs;
+     }
+-- 
+2.1.4
+

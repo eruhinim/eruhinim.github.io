@@ -1,0 +1,619 @@
+diff -Nru debsecan-0.4.18/debian/changelog debsecan-0.4.18+nmu1/debian/changelog
+--- debsecan-0.4.18/debian/changelog	2015-02-22 19:13:07.000000000 +0000
++++ debsecan-0.4.18+nmu1/debian/changelog	2015-09-27 00:16:24.000000000 +0000
+@@ -1,3 +1,10 @@
++debsecan (0.4.18+nmu1) UNRELEASED; urgency=medium
++
++  * Non-maintainer upload.
++  * Add support for python3.
++
++ -- Michael Gilbert <mgilbert@debian.org>  Sat, 26 Sep 2015 21:50:21 +0000
++
+ debsecan (0.4.18) unstable; urgency=low
+ 
+   * Increase compatibility with Python 2.6 in squeeze.  The
+diff -Nru debsecan-0.4.18/debian/control debsecan-0.4.18+nmu1/debian/control
+--- debsecan-0.4.18/debian/control	2015-02-22 19:06:12.000000000 +0000
++++ debsecan-0.4.18+nmu1/debian/control	2015-09-27 00:01:52.000000000 +0000
+@@ -9,7 +9,7 @@
+ 
+ Package: debsecan
+ Architecture: all
+-Depends: debconf | debconf-2.0, python (>= 2.3), python-apt, ${misc:Depends},
++Depends: debconf | debconf-2.0, python-apt | python3-apt, ${misc:Depends},
+  ca-certificates
+ Recommends: cron, exim4 | mail-transport-agent
+ Description: Debian Security Analyzer
+diff -Nru debsecan-0.4.18/debian/rules debsecan-0.4.18+nmu1/debian/rules
+--- debsecan-0.4.18/debian/rules	2010-03-07 16:57:27.000000000 +0000
++++ debsecan-0.4.18+nmu1/debian/rules	2015-09-27 00:02:36.000000000 +0000
+@@ -30,8 +30,10 @@
+ 
+ 	# Add here commands to install the package into debian/<packagename>.
+ 	install -d debian/`dh_listpackages`/var/lib/debsecan
+-	install -D -m 0755 src/debsecan \
++	install -D -m 0755 debsecan \
+ 		debian/`dh_listpackages`/usr/bin/debsecan
++	install -D -m 0755 src/debsecan \
++		debian/`dh_listpackages`/usr/share/debsecan/debsecan
+ 	install -D -m 0755 src/debsecan-create-cron \
+ 		debian/`dh_listpackages`/usr/sbin/debsecan-create-cron
+ 	install -D -m 0755 doc/debsecan.1 \
+diff -Nru debsecan-0.4.18/debsecan debsecan-0.4.18+nmu1/debsecan
+--- debsecan-0.4.18/debsecan	1970-01-01 00:00:00.000000000 +0000
++++ debsecan-0.4.18+nmu1/debsecan	2015-09-27 00:23:39.000000000 +0000
+@@ -0,0 +1,10 @@
++#!/bin/sh -e
++
++if [ -e /usr/share/doc/python3-apt/copyright ]; then
++    /usr/bin/python3 /usr/share/debsecan/debsecan $@
++elif [ -e /usr/share/doc/python-apt/copyright ]; then
++    /usr/bin/python /usr/share/debsecan/debsecan $@
++else
++    echo "error: python-apt package not found"
++    exit 1
++fi
+diff -Nru debsecan-0.4.18/src/debsecan debsecan-0.4.18+nmu1/src/debsecan
+--- debsecan-0.4.18/src/debsecan	2014-03-29 21:09:58.000000000 +0000
++++ debsecan-0.4.18+nmu1/src/debsecan	2015-09-27 00:08:36.000000000 +0000
+@@ -1,6 +1,7 @@
+ #!/usr/bin/python
+ # debsecan - Debian Security Analyzer
+ # Copyright (C) 2005, 2006, 2007 Florian Weimer
++# Copyright (C) 2015 Michael Gilbert <mgilbert@debian.org>
+ #
+ # This program is free software; you can redistribute it and/or modify
+ # it under the terms of the GNU General Public License as published by
+@@ -19,7 +20,6 @@
+ VERSION = "0.4"
+ 
+ import copy
+-from cStringIO import StringIO
+ from optparse import OptionParser
+ import os
+ import os.path
+@@ -28,10 +28,23 @@
+ import sys
+ import time
+ import types
+-import urllib2
+ import zlib
+ import apt_pkg
+ 
++try:
++    from cStringIO import StringIO
++except ImportError:
++    from io import StringIO
++
++try:
++    from urllib2 import urlopen
++    from urllib2 import Request
++    from urllib2 import HTTPError
++except ImportError:
++    from urllib.error import HTTPError
++    from urllib.request import urlopen
++    from urllib.request import Request
++
+ apt_pkg.init()
+ try:
+     version_compare = apt_pkg.version_compare
+@@ -56,7 +69,7 @@
+     """
+ 
+     def __init__(self, filename, lineno, msg):
+-        assert type(lineno) == types.IntType
++        assert type(lineno) == int
+         self.filename = filename
+         self.lineno = lineno
+         self.msg = msg
+@@ -65,9 +78,9 @@
+         return self.msg
+ 
+     def __repr__(self):
+-        return "ParseError(%s, %d, %s)" % (`self.filename`,
++        return "ParseError(%s, %d, %s)" % (repr(self.filename),
+                                            self.lineno,
+-                                           `self.msg`)
++                                           repr(self.msg))
+ 
+     def printOut(self, file):
+         """Writes a machine-parsable error message to file."""
+@@ -78,17 +91,35 @@
+     """Version class which uses the original APT comparison algorithm."""
+     def __init__(self, version):
+         """Creates a new Version object."""
+-        assert type(version) == types.StringType, `version`
+-        assert version <> ""
++        assert type(version) == str, repr(version)
++        assert version != ""
+         self.__asString = version
+ 
+     def __str__(self):
+         return self.__asString
+ 
+     def __repr__(self):
+-        return 'Version(%s)' % `self.__asString`
++        return 'Version(%s)' % repr(self.__asString)
++
++    def __lt__(self, other):
++        return version_compare(self.__asString, other.__asString) < 0
++
++    def __eq__(self, other):
++        return version_compare(self.__asString, other.__asString) == 0
++
++    def __gt__(self, other):
++        raise NotImplementedError()
++
++    def __le__(self, other):
++        raise NotImplementedError()
+ 
+-    def __cmp__(self, other):
++    def __ge__(self, other):
++        raise NotImplementedError()
++
++    def __ne__(self, other):
++        raise NotImplementedError()
++
++    def compare(self, other):
+         return version_compare(self.__asString, other.__asString)
+ 
+ class PackageFile:
+@@ -128,7 +159,7 @@
+ 
+             match = self.re_field.match(line)
+             if not match:
+-                self.raiseSyntaxError("expected package field, got " + `line`)
++                self.raiseSyntaxError("expected package field, got " + repr(line))
+             (name, contents) = match.groups()
+             contents = contents or ''
+ 
+@@ -161,9 +192,9 @@
+ 
+ def safe_open(name, mode="r"):
+     try:
+-        return file(name, mode)
+-    except IOError, e:
+-        sys.stdout.write("error: could not open %s: %s\n" % (`name`, e.strerror))
++        return open(name, mode)
++    except IOError as e:
++        sys.stdout.write("error: could not open %s: %s\n" % (repr(name), e.strerror))
+         sys.exit(2)
+ 
+ # Configuration file parser
+@@ -234,8 +265,8 @@
+         def onComment(self, line, lineno):
+             new_file.append(line)
+         def onKey(self, line, lineno, key, value, trailer):
+-            if new_config.has_key(key):
+-                if new_config[key] <> value:
++            if key in new_config:
++                if new_config[key] != value:
+                     new_file.append("%s=%s%s"
+                                     % (key, new_config[key], trailer))
+                 else:
+@@ -245,15 +276,15 @@
+                 new_file.append(line)
+     Parser(name).parse()
+ 
+-    remaining = new_config.keys()
++    remaining = list(new_config.keys())
+     remaining.sort()
+     if remaining:
+-        if remaining[-1] <> "\n":
++        if remaining[-1] != "\n":
+             new_file.append("\n")
+         for k in remaining:
+             new_file.append("%s=%s\n" % (k, new_config[k]))
+ 
+-    conf = file(name, "w+")
++    conf = open(name, "w+")
+     try:
+         for line in new_file:
+             conf.write(line)
+@@ -266,7 +297,11 @@
+     import ssl
+     from inspect import getargspec
+     from inspect import stack
+-    from httplib import HTTPConnection
++
++    try:
++        from httplib import HTTPConnection
++    except ImportError:
++        from http.client import HTTPConnection
+ 
+     wrap_socket_orig = ssl.wrap_socket
+     set_ciphers = "ciphers" in getargspec(wrap_socket_orig)[0]
+@@ -381,7 +416,7 @@
+                 "error: at most one whitelist option may be specified\n")
+             sys.exit(1)
+ 
+-        for (k, v) in options.__dict__.items():
++        for (k, v) in list(options.__dict__.items()):
+             if type(v) == types.MethodType or v is None:
+                 continue
+             if k not in ("whitelist", "whitelist_add", "whitelist_remove",
+@@ -413,13 +448,13 @@
+     if options.no_obsolete and not options.suite:
+         sys.stderr.write("error: --no-obsolete requires --suite\n")
+         sys.exit(1)
+-    if options.update_history and options.format <> 'report':
++    if options.update_history and options.format != 'report':
+         sys.stderr.write("error: --update-history requires report format\n")
+         sys.exit(1)
+-    if options.cron and options.format <> 'report':
++    if options.cron and options.format != 'report':
+         sys.stderr.write("error: --cron requires report format\n")
+         sys.exit(1)
+-    if options.mailto and options.format <> 'report':
++    if options.mailto and options.format != 'report':
+         sys.stderr.write("error: --mailto requires report format\n")
+         sys.exit(1)
+     options.need_history = options.format == 'report'
+@@ -473,10 +508,12 @@
+                        ' ' : False}[flags[2]]
+         self.fix_available = flags[3] == 'F'
+ 
+-    def is_vulnerable(self, (bin_pkg, bin_ver), (src_pkg, src_ver)):
++    def is_vulnerable(self, bin_pair, src_pair):
+         """Returns true if the specified binary package is subject to
+         this vulnerability."""
+         self._parse()
++        (bin_pkg, bin_ver) = bin_pair
++        (src_pkg, src_ver) = src_pair
+         if self.binary_package and bin_pkg == self.package:
+             if self.unstable_version:
+                 return bin_ver < self.unstable_version
+@@ -506,37 +543,37 @@
+ 
+     def _parse(self):
+         """Further parses the object."""
+-        if type(self.unstable_version) == types.StringType:
++        if type(self.unstable_version) == str:
+             if self.unstable_version:
+                 self.unstable_version = Version(self.unstable_version)
+             else:
+                 self.unstable_version = None
+-            self.other_versions = map(Version, self.other_versions)
++            self.other_versions = list(map(Version, self.other_versions))
+ 
+ def fetch_data(options, config):
+     """Returns a dictionary PACKAGE -> LIST-OF-VULNERABILITIES."""
+     url = options.source or config.get("SOURCE", None) \
+         or "https://security-tracker.debian.org/tracker/" \
+            "debsecan/release/1/"
+-    if url[-1] <> "/":
++    if url[-1] != "/":
+         url += "/"
+     if options.suite:
+         url += options.suite
+     else:
+         url += 'GENERIC'
+-    r = urllib2.Request(url)
++    r = Request(url)
+     r.add_header('User-Agent', 'debsecan/' + VERSION)
+     try:
+-        u = urllib2.urlopen(r)
++        u = urlopen(r)
+         # In cron mode, we suppress almost all errors because we
+         # assume that they are due to lack of Internet connectivity.
+-    except urllib2.HTTPError, e:
++    except HTTPError as e:
+         if (not options.cron) or e.code == 404:
+             sys.stderr.write("error: while downloading %s:\n%s\n" % (url, e))
+             sys.exit(1)
+         else:
+             sys.exit(0)
+-    except urllib2.URLError, e:
++    except URLError as e:
+         if not options.cron:            # no e.code check here
+             # Be conservative about the attributes offered by
+             # URLError.  They are undocumented, and strerror is not
+@@ -559,8 +596,14 @@
+             data.append(d)
+         else:
+             break
+-    data = StringIO(zlib.decompress(''.join(data)))
+-    if data.readline() <> "VERSION 1\n":
++
++    raw = zlib.decompress(b''.join(data))
++    try:
++        data = StringIO(raw)
++    except TypeError:
++        data = StringIO(raw.decode('utf-8'))
++
++    if data.readline() != "VERSION 1\n":
+         sys.stderr.write("error: server sends data in unknown format\n")
+         sys.exit(1)
+ 
+@@ -597,7 +640,7 @@
+         else:
+             source_to_binary[sp] = []
+ 
+-    for vs in packages.values():
++    for vs in list(packages.values()):
+         for v in vs:
+             if not v.binary_package:
+                 v.binary_packages = source_to_binary.get(v.package, None)
+@@ -633,7 +676,7 @@
+ 
+     def known(self, v):
+         """Returns true if the vulnerability is known."""
+-        return self.history.has_key(v)
++        return v in self.history
+ 
+     def fixed(self, v):
+         """Returns true if the vulnerability is known and has been
+@@ -647,7 +690,7 @@
+         self.history = {}
+ 
+         try:
+-            f = file(name)
++            f = open(name)
+         except IOError:
+             return
+ 
+@@ -681,8 +724,8 @@
+         if name and os.path.exists(name):
+             src = safe_open(name)
+             line = src.readline()
+-            if line <> 'VERSION 0\n':
+-                raise SyntaxError, "invalid whitelist file, got: " + `line`
++            if line != 'VERSION 0\n':
++                raise SyntaxError("invalid whitelist file, got: " + repr(line))
+             for line in src:
+                 if line[-1] == '\n':
+                     line = line[:-1]
+@@ -717,7 +760,7 @@
+                 removed = True
+             except KeyError:
+                 pass
+-            for bug_pkg in self.bug_package_dict.keys():
++            for bug_pkg in list(self.bug_package_dict.keys()):
+                 if bug_pkg[0] == bug:
+                     del self.bug_package_dict[bug_pkg]
+                     removed = True
+@@ -736,8 +779,8 @@
+ 
+     def check(self, bug, package):
+         """Returns true if the bug/package pair is whitelisted."""
+-        return self.bug_dict.has_key(bug) \
+-               or self.bug_package_dict.has_key((bug, package))
++        return bug in self.bug_dict \
++               or (bug, package) in self.bug_package_dict
+ 
+     def update(self):
+         """Write the whitelist file back to disk, if the data has changed."""
+@@ -746,11 +789,11 @@
+         new_name = self.name + '.new'
+         f = safe_open(new_name, "w+")
+         f.write("VERSION 0\n")
+-        l = self.bug_dict.keys()
++        l = list(self.bug_dict.keys())
+         l.sort()
+         for bug in l:
+             f.write(bug + ",\n")
+-        l = self.bug_package_dict.keys()
++        l = list(self.bug_package_dict.keys())
+         l.sort()
+         for bug_pkg in l:
+             f.write("%s,%s\n" % bug_pkg)
+@@ -759,9 +802,9 @@
+ 
+     def show(self, file):
+         l = []
+-        for bug in self.bug_dict.keys():
++        for bug in list(self.bug_dict.keys()):
+             file.write("%s (all packages)\n" % bug)
+-        for (bug, pkg) in self.bug_package_dict.keys():
++        for (bug, pkg) in list(self.bug_package_dict.keys()):
+             l.append("%s %s\n" % (bug, pkg))
+         l.sort()
+         for line in l:
+@@ -772,14 +815,14 @@
+     while args:
+         bug = args[0]
+         if bug == '' or (not ('A' <= bug[0] <= 'Z')) or ',' in bug:
+-            sys.stderr.write("error: %s is not a bug name\n" % `bug`)
++            sys.stderr.write("error: %s is not a bug name\n" % repr(bug))
+             sys.exit(1)
+         del args[0]
+         pkg_found = False
+         while args:
+             pkg = args[0]
+             if (not pkg) or ',' in pkg:
+-                sys.stderr.write("error: %s is not a package name\n" % `bug`)
++                sys.stderr.write("error: %s is not a package name\n" % repr(bug))
+                 sys.exit(1)
+             if 'A' <= pkg[0] <= 'Z':
+                 break
+@@ -844,7 +887,7 @@
+     def record(self, v, bp, sp):
+         self.bugs[v.bug] = 1
+     def finish(self):
+-        bugs = self.bugs.keys()
++        bugs = list(self.bugs.keys())
+         bugs.sort()
+         for b in bugs:
+             self.target.write(b)
+@@ -853,17 +896,17 @@
+     def __init__(self, target, options, history):
+         Formatter.__init__(self, target, options, history)
+         self.packages = {}
+-    def record(self, v, (bin_name, bin_version), sp):
+-        self.packages[bin_name] = 1
++    def record(self, v, bin_pair, sp):
++        self.packages[bin_pair[0]] = 1
+     def finish(self):
+-        packages = self.packages.keys()
++        packages = list(self.packages.keys())
+         packages.sort()
+         for p in packages:
+             self.target.write(p)
+ 
+ class SummaryFormatter(Formatter):
+-    def record(self, v,
+-               (bin_name, bin_version), (src_name, src_version)):
++    def record(self, v, bin_pair, src_pair):
++        (bin_name, bin_version) = bin_pair
+         notes = []
+         if v.fix_available:
+             notes.append("fixed")
+@@ -880,13 +923,13 @@
+             self.target.write("%s %s" % (v.bug, bin_name))
+ 
+ class SimpleFormatter(Formatter):
+-    def record(self, v,
+-               (bin_name, bin_version), (src_name, src_version)):
+-        self.target.write("%s %s" % (v.bug, bin_name))
++    def record(self, v, bin_pair, src_pair):
++        self.target.write("%s %s" % (v.bug, bin_pair[0]))
+ 
+ class DetailFormatter(Formatter):
+-    def record(self, v,
+-               (bin_name, bin_version), (src_name, src_version)):
++    def record(self, v, bin_pair, src_pair):
++        (bin_name, bin_version) = bin_pair
++        (src_name, src_version) = src_pair
+         notes = []
+         if v.fix_available:
+             notes.append("fixed")
+@@ -943,7 +986,7 @@
+         new_name = name + '.new'
+         f = safe_open(new_name, "w+")
+         f.write("VERSION 1\n%d\n" % int(time.time()))
+-        for ((bug, package), fixed) in self.new_history.items():
++        for ((bug, package), fixed) in list(self.new_history.items()):
+             if fixed:
+                 fixed = 'F'
+             else:
+@@ -958,13 +1001,14 @@
+         # need special treatment, too.
+         self.record(v, bp, sp)
+ 
+-    def record(self, v,
+-               (bin_name, bin_version), (src_name, src_version)):
++    def record(self, v, bin_pair, src_pair):
+ 
++        (bin_name, bin_version) = bin_pair
++        (src_name, src_version) = src_pair
+         v = v.installed(src_name, bin_name)
+         bn = (v.bug, bin_name)
+         if not self.whitelist.check(v.bug, bin_name):
+-            if self.bugs.has_key(v.bug):
++            if v.bug in self.bugs:
+                 self.bugs[v.bug].append(v)
+             else:
+                 self.bugs[v.bug] = [v]
+@@ -987,10 +1031,10 @@
+         """Returns true if the system's vulnerability status changed
+         since the last run."""
+ 
+-        for (k, v) in self.new_history.items():
+-            if (not self.history.known(k)) or self.history.fixed(k) <> v:
++        for (k, v) in list(self.new_history.items()):
++            if (not self.history.known(k)) or self.history.fixed(k) != v:
+                 return True
+-        return len(self.fixed_bugs.keys()) > 0
++        return len(list(self.fixed_bugs.keys())) > 0
+ 
+     def finish(self):
+         if self.options.mailto and not self._status_changed():
+@@ -1010,10 +1054,10 @@
+ the correct suite, run "dpkg-reconfigure debsecan" as root.""")
+         w("")
+ 
+-        for vlist in self.bugs.values():
++        for vlist in list(self.bugs.values()):
+             vlist.sort(lambda a, b: cmp(a.package, b.package))
+ 
+-        blist = self.bugs.items()
++        blist = list(self.bugs.items())
+         blist.sort()
+ 
+         self._bug_found = False
+@@ -1086,7 +1130,7 @@
+                     else:
+                         is_new = (not self.history.known(bug_package)) \
+                                  or self.history.fixed(bug_package)
+-                    if v.fix_available <> fix_status or is_new <> new_status:
++                    if v.fix_available != fix_status or is_new != new_status:
+                         continue
+ 
+                     if first_bug:
+@@ -1099,7 +1143,7 @@
+                         have_obsolete = True
+ 
+                     notes = vuln_to_notes(v)
+-                    if pkg_vulns.has_key(notes):
++                    if notes in pkg_vulns:
+                         pkg_vulns[notes].append(v)
+                     else:
+                         pkg_vulns[notes] = [v]
+@@ -1107,7 +1151,7 @@
+                 indent = "    "
+                 if len(pkg_vulns) > 0:
+                     self._bug_found = True
+-                    notes = pkg_vulns.keys()
++                    notes = list(pkg_vulns.keys())
+                     notes.sort()
+                     # any v will do, because we've aggregated by v.bug
+                     v = pkg_vulns[notes[0]][0]
+@@ -1153,12 +1197,12 @@
+ 
+         def scan_fixed():
+             bugs = {}
+-            for (bug, package) in self.fixed_bugs.keys():
+-                if bugs.has_key(bug):
++            for (bug, package) in list(self.fixed_bugs.keys()):
++                if bug in bugs:
+                     bugs[bug].append(package)
+                 else:
+                     bugs[bug] = [package]
+-            bug_names = bugs.keys()
++            bug_names = list(bugs.keys())
+             bug_names.sort()
+ 
+             first_bug = True
+@@ -1236,11 +1280,11 @@
+     try:
+         return msg % format_values
+     except ValueError:
+-        sys.stderr.write("error: invalid format string: %s\n" % `msg`)
++        sys.stderr.write("error: invalid format string: %s\n" % repr(msg))
+         sys.exit(2)
+-    except KeyError, e:
++    except KeyError as e:
+         sys.stderr.write("error: invalid key %s in format string %s\n"
+-                         % (`e.args[0]`, `msg`))
++                         % (repr(e.args[0]), repr(msg)))
+         sys.exit(2)
+ 
+ # Targets
+@@ -1281,8 +1325,7 @@
+ 
+ class TargetPrint(Target):
+     def write(self, line):
+-        print line
+-
++        sys.stdout.write(line + '\n')
+ 
+ def rate_system(target, options, vulns, history):
+     """Read /var/lib/dpkg/status and discover vulnerable packages.
+@@ -1314,7 +1357,7 @@
+                 if match is None:
+                     raise SyntaxError(('package %s references '
+                                        + 'invalid source package %s') %
+-                                      (pkg_name, `contents`))
++                                      (pkg_name, repr(contents)))
+                 (pkg_source, pkg_source_version) = match.groups()
+         if pkg_name is None:
+             raise SyntaxError\
+@@ -1364,7 +1407,7 @@
+     if (options.update_config):
+         update_config(options.config)
+         sys.exit(0)
+-    if options.cron and config.get("REPORT", "true") <> "true":
++    if options.cron and config.get("REPORT", "true") != "true":
+         # Do nothing in cron mode if reporting is disabled.
+         sys.exit(0)
+     if options.need_history:

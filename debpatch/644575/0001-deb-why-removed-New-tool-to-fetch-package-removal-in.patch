@@ -1,0 +1,319 @@
+From e5dafe5505ee3d6bd5c3c3c7e3e82f3994781827 Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Wed, 2 May 2018 02:46:32 +0200
+Subject: [PATCH] deb-why-removed: New tool to fetch package removal
+ information
+
+Closes: #644575
+---
+ .gitignore                 |   2 +
+ README                     |   3 +
+ debian/control             |   2 +
+ po4a/devscripts-po4a.conf  |   2 +
+ scripts/Makefile           |   1 +
+ scripts/deb-why-removed.pl | 228 +++++++++++++++++++++++++++++++++++++
+ 6 files changed, 238 insertions(+)
+ create mode 100755 scripts/deb-why-removed.pl
+
+diff --git a/.gitignore b/.gitignore
+index 25cddaec..2574ca9c 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -41,6 +41,8 @@ scripts/dcontrol.1
+ scripts/dd-list
+ scripts/deb-reversion
+ scripts/deb-reversion.1
++scripts/deb-why-removed
++scripts/deb-why-removed.1
+ scripts/debc
+ scripts/debchange
+ scripts/debcheckout
+diff --git a/README b/README
+index 059f68fa..ff9c2dac 100644
+--- a/README
++++ b/README
+@@ -154,6 +154,9 @@ And now, in mostly alphabetical order, the scripts:
+ - deb-reversion: increases a binary package version number and repacks the
+   package, useful for porters and the like
+ 
++- deb-why-removed: shows the reason a package was removed from the archive
++  [libdpkg-perl]
++
+ - dep3changelog: generate a changelog entry from a DEP3-style patch header
+ 
+ - desktop2menu: given a freedesktop.org desktop file, generate a skeleton
+diff --git a/debian/control b/debian/control
+index 97ec4bee..82ddc96e 100644
+--- a/debian/control
++++ b/debian/control
+@@ -191,6 +191,8 @@ Description: scripts to make the life of a Debian Package maintainer easier
+     gnupg | gnupg2]
+   - deb-reversion: increase a binary package version number and repacks the
+     package, useful for porters and the like
++  - deb-why-removed: shows the reason a package was removed from the archive
++    [libdpkg-perl]
+   - dep3changelog: generate a changelog entry from a DEP3-style patch header
+   - desktop2menu: given a freedesktop.org desktop file, generate a skeleton
+     for a menu file [libfile-desktopentry-perl]
+diff --git a/po4a/devscripts-po4a.conf b/po4a/devscripts-po4a.conf
+index e4a89e2f..38eec45f 100644
+--- a/po4a/devscripts-po4a.conf
++++ b/po4a/devscripts-po4a.conf
+@@ -54,6 +54,8 @@
+ 	$lang:$lang/debrelease.$lang.1 add_$lang:?add_$lang/translator_man.add
+ [type:docbook] ../scripts/deb-reversion.dbk \
+ 	$lang:$lang/deb-reversion.$lang.dbk add_$lang:?add_$lang/translator_dbk.add
++[type:pod] ../scripts/deb-why-removed.pl \
++	$lang:$lang/deb-why-removed.$lang.pl add_$lang:?add_$lang/translator_pod.add
+ [type:man] ../scripts/debrsign.1 \
+ 	$lang:$lang/debrsign.$lang.1 add_$lang:?add_$lang/translator_man.add
+ [type:man] ../scripts/debsign.1 \
+diff --git a/scripts/Makefile b/scripts/Makefile
+index 0ba409aa..eb1b0984 100644
+--- a/scripts/Makefile
++++ b/scripts/Makefile
+@@ -46,6 +46,7 @@ PKGNAMES := \
+ 	wnpp-check \
+ 
+ GEN_MAN1S += \
++	deb-why-removed.1 \
+ 	debrepro.1 \
+ 	devscripts.1 \
+ 	ltnu.1 \
+diff --git a/scripts/deb-why-removed.pl b/scripts/deb-why-removed.pl
+new file mode 100755
+index 00000000..8880ebe8
+--- /dev/null
++++ b/scripts/deb-why-removed.pl
+@@ -0,0 +1,228 @@
++#!/usr/bin/perl
++#
++# Copyright © 2017-2018 Guillem Jover <guillem@debian.org>
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 2 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <https://www.gnu.org/licenses/>.
++
++use strict;
++use warnings;
++
++use File::Basename;
++use File::Path qw(make_path);
++use File::Spec;
++use Getopt::Long qw(:config posix_default no_ignorecase);
++use HTTP::Tiny;
++use Dpkg::Index;
++
++my $VERSION = '0.0';
++my ($PROGNAME) = $0 =~ m{(?:.*/)?([^/]*)};
++
++my %url_map = (
++    'debian' => 'https://ftp-master.debian.org/removals-full.822',
++);
++my $default_url = 'debian';
++
++sub version
++{
++    print "$PROGNAME $VERSION (devscripts ###VERSION###)\n";
++}
++
++sub usage
++{
++    print <<HELP;
++Usage: $PROGNAME [<option>...] <package>...
++
++Options:
++  -u, --url URL     URL to the removals deb822 file list (defaults to
++                      <$url_map{$default_url}>).
++      --no-refresh  Do not refresh the cached removals file even if old.
++  -?, --help        Print this help text.
++      --version     Print the version.
++HELP
++}
++
++sub error
++{
++    my @msg = @_;
++
++    print { *STDERR } "E: @msg\n";
++    exit 1;
++}
++
++# XXX: DAK produces broken output, fix it up here before we process it.
++#
++# The two current bogus instances are, at least two fused paragraphs, and
++# bogus "sh: 0: getcwd() failed: No such file or directory" command output
++# interpersed within the file.
++sub fixup_broken_metadata
++{
++    my $cachefile = shift;
++    my $para_sep = 1;
++
++    open my $fh_old, '<', $cachefile
++        or error("cannot open cache file $cachefile for fixup");
++    open my $fh_new, '>', "$cachefile.new"
++        or error("cannot open cache file $cachefile.new for fixup");
++    while (my $line = <$fh_old>) {
++        if ($line =~ m/^\s*$/) {
++            $para_sep = 1;
++        } elsif (not $para_sep and $line =~ m/^Date:/) {
++            # XXX: We assume each paragraph starts with a Date: field, and
++            # inject the missing newline.
++            print { $fh_new } "\n";
++        } else {
++            $para_sep = 0;
++        }
++
++        # XXX: Fixup shell output detritus.
++        if ($line =~ s/sh: 0: getcwd\(\) failed: No such file or directory//) {
++            # Remove the trailing line so that the next line gets folded back
++            # into this one.
++            chomp $line;
++        }
++
++        print { $fh_new } $line;
++    }
++    close $fh_new or error("cannot write cache file $cachefile.new");
++    close $fh_old;
++
++    # Preserve the original mtime so that mirroring works.
++    my ($atime, $mtime) = (stat $cachefile)[8, 9];
++    utime $atime, $mtime, "$cachefile.new";
++
++    rename "$cachefile.new", $cachefile
++        or error("cannot replace cache file with fixup version");
++}
++
++my $opts;
++
++GetOptions(
++    'url|u=s' => \$opts->{'url'},
++    'no-refresh' => \$opts->{'no-refresh'},
++    'help|?' => sub { usage(); exit 0 },
++    'version' => sub { version(); exit 0 },
++) or die "\nUsage: $PROGNAME [<option>...] <package>...\n" .
++         "Run $PROGNAME --help for more details.\n";
++
++unless (@ARGV) {
++    error('need at least one package name as an argument');
++}
++
++my $url = $opts->{url} // $default_url;
++$url = $url_map{$url} if $url_map{$url};
++
++my $cachehome = $ENV{XDG_CACHE_HOME};
++$cachehome ||= File::Spec->catdir($ENV{HOME}, '.cache') if length $ENV{HOME};
++if (length $cachehome == 0) {
++    error("unknown user home, cannot download removal metadata");
++}
++my $cachedir = File::Spec->catdir($cachehome, 'devscripts', 'deb-why-removed');
++my $cachefile = File::Spec->catfile($cachedir, basename($url));
++
++if (not -d $cachedir) {
++    make_path($cachedir);
++}
++
++if (not -e $cachefile or (-e _ and not $opts->{'no-refresh'})) {
++    # Cache the file locally.
++    my $http = HTTP::Tiny->new(verify_SSL => 1);
++    my $resp = $http->mirror($url, $cachefile);
++
++    unless ($resp->{success}) {
++        error("cannot fetch removal metadata: $resp->{status} $resp->{reason}");
++    }
++
++    if ($resp->{status} != 304) {
++        fixup_broken_metadata($cachefile);
++    }
++}
++
++my $meta = Dpkg::Index->new(
++    get_key_func => sub { return $_[0]->{Sources} // $_[0]->{Binaries} // '' },
++);
++
++$meta->load($cachefile, compression => 0);
++
++STANZA: foreach my $entry ($meta->get) {
++    foreach my $pkg (@ARGV) {
++        # XXX: Skip bogus entries with no indexable fields.
++        next if not defined $entry->{Sources} and
++                not defined $entry->{Binaries};
++
++        next unless (defined $entry->{Sources} and
++                     $entry->{Sources} =~ m/^\Q$pkg\E_/m) or
++                    (defined $entry->{Binaries} and
++                     $entry->{Binaries} =~ m/^\Q$pkg\E_/m);
++
++        print $entry->output();
++        print "\n";
++        next STANZA;
++    }
++}
++
++=encoding utf8
++
++=head1 NAME
++
++deb-why-removed - shows the reason a package was removed from the archive
++
++=head1 SYNOPSIS
++
++B<deb-why-removed> [I<option>...] I<package>...
++
++=head1 DESCRIPTION
++
++This program will download the removals metadata from the archive, search
++and print the entries within for a source or binary package name match.
++
++=head1 OPTIONS
++
++=over 4
++
++=item B<-u>, B<--url> I<URL>
++
++URL to the archive removals deb822-formatted file list.
++
++=item B<--no-refresh>
++
++Do not refresh the cached removals file even if there is a newer version
++in the archive.
++
++=item B<-?>, B<--help>
++
++Show a help message and exit.
++
++=item B<--version>
++
++Show the program version.
++
++=back
++
++=head1 FILES
++
++=over 4
++
++=item I<cachedir>B</devscripts/deb-why-removed/>
++
++This directory contains the cached removal files downloaded from the archive.
++I<cachedir> will be either B<$XDG_CACHE_HOME> or if that is not defined
++B<$HOME/.cache/>.
++
++=back
++
++=head1 SEE ALSO
++
++L<https://ftp-master.debian.org/#removed>
++
++=cut
+-- 
+2.18.0.345.g5c9ce644c3
+

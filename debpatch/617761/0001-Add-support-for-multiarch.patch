@@ -1,0 +1,119 @@
+From 4efbc779861c88de4f5f13e0786b6ed41737b6d3 Mon Sep 17 00:00:00 2001
+From: Steve Langasek <steve.langasek@linaro.org>
+Date: Thu, 10 Mar 2011 22:28:24 -0800
+Subject: [PATCH] Add support for multiarch.
+
+Open compat level 9, which incompatibly changes dh_auto_configure behavior
+to set --libdir and --libexecdir to the multiarch directory path.  This
+requires dpkg-dev 1.16.0 (not yet released) for the multiarch directory
+variable, so bump the dependency to this version.
+
+Also set a new substvar, misc:Pre-Depends, to multiarch-support, a virtual
+package provided by versions of eglibc that support the multiarch library
+paths at runtime; this needs to be a pre-dependency to ensure unpacked but
+not-yet-configured libraries can still be found during upgrades, so library
+packages converting to multiarch (i.e., switching to compat 9) will need to
+add this substitution by hand to debian/control.
+---
+ Debian/Debhelper/Buildsystem/autoconf.pm |    9 +++++++--
+ Debian/Debhelper/Dh_Lib.pm               |    2 +-
+ debian/control                           |    2 +-
+ dh_makeshlibs                            |    8 ++++++++
+ 4 files changed, 17 insertions(+), 4 deletions(-)
+
+diff --git a/Debian/Debhelper/Buildsystem/autoconf.pm b/Debian/Debhelper/Buildsystem/autoconf.pm
+index d7b0bed..f0948f3 100644
+--- a/Debian/Debhelper/Buildsystem/autoconf.pm
++++ b/Debian/Debhelper/Buildsystem/autoconf.pm
+@@ -7,7 +7,7 @@
+ package Debian::Debhelper::Buildsystem::autoconf;
+ 
+ use strict;
+-use Debian::Debhelper::Dh_Lib qw(dpkg_architecture_value sourcepackage);
++use Debian::Debhelper::Dh_Lib qw(dpkg_architecture_value sourcepackage compat);
+ use base 'Debian::Debhelper::Buildsystem::makefile';
+ 
+ sub DESCRIPTION {
+@@ -37,7 +37,12 @@ sub configure {
+ 	push @opts, "--infodir=\${prefix}/share/info";
+ 	push @opts, "--sysconfdir=/etc";
+ 	push @opts, "--localstatedir=/var";
+-	push @opts, "--libexecdir=\${prefix}/lib/" . sourcepackage();
++	if (! compat(8)) {
++		push @opts, "--libdir=\${prefix}/lib/" . dpkg_architecture_value("DEB_HOST_MULTIARCH");
++		push @opts, "--libexecdir=\${prefix}/lib/" . dpkg_architecture_value("DEB_HOST_MULTIARCH") . "/" . sourcepackage();
++	} else {
++		push @opts, "--libexecdir=\${prefix}/lib/" . sourcepackage();
++	}
+ 	push @opts, "--disable-maintainer-mode";
+ 	push @opts, "--disable-dependency-tracking";
+ 	# Provide --host only if different from --build, as recommended in
+diff --git a/Debian/Debhelper/Dh_Lib.pm b/Debian/Debhelper/Dh_Lib.pm
+index 0177721..dcba4d2 100644
+--- a/Debian/Debhelper/Dh_Lib.pm
++++ b/Debian/Debhelper/Dh_Lib.pm
+@@ -20,7 +20,7 @@ use vars qw(@ISA @EXPORT %dh);
+ 	    &is_make_jobserver_unavailable &clean_jobserver_makeflags
+ 	    &cross_command);
+ 
+-my $max_compat=8;
++my $max_compat=9;
+ 
+ sub init {
+ 	my %params=@_;
+diff --git a/debian/control b/debian/control
+index cdf7489..202f418 100644
+--- a/debian/control
++++ b/debian/control
+@@ -10,7 +10,7 @@ Homepage: http://kitenet.net/~joey/code/debhelper/
+ 
+ Package: debhelper
+ Architecture: all
+-Depends: ${perl:Depends}, ${misc:Depends}, perl-base (>= 5.10), file (>= 3.23), dpkg-dev (>= 1.14.19), html2text, binutils, po-debconf, man-db (>= 2.5.1-1)
++Depends: ${perl:Depends}, ${misc:Depends}, perl-base (>= 5.10), file (>= 3.23), dpkg-dev (>= 1.16.0), html2text, binutils, po-debconf, man-db (>= 2.5.1-1)
+ Suggests: dh-make
+ Conflicts: dpkg-cross (<< 1.18), python-support (<< 0.5.3), python-central (<< 0.5.6)
+ Description: helper programs for debian/rules
+diff --git a/dh_makeshlibs b/dh_makeshlibs
+index a3c81e1..5d6f869 100755
+--- a/dh_makeshlibs
++++ b/dh_makeshlibs
+@@ -122,6 +122,7 @@ init(options => {
+ });
+ 
+ my $objdump=cross_command("objdump");
++my $multiarch=dpkg_architecture_value("DEB_HOST_MULTIARCH");
+ 
+ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 	next if is_udeb($package);
+@@ -130,6 +131,7 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 
+ 	my %seen;
+ 	my $need_ldconfig = 0;
++	my $is_multiarch = 0;
+ 
+ 	doit("rm", "-f", "$tmp/DEBIAN/shlibs");
+ 
+@@ -148,6 +150,9 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 	while (<FIND>) {
+ 		my ($library, $major);
+ 		push @lib_files, $_;
++		if ($multiarch ne '' && $_ =~ m,/$multiarch/,) {
++			$is_multiarch=1;
++		}
+ 		my $ret=`$objdump -p $_`;
+ 		if ($ret=~m/\s+SONAME\s+(.+)\.so\.(.+)/) {
+ 			# proper soname format
+@@ -240,6 +245,9 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 			doit("rm", "-f", "$tmp/DEBIAN/symbols");
+ 		}
+ 	}
++	if ($is_multiarch) {
++		addsubstvar($package, "misc:Pre-Depends", "multiarch-support");
++	}
+ }
+ 
+ =head1 SEE ALSO
+-- 
+1.7.2.3
+

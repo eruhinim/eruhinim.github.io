@@ -1,0 +1,41 @@
+From 0689b5b4a144d9d7c2171a12f6ff84da63a61892 Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Mon, 22 May 2023 23:49:59 +0200
+Subject: [PATCH] dpkg: Handle non-existent .dpkg-tmp files on read-only
+ filesystems
+
+On read-only filesystems trying to rename a directory or a file will
+fail with EROFS, even if non-existent. To avoid impacting the common
+case, check whether errno is EROFS, then check whether the file exists
+and if so restore errno to EROFS to fail on that, otherwise let the
+errno from the failure trickle into the next check which will ignore it
+if it implies that the file does not exist.
+
+Closes: #1030149
+---
+ src/main/archives.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/src/main/archives.c b/src/main/archives.c
+index 0062600c2..1ecce545a 100644
+--- a/src/main/archives.c
++++ b/src/main/archives.c
+@@ -762,6 +762,15 @@ tarobject(struct tar_archive *tar, struct tar_entry *ti)
+      * backup/restore operation and were rudely interrupted.
+      * So, we see if we have .dpkg-tmp, and if so we restore it. */
+     if (rename(fnametmpvb.buf,fnamevb.buf)) {
++      /* Trying to remove a directory or a file on a read-only filesystem,
++       * even if non-existent, always returns EROFS. */
++      if (errno == EROFS) {
++        /* If the file does not exist the access function will remap the
++         * EROFS into an ENOENT, otherwise restore EROFS to fail with that. */
++        if (access(fnametmpvb.buf, F_OK) == 0)
++          errno = EROFS;
++      }
++
+       if (errno != ENOENT && errno != ENOTDIR)
+         ohshite(_("unable to clean up mess surrounding '%.255s' before "
+                   "installing another version"), ti->name);
+-- 
+2.40.1
+

@@ -1,0 +1,735 @@
+diff -Nru blhc-0.05/Build.PL blhc-0.06/Build.PL
+--- blhc-0.05/Build.PL	2014-08-20 00:56:47.000000000 +0200
++++ blhc-0.06/Build.PL	2016-06-05 15:43:36.000000000 +0200
+@@ -1,6 +1,6 @@
+ #!/usr/bin/perl
+ 
+-# Copyright (C) 2012-2014  Simon Ruderich
++# Copyright (C) 2012-2016  Simon Ruderich
+ #
+ # This program is free software: you can redistribute it and/or modify
+ # it under the terms of the GNU General Public License as published by
+diff -Nru blhc-0.05/META.json blhc-0.06/META.json
+--- blhc-0.05/META.json	2014-08-20 00:56:47.000000000 +0200
++++ blhc-0.06/META.json	2016-06-05 15:43:36.000000000 +0200
+@@ -4,7 +4,7 @@
+       "Simon Ruderich <simon@ruderich.org>"
+    ],
+    "dynamic_config" : 1,
+-   "generated_by" : "Module::Build version 0.4206",
++   "generated_by" : "Module::Build version 0.4218",
+    "license" : [
+       "gpl_1"
+    ],
+@@ -33,8 +33,9 @@
+    "release_status" : "stable",
+    "resources" : {
+       "license" : [
+-         "http://opensource.org/licenses/gpl-license.php"
++         "http://www.gnu.org/licenses/old-licenses/gpl-1.0.txt"
+       ]
+    },
+-   "version" : "0.05"
++   "version" : "0.06",
++   "x_serialization_backend" : "JSON::PP version 2.27300"
+ }
+diff -Nru blhc-0.05/META.yml blhc-0.06/META.yml
+--- blhc-0.05/META.yml	2014-08-20 00:56:47.000000000 +0200
++++ blhc-0.06/META.yml	2016-06-05 15:43:36.000000000 +0200
+@@ -6,7 +6,7 @@
+ configure_requires:
+   Module::Build: '0'
+ dynamic_config: 1
+-generated_by: 'Module::Build version 0.4206, CPAN::Meta::Converter version 2.140640'
++generated_by: 'Module::Build version 0.4218, CPAN::Meta::Converter version 2.150005'
+ license: gpl
+ meta-spec:
+   url: http://module-build.sourceforge.net/META-spec-v1.4.html
+@@ -20,5 +20,6 @@
+   Term::ANSIColor: '2.01'
+   Text::ParseWords: '0'
+ resources:
+-  license: http://opensource.org/licenses/gpl-license.php
+-version: '0.05'
++  license: http://www.gnu.org/licenses/old-licenses/gpl-1.0.txt
++version: '0.06'
++x_serialization_backend: 'CPAN::Meta::YAML version 0.012'
+diff -Nru blhc-0.05/NEWS blhc-0.06/NEWS
+--- blhc-0.05/NEWS	2014-08-20 00:56:47.000000000 +0200
++++ blhc-0.06/NEWS	2016-06-05 15:43:36.000000000 +0200
+@@ -1,6 +1,25 @@
+ NEWS
+ ====
+ 
++Version 0.06
++------------
++
++- Sync architecture specific hardening support with dpkg 1.18.2.
++- Fix false positive in "libtool: link: g++ -include test.h .." (Debian Bug
++  #784959), reported by Raphaël Hertzog.
++- Fix false positive with `gcc -v` (Debian Bug #765756), reported by Andreas
++  Beckmann.
++- Fix false positive in `rm` lines (Debian Bug #772853), reported by Jakub
++  Wilk.
++- Sync architecture specific hardening support with dpkg 1.17.18.
++- Update t/tests.t for new output of Pod::Usage in 1.65 (Debian Bug #825428),
++  reported by Niko Tyni, patch by Gregor Herrmann.
++- Fix false positives for comment lines (Debian Bug #825671), reported by
++  Fabian Wolff.
++- Improve non-verbose detection for parallel builds (Debian Bug #801492),
++  reported by Mattia Rizzolo, initial patch by Julien Lamy.
++
++
+ Version 0.05
+ ------------
+ 
+diff -Nru blhc-0.05/README blhc-0.06/README
+--- blhc-0.05/README	2014-08-20 00:56:47.000000000 +0200
++++ blhc-0.06/README	2016-06-05 15:43:36.000000000 +0200
+@@ -174,7 +174,7 @@
+ 
+ blhc is licensed under GPL version 3 or later.
+ 
+-Copyright (C) 2012-2014  Simon Ruderich
++Copyright (C) 2012-2016  Simon Ruderich
+ 
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+@@ -188,3 +188,5 @@
+ 
+ You should have received a copy of the GNU General Public License
+ along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++// vim: ft=asciidoc
+diff -Nru blhc-0.05/bin/blhc blhc-0.06/bin/blhc
+--- blhc-0.05/bin/blhc	2014-08-20 00:56:47.000000000 +0200
++++ blhc-0.06/bin/blhc	2016-06-05 15:43:36.000000000 +0200
+@@ -2,7 +2,7 @@
+ 
+ # Build log hardening check, checks build logs for missing hardening flags.
+ 
+-# Copyright (C) 2012-2014  Simon Ruderich
++# Copyright (C) 2012-2016  Simon Ruderich
+ #
+ # This program is free software: you can redistribute it and/or modify
+ # it under the terms of the GNU General Public License as published by
+@@ -24,7 +24,7 @@
+ use Getopt::Long ();
+ use Text::ParseWords ();
+ 
+-our $VERSION = '0.05';
++our $VERSION = '0.06';
+ 
+ 
+ # CONSTANTS/VARIABLES
+@@ -38,8 +38,11 @@
+     /x;
+ # Full regex which matches the complete compiler name. Used in a few places to
+ # prevent false negatives.
++my $cc_regex_full_prefix = qr/
++    [a-z0-9_]+-(?:linux-|kfreebsd-)?gnu(?:eabi|eabihf)?
++    /x;
+ my $cc_regex_full = qr/
+-    (?:[a-z0-9_]+-(?:linux-|kfreebsd-)?gnu(?:eabi|eabihf)?-)?
++    (?:$cc_regex_full_prefix-)?
+     $cc_regex
+     /x;
+ # Regex to check if a line contains a compiler command.
+@@ -51,6 +54,7 @@
+ # Regex to catch libtool commands and not lines which show commands executed
+ # by libtool (e.g. libtool: link: ...).
+ my $libtool_regex = qr/\blibtool\s.*--mode=/;
++my $libtool_link_regex = qr/\blibtool: link: /;
+ 
+ # List of source file extensions which require preprocessing.
+ my @source_preprocess_compile_cpp = (
+@@ -441,7 +445,7 @@
+ }
+ 
+ sub is_non_verbose_build {
+-    my ($line, $next_line, $skip_ref) = @_;
++    my ($line, $skip_ref, $input_ref, $line_offset, $line_count) = @_;
+ 
+     if ($line =~ /$libtool_regex/o) {
+         # libtool's --silent hides the real compiler flags.
+@@ -481,25 +485,30 @@
+     my $file = $1;
+ 
+     # On the first pass we only check if this line is verbose or not.
+-    return 1 if not defined $next_line;
++    return 1 if not defined $input_ref;
+ 
+-    # Second pass, we have access to the next line.
++    # Second pass, we have access to the next lines.
+     ${$skip_ref} = 0;
+ 
+     # CMake and other build systems print the non-verbose messages also when
+     # building verbose. If a compiler and the file name occurs in the next
+-    # line, treat it as verbose build.
++    # lines, treat it as verbose build.
+     if (defined $file) {
+         # Get filename, we can't use the complete path as only parts of it are
+         # used in the real compiler command.
+         $file =~ m{/([^/\s]+)$};
+         $file = $1;
+ 
+-        if (index($next_line, $file) != -1 and $next_line =~ /$cc_regex/o) {
+-            # Not a non-verbose line, but we still have to skip the current line
+-            # as it doesn't contain any compiler commands.
+-            ${$skip_ref} = 1;
+-            return 0;
++        for (my $i = 1; $i <= $line_count; $i++) {
++            my $next_line = $input_ref->[$line_offset + $i];
++            last unless defined $next_line;
++
++            if (index($next_line, $file) != -1 and $next_line =~ /$cc_regex/o) {
++                # Not a non-verbose line, but we still have to skip the
++                # current line as it doesn't contain any compiler commands.
++                ${$skip_ref} = 1;
++                return 0;
++            }
+         }
+     }
+ 
+@@ -601,7 +610,7 @@
+ }
+ if ($option_version) {
+     print <<"EOF";
+-blhc $VERSION  Copyright (C) 2012-2014  Simon Ruderich
++blhc $VERSION  Copyright (C) 2012-2016  Simon Ruderich
+ 
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+@@ -710,10 +719,15 @@
+     my $harden_pie     = $option_pie;     # defaults to 0
+ 
+     # Does this build log use ada? Ada also uses gcc as compiler but uses
+-    # different CFLAGS. But only perform ada checks if an ada compiler used
++    # different CFLAGS. But only perform ada checks if an ada compiler is used
+     # for performance reasons.
+     my $ada = 0;
+ 
++    # Number of parallel jobs to prevent false positives when detecting
++    # non-verbose builds. As not all jobs declare the number of parallel jobs
++    # use a large enough default.
++    my $parallel = 10;
++
+     while (my $line = <$fh>) {
+         # Detect architecture automatically unless overridden. For buildd logs
+         # only, doesn't use the dpkg-buildpackage header. Necessary to ignore
+@@ -807,6 +821,11 @@
+             }
+         }
+ 
++        # This flags is not always available, but if it is use it.
++        if ($line =~ /^DEB_BUILD_OPTIONS=.*\bparallel=(\d+)/) {
++            $parallel = $1;
++        }
++
+         # We skip over unimportant lines at the beginning of the log to
+         # prevent false positives.
+         last if index($line, 'dpkg-buildpackage: ') == 0;
+@@ -846,6 +865,7 @@
+             }
+         }
+ 
++        next if $line =~ /^\s*#/;
+         # Ignore compiler warnings for now.
+         next if $line =~ /$warning_regex/o;
+ 
+@@ -863,7 +883,7 @@
+ 
+         # Check if this line indicates a non verbose build.
+         my $skip = 0;
+-        $non_verbose |= is_non_verbose_build($line, undef, \$skip);
++        $non_verbose |= is_non_verbose_build($line, \$skip);
+         next if $skip;
+ 
+         # One line may contain multiple commands (";"). Treat each one as
+@@ -942,6 +962,16 @@
+                 next if     not $before =~ /$cc_regex_normal/o
+                         and not $after  =~ /$cc_regex_normal/o;
+             }
++            # Ignore false positives caused by gcc -v. It outputs a line
++            # looking like a normal compiler line but which is sometimes
++            # missing hardening flags, although the normal compiler line
++            # contains them.
++            next if $line =~ m{^\s+/usr/lib/gcc/$cc_regex_full_prefix/
++                                   [0-9.]+/cc1(?:plus)?}xo;
++            # Ignore false positive with `rm` which may remove files which
++            # look like a compiler executable thus causing the line to be
++            # treated as a normal compiler line.
++            next if $line =~ m{^\s*rm\s+};
+ 
+             # Check if additional hardening options were used. Used to ensure
+             # they are used for the complete build.
+@@ -982,7 +1012,7 @@
+ 
+     # Option or auto detected.
+     if ($arch) {
+-        # The following was partially copied from dpkg-dev 1.17.11
++        # The following was partially copied from dpkg-dev 1.18.7
+         # (/usr/share/perl5/Dpkg/Vendor/Debian.pm, add_hardening_flags()),
+         # copyright Raphaël Hertzog <hertzog@debian.org>, Kees Cook
+         # <kees@debian.org>, Canonical, Ltd. licensed under GPL version 2 or
+@@ -992,11 +1022,10 @@
+         my ($abi, $os, $cpu) = Dpkg::Arch::debarch_to_debtriplet($arch);
+ 
+         # Disable unsupported hardening options.
+-        if ($os !~ /^(?:linux|knetbsd|hurd)$/ or
+-                $cpu =~ /^(?:hppa|mips|mipsel|avr32)$/) {
++        if ($os !~ /^(?:linux|knetbsd|hurd)$/ or $cpu =~ /^(?:hppa|avr32)$/) {
+             $harden_pie = 0;
+         }
+-        if ($cpu =~ /^(?:ia64|alpha|mips|mipsel|hppa)$/ or $arch eq 'arm') {
++        if ($cpu =~ /^(?:ia64|alpha|hppa|nios2)$/ or $arch eq 'arm') {
+             $harden_stack = 0;
+             $harden_stack_strong = 0;
+         }
+@@ -1089,7 +1118,8 @@
+ 
+         my $skip = 0;
+         if ($input_nonverbose[$i]
+-                and is_non_verbose_build($line, $input[$i + 1], \$skip)) {
++                and is_non_verbose_build($line, \$skip,
++                                         \@input, $i, $parallel)) {
+             if (not $option_buildd) {
+                 error_non_verbose_build($line);
+                 $exit |= $exit_code{non_verbose_build};
+@@ -1102,6 +1132,8 @@
+         # is_non_verbose_build()).
+         next if $skip;
+ 
++        my $orig_line = $line;
++
+         # Remove everything until and including the compiler command. Makes
+         # checks easier and faster.
+         $line =~ s/^.*?$cc_regex//o;
+@@ -1152,7 +1184,11 @@
+         }
+         # These file types require preprocessing.
+         if (extension_found(\%extensions_preprocess, @extensions)) {
+-            $preprocess = 1;
++            # Prevent false positives with "libtool: link: g++ -include test.h
++            # .." compiler lines.
++            if ($orig_line !~ /$libtool_link_regex/o) {
++                $preprocess = 1;
++            }
+         }
+ 
+         if (not $flag_preprocess) {
+@@ -1573,7 +1609,7 @@
+ 
+ =head1 LICENSE AND COPYRIGHT
+ 
+-Copyright (C) 2012-2014 by Simon Ruderich
++Copyright (C) 2012-2016 by Simon Ruderich
+ 
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+diff -Nru blhc-0.05/debian/changelog blhc-0.06/debian/changelog
+--- blhc-0.05/debian/changelog	2015-07-19 20:18:53.000000000 +0200
++++ blhc-0.06/debian/changelog	2016-06-05 17:07:22.000000000 +0200
+@@ -1,3 +1,24 @@
++blhc (0.06-0.1) unstable; urgency=medium
++
++  * Non-maintainer upload.
++  * New upstream release.
++    Fixes the following bugs:
++    - "gets confused by output from gcc -v, g++ -v and reports false
++       positives" (Closes: #765756)
++    - "false positive: LDFLAGS missing (-Wl, -z, relro): rm -f afl-gcc ..."
++      (Closes: #772853)
++    - "possible false positive about missing CPPFLAGS in a linker call"
++      (Closes: #784959)
++    - "false positive for non verbose build" (Closes: #801492)
++    - "FTBFS with Perl 5.24: Pod::Usage formatting changed" (Closes: #825428)
++    - "false positives for comment lines" (Closes: #825671)
++  * Update years of upstream copyright.
++  * Change various URLs to use HTTPS in debian/control and
++    debian/copyright. Thanks to duck and lintian.
++  * Declare compliance with Debian Policy 3.9.8.
++
++ -- gregor herrmann <gregoa@debian.org>  Sun, 05 Jun 2016 17:07:19 +0200
++
+ blhc (0.05-0.1) unstable; urgency=medium
+ 
+   * Non-maintainer upload.
+diff -Nru blhc-0.05/debian/control blhc-0.06/debian/control
+--- blhc-0.05/debian/control	2015-07-19 19:54:14.000000000 +0200
++++ blhc-0.06/debian/control	2016-06-05 17:07:22.000000000 +0200
+@@ -3,10 +3,10 @@
+ Priority: optional
+ Maintainer: Jari Aalto <jari.aalto@cante.net>
+ Build-Depends: debhelper (>= 9), libmodule-build-perl
+-Standards-Version: 3.9.6
+-Vcs-Git: git://anonscm.debian.org/collab-maint/blhc.git
+-Vcs-Browser: http://anonscm.debian.org/gitweb/?p=collab-maint/blhc.git;a=summary
+-Homepage: http://ruderich.org/simon/blhc
++Standards-Version: 3.9.8
++Vcs-Git: https://anonscm.debian.org/git/collab-maint/blhc.git
++Vcs-Browser: https://anonscm.debian.org/cgit/collab-maint/blhc.git
++Homepage: https://ruderich.org/simon/blhc
+ 
+ Package: blhc
+ Architecture: all
+diff -Nru blhc-0.05/debian/copyright blhc-0.06/debian/copyright
+--- blhc-0.05/debian/copyright	2014-08-14 07:35:40.000000000 +0200
++++ blhc-0.06/debian/copyright	2016-06-05 17:07:22.000000000 +0200
+@@ -1,13 +1,13 @@
+-Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0
++Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0
+ Upstream-Name: blhc
+ Upstream-Contact: Simon Ruderich <simon@ruderich.org>
+-Source: http://ruderich.org/simon/blhc/
+-X-Upstream-Vcs: http://ruderich.org/simon/blhc/blhc.git
++Source: https://ruderich.org/simon/blhc/
++X-Upstream-Vcs: https://ruderich.org/simon/blhc/blhc.git
+ X-Upstream-Bugs: Simon Ruderich <simon@ruderich.org>
+ 
+ Files: *
+ Copyright:
+-  2012-2014 Simon Ruderich <simon@ruderich.org>
++  2012-2016 Simon Ruderich <simon@ruderich.org>
+ License: GPL-3+
+ 
+ Files: debian/*
+@@ -27,7 +27,7 @@
+  GNU General Public License for more details.
+  .
+  You should have received a copy of the GNU General Public License
+- along with this program. If not, see <http://www.gnu.org/licenses/>.
++ along with this program. If not, see <https://www.gnu.org/licenses/>.
+  .
+  On Debian systems, the complete text of the GNU General
+  Public License can be found in "/usr/share/common-licenses/GPL-3".
+diff -Nru blhc-0.05/t/logs/buildd-architecture blhc-0.06/t/logs/buildd-architecture
+--- blhc-0.05/t/logs/buildd-architecture	2014-08-20 00:56:47.000000000 +0200
++++ blhc-0.06/t/logs/buildd-architecture	2016-06-05 15:43:36.000000000 +0200
+@@ -1,4 +1,4 @@
+-Build Architecture: mipsel
++Build Architecture: arm
+ dpkg-buildpackage: source package test
+ 
+ gcc -g -O2 -Wformat -Wformat-security -Werror=format-security -D_FORTIFY_SOURCE=2 -c test.c
+diff -Nru blhc-0.05/t/logs/buildd-architecture-old blhc-0.06/t/logs/buildd-architecture-old
+--- blhc-0.05/t/logs/buildd-architecture-old	2014-08-20 00:56:47.000000000 +0200
++++ blhc-0.06/t/logs/buildd-architecture-old	2016-06-05 15:43:36.000000000 +0200
+@@ -1,6 +1,6 @@
+ # Old logs used Architecture instead of Build Architecture (sbuild <<
+ # 0.63.0-1).
+-Architecture: mipsel
++Architecture: arm
+ dpkg-buildpackage: source package test
+ 
+ gcc -g -O2 -Wformat -Wformat-security -Werror=format-security -D_FORTIFY_SOURCE=2 -c test.c
+diff -Nru blhc-0.05/t/logs/false-positives blhc-0.06/t/logs/false-positives
+--- blhc-0.05/t/logs/false-positives	2014-08-20 00:56:47.000000000 +0200
++++ blhc-0.06/t/logs/false-positives	2016-06-05 15:43:36.000000000 +0200
+@@ -5,3 +5,41 @@
+ swig -Wall -c++ -python test.i
+ 
+ + CC=gcc CFLAGS=-g -O2 ... sh ../../build.sh -r -c lto
++
++rm -f afl-gcc afl-as afl-fuzz afl-showmap as afl-g++ afl-clang afl-clang++ *.o *~ a.out core core.[1-9][0-9]* *.stackdump test .test test-instr .test-instr0 .test-instr1
++
++# "Missing" flags in comments should be ignored.
++# gcc -E tag_tree.list does not work, so use a .c name
++
++# gcc -v can cause false positives.
++cd GUI && qmake
++/usr/bin/make -C GUI
++make[2]: Entering directory '/tmp/buildd/i7z-0.27.2+git2013.10.12-g5023138/GUI'
++/usr/lib/x86_64-linux-gnu/qt4/bin/moc -DQT_GUI_LIB -DQT_CORE_LIB -DQT_SHARED -I/usr/share/qt4/mkspecs/linux-g++-64 -I. -I/usr/include/qt4/QtCore -I/usr/include/qt4/QtGui -I/usr/include/qt4 -I. -I. i7z_GUI.cpp -o i7z_GUI.moc
++g++ -c -m64 -pipe -g -O2 -fstack-protector-strong -Wformat -Werror=format-security -D_FORTIFY_SOURCE=2 -v -fno-schedule-insns2 -fno-schedule-insns -fno-inline-small-functions -fno-caller-saves -g -Wall -W -D_REENTRANT -DQT_GUI_LIB -DQT_CORE_LIB -DQT_SHARED -I/usr/share/qt4/mkspecs/linux-g++-64 -I. -I/usr/include/qt4/QtCore -I/usr/include/qt4/QtGui -I/usr/include/qt4 -I. -I. -o i7z_GUI.o i7z_GUI.cpp
++Using built-in specs.
++COLLECT_GCC=g++
++Target: x86_64-linux-gnu
++Configured with: ../src/configure -v --with-pkgversion='Debian 4.9.1-17' --with-bugurl=file:///usr/share/doc/gcc-4.9/README.Bugs --enable-languages=c,c++,java,go,d,fortran,objc,obj-c++ --prefix=/usr --program-suffix=-4.9 --enable-shared --enable-linker-build-id --libexecdir=/usr/lib --without-included-gettext --enable-threads=posix --with-gxx-include-dir=/usr/include/c++/4.9 --libdir=/usr/lib --enable-nls --with-sysroot=/ --enable-clocale=gnu --enable-libstdcxx-debug --enable-libstdcxx-time=yes --enable-gnu-unique-object --disable-vtable-verify --enable-plugin --with-system-zlib --disable-browser-plugin --enable-java-awt=gtk --enable-gtk-cairo --with-java-home=/usr/lib/jvm/java-1.5.0-gcj-4.9-amd64/jre --enable-java-home --with-jvm-root-dir=/usr/lib/jvm/java-1.5.0-gcj-4.9-amd64 --with-jvm-jar-dir=/usr/lib/jvm-exports/java-1.5.0-gcj-4.9-amd64 --with-arch-directory=amd64 --with-ecj-jar=/usr/share/java/eclipse-ecj.jar --enable-objc-gc --enable-multiarch --with-arch-32=i586 --with-abi=m64 --with-multilib-list=m32,m64,mx32 --enable-multilib --with-tune=generic--enable-checking=release --build=x86_64-linux-gnu --host=x86_64-linux-gnu --target=x86_64-linux-gnu
++Thread model: posix
++gcc version 4.9.1 (Debian 4.9.1-17)
++COLLECT_GCC_OPTIONS='-c' '-m64' '-pipe' '-g' '-O2' '-fstack-protector-strong' '-Wformat=1' '-Werror=format-security' '-D' '_FORTIFY_SOURCE=2' '-v' '-fno-schedule-insns2' '-fno-schedule-insns' '-fno-inline-small-functions' '-fno-caller-saves' '-g' '-Wall' '-Wextra' '-D' '_REENTRANT' '-D' 'QT_GUI_LIB' '-D' 'QT_CORE_LIB' '-D' 'QT_SHARED' '-I' '/usr/share/qt4/mkspecs/linux-g++-64' '-I' '.' '-I' '/usr/include/qt4/QtCore' '-I' '/usr/include/qt4/QtGui' '-I' '/usr/include/qt4' '-I' '.' '-I' '.' '-o' 'i7z_GUI.o' '-shared-libgcc' '-mtune=generic' '-march=x86-64'
++ /usr/lib/gcc/x86_64-linux-gnu/4.9/cc1plus -quiet -v -I /usr/share/qt4/mkspecs/linux-g++-64 -I . -I /usr/include/qt4/QtCore -I /usr/include/qt4/QtGui -I /usr/include/qt4 -I . -I . -imultiarch x86_64-linux-gnu -D_GNU_SOURCE -D _FORTIFY_SOURCE=2 -D _REENTRANT -D QT_GUI_LIB -D QT_CORE_LIB -D QT_SHARED i7z_GUI.cpp -quiet -dumpbase i7z_GUI.cpp -m64 -mtune=generic -march=x86-64 -auxbase-strip i7z_GUI.o -g -g -O2 -Wformat=1 -Werror=format-security -Wall -Wextra -version -fstack-protector-strong -fno-schedule-insns2 -fno-schedule-insns -fno-inline-small-functions -fno-caller-saves -o - | as -v -I /usr/share/qt4/mkspecs/linux-g++-64 -I . -I /usr/include/qt4/QtCore -I /usr/include/qt4/QtGui -I /usr/include/qt4 -I . -I . --64 -o i7z_GUI.o
++GNU assembler version 2.24.51 (x86_64-linux-gnu) using BFD version (GNU Binutils for Debian) 2.24.90.20141014
++GNU C++ (Debian 4.9.1-17) version 4.9.1 (x86_64-linux-gnu)
++        compiled by GNU C version 4.9.1, GMP version 6.0.0, MPFR version 3.1.2-p3, MPC version 1.0.2
++GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072
++ignoring duplicate directory "/usr/include/x86_64-linux-gnu/c++/4.9"
++ignoring nonexistent directory "/usr/local/include/x86_64-linux-gnu"
++ignoring nonexistent directory "/usr/lib/gcc/x86_64-linux-gnu/4.9/../../../../x86_64-linux-gnu/include"
++ignoring duplicate directory "."
++ignoring duplicate directory "."
++#include "..." search starts here:
++#include <...> search starts here:
++[...]
++ /usr/include
++End of search list.
++GNU C++ (Debian 4.9.1-17) version 4.9.1 (x86_64-linux-gnu)
++        compiled by GNU C version 4.9.1, GMP version 6.0.0, MPFR version 3.1.2-p3, MPC version 1.0.2
++GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072
++Compiler executable checksum: 26648cf2c5cb5e5907eedabc7a0be2ce
+diff -Nru blhc-0.05/t/logs/libtool blhc-0.06/t/logs/libtool
+--- blhc-0.05/t/logs/libtool	2014-08-20 00:56:47.000000000 +0200
++++ blhc-0.06/t/logs/libtool	2016-06-05 15:43:36.000000000 +0200
+@@ -38,9 +38,8 @@
+ libtool: link: gcc  -g -O2 -fstack-protector-strong -Wformat -Wformat-security -Werror=format-security   -Wl,-z,relro -o test test.o
+ gcc -g -O2 -fstack-protector-strong -Wformat -Wformat-security -Werror=format-security -Wl,-z -Wl,relro -o .libs/test test.o
+ 
+-# Just to be sure, libtool won't do this. Note the test.c.
+-/bin/bash ../libtool --tag=CC   --mode=link gcc -Wl,-z,relro -o test.so test.c
+-libtool: link: gcc -Wl,-z,relro -o test.so test.c
++# Note the .h, this might cause a false positive CPPFLAGS check.
++libtool: link: g++ -include ./include/CppUTest/MemoryLeakDetectorNewMacros.h -Wall -Wextra -Wshadow -Wswitch-default -Wswitch-enum -Wconversion -pedantic -Wsign-conversion -Woverloaded-virtual -Wno-disabled-macro-expansion -Wno-padded -Wno-global-constructors -Wno-exit-time-destructors -Wno-weak-vtables -Wno-old-style-cast -g -O2 -fstack-protector-strong -Wformat -Werror=format-security -Wl,-z -Wl,relro -o CppUTestTests CppUTestTests-AllocationInCFile.o CppUTestTests-AllocationInCppFile.o CppUTestTests-AllocLetTestFree.o CppUTestTests-AllocLetTestFreeTest.o CppUTestTests-AllTests.o CppUTestTests-CheatSheetTest.o CppUTestTests-CommandLineArgumentsTest.o CppUTestTests-CommandLineTestRunnerTest.o CppUTestTests-JUnitOutputTest.o CppUTestTests-MemoryLeakDetectorTest.o CppUTestTests-MemoryLeakOperatorOverloadsTest.o CppUTestTests-MemoryLeakWarningTest.o CppUTestTests-PluginTest.o CppUTestTests-PreprocessorTest.o CppUTestTests-SetPluginTest.o CppUTest Tests-SimpleStringTest.o CppUTestTests-SimpleMutexTest.o CppUTestTests-TestFailureNaNTest.o CppUTestTests-TestFailureTest.o CppUTestTests-TestFilterTest.o CppUTestTests-TestHarness_cTest.o CppUTestTests-TestHarness_cTestCFile.o CppUTestTests-TestInstallerTest.o CppUTestTests-TestMemoryAllocatorTest.o CppUTestTests-TestOutputTest.o CppUTestTests-TestRegistryTest.o CppUTestTests-TestResultTest.o CppUTestTests-TestUTestMacro.o CppUTestTests-UtestTest.o CppUTestTests-UtestPlatformTest.o  lib/libCppUTest.a -lpthread
+ 
+ libtool: install: /usr/bin/install -c ...
+ /bin/bash ./libtool --mode=install /usr/bin/install -c ...
+diff -Nru blhc-0.05/t/logs/verbose-build blhc-0.06/t/logs/verbose-build
+--- blhc-0.05/t/logs/verbose-build	2014-08-20 00:56:47.000000000 +0200
++++ blhc-0.06/t/logs/verbose-build	2016-06-05 15:43:36.000000000 +0200
+@@ -65,6 +65,19 @@
+ Building shared library ../build/test/libtest.so.1.2.3
+ Compiling test.cc to ../build/test/test.o
+ Building program ../build/bin/test
++
++# padding to handle the parallel non-verbose detection
++cc -E -D_FORTIFY_SOURCE=2 padding.c
++cc -E -D_FORTIFY_SOURCE=2 padding.c
++cc -E -D_FORTIFY_SOURCE=2 padding.c
++cc -E -D_FORTIFY_SOURCE=2 padding.c
++cc -E -D_FORTIFY_SOURCE=2 padding.c
++cc -E -D_FORTIFY_SOURCE=2 padding.c
++cc -E -D_FORTIFY_SOURCE=2 padding.c
++cc -E -D_FORTIFY_SOURCE=2 padding.c
++cc -E -D_FORTIFY_SOURCE=2 padding.c
++cc -E -D_FORTIFY_SOURCE=2 padding.c
++
+ # Verbose ...
+ Compiling test/test.cc to ../build/test/test.o
+ g++ -c -g -O2 -fstack-protector-strong -Wformat -Wformat-security -Werror=format-security -o ../build/test/test.o test/test.cc
+@@ -79,6 +92,19 @@
+ 
+ # Non verbose.
+ Compiling test_file.cxx...
++
++# padding to handle the parallel non-verbose detection
++cc -E -D_FORTIFY_SOURCE=2 padding.c
++cc -E -D_FORTIFY_SOURCE=2 padding.c
++cc -E -D_FORTIFY_SOURCE=2 padding.c
++cc -E -D_FORTIFY_SOURCE=2 padding.c
++cc -E -D_FORTIFY_SOURCE=2 padding.c
++cc -E -D_FORTIFY_SOURCE=2 padding.c
++cc -E -D_FORTIFY_SOURCE=2 padding.c
++cc -E -D_FORTIFY_SOURCE=2 padding.c
++cc -E -D_FORTIFY_SOURCE=2 padding.c
++cc -E -D_FORTIFY_SOURCE=2 padding.c
++
+ # Verbose ...
+ Compiling test_file.cxx...
+ g++ -g -O2 -fPIC -Wformat -Wformat-security -Werror=format-security -D_FORTIFY_SOURCE=2 -c test_file.cxx
+@@ -105,3 +131,43 @@
+ Compiling /«BUILDDIR»/emacs23-23.4+1/debian/build-x/src/../lisp/international/characters.el
+ Compiling '/«PKGBUILDDIR»/debian/tmp/usr/lib/python3.3/_markupbase.py'...
+ Compiling /«PKGBUILDDIR»/debian/tmp/usr/lib/python2.7/dist-packages/libsvn/__init__.py ...
++
++
++# More examples for real build logs.
++Scanning dependencies of target dcmtk_getscu
++make[3]: Leaving directory '/«PKGBUILDDIR»/build'
++make -f tests/tools/CMakeFiles/dcmtk_getscu.dir/build.make tests/tools/CMakeFiles/dcmtk_getscu.dir/build
++make[3]: Entering directory '/«PKGBUILDDIR»/build'
++[  0%] Building CXX object tests/tools/CMakeFiles/dcmtk_getscu.dir/getscu.cc.o
++[  0%] Building CXX object tests/tools/CMakeFiles/dcmtk_getscu.dir/scu.cc.o
++cd /«PKGBUILDDIR»/build/tests/tools && /usr/bin/c++     -g -O2 -fstack-protector-strong -Wformat -Werror=format-security -std=c++0x -Wdate-time -D_FORTIFY_SOURCE=2    -D HAVE_CONFIG_H -o CMakeFiles/dcmtk_getscu.dir/getscu.cc.o -c /«PKGBUILDDIR»/tests/tools/getscu.cc
++cd /«PKGBUILDDIR»/build/tests/tools && /usr/bin/c++     -g -O2 -fstack-protector-strong -Wformat -Werror=format-security -std=c++0x -Wdate-time -D_FORTIFY_SOURCE=2    -D HAVE_CONFIG_H -o CMakeFiles/dcmtk_getscu.dir/scu.cc.o -c /«PKGBUILDDIR»/tests/tools/scu.cc
++
++make[3]: Entering directory '/«PKGBUILDDIR»/build'
++[ 30%] Building CXX object examples/CMakeFiles/move.dir/move.cpp.o
++[ 30%] Building CXX object examples/CMakeFiles/store.dir/store.cpp.o
++cd /«PKGBUILDDIR»/build/examples && /usr/bin/c++    -I/«PKGBUILDDIR»/src -I/usr/include/jsoncpp  -g -O2 -fstack-protector-strong -Wformat -Werror=format-security -std=c++0x -Wdate-time -D_FORTIFY_SOURCE=2    -D HAVE_CONFIG_H -D BOOST_ASIO_DYN_LINK -D ODIL_MAJOR_VERSION=0 -o CMakeFiles/store.dir/store.cpp.o -c /«PKGBUILDDIR»/examples/store.cpp
++cd /«PKGBUILDDIR»/build/examples && /usr/bin/c++    -I/«PKGBUILDDIR»/src -I/usr/include/jsoncpp  -g -O2 -fstack-protector-strong -Wformat -Werror=format-security -std=c++0x -Wdate-time -D_FORTIFY_SOURCE=2    -D HAVE_CONFIG_H -D BOOST_ASIO_DYN_LINK -D ODIL_MAJOR_VERSION=0 -o CMakeFiles/move.dir/move.cpp.o -c /«PKGBUILDDIR»/examples/move.cpp
++[ 30%] Building CXX object examples/CMakeFiles/get.dir/get.cpp.o
++cd /«PKGBUILDDIR»/build/examples && /usr/bin/c++    -I/«PKGBUILDDIR»/src -I/usr/include/jsoncpp  -g -O2 -fstack-protector-strong -Wformat -Werror=format-security -std=c++0x -Wdate-time -D_FORTIFY_SOURCE=2    -D HAVE_CONFIG_H -D BOOST_ASIO_DYN_LINK -D ODIL_MAJOR_VERSION=0 -o CMakeFiles/get.dir/get.cpp.o -c /«PKGBUILDDIR»/examples/get.cpp
++[ 30%] Building CXX object examples/CMakeFiles/find.dir/find.cpp.o
++cd /«PKGBUILDDIR»/build/examples && /usr/bin/c++    -I/«PKGBUILDDIR»/src -I/usr/include/jsoncpp  -g -O2 -fstack-protector-strong -Wformat -Werror=format-security -std=c++0x -Wdate-time -D_FORTIFY_SOURCE=2    -D HAVE_CONFIG_H -D BOOST_ASIO_DYN_LINK -D ODIL_MAJOR_VERSION=0 -o CMakeFiles/find.dir/find.cpp.o -c /«PKGBUILDDIR»/examples/find.cpp
++[ 31%] Linking CXX executable store
++cd /«PKGBUILDDIR»/build/examples && /usr/bin/cmake -E cmake_link_script CMakeFiles/store.dir/link.txt --verbose=1
++/usr/bin/c++   -g -O2 -fstack-protector-strong -Wformat -Werror=format-security -std=c++0x -Wdate-time -D_FORTIFY_SOURCE=2    -Wl,-z,relro CMakeFiles/store.dir/store.cpp.o  -o store -rdynamic ../src/libodil.so.0.5.0 -lboost_filesystem -lboost_system -ldcmnet -ldcmdata -loflog -lofstd -lpthread -lwrap -lz -licuuc -ljsoncpp -Wl,-rpath,/«PKGBUILDDIR»/build/src 
++
++[  2%] Building CXX object scribus/text/CMakeFiles/scribus_text_lib.dir/sctext_shared.cpp.o
++[  3%] Building CXX object scribus/desaxe/CMakeFiles/scribus_desaxe_lib.dir/uniqueid.cpp.o
++[  3%] Building CXX object scribus/styles/CMakeFiles/scribus_styles_lib.dir/stylecontext.cpp.o
++[  3%] Building CXX object scribus/colormgmt/CMakeFiles/scribus_colormgmt_lib.dir/sccolorprofilecache.cpp.o
++[  3%] Building CXX object scribus/styles/CMakeFiles/scribus_styles_lib.dir/stylecontextproxy.cpp.o
++[  3%] Building CXX object scribus/text/CMakeFiles/scribus_text_lib.dir/fsize.cpp.o
++[  3%] Building CXX object scribus/desaxe/CMakeFiles/scribus_desaxe_lib.dir/digester.cpp.o
++[  3%] Building CXX object scribus/text/CMakeFiles/scribus_text_lib.dir/frect.cpp.o
++cd /build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus/text && /usr/lib/ccache/c++   -DHAVE_CONFIG_H -DHAVE_DLFCN_H -DHAVE_UNISTD_H -DNDEBUG -DQT_CORE_LIB -DQT_GUI_LIB -DQT_NETWORK_LIB -DQT_NO_DEBUG -DQT_THREAD_LIB -DQT_XML_LIB -g -O2 -fstack-protector-strong -Wformat -Werror=format-security -D_LARGEFILE64_SOURCE=1 -D_LARGEFILE_SOURCE=1 -D_FILE_OFFSET_BITS=64 -D_FORTIFY_SOURCE=2  -O2 -Wall -fPIC -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus/text -I/build/scribus-1.4.5+dfsg1/scribus/text -isystem /usr/include/qt4 -isystem /usr/include/qt4/QtGui -isystem /usr/include/qt4/QtXml -isystem /usr/include/qt4/QtNetwork -isystem /usr/include/qt4/QtCore -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus -I/usr/include/qt4/QtDesigner -I/usr/include/qt4/QtDeclarative -I/usr/include/qt4/QtScriptTools -I/usr/include/qt4/QtDBus -I/usr/include/qt4/QtSql -I/usr/include/qt4/QtXmlPatterns -I/usr/include/qt4/QtHelp -I/usr/include/qt4/QtUiTools -I/usr/include/qt4/QtTest -I/usr/include/qt4/QtScript -I/usr/include/qt4/QtSvg -I/usr/include/qt4/Qt3Support -I/usr/share/qt4/mkspecs/default -I/usr/include/libxml2 -I/usr/include/python2.7 -I/usr/include/x86_64-linux-gnu -I/build/scribus-1.4.5+dfsg1 -I/build/scribus-1.4.5+dfsg1/scribus -I/usr/include/freetype2    -DSHAREDIR=\"/usr/share/scribus/\" -DDOCDIR=\"/usr/share/doc/scribus/\" -DICONDIR=\"/usr/share/scribus/icons/\" -DSAMPLESDIR=\"/usr/share/scribus/samples/\" -DSCRIPTSDIR=\"/usr/share/scribus/scripts/\" -DTEMPLATEDIR=\"/usr/share/scribus/templates/\" -DDESKTOPDIR=\"/usr/share/applications/\" -DLIBDIR=\"/usr/lib/scribus/\" -DPLUGINDIR=\"/usr/lib/scribus/plugins/\" -DCOMPILE_SCRIBUS_MAIN_APP -o CMakeFiles/scribus_text_lib.dir/sctext_shared.cpp.o -c /build/scribus-1.4.5+dfsg1/scribus/text/sctext_shared.cpp
++cd /build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus/desaxe && /usr/lib/ccache/c++   -DHAVE_CONFIG_H -DHAVE_DLFCN_H -DHAVE_UNISTD_H -DNDEBUG -DQT_CORE_LIB -DQT_GUI_LIB -DQT_NETWORK_LIB -DQT_NO_DEBUG -DQT_THREAD_LIB -DQT_XML_LIB -g -O2 -fstack-protector-strong -Wformat -Werror=format-security -D_LARGEFILE64_SOURCE=1 -D_LARGEFILE_SOURCE=1 -D_FILE_OFFSET_BITS=64 -D_FORTIFY_SOURCE=2  -O2 -Wall -fPIC -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus/desaxe -I/build/scribus-1.4.5+dfsg1/scribus/desaxe -isystem /usr/include/qt4 -isystem /usr/include/qt4/QtGui -isystem /usr/include/qt4/QtXml -isystem /usr/include/qt4/QtNetwork -isystem /usr/include/qt4/QtCore -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus -I/usr/include/qt4/QtDesigner -I/usr/include/qt4/QtDeclarative -I/usr/include/qt4/QtScriptTools -I/usr/include/qt4/QtDBus -I/usr/include/qt4/QtSql -I/usr/include/qt4/QtXmlPatterns -I/usr/include/qt4/QtHelp -I/usr/include/qt4/QtUiTools -I/usr/include/qt4/QtTest -I/usr/include/qt4/QtScript -I/usr/include/qt4/QtSvg -I/usr/include/qt4/Qt3Support -I/usr/share/qt4/mkspecs/default -I/usr/include/libxml2 -I/usr/include/python2.7 -I/usr/include/x86_64-linux-gnu -I/build/scribus-1.4.5+dfsg1 -I/build/scribus-1.4.5+dfsg1/scribus -I/usr/include/freetype2    -DSHAREDIR=\"/usr/share/scribus/\" -DDOCDIR=\"/usr/share/doc/scribus/\" -DICONDIR=\"/usr/share/scribus/icons/\" -DSAMPLESDIR=\"/usr/share/scribus/samples/\" -DSCRIPTSDIR=\"/usr/share/scribus/scripts/\" -DTEMPLATEDIR=\"/usr/share/scribus/templates/\" -DDESKTOPDIR=\"/usr/share/applications/\" -DLIBDIR=\"/usr/lib/scribus/\" -DPLUGINDIR=\"/usr/lib/scribus/plugins/\" -DCOMPILE_SCRIBUS_MAIN_APP -o CMakeFiles/scribus_desaxe_lib.dir/uniqueid.cpp.o -c /build/scribus-1.4.5+dfsg1/scribus/desaxe/uniqueid.cpp
++cd /build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus/styles && /usr/lib/ccache/c++   -DHAVE_CONFIG_H -DHAVE_DLFCN_H -DHAVE_UNISTD_H -DNDEBUG -DQT_CORE_LIB -DQT_GUI_LIB -DQT_NETWORK_LIB -DQT_NO_DEBUG -DQT_THREAD_LIB -DQT_XML_LIB -g -O2 -fstack-protector-strong -Wformat -Werror=format-security -D_LARGEFILE64_SOURCE=1 -D_LARGEFILE_SOURCE=1 -D_FILE_OFFSET_BITS=64 -D_FORTIFY_SOURCE=2  -O2 -Wall -fPIC -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus/styles -I/build/scribus-1.4.5+dfsg1/scribus/styles -isystem /usr/include/qt4 -isystem /usr/include/qt4/QtGui -isystem /usr/include/qt4/QtXml -isystem /usr/include/qt4/QtNetwork -isystem /usr/include/qt4/QtCore -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus -I/usr/include/qt4/QtDesigner -I/usr/include/qt4/QtDeclarative -I/usr/include/qt4/QtScriptTools -I/usr/include/qt4/QtDBus -I/usr/include/qt4/QtSql -I/usr/include/qt4/QtXmlPatterns -I/usr/include/qt4/QtHelp -I/usr/include/qt4/QtUiTools -I/usr/include/qt4/QtTest -I/usr/include/qt4/QtScript -I/usr/include/qt4/QtSvg -I/usr/include/qt4/Qt3Support -I/usr/share/qt4/mkspecs/default -I/usr/include/libxml2 -I/usr/include/python2.7 -I/usr/include/x86_64-linux-gnu -I/build/scribus-1.4.5+dfsg1 -I/build/scribus-1.4.5+dfsg1/scribus -I/usr/include/freetype2    -DSHAREDIR=\"/usr/share/scribus/\" -DDOCDIR=\"/usr/share/doc/scribus/\" -DICONDIR=\"/usr/share/scribus/icons/\" -DSAMPLESDIR=\"/usr/share/scribus/samples/\" -DSCRIPTSDIR=\"/usr/share/scribus/scripts/\" -DTEMPLATEDIR=\"/usr/share/scribus/templates/\" -DDESKTOPDIR=\"/usr/share/applications/\" -DLIBDIR=\"/usr/lib/scribus/\" -DPLUGINDIR=\"/usr/lib/scribus/plugins/\" -DCOMPILE_SCRIBUS_MAIN_APP -o CMakeFiles/scribus_styles_lib.dir/stylecontext.cpp.o -c /build/scribus-1.4.5+dfsg1/scribus/styles/stylecontext.cpp
++cd /build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus/colormgmt && /usr/lib/ccache/c++   -DHAVE_CONFIG_H -DHAVE_DLFCN_H -DHAVE_UNISTD_H -DNDEBUG -DQT_CORE_LIB -DQT_GUI_LIB -DQT_NETWORK_LIB -DQT_NO_DEBUG -DQT_THREAD_LIB -DQT_XML_LIB -g -O2 -fstack-protector-strong -Wformat -Werror=format-security -D_LARGEFILE64_SOURCE=1 -D_LARGEFILE_SOURCE=1 -D_FILE_OFFSET_BITS=64 -D_FORTIFY_SOURCE=2  -O2 -Wall -fPIC -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus/colormgmt -I/build/scribus-1.4.5+dfsg1/scribus/colormgmt -isystem /usr/include/qt4 -isystem /usr/include/qt4/QtGui -isystem /usr/include/qt4/QtXml -isystem /usr/include/qt4/QtNetwork -isystem /usr/include/qt4/QtCore -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus -I/usr/include/qt4/QtDesigner -I/usr/include/qt4/QtDeclarative -I/usr/include/qt4/QtScriptTools -I/usr/include/qt4/QtDBus -I/usr/include/qt4/QtSql -I/usr/include/qt4/QtXmlPatterns -I/usr/include/qt4/QtHelp -I/usr/include/qt4/QtUiTools -I/usr/include/qt4/QtTest -I/usr/include/qt4/QtScript -I/usr/include/qt4/QtSvg -I/usr/include/qt4/Qt3Support -I/usr/share/qt4/mkspecs/default -I/usr/include/libxml2 -I/usr/include/python2.7 -I/usr/include/x86_64-linux-gnu -I/build/scribus-1.4.5+dfsg1 -I/build/scribus-1.4.5+dfsg1/scribus    -DSHAREDIR=\"/usr/share/scribus/\" -DDOCDIR=\"/usr/share/doc/scribus/\" -DICONDIR=\"/usr/share/scribus/icons/\" -DSAMPLESDIR=\"/usr/share/scribus/samples/\" -DSCRIPTSDIR=\"/usr/share/scribus/scripts/\" -DTEMPLATEDIR=\"/usr/share/scribus/templates/\" -DDESKTOPDIR=\"/usr/share/applications/\" -DLIBDIR=\"/usr/lib/scribus/\" -DPLUGINDIR=\"/usr/lib/scribus/plugins/\" -DCOMPILE_SCRIBUS_MAIN_APP -o CMakeFiles/scribus_colormgmt_lib.dir/sccolorprofilecache.cpp.o -c /build/scribus-1.4.5+dfsg1/scribus/colormgmt/sccolorprofilecache.cpp
++cd /build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus/styles && /usr/lib/ccache/c++   -DHAVE_CONFIG_H -DHAVE_DLFCN_H -DHAVE_UNISTD_H -DNDEBUG -DQT_CORE_LIB -DQT_GUI_LIB -DQT_NETWORK_LIB -DQT_NO_DEBUG -DQT_THREAD_LIB -DQT_XML_LIB -g -O2 -fstack-protector-strong -Wformat -Werror=format-security -D_LARGEFILE64_SOURCE=1 -D_LARGEFILE_SOURCE=1 -D_FILE_OFFSET_BITS=64 -D_FORTIFY_SOURCE=2  -O2 -Wall -fPIC -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus/styles -I/build/scribus-1.4.5+dfsg1/scribus/styles -isystem /usr/include/qt4 -isystem /usr/include/qt4/QtGui -isystem /usr/include/qt4/QtXml -isystem /usr/include/qt4/QtNetwork -isystem /usr/include/qt4/QtCore -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus -I/usr/include/qt4/QtDesigner -I/usr/include/qt4/QtDeclarative -I/usr/include/qt4/QtScriptTools -I/usr/include/qt4/QtDBus -I/usr/include/qt4/QtSql -I/usr/include/qt4/QtXmlPatterns -I/usr/include/qt4/QtHelp -I/usr/include/qt4/QtUiTools -I/usr/include/qt4/QtTest -I/usr/include/qt4/QtScript -I/usr/include/qt4/QtSvg -I/usr/include/qt4/Qt3Support -I/usr/share/qt4/mkspecs/default -I/usr/include/libxml2 -I/usr/include/python2.7 -I/usr/include/x86_64-linux-gnu -I/build/scribus-1.4.5+dfsg1 -I/build/scribus-1.4.5+dfsg1/scribus -I/usr/include/freetype2    -DSHAREDIR=\"/usr/share/scribus/\" -DDOCDIR=\"/usr/share/doc/scribus/\" -DICONDIR=\"/usr/share/scribus/icons/\" -DSAMPLESDIR=\"/usr/share/scribus/samples/\" -DSCRIPTSDIR=\"/usr/share/scribus/scripts/\" -DTEMPLATEDIR=\"/usr/share/scribus/templates/\" -DDESKTOPDIR=\"/usr/share/applications/\" -DLIBDIR=\"/usr/lib/scribus/\" -DPLUGINDIR=\"/usr/lib/scribus/plugins/\" -DCOMPILE_SCRIBUS_MAIN_APP -o CMakeFiles/scribus_styles_lib.dir/stylecontextproxy.cpp.o -c /build/scribus-1.4.5+dfsg1/scribus/styles/stylecontextproxy.cpp
++cd /build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus/text && /usr/lib/ccache/c++   -DHAVE_CONFIG_H -DHAVE_DLFCN_H -DHAVE_UNISTD_H -DNDEBUG -DQT_CORE_LIB -DQT_GUI_LIB -DQT_NETWORK_LIB -DQT_NO_DEBUG -DQT_THREAD_LIB -DQT_XML_LIB -g -O2 -fstack-protector-strong -Wformat -Werror=format-security -D_LARGEFILE64_SOURCE=1 -D_LARGEFILE_SOURCE=1 -D_FILE_OFFSET_BITS=64 -D_FORTIFY_SOURCE=2  -O2 -Wall -fPIC -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus/text -I/build/scribus-1.4.5+dfsg1/scribus/text -isystem /usr/include/qt4 -isystem /usr/include/qt4/QtGui -isystem /usr/include/qt4/QtXml -isystem /usr/include/qt4/QtNetwork -isystem /usr/include/qt4/QtCore -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus -I/usr/include/qt4/QtDesigner -I/usr/include/qt4/QtDeclarative -I/usr/include/qt4/QtScriptTools -I/usr/include/qt4/QtDBus -I/usr/include/qt4/QtSql -I/usr/include/qt4/QtXmlPatterns -I/usr/include/qt4/QtHelp -I/usr/include/qt4/QtUiTools -I/usr/include/qt4/QtTest -I/usr/include/qt4/QtScript -I/usr/include/qt4/QtSvg -I/usr/include/qt4/Qt3Support -I/usr/share/qt4/mkspecs/default -I/usr/include/libxml2 -I/usr/include/python2.7 -I/usr/include/x86_64-linux-gnu -I/build/scribus-1.4.5+dfsg1 -I/build/scribus-1.4.5+dfsg1/scribus -I/usr/include/freetype2    -DSHAREDIR=\"/usr/share/scribus/\" -DDOCDIR=\"/usr/share/doc/scribus/\" -DICONDIR=\"/usr/share/scribus/icons/\" -DSAMPLESDIR=\"/usr/share/scribus/samples/\" -DSCRIPTSDIR=\"/usr/share/scribus/scripts/\" -DTEMPLATEDIR=\"/usr/share/scribus/templates/\" -DDESKTOPDIR=\"/usr/share/applications/\" -DLIBDIR=\"/usr/lib/scribus/\" -DPLUGINDIR=\"/usr/lib/scribus/plugins/\" -DCOMPILE_SCRIBUS_MAIN_APP -o CMakeFiles/scribus_text_lib.dir/fsize.cpp.o -c /build/scribus-1.4.5+dfsg1/scribus/text/fsize.cpp
++cd /build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus/desaxe && /usr/lib/ccache/c++   -DHAVE_CONFIG_H -DHAVE_DLFCN_H -DHAVE_UNISTD_H -DNDEBUG -DQT_CORE_LIB -DQT_GUI_LIB -DQT_NETWORK_LIB -DQT_NO_DEBUG -DQT_THREAD_LIB -DQT_XML_LIB -g -O2 -fstack-protector-strong -Wformat -Werror=format-security -D_LARGEFILE64_SOURCE=1 -D_LARGEFILE_SOURCE=1 -D_FILE_OFFSET_BITS=64 -D_FORTIFY_SOURCE=2  -O2 -Wall -fPIC -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus/desaxe -I/build/scribus-1.4.5+dfsg1/scribus/desaxe -isystem /usr/include/qt4 -isystem /usr/include/qt4/QtGui -isystem /usr/include/qt4/QtXml -isystem /usr/include/qt4/QtNetwork -isystem /usr/include/qt4/QtCore -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu -I/build/scribus-1.4.5+dfsg1/obj-x86_64-linux-gnu/scribus -I/usr/include/qt4/QtDesigner -I/usr/include/qt4/QtDeclarative -I/usr/include/qt4/QtScriptTools -I/usr/include/qt4/QtDBus -I/usr/include/qt4/QtSql -I/usr/include/qt4/QtXmlPatterns -I/usr/include/qt4/QtHelp -I/usr/include/qt4/QtUiTools -I/usr/include/qt4/QtTest -I/usr/include/qt4/QtScript -I/usr/include/qt4/QtSvg -I/usr/include/qt4/Qt3Support -I/usr/share/qt4/mkspecs/default -I/usr/include/libxml2 -I/usr/include/python2.7 -I/usr/include/x86_64-linux-gnu -I/build/scribus-1.4.5+dfsg1 -I/build/scribus-1.4.5+dfsg1/scribus -I/usr/include/freetype2    -DSHAREDIR=\"/usr/share/scribus/\" -DDOCDIR=\"/usr/share/doc/scribus/\" -DICONDIR=\"/usr/share/scribus/icons/\" -DSAMPLESDIR=\"/usr/share/scribus/samples/\" -DSCRIPTSDIR=\"/usr/share/scribus/scripts/\" -DTEMPLATEDIR=\"/usr/share/scribus/templates/\" -DDESKTOPDIR=\"/usr/share/applications/\" -DLIBDIR=\"/usr/lib/scribus/\" -DPLUGINDIR=\"/usr/lib/scribus/plugins/\" -DCOMPILE_SCRIBUS_MAIN_APP -o CMakeFiles/scribus_desaxe_lib.dir/digester.cpp.o -c /build/scribus-1.4.5+dfsg1/scribus/desaxe/digester.cpp
+diff -Nru blhc-0.05/t/tests.t blhc-0.06/t/tests.t
+--- blhc-0.05/t/tests.t	2014-08-20 00:56:47.000000000 +0200
++++ blhc-0.06/t/tests.t	2016-06-05 15:43:36.000000000 +0200
+@@ -1,6 +1,6 @@
+ # Tests for blhc.
+ #
+-# Copyright (C) 2012-2014  Simon Ruderich
++# Copyright (C) 2012-2016  Simon Ruderich
+ #
+ # This program is free software: you can redistribute it and/or modify
+ # it under the terms of the GNU General Public License as published by
+@@ -19,7 +19,7 @@
+ use strict;
+ use warnings;
+ 
+-use Test::More tests => 218;
++use Test::More tests => 216;
+ 
+ 
+ sub is_blhc {
+@@ -48,11 +48,17 @@
+ 
+ # Usage, invalid arguments.
+ 
+-my $usage =
++use Pod::Usage;
++my $usage = ( $Pod::Usage::VERSION < 1.65 ?
+         'Usage:
+     blhc [*options*] *<dpkg-buildpackage build log file>..*
+ 
+-';
++'
++    :
++        'Usage:
++    blhc [options] <dpkg-buildpackage build log file>..
++
++');
+ is_blhc '', '--invalid', 2,
+         "Unknown option: invalid\n"
+         . $usage;
+@@ -61,7 +67,7 @@
+         $usage;
+ 
+ is_blhc '', '--version', 0,
+-        'blhc 0.05  Copyright (C) 2012-2014  Simon Ruderich
++        'blhc 0.06  Copyright (C) 2012-2016  Simon Ruderich
+ 
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+@@ -79,7 +85,7 @@
+ 
+ is_blhc '', '--help', 1,
+         qr/^Usage:
+-    blhc \[\*options\*\] \*<dpkg-buildpackage build log file>\.\.\*
++    blhc \[\*?options\*?\] \*?<dpkg-buildpackage build log file>\.\.\*?
+ 
+ Options:
+ /s;
+@@ -118,23 +124,14 @@
+ 
+ # Invalid option.
+ is_blhc 'ignore-flag', '--ignore-arch-flag -g', 2,
+-        'Value "-g" invalid for option ignore-arch-flag ("arch:flag" expected)
+-Usage:
+-    blhc [*options*] *<dpkg-buildpackage build log file>..*
+-
+-';
++        'Value "-g" invalid for option ignore-arch-flag ("arch:flag" expected)'
++        . "\n$usage";
+ is_blhc 'ignore-flag', '--ignore-arch-flag -g:', 2,
+-        'Value "-g:" invalid for option ignore-arch-flag ("arch:flag" expected)
+-Usage:
+-    blhc [*options*] *<dpkg-buildpackage build log file>..*
+-
+-';
++        'Value "-g:" invalid for option ignore-arch-flag ("arch:flag" expected)'
++        . "\n$usage";
+ is_blhc 'ignore-flag', '--ignore-arch-flag :amd64', 2,
+-        'Value ":amd64" invalid for option ignore-arch-flag ("arch:flag" expected)
+-Usage:
+-    blhc [*options*] *<dpkg-buildpackage build log file>..*
+-
+-';
++        'Value ":amd64" invalid for option ignore-arch-flag ("arch:flag" expected)'
++        . "\n$usage";
+ 
+ # Wrong architecture.
+ is_blhc 'ignore-flag', '--ignore-arch-flag amd64:-g', 8,
+@@ -181,23 +178,14 @@
+ 
+ # Invalid option.
+ is_blhc 'ignore-line', '--ignore-arch-line .+', 2,
+-        'Value ".+" invalid for option ignore-arch-line ("arch:line" expected)
+-Usage:
+-    blhc [*options*] *<dpkg-buildpackage build log file>..*
+-
+-';
++        'Value ".+" invalid for option ignore-arch-line ("arch:line" expected)'
++        . "\n$usage";
+ is_blhc 'ignore-line', '--ignore-arch-line .+:', 2,
+-        'Value ".+:" invalid for option ignore-arch-line ("arch:line" expected)
+-Usage:
+-    blhc [*options*] *<dpkg-buildpackage build log file>..*
+-
+-';
++        'Value ".+:" invalid for option ignore-arch-line ("arch:line" expected)'
++        . "\n$usage";
+ is_blhc 'ignore-line', '--ignore-arch-line :amd64', 2,
+-        'Value ":amd64" invalid for option ignore-arch-line ("arch:line" expected)
+-Usage:
+-    blhc [*options*] *<dpkg-buildpackage build log file>..*
+-
+-';
++        'Value ":amd64" invalid for option ignore-arch-line ("arch:line" expected)'
++        . "\n$usage";
+ 
+ # Wrong architecture.
+ is_blhc 'ignore-line', '--ignore-arch-line "amd64:.+"', 8,
+@@ -644,6 +632,7 @@
+ CXXFLAGS missing (-Wformat): cd /tmp/test/src && /usr/bin/c++ -g -O2 -fstack-protector-strong -Wformat-security -Werror=format-security -o CMakeFiles/test-verbose.dir/verbose.cpp.o -c -D_FORTIFY_SOURCE=2 /tmp/test/src/test-verbose/verbose.cpp
+ CFLAGS missing (-Werror=format-security): cd /tmp/test/src && /usr/bin/gcc -g -O2 -fstack-protector-strong -Wformat -Wformat-security -o CMakeFiles/test-verbose-c.dir/verbose-c.c.o -c -D_FORTIFY_SOURCE=2 /tmp/test/src/test-verbose-c/verbose-c.c
+ NONVERBOSE BUILD: Compiling test.c \     gcc test.c
++NONVERBOSE BUILD: [  3%] Building CXX object scribus/text/CMakeFiles/scribus_text_lib.dir/frect.cpp.o
+ ';
+ 
+ 
+@@ -796,12 +785,8 @@
+ LDFLAGS missing (-fPIE -pie -Wl,-z,now):  libtool: relink: g++ -Wl,-z,relro -o test.la test.o
+ LDFLAGS missing (-fPIE -pie -Wl,-z,now): libtool: link: gcc  -g -O2 -fstack-protector-strong -Wformat -Wformat-security -Werror=format-security   -Wl,-z,relro -o test test.o
+ LDFLAGS missing (-fPIE -pie -Wl,-z,now): gcc -g -O2 -fstack-protector-strong -Wformat -Wformat-security -Werror=format-security -Wl,-z -Wl,relro -o .libs/test test.o
+-CFLAGS missing (-g -O2 -fPIE -fstack-protector-strong -Wformat -Werror=format-security): libtool: link: gcc -Wl,-z,relro -o test.so test.c
+-CPPFLAGS missing (-D_FORTIFY_SOURCE=2): libtool: link: gcc -Wl,-z,relro -o test.so test.c
+-LDFLAGS missing (-fPIE -pie -Wl,-z,now): libtool: link: gcc -Wl,-z,relro -o test.so test.c
+-CPPFLAGS missing (-D_FORTIFY_SOURCE=2): libtool: link: gcc -Wl,-z,relro -o libtest.la test.h test-a.lo test-b.lo test-c.lo test-d.la
++LDFLAGS missing (-fPIE -pie -Wl,-z,now): libtool: link: g++ -include ./include/CppUTest/MemoryLeakDetectorNewMacros.h -Wall -Wextra -Wshadow -Wswitch-default -Wswitch-enum -Wconversion -pedantic -Wsign-conversion -Woverloaded-virtual -Wno-disabled-macro-expansion -Wno-padded -Wno-global-constructors -Wno-exit-time-destructors -Wno-weak-vtables -Wno-old-style-cast -g -O2 -fstack-protector-strong -Wformat -Werror=format-security -Wl,-z -Wl,relro -o CppUTestTests CppUTestTests-AllocationInCFile.o CppUTestTests-AllocationInCppFile.o CppUTestTests-AllocLetTestFree.o CppUTestTests-AllocLetTestFreeTest.o CppUTestTests-AllTests.o CppUTestTests-CheatSheetTest.o CppUTestTests-CommandLineArgumentsTest.o CppUTestTests-CommandLineTestRunnerTest.o CppUTestTests-JUnitOutputTest.o CppUTestTests-MemoryLeakDetectorTest.o CppUTestTests-MemoryLeakOperatorOverloadsTest.o CppUTestTests-MemoryLeakWarningTest.o CppUTestTests-PluginTest.o CppUTestTests-PreprocessorTest.o CppUTestTests-SetPluginTest.o CppUTest Tests-SimpleStringTest.o CppUTestTests-SimpleMutexTest.o CppUTestTests-TestFailureNaNTest.o CppUTestTests-TestFailureTest.o CppUTestTests-TestFilterTest.o CppUTestTests-TestHarness_cTest.o CppUTestTests-TestHarness_cTestCFile.o CppUTestTests-TestInstallerTest.o CppUTestTests-TestMemoryAllocatorTest.o CppUTestTests-TestOutputTest.o CppUTestTests-TestRegistryTest.o CppUTestTests-TestResultTest.o CppUTestTests-TestUTestMacro.o CppUTestTests-UtestTest.o CppUTestTests-UtestPlatformTest.o  lib/libCppUTest.a -lpthread
+ LDFLAGS missing (-fPIE -pie -Wl,-z,now): libtool: link: gcc -Wl,-z,relro -o libtest.la test.h test-a.lo test-b.lo test-c.lo test-d.la
+-CPPFLAGS missing (-D_FORTIFY_SOURCE=2): libtool: link: gcc -o libtest.la test.h test-a.lo test-b.lo test-c.lo test-d.la
+ LDFLAGS missing (-fPIE -pie -Wl,-z,relro -Wl,-z,now): libtool: link: gcc -o libtest.la test.h test-a.lo test-b.lo test-c.lo test-d.la
+ NONVERBOSE BUILD: /usr/share/apr-1.0/build/libtool --silent --mode=compile x86_64-linux-gnu-gcc -std=gnu99 -I/usr/include/libxml2 -pthread  -pipe -g -O2 -fstack-protector-strong -Wformat -Werror=format-security ... -prefer-pic -c mod_buffer.c
+ NONVERBOSE BUILD: /usr/share/apr-1.0/build/libtool --silent --mode=link x86_64-linux-gnu-gcc -std=gnu99 -I/usr/include/libxml2 -pthread  -pipe -g -O2 -fstack-protector-strong -Wformat -Werror=format-security -Wl,--as-needed -Wl,-z,relro -o mod_buffer.la -rpath /usr/lib/apache2/modules -module -avoid-version  mod_buffer.lo
+@@ -834,11 +819,6 @@
+ is_blhc 'arch-ia64', '', 8,
+         $arch_ia64;
+ 
+-is_blhc 'arch-mipsel', '', 8,
+-        'CFLAGS missing (-Werror=format-security): gcc -D_FORTIFY_SOURCE=2 -g -O2 -Wformat -Wformat-security -Wall -c test.c
+-LDFLAGS missing (-Wl,-z,relro): gcc -Wl,-z,now -o test test.o
+-';
+-
+ is_blhc 'arch-ia64', '--arch i386', 8,
+         'CFLAGS missing (-fstack-protector-strong): gcc -D_FORTIFY_SOURCE=2 -g -O2 -fPIE -Wformat -Wformat-security -Werror=format-security -Wall -c test.c
+ LDFLAGS missing (-Wl,-z,relro): gcc -fPIE -pie -o test test.o
+@@ -911,8 +891,8 @@
+ 
+ # false positives
+ 
+-is_blhc 'false-positives', '', 1,
+-        $empty;
++is_blhc 'false-positives', '', 0,
++        '';
+ 
+ 
+ # buildd support

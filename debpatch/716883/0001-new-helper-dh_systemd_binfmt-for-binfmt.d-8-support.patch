@@ -1,0 +1,132 @@
+>From 7e7e398db3be7d9169a0f2ff57ff73dee8edf1f9 Mon Sep 17 00:00:00 2001
+From: Shawn Landden <shawnlandden@gmail.com>
+Date: Sat, 13 Jul 2013 18:23:20 -0700
+Subject: [PATCH] new helper dh_systemd_binfmt, for binfmt.d(8) support
+
+---
+ Makefile.PL                              |  1 +
+ autoscripts/postinst-systemd-binfmt      |  3 ++
+ debian/dh-systemd.install                |  2 ++
+ lib/Debian/Debhelper/Sequence/systemd.pm |  4 +++
+ script/dh_systemd_binfmt                 | 61 ++++++++++++++++++++++++++++++++
+ 5 files changed, 71 insertions(+)
+ create mode 100644 autoscripts/postinst-systemd-binfmt
+ create mode 100755 script/dh_systemd_binfmt
+
+diff --git a/Makefile.PL b/Makefile.PL
+index 749aed9..7c27711 100644
+--- a/Makefile.PL
++++ b/Makefile.PL
+@@ -7,6 +7,7 @@ install_script 'deb-systemd-helper';
+ install_script 'deb-systemd-invoke';
+ install_script 'dh_systemd_enable';
+ install_script 'dh_systemd_start';
++install_script 'dh_systemd_binfmt';
+ 
+ postamble <<'END_OF_MAKEFILE';
+ install:: extra_install
+diff --git a/autoscripts/postinst-systemd-binfmt b/autoscripts/postinst-systemd-binfmt
+new file mode 100644
+index 0000000..0a74a7f
+--- /dev/null
++++ b/autoscripts/postinst-systemd-binfmt
+@@ -0,0 +1,3 @@
++if [ -d /run/systemd/system ]; then
++	deb-systemd-invoke start systemd-binfmt.service >/dev/null || true
++fi
+diff --git a/debian/dh-systemd.install b/debian/dh-systemd.install
+index da265a0..c250cb2 100644
+--- a/debian/dh-systemd.install
++++ b/debian/dh-systemd.install
+@@ -1,6 +1,8 @@
+ usr/bin/dh_systemd_start
+ usr/bin/dh_systemd_enable
++usr/bin/dh_systemd_binfmt
+ usr/share/perl5/Debian/Debhelper/Sequence/systemd.pm
+ usr/share/debhelper/autoscripts
+ usr/share/man/man1/dh_systemd_start.1p
+ usr/share/man/man1/dh_systemd_enable.1p
++usr/share/man/man1/dh_systemd_binfmt.1p
+diff --git a/lib/Debian/Debhelper/Sequence/systemd.pm b/lib/Debian/Debhelper/Sequence/systemd.pm
+index bbaa405..dc404e0 100644
+--- a/lib/Debian/Debhelper/Sequence/systemd.pm
++++ b/lib/Debian/Debhelper/Sequence/systemd.pm
+@@ -11,4 +11,8 @@ insert_before("dh_installinit", "dh_systemd_enable");
+ # script, so it runs after dh_installinit.
+ insert_after("dh_installinit", "dh_systemd_start");
+ 
++# dh_systemd_binfmt runs unconditionally, and after dh_install, as it checks
++# if /etc/binfmt.d directory exists in the target package
++insert_after("dh_install", "dh_systemd_binfmt");
++
+ 1
+diff --git a/script/dh_systemd_binfmt b/script/dh_systemd_binfmt
+new file mode 100755
+index 0000000..e5274e3
+--- /dev/null
++++ b/script/dh_systemd_binfmt
+@@ -0,0 +1,61 @@
++#!/usr/bin/perl -w
++
++=head1 NAME
++
++dh_systemd_binfmt - enable new systemd binfmt.d interpreters
++
++=cut
++
++use strict;
++use Debian::Debhelper::Dh_Lib;
++use File::Find;
++use Text::ParseWords qw(shellwords); # in core since Perl 5
++
++=head1 SYNOPSIS
++
++B<dh_systemd_binfmt> [S<I<debhelper options>>]
++
++=head1 DESCRIPTION
++
++B<dh_systemd_binfmt> is a debhelper program that is responsible for enabling
++newly installed systemd binfmt.d rules.
++
++It is not necessary that the machine
++actually runs systemd during package installation time, enabling happens on all
++machines in order to be able to switch from sysvinit to systemd and back.
++
++=head1 NOTES
++
++Note that this command is not idempotent. L<dh_prep(1)> should be called
++between invocations of this command (with the same arguments). Otherwise, it
++may cause multiple instances of the same text to be added to maintainer
++scripts.
++
++Note that B<dh_systemd_binfmt> should be run after B<dh_install> or after files
++are installed to /etc/binfmt.d. The default sequence in B<dh> does the right thing.
++
++=cut
++
++init();
++
++foreach my $package (@{$dh{DOPACKAGES}}) {
++	my $tmpdir = tmpdir($package);
++
++        if (-d "$tmpdir/etc/binfmt.d") {
++	        autoscript($package, "postinst", "postinst-systemd-binfmt", "");
++
++	        # init-system-helpers ships deb-systemd-helper which we use in our
++	        # autoscripts
++	        addsubstvar($package, "misc:Depends", "init-system-helpers (>= 1.4)");
++        }
++}
++
++=head1 SEE ALSO
++
++L<dh_systemd_enable(1)>, L<dh_systemd_start(1)>, L<debhelper(7)>
++
++=head1 AUTHORS
++
++pkg-systemd-maintainers@lists.alioth.debian.org
++
++=cut
+-- 
+1.8.3.2
+

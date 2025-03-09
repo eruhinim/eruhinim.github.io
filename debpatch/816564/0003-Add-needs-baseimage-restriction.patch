@@ -1,0 +1,108 @@
+From 135988ff18e58f93db204bbba42a5d544435397d Mon Sep 17 00:00:00 2001
+From: Christian Seiler <christian@iwakd.de>
+Date: Fri, 26 Feb 2016 16:14:49 +0100
+Subject: [PATCH 3/3] Add needs-baseimage restriction
+
+Add the needs-baseimage restriction for package tests that need to be
+able to start a VM inside the test environment.
+---
+ debian/changelog             |  1 +
+ doc/README.package-tests.rst | 20 ++++++++++++++++++++
+ lib/testdesc.py              |  9 ++++++++-
+ virt-subproc/adt-virt-qemu   |  4 +++-
+ 4 files changed, 32 insertions(+), 2 deletions(-)
+
+diff --git a/debian/changelog b/debian/changelog
+index 82a9a07..b5b2e94 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -11,6 +11,7 @@ autopkgtest (3.19.4) UNRELEASED; urgency=medium
+   * adt-virt-qemu: Implement support for nested base images.
+     (Closes: #800845)
+   * adt-virt-qemu: Use host CPU type by default
++  * Add needs-baseimage restriction
+ 
+  -- Martin Pitt <mpitt@debian.org>  Tue, 23 Feb 2016 18:21:51 +0100
+ 
+diff --git a/doc/README.package-tests.rst b/doc/README.package-tests.rst
+index a7874e5..78248bf 100644
+--- a/doc/README.package-tests.rst
++++ b/doc/README.package-tests.rst
+@@ -207,6 +207,26 @@ needs-recommends
+     Enable installation of recommended packages in apt for the test
+     dependencies. This does not affect build dependencies.
+ 
++needs-baseimage
++    The test needs to have a read-only base image available so it may
++    create an overlay and start a qemu/KVM virtual machine inside the
++    test environment.
++
++    This is useful for testing network client packages that require
++    kernel support (NFS, CIFS, iSCSI, NBD, etc.): the external testing
++    environment sets up a minimalistic server environment and then
++    starts a virtual machine that tests the client.
++
++    While currently only adt-virt-qemu supports this, this restriction
++    is independent of the isolation level. If the setup of the server
++    also needs a specific isolation level, that should be specified
++    additionally.
++
++    The environment variable ADT_BASEIMAGE will be set to the absolute
++    path of the base image. If the test environment supports it, this
++    variable will be available irrespective of whether this restriction
++    was added to the test or not.
++
+ Defined features
+ ----------------
+ 
+diff --git a/lib/testdesc.py b/lib/testdesc.py
+index c5ecf83..e50c651 100644
+--- a/lib/testdesc.py
++++ b/lib/testdesc.py
+@@ -42,7 +42,8 @@ import adtlog
+ 
+ known_restrictions = ['rw-build-tree', 'breaks-testbed', 'needs-root',
+                       'build-needed', 'allow-stderr', 'isolation-container',
+-                      'isolation-machine', 'needs-recommends']
++                      'isolation-machine', 'needs-recommends',
++                      'needs-baseimage']
+ 
+ 
+ class Unsupported(Exception):
+@@ -161,6 +162,12 @@ class Test:
+                               'Test needs root on testbed which is not '
+                               'available')
+ 
++        if 'needs-baseimage' in self.restrictions and \
++           'provides-baseimage' not in caps:
++            raise Unsupported(self.name,
++                              'Test needs baseimage inside testbed which '
++                              'is not available')
++
+ #
+ # Parsing for Debian source packages
+ #
+diff --git a/virt-subproc/adt-virt-qemu b/virt-subproc/adt-virt-qemu
+index 1f4f192..7dbd8ee 100755
+--- a/virt-subproc/adt-virt-qemu
++++ b/virt-subproc/adt-virt-qemu
+@@ -583,13 +583,15 @@ def hook_forked_inchild():
+ 
+ 
+ def hook_capabilities():
+-    global normal_user
++    global normal_user, args
+     caps = ['revert', 'revert-full-system', 'root-on-testbed',
+             'isolation-machine', 'reboot']
+     # disabled, see hook_downtmp()
+     # caps.append('downtmp-host=%s' % os.path.join(workdir, 'shared', 'tmp'))
+     if normal_user:
+         caps.append('suggested-normal-user=' + normal_user)
++    if args.nested_baseimage is not None:
++        caps.append('provides-baseimage')
+     return caps
+ 
+ 
+-- 
+2.1.4
+

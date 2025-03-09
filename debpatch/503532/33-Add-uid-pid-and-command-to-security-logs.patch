@@ -1,0 +1,448 @@
+From 9bc79bc768defaa779fae45845a42301b557a908 Mon Sep 17 00:00:00 2001
+From: Colin Walters <walters@verbum.org>
+Date: Wed, 17 Dec 2008 16:01:28 -0500
+Subject: [PATCH] Add uid, pid, and command to security logs
+
+Extend the current security logs with even more relevant
+information than just the message content.  This requires
+some utility code to look up and cache (as a string)
+the data such as the uid/pid/command when a connection is
+authenticated.
+---
+ bus/bus.c                     |   42 ++++++++++++----
+ bus/connection.c              |  105 +++++++++++++++++++++++++++++++++++++----
+ bus/connection.h              |    1 +
+ dbus/dbus-sysdeps-util-unix.c |   96 +++++++++++++++++++++++++++++++++++++
+ dbus/dbus-sysdeps.h           |    5 ++
+ 5 files changed, 228 insertions(+), 21 deletions(-)
+
+diff --git a/bus/bus.c b/bus/bus.c
+index b749d30..db3556f 100644
+--- a/bus/bus.c
++++ b/bus/bus.c
+@@ -1168,6 +1168,8 @@ bus_context_check_security_policy (BusContext     *context,
+   int type;
+   dbus_bool_t requested_reply;
+   const char *sender_name;
++  const char *sender_loginfo;
++  const char *proposed_recipient_loginfo;
+   
+   type = dbus_message_get_type (message);
+   dest = dbus_message_get_destination (message);
+@@ -1182,9 +1184,20 @@ bus_context_check_security_policy (BusContext     *context,
+ 
+   /* Used in logging below */
+   if (sender != NULL)
+-    sender_name = bus_connection_get_name (sender);
++    {
++      sender_name = bus_connection_get_name (sender);
++      sender_loginfo = bus_connection_get_loginfo (sender);
++    }
++  else
++    {
++      sender_name = NULL;
++      sender_loginfo = "(bus)";
++    }
++  
++  if (proposed_recipient != NULL)
++    proposed_recipient_loginfo = bus_connection_get_loginfo (proposed_recipient);
+   else
+-    sender_name = NULL;
++    proposed_recipient_loginfo = "bus";
+   
+   switch (type)
+     {
+@@ -1347,32 +1360,35 @@ bus_context_check_security_policy (BusContext     *context,
+                                          message, &toggles, &log))
+     {
+       const char *msg = "Rejected send message, %d matched rules; "
+-                        "type=\"%s\", sender=\"%s\" interface=\"%s\" member=\"%s\" error name=\"%s\" destination=\"%s\")";
+-
++                        "type=\"%s\", sender=\"%s\" (%s) interface=\"%s\" member=\"%s\" error name=\"%s\" destination=\"%s\" (%s))";
+ 
+       dbus_set_error (error, DBUS_ERROR_ACCESS_DENIED, msg,
+                       toggles,
+                       dbus_message_type_to_string (dbus_message_get_type (message)),
+                       sender_name ? sender_name : "(unset)",
++                      sender_loginfo,
+                       dbus_message_get_interface (message) ?
+                       dbus_message_get_interface (message) : "(unset)",
+                       dbus_message_get_member (message) ?
+                       dbus_message_get_member (message) : "(unset)",
+                       dbus_message_get_error_name (message) ?
+                       dbus_message_get_error_name (message) : "(unset)",
+-                      dest ? dest : DBUS_SERVICE_DBUS);
++                      dest ? dest : DBUS_SERVICE_DBUS,
++                      proposed_recipient_loginfo);
+       /* Needs to be duplicated to avoid calling malloc and having to handle OOM */
+       bus_context_log_security (context, msg,
+                                 toggles,
+                                 dbus_message_type_to_string (dbus_message_get_type (message)),
+                                 sender_name ? sender_name : "(unset)",
++                                sender_loginfo,
+                                 dbus_message_get_interface (message) ?
+                                 dbus_message_get_interface (message) : "(unset)",
+                                 dbus_message_get_member (message) ?
+                                 dbus_message_get_member (message) : "(unset)",
+                                 dbus_message_get_error_name (message) ?
+                                 dbus_message_get_error_name (message) : "(unset)",
+-                                dest ? dest : DBUS_SERVICE_DBUS);
++                                dest ? dest : DBUS_SERVICE_DBUS,
++                                proposed_recipient_loginfo);
+       _dbus_verbose ("security policy disallowing message due to sender policy\n");
+       return FALSE;
+     }
+@@ -1401,35 +1417,39 @@ bus_context_check_security_policy (BusContext     *context,
+                                             message, &toggles))
+     {
+       const char *msg = "Rejected receive message, %d matched rules; "
+-                        "type=\"%s\" sender=\"%s\" interface=\"%s\" member=\"%s\" error name=\"%s\" destination=\"%s\" reply serial=%u requested_reply=%d)";
++                        "type=\"%s\" sender=\"%s\" (%s) interface=\"%s\" member=\"%s\" error name=\"%s\" reply serial=%u requested_reply=%d destination=\"%s\" (%s))";
+ 
+       dbus_set_error (error, DBUS_ERROR_ACCESS_DENIED, msg,
+                       toggles,
+                       dbus_message_type_to_string (dbus_message_get_type (message)),
+                       sender_name ? sender_name : "(unset)",
++                      sender_loginfo,
+                       dbus_message_get_interface (message) ?
+                       dbus_message_get_interface (message) : "(unset)",
+                       dbus_message_get_member (message) ?
+                       dbus_message_get_member (message) : "(unset)",
+                       dbus_message_get_error_name (message) ?
+                       dbus_message_get_error_name (message) : "(unset)",
+-                      dest ? dest : DBUS_SERVICE_DBUS,
+                       dbus_message_get_reply_serial (message),
+-                      requested_reply);
++                      requested_reply,
++                      dest ? dest : DBUS_SERVICE_DBUS,
++                      proposed_recipient_loginfo);
+       /* Needs to be duplicated to avoid calling malloc and having to handle OOM */
+       bus_context_log_security (context, msg,
+                                 toggles,
+                                 dbus_message_type_to_string (dbus_message_get_type (message)),
+                                 sender_name ? sender_name : "(unset)",
++                                sender_loginfo,
+                                 dbus_message_get_interface (message) ?
+                                 dbus_message_get_interface (message) : "(unset)",
+                                 dbus_message_get_member (message) ?
+                                 dbus_message_get_member (message) : "(unset)",
+                                 dbus_message_get_error_name (message) ?
+                                 dbus_message_get_error_name (message) : "(unset)",
+-                                dest ? dest : DBUS_SERVICE_DBUS,
+                                 dbus_message_get_reply_serial (message),
+-                                requested_reply);
++                                requested_reply,
++                                dest ? dest : DBUS_SERVICE_DBUS,
++                                proposed_recipient_loginfo);
+       _dbus_verbose ("security policy disallowing message due to recipient policy\n");
+       return FALSE;
+     }
+diff --git a/bus/connection.c b/bus/connection.c
+index ed1b139..ab99fa5 100644
+--- a/bus/connection.c
++++ b/bus/connection.c
+@@ -32,6 +32,9 @@
+ #include <dbus/dbus-hash.h>
+ #include <dbus/dbus-timeout.h>
+ 
++/* Trim executed commands to this length; we want to keep logs readable */
++#define MAX_LOG_COMMAND_LEN 50
++
+ static void bus_connection_remove_transactions (DBusConnection *connection);
+ 
+ typedef struct
+@@ -76,6 +79,7 @@ typedef struct
+   DBusPreallocatedSend *oom_preallocated;
+   BusClientPolicy *policy;
+ 
++  char *cached_loginfo_string;
+   BusSELinuxID *selinux_id;
+ 
+   long connection_tv_sec;  /**< Time when we connected (seconds component) */
+@@ -406,6 +410,8 @@ free_connection_data (void *data)
+   if (d->selinux_id)
+     bus_selinux_id_unref (d->selinux_id);
+   
++  dbus_free (d->cached_loginfo_string);
++  
+   dbus_free (d->name);
+   
+   dbus_free (d);
+@@ -537,13 +543,73 @@ bus_connections_unref (BusConnections *connections)
+     }
+ }
+ 
++/* Used for logging */
++static dbus_bool_t
++cache_peer_loginfo_string (BusConnectionData *d, 
++                           DBusConnection    *connection)
++{
++  DBusString loginfo_buf;
++  unsigned long uid;
++  unsigned long pid;
++  char *windows_sid;
++  dbus_bool_t prev_added;
++
++  if (!_dbus_string_init (&loginfo_buf))
++    return FALSE;
++  
++  prev_added = FALSE;
++  if (dbus_connection_get_unix_user (connection, &uid))
++    {
++      if (!_dbus_string_append_printf (&loginfo_buf, "uid=%ld", uid))
++        goto oom;
++      else
++        prev_added = TRUE;
++    }
++
++  if (dbus_connection_get_unix_process_id (connection, &pid))
++    {
++      if (prev_added)
++        {
++          if (!_dbus_string_append_byte (&loginfo_buf, ' '))
++            goto oom;
++        }
++      if (!_dbus_string_append_printf (&loginfo_buf, "pid=%ld comm=\"", pid))
++        goto oom;
++      /* Ignore errors here */
++      if (_dbus_command_for_pid (pid, &loginfo_buf, MAX_LOG_COMMAND_LEN, NULL))
++        {
++          if (!_dbus_string_append_byte (&loginfo_buf, '"'))
++            goto oom;
++        }
++    }
++
++  if (dbus_connection_get_windows_user (connection, &windows_sid))
++    {
++      if (!_dbus_string_append_printf (&loginfo_buf, "sid=\"%s\" ", windows_sid))
++        goto oom;
++      dbus_free (windows_sid);
++    }
++
++  if (!_dbus_string_steal_data (&loginfo_buf, &(d->cached_loginfo_string)))
++    goto oom;
++
++  _dbus_string_free (&loginfo_buf); 
++
++  return TRUE;
++oom:
++   _dbus_string_free (&loginfo_buf);
++   return FALSE;
++}
++
+ dbus_bool_t
+ bus_connections_setup_connection (BusConnections *connections,
+                                   DBusConnection *connection)
+ {
++
+   BusConnectionData *d;
+   dbus_bool_t retval;
+   DBusError error;
++
+   
+   d = dbus_new0 (BusConnectionData, 1);
+   
+@@ -583,7 +649,7 @@ bus_connections_setup_connection (BusConnections *connections,
+       dbus_error_free (&error);
+       goto out;
+     }
+-  
++
+   if (!dbus_connection_set_watch_functions (connection,
+                                             add_connection_watch,
+                                             remove_connection_watch,
+@@ -842,6 +908,18 @@ bus_connection_is_in_unix_group (DBusConnection *connection,
+   return FALSE;
+ }
+ 
++const char *
++bus_connection_get_loginfo (DBusConnection        *connection)
++{
++  BusConnectionData *d;
++    
++  d = BUS_CONNECTION_DATA (connection);
++
++  if (!bus_connection_is_active (connection))
++    return "inactive";
++  return d->cached_loginfo_string;  
++}
++
+ BusClientPolicy*
+ bus_connection_get_policy (DBusConnection *connection)
+ {
+@@ -1302,16 +1380,15 @@ bus_connection_complete (DBusConnection   *connection,
+     {
+       if (!adjust_connections_for_uid (d->connections,
+                                        uid, 1))
+-        {
+-          BUS_SET_OOM (error);
+-          dbus_free (d->name);
+-          d->name = NULL;
+-          bus_client_policy_unref (d->policy);
+-          d->policy = NULL;
+-          return FALSE;
+-        }
++        goto fail;
+     }
+-  
++
++  /* Create and cache a string which holds information about the 
++   * peer process; used for logging purposes.
++   */
++  if (!cache_peer_loginfo_string (d, connection))
++    goto fail;
++
+   /* Now the connection is active, move it between lists */
+   _dbus_list_unlink (&d->connections->incomplete,
+                      d->link_in_connection_list);
+@@ -1329,6 +1406,14 @@ bus_connection_complete (DBusConnection   *connection,
+   _dbus_assert (bus_connection_is_active (connection));
+   
+   return TRUE;
++fail:
++  BUS_SET_OOM (error);
++  dbus_free (d->name);
++  d->name = NULL;
++  if (d->policy)
++    bus_client_policy_unref (d->policy);
++  d->policy = NULL;
++  return FALSE;
+ }
+ 
+ const char *
+diff --git a/bus/connection.h b/bus/connection.h
+index 5099bcf..4f35216 100644
+--- a/bus/connection.h
++++ b/bus/connection.h
+@@ -50,6 +50,7 @@ BusConnections* bus_connection_get_connections    (DBusConnection
+ BusRegistry*    bus_connection_get_registry       (DBusConnection               *connection);
+ BusActivation*  bus_connection_get_activation     (DBusConnection               *connection);
+ BusMatchmaker*  bus_connection_get_matchmaker     (DBusConnection               *connection);
++const char *    bus_connection_get_loginfo        (DBusConnection        *connection);
+ BusSELinuxID*   bus_connection_get_selinux_id     (DBusConnection               *connection);
+ dbus_bool_t     bus_connections_check_limits      (BusConnections               *connections,
+                                                    DBusConnection               *requesting_completion,
+diff --git a/dbus/dbus-sysdeps-util-unix.c b/dbus/dbus-sysdeps-util-unix.c
+index 3f2a233..6ca662b 100644
+--- a/dbus/dbus-sysdeps-util-unix.c
++++ b/dbus/dbus-sysdeps-util-unix.c
+@@ -1132,3 +1132,99 @@ _dbus_string_get_dirname  (const DBusString *filename,
+ }
+ /** @} */ /* DBusString stuff */
+ 
++static void
++string_squash_nonprintable (DBusString *str)
++{
++  char *buf;
++  int i, len; 
++  
++  buf = _dbus_string_get_data (str);
++  len = _dbus_string_get_length (str);
++  
++  for (i = 0; i < len; i++)
++    if (buf[i] == '\0')
++      buf[i] = ' ';
++    else if (buf[i] < 0x20 || buf[i] > 127)
++      buf[i] = '?';
++}
++
++/**
++ * Get a printable string describing the command used to execute
++ * the process with pid.  This string should only be used for
++ * informative purposes such as logging; it may not be trusted.
++ * 
++ * The command is guaranteed to be printable ASCII and no longer
++ * than max_len.
++ * 
++ * @param pid Process id
++ * @param str Append command to this string
++ * @param max_len Maximum length of returned command
++ * @param error return location for errors
++ * @returns #FALSE on error
++ */
++dbus_bool_t 
++_dbus_command_for_pid (unsigned long  pid,
++                       DBusString    *str,
++                       int            max_len,
++                       DBusError     *error)
++{
++  /* This is all Linux-specific for now */
++  DBusString path;
++  DBusString cmdline;
++  int fd;
++  
++  if (!_dbus_string_init (&path)) 
++    {
++      _DBUS_SET_OOM (error);
++      return FALSE;
++    }
++  
++  if (!_dbus_string_init (&cmdline))
++    {
++      _DBUS_SET_OOM (error);
++      _dbus_string_free (&path);
++      return FALSE;
++    }
++  
++  if (!_dbus_string_append_printf (&path, "/proc/%ld/cmdline", pid))
++    goto oom;
++  
++  fd = open (_dbus_string_get_const_data (&path), O_RDONLY);
++  if (fd < 0) 
++    {
++      dbus_set_error (error,
++                      _dbus_error_from_errno (errno),
++                      "Failed to open \"%s\": %s",
++                      _dbus_string_get_const_data (&path),
++                      _dbus_strerror (errno));
++      goto fail;
++    }
++  
++  if (!_dbus_read (fd, &cmdline, max_len))
++    {
++      dbus_set_error (error,
++                      _dbus_error_from_errno (errno),
++                      "Failed to read from \"%s\": %s",
++                      _dbus_string_get_const_data (&path),
++                      _dbus_strerror (errno));      
++      goto fail;
++    }
++  
++  if (!_dbus_close (fd, error))
++    goto fail;
++  
++  string_squash_nonprintable (&cmdline);  
++  
++  if (!_dbus_string_copy (&cmdline, 0, str, _dbus_string_get_length (str)))
++    goto oom;
++  
++  _dbus_string_free (&cmdline);  
++  _dbus_string_free (&path);
++  return TRUE;
++oom:
++  _DBUS_SET_OOM (error);
++fail:
++  _dbus_string_free (&cmdline);
++  _dbus_string_free (&path);
++  return FALSE;
++}
+\ No newline at end of file
+diff --git a/dbus/dbus-sysdeps.h b/dbus/dbus-sysdeps.h
+index 5f4b00e..2662b27 100644
+--- a/dbus/dbus-sysdeps.h
++++ b/dbus/dbus-sysdeps.h
+@@ -411,6 +411,11 @@ dbus_bool_t _dbus_write_pid_to_file_and_pipe (const DBusString *pidfile,
+                                               dbus_pid_t        pid_to_write,
+                                               DBusError        *error);
+ 
++dbus_bool_t _dbus_command_for_pid (unsigned long  pid,
++                                   DBusString    *str,
++                                   int            max_len,
++                                   DBusError     *error);
++
+ /** A UNIX signal handler */
+ typedef void (* DBusSignalHandler) (int sig);
+ 
+-- 
+1.5.6.5
+

@@ -1,0 +1,62 @@
+From 0c28f55065c671572849f2cbc1f8cf37f9946c31 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Rapha=C3=ABl=20Hertzog?= <hertzog@debian.org>
+Date: Fri, 13 Jul 2012 10:45:33 +0200
+Subject: [PATCH] dpkg: do not forget about shared directories if we have a
+ postrm script
+
+This is meant to fix the case where the postrm purge is responsible of
+removing a file that might be in those directories.
+
+Closes: #316521
+---
+ src/remove.c |   13 ++++++++++---
+ 1 file changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/src/remove.c b/src/remove.c
+index 95ea98f..a1c0a2e 100644
+--- a/src/remove.c
++++ b/src/remove.c
+@@ -240,12 +240,15 @@ static void
+ removal_bulk_remove_files(struct pkginfo *pkg)
+ {
+   int before;
++  bool foundpostrm;
+   struct reversefilelistiter rlistit;
+   struct fileinlist *leftover;
+   struct filenamenode *namenode;
+   static struct varbuf fnvb;
+   struct stat stab;
+ 
++    foundpostrm = pkg_infodb_has_file(pkg, &pkg->installed, POSTRMFILE);
++
+     pkg_set_status(pkg, stat_halfinstalled);
+     modstatdb_note(pkg);
+     push_checkpoint(~ehflag_bombout, ehflag_normaltidy);
+@@ -301,8 +304,9 @@ removal_bulk_remove_files(struct pkginfo *pkg)
+       if (is_dir) {
+         debug(dbg_eachfiledetail, "removal_bulk is a directory");
+         /* Only delete a directory or a link to one if we're the only
+-         * package which uses it. Other files should only be listed
+-         * in this package (but we don't check). */
++         * package which uses it. Ensure we don't forget about it
++         * in all the cases where we might have to retry its removal
++         * during purge. */
+         if (dir_has_conffiles(namenode, pkg)) {
+ 	  push_leftover(&leftover,namenode);
+ 	  continue;
+@@ -311,8 +315,11 @@ removal_bulk_remove_files(struct pkginfo *pkg)
+           push_leftover(&leftover, namenode);
+           continue;
+         }
+-        if (dir_is_used_by_others(namenode, pkg))
++        if (dir_is_used_by_others(namenode, pkg)) {
++          if (foundpostrm)
++            push_leftover(&leftover, namenode);
+           continue;
++        }
+       }
+       debug(dbg_eachfiledetail, "removal_bulk removing '%s'", fnvb.buf);
+       if (!rmdir(fnvb.buf) || errno == ENOENT || errno == ELOOP) continue;
+-- 
+1.7.10.4
+

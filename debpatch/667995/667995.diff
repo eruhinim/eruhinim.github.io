@@ -1,0 +1,145 @@
+diff -Nru python-cups-1.9.48/debian/changelog python-cups-1.9.48/debian/changelog
+--- python-cups-1.9.48/debian/changelog	2010-02-15 20:06:12.000000000 +0100
++++ python-cups-1.9.48/debian/changelog	2012-12-05 19:48:04.000000000 +0100
+@@ -1,3 +1,19 @@
++python-cups (1.9.48-1.1) UNRELEASED; urgency=low
++
++  * Non-maintainer upload.
++  * Fix "cupsd configuration: "cupsdAuthorize: Empty Basic password!"":
++    Backport fix from Fedora git:
++    http://git.fedorahosted.org/cgit/pycups.git/commit/?id=7fdad2e693e74b8811beca28d4ac6dd1619c988a
++    Thanks Andres Cimmarusti for the pointer. Closes: #667995
++
++    Original changelog entry (stripped in our patch):
++      * cupsmodule.c (do_password_callback), cupsconnection.c
++      (password_callback): Return NULL instead of the empty string
++      when handling an exception or when the callback returned an
++      empty string, and handle the callback returning None.
++
++ -- gregor herrmann <gregoa@debian.org>  Wed, 05 Dec 2012 19:40:14 +0100
++
+ python-cups (1.9.48-1) unstable; urgency=low
+ 
+   [ Jérôme Guelfucci ]
+diff -Nru python-cups-1.9.48/debian/patches/02_auth_loop.patch python-cups-1.9.48/debian/patches/02_auth_loop.patch
+--- python-cups-1.9.48/debian/patches/02_auth_loop.patch	1970-01-01 01:00:00.000000000 +0100
++++ python-cups-1.9.48/debian/patches/02_auth_loop.patch	2012-12-05 19:50:22.000000000 +0100
+@@ -0,0 +1,112 @@
++Taken from Fedora git, 7fdad2e693e74b8811beca28d4ac6dd1619c988a
++and backported to Debian version. Original commit info:
++
++From: Tim Waugh <twaugh@redhat.com>
++Date: Mon, 03 Oct 2011 16:18:53 +0000
++Subject: Prevent auth loops by returning NULL when the callback returns an empty string.
++
++Also add support for the callback returning None when it wants to
++cancel the current operation.
++
++--- a/cupsconnection.c
+++++ b/cupsconnection.c
++@@ -356,20 +356,26 @@ password_callback (int newstyle,
++   Py_DECREF (args);
++   if (result == NULL)
++   {
++-    debugprintf ("<- password_callback (empty string)\n");
+++    debugprintf ("<- password_callback (exception)\n");
++     Connection_begin_allow_threads (self);
++-    return "";
+++    return NULL;
++   }
++ 
++-  pwval = PyString_AsString (result);
++   free (self->cb_password);
++-  self->cb_password = strdup (pwval);
+++  if (result == Py_None)
+++    self->cb_password = NULL;
+++  else
+++  {
+++    pwval = PyString_AsString (result);
+++    self->cb_password = strdup (pwval);
+++  }
+++
++   Py_DECREF (result);
++-  if (!self->cb_password)
+++  if (!self->cb_password || !*self->cb_password)
++   {
++-    debugprintf ("<- password_callback (empty string)\n");
+++    debugprintf ("<- password_callback (empty/null)\n");
++     Connection_begin_allow_threads (self);
++-    return "";
+++    return NULL;
++   }
++ 
++   Connection_begin_allow_threads (self);
++--- a/cupsmodule.c
+++++ b/cupsmodule.c
++@@ -124,9 +124,9 @@ do_password_callback (const char *prompt
++   Py_DECREF (args);
++   if (result == NULL)
++   {
++-    debugprintf ("<- do_password_callback (empty string)\n");
+++    debugprintf ("<- do_password_callback (exception)\n");
++     Connection_begin_allow_threads (g_current_connection);
++-    return "";
+++    return NULL;
++   }
++ 
++   if (password) {
++@@ -134,14 +134,20 @@ do_password_callback (const char *prompt
++     password = NULL;
++   }
++ 
++-  pwval = PyString_AsString (result);
++-  password = strdup (pwval);
+++  if (result == Py_None)
+++    password = NULL;
+++  else
+++  {
+++    pwval = PyString_AsString (result);
+++    password = strdup (pwval);
+++  }
+++
++   Py_DECREF (result);
++-  if (!password)
+++  if (!password || !*password)
++   {
++-    debugprintf ("<- do_password_callback (empty string)\n");
+++    debugprintf ("<- do_password_callback (empty/null)\n");
++     Connection_begin_allow_threads (g_current_connection);
++-    return "";
+++    return NULL;
++   }
++ 
++   Connection_begin_allow_threads (g_current_connection);
++@@ -481,8 +487,8 @@ static PyMethodDef CupsMethods[] = {
++     "setPasswordCB(fn) -> None\n\n"
++     "Set password callback function.  This Python function will be called \n"
++     "when a password is required.  It must take one string parameter \n"
++-    "(the password prompt) and it must return a string (the password).  To \n"
++-    "abort the operation it may return the empty string ('').\n\n"
+++    "(the password prompt) and it must return a string (the password), or \n"
+++    "None to abort the operation.\n\n"
++     "@type fn: callable object\n"
++     "@param fn: callback function" },
++ 
++@@ -491,10 +497,10 @@ static PyMethodDef CupsMethods[] = {
++     "setPasswordCB2(fn, context=None) -> None\n\n"
++     "Set password callback function.  This Python function will be called \n"
++     "when a password is required.  It must take parameters of type string \n"
++-    "(the password prompt), instance (the cups.Connection), string (the HTTP "
++-    "method), string (the HTTP resource) and, optionally, the user-supplied "
++-    "context.  It must return a string (the password).  To \n"
++-    "abort the operation it may return the empty string ('').\n\n"
+++    "(the password prompt), instance (the cups.Connection), string (the \n"
+++    "HTTP method), string (the HTTP resource) and, optionally, the user-\n"
+++    "supplied context.  It must return a string (the password), or None \n"
+++    "to abort the operation.\n\n"
++     "@type fn: callable object, or None for default handler\n"
++     "@param fn: callback function" },
++ #endif /* HAVE_CUPS_1_4 */
+diff -Nru python-cups-1.9.48/debian/patches/series python-cups-1.9.48/debian/patches/series
+--- python-cups-1.9.48/debian/patches/series	2010-02-15 18:41:58.000000000 +0100
++++ python-cups-1.9.48/debian/patches/series	2012-12-05 19:32:47.000000000 +0100
+@@ -1 +1,2 @@
+ 01_no_epydoc.patch
++02_auth_loop.patch

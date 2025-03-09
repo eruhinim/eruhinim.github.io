@@ -1,0 +1,894 @@
+diff -Nru apt-0.7.21/apt-pkg/cdrom.cc apt-0.7.21a0.mrvn.1/apt-pkg/cdrom.cc
+--- apt-0.7.21/apt-pkg/cdrom.cc	2009-04-14 14:20:29.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/apt-pkg/cdrom.cc	2009-07-06 22:44:07.000000000 +0200
+@@ -217,33 +217,41 @@
+ /* Here we drop everything that is not this machines arch */
+ bool pkgCdrom::DropBinaryArch(vector<string> &List)
+ {
+-   char S[300];
+-   snprintf(S,sizeof(S),"/binary-%s/",
+-	    _config->Find("Apt::Architecture").c_str());
+-   
++   string Arch = _config->Find("Apt::Architecture");
++   vector<string> Archs = _config->FindList("Apt::Architectures");
++
+    for (unsigned int I = 0; I < List.size(); I++)
+    {
+       const char *Str = List[I].c_str();
+       
+-      const char *Res;
+-      if ((Res = strstr(Str,"/binary-")) == 0)
++      const char *Start, *End;
++      char Tmp[300];
++      if ((Start = strstr(Str,"/binary-")) == 0)
+ 	 continue;
++      Start += 8;
++      if ((End = strstr(Start,"/")) == 0 || Start == End)
++	 continue;
++      --End;
++
++      // Create temp string
++      strncpy(Tmp,Start,End-Start);
++      Tmp[End-Start] = 0;
++
++      // Check if arch matches
++      bool matching = false;
++      if (Arch == Tmp) matching = true;
++      for(vector<string>::const_iterator J = Archs.begin();
++	  !matching && J != Archs.end(); ++J) {
++	  if (*J == Tmp) matching = true;
++      }
+ 
+       // Weird, remove it.
+-      if (strlen(Res) < strlen(S))
++      if (!matching)
+       {
+ 	 List.erase(List.begin() + I);
+ 	 I--;
+ 	 continue;
+       }
+-	  
+-      // See if it is our arch
+-      if (stringcmp(Res,Res + strlen(S),S) == 0)
+-	 continue;
+-      
+-      // Erase it
+-      List.erase(List.begin() + I);
+-      I--;
+    }
+    
+    return true;
+diff -Nru apt-0.7.21/apt-pkg/clean.cc apt-0.7.21a0.mrvn.1/apt-pkg/clean.cc
+--- apt-0.7.21/apt-pkg/clean.cc	2008-06-09 23:10:08.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/apt-pkg/clean.cc	2009-07-06 22:38:05.000000000 +0200
+@@ -77,8 +77,9 @@
+       if (*I != '.')
+ 	 continue;
+       string Arch = DeQuoteString(string(Start,I-Start));
+-      
+-      if (Arch != "all" && Arch != MyArch)
++
++      if (Arch != "all" && Arch != MyArch
++	  && !_config->Member("APT::architectures", Arch))
+ 	 continue;
+       
+       // Lookup the package
+diff -Nru apt-0.7.21/apt-pkg/contrib/configuration.cc apt-0.7.21a0.mrvn.1/apt-pkg/contrib/configuration.cc
+--- apt-0.7.21/apt-pkg/contrib/configuration.cc	2009-04-08 22:58:28.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/apt-pkg/contrib/configuration.cc	2009-07-06 16:45:30.000000000 +0200
+@@ -223,6 +223,27 @@
+    return Res;
+ }
+ 									/*}}}*/
++// Configuration::FindList - Find a list of values		        /*{{{*/
++// ---------------------------------------------------------------------
++/* */
++vector<string> Configuration::FindList(const string Name) const
++{
++   vector<string> Vec;
++   const Item *Top = Lookup(Name.c_str());
++   if (Top == 0 || Top->Child == 0)
++      return Vec;
++
++   Item *I;
++   I = Top->Child;
++
++   while(I != NULL)
++   {
++      Vec.push_back(I->Value);
++      I = I->Next;
++   }
++   return Vec;
++}
++									/*}}}*/
+ // Configuration::FindI - Find an integer value				/*{{{*/
+ // ---------------------------------------------------------------------
+ /* */
+@@ -370,6 +391,30 @@
+      
+ }
+ 									/*}}}*/
++// Configuration::Member - Check if Value is member of a list	        /*{{{*/
++// ---------------------------------------------------------------------
++/* */
++bool Configuration::Member(const string Name, string Value)
++{
++   Item *Top = Lookup(Name.c_str(),false);
++   if (Top == 0 || Top->Child == 0)
++      return false;
++
++   Item *I;
++   I = Top->Child;
++
++   while(I != NULL)
++   {
++      if(I->Value == Value)
++      {
++	 return true;
++      } else {
++	 I = I->Next;
++      }
++   }
++   return false;
++}
++									/*}}}*/
+ // Configuration::Clear - Clear an entire tree				/*{{{*/
+ // ---------------------------------------------------------------------
+ /* */
+diff -Nru apt-0.7.21/apt-pkg/contrib/configuration.h apt-0.7.21a0.mrvn.1/apt-pkg/contrib/configuration.h
+--- apt-0.7.21/apt-pkg/contrib/configuration.h	2008-06-09 23:10:08.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/apt-pkg/contrib/configuration.h	2009-07-06 16:43:14.000000000 +0200
+@@ -32,8 +32,10 @@
+ 
+ #include <string>
+ #include <iostream>
++#include <vector>
+ 
+ using std::string;
++using std::vector;
+ 
+ class Configuration
+ {
+@@ -70,6 +72,7 @@
+    string Find(const string Name,const char *Default = 0) const {return Find(Name.c_str(),Default);};
+    string FindFile(const char *Name,const char *Default = 0) const;
+    string FindDir(const char *Name,const char *Default = 0) const;
++   vector<string> FindList(const string Name) const;
+    int FindI(const char *Name,int Default = 0) const;
+    int FindI(const string Name,int Default = 0) const {return FindI(Name.c_str(),Default);};
+    bool FindB(const char *Name,bool Default = false) const;
+@@ -92,6 +95,9 @@
+    void Clear(const string List, string Value);
+    void Clear(const string List, int Value);
+ 
++   // check if Value is member of a list
++   bool Member(const string Name, const string Value);
++
+    inline const Item *Tree(const char *Name) const {return Lookup(Name);};
+ 
+    inline void Dump() { Dump(std::clog); };
+diff -Nru apt-0.7.21/apt-pkg/deb/debindexfile.cc apt-0.7.21a0.mrvn.1/apt-pkg/deb/debindexfile.cc
+--- apt-0.7.21/apt-pkg/deb/debindexfile.cc	2008-06-09 23:10:08.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/apt-pkg/deb/debindexfile.cc	2009-07-06 22:41:51.000000000 +0200
+@@ -28,7 +28,7 @@
+ // ---------------------------------------------------------------------
+ /* */
+ debSourcesIndex::debSourcesIndex(string URI,string Dist,string Section,bool Trusted) :
+-     pkgIndexFile(Trusted), URI(URI), Dist(Dist), Section(Section)
++   pkgIndexFile(Trusted, "source"), URI(URI), Dist(Dist), Section(Section)
+ {
+ }
+ 									/*}}}*/
+@@ -149,8 +149,8 @@
+ // PackagesIndex::debPackagesIndex - Contructor				/*{{{*/
+ // ---------------------------------------------------------------------
+ /* */
+-debPackagesIndex::debPackagesIndex(string URI,string Dist,string Section,bool Trusted) : 
+-                  pkgIndexFile(Trusted), URI(URI), Dist(Dist), Section(Section)
++debPackagesIndex::debPackagesIndex(string URI,string Dist,string Section,bool Trusted,string Architecture) : 
++    pkgIndexFile(Trusted,Architecture), URI(URI), Dist(Dist), Section(Section)
+ {
+ }
+ 									/*}}}*/
+@@ -171,6 +171,8 @@
+    Res += " ";
+    Res += Ver.ParentPkg().Name();
+    Res += " ";
++   Res += Ver.Arch();
++   Res += " ";
+    Res += Ver.VerStr();
+    return Res;
+ }
+@@ -204,6 +206,8 @@
+    else
+       Info += Dist + '/' + Section;   
+    Info += " ";
++   Info += Arch;
++   Info += " ";
+    Info += Type;
+    return Info;
+ }
+@@ -227,7 +231,7 @@
+    }
+    else
+       Res = URI + "dists/" + Dist + '/' + Section +
+-      "/binary-" + _config->Find("APT::Architecture") + '/';
++      "/binary-" + Arch + '/';
+    
+    Res += Type;
+    return Res;
+@@ -280,13 +284,13 @@
+       return _error->Error("Problem with MergeList %s",PackageFile.c_str());
+ 
+    // Check the release file
+-   string ReleaseFile = debReleaseIndex(URI,Dist).MetaIndexFile("Release");
++   string ReleaseFile = debReleaseIndex(URI,Dist,Arch).MetaIndexFile("Release");
+    if (FileExists(ReleaseFile) == true)
+    {
+       FileFd Rel(ReleaseFile,FileFd::ReadOnly);
+       if (_error->PendingError() == true)
+ 	 return false;
+-      Parser.LoadReleaseInfo(File,Rel,Section);
++      Parser.LoadReleaseInfo(File,Rel,Section,Arch);
+    }
+    
+    return true;
+@@ -320,7 +324,7 @@
+ // ---------------------------------------------------------------------
+ /* */
+ debTranslationsIndex::debTranslationsIndex(string URI,string Dist,string Section) : 
+-                  pkgIndexFile(true), URI(URI), Dist(Dist), Section(Section)
++    pkgIndexFile(true,"translation"), URI(URI), Dist(Dist), Section(Section)
+ {
+ }
+ 									/*}}}*/
+@@ -483,7 +487,7 @@
+ // StatusIndex::debStatusIndex - Constructor				/*{{{*/
+ // ---------------------------------------------------------------------
+ /* */
+-debStatusIndex::debStatusIndex(string File) : pkgIndexFile(true), File(File)
++debStatusIndex::debStatusIndex(string File) : pkgIndexFile(true,"status"), File(File)
+ {
+ }
+ 									/*}}}*/
+diff -Nru apt-0.7.21/apt-pkg/deb/debindexfile.h apt-0.7.21a0.mrvn.1/apt-pkg/deb/debindexfile.h
+--- apt-0.7.21/apt-pkg/deb/debindexfile.h	2008-06-09 23:10:08.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/apt-pkg/deb/debindexfile.h	2009-07-06 17:07:58.000000000 +0200
+@@ -60,7 +60,7 @@
+    virtual string ArchiveURI(string File) const {return URI + File;};
+    
+    // Interface for acquire
+-   virtual string Describe(bool Short) const;   
++   virtual string Describe(bool Short) const;
+    
+    // Interface for the Cache Generator
+    virtual bool Exists() const;
+@@ -69,7 +69,7 @@
+    virtual bool Merge(pkgCacheGenerator &Gen,OpProgress &Prog) const;
+    virtual pkgCache::PkgFileIterator FindInCache(pkgCache &Cache) const;
+ 
+-   debPackagesIndex(string URI,string Dist,string Section,bool Trusted);
++   debPackagesIndex(string URI,string Dist,string Section,bool Trusted,string Architecture);
+ };
+ 
+ class debTranslationsIndex : public pkgIndexFile
+@@ -89,7 +89,7 @@
+    virtual const Type *GetType() const;
+ 
+    // Interface for acquire
+-   virtual string Describe(bool Short) const;   
++   virtual string Describe(bool Short) const;
+    virtual bool GetIndexes(pkgAcquire *Owner) const;
+    
+    // Interface for the Cache Generator
+@@ -122,7 +122,7 @@
+    virtual string ArchiveURI(string File) const {return URI + File;};
+    
+    // Interface for acquire
+-   virtual string Describe(bool Short) const;   
++   virtual string Describe(bool Short) const;
+ 
+    // Interface for the record parsers
+    virtual pkgSrcRecords::Parser *CreateSrcParser() const;
+diff -Nru apt-0.7.21/apt-pkg/deb/deblistparser.cc apt-0.7.21a0.mrvn.1/apt-pkg/deb/deblistparser.cc
+--- apt-0.7.21/apt-pkg/deb/deblistparser.cc	2008-06-09 23:10:09.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/apt-pkg/deb/deblistparser.cc	2009-07-06 22:12:15.000000000 +0200
+@@ -34,7 +34,9 @@
+ /* */
+ debListParser::debListParser(FileFd *File) : Tags(File)
+ {
++   // FIXME: get arch from options field?
+    Arch = _config->Find("APT::architecture");
++   Archs = _config->FindList("APT::architectures");
+ }
+ 									/*}}}*/
+ // ListParser::UniqFindTagWrite - Find the tag and write a unq string	/*{{{*/
+@@ -439,6 +441,7 @@
+ 
+    if (ParseArchFlags == true)
+    {
++      // FIXME: needs investigating
+       string arch = _config->Find("APT::Architecture");
+ 
+       // Parse an architecture
+@@ -604,6 +607,12 @@
+       if (stringcmp(Start,Stop,"all") == 0)
+ 	 return true;
+ 
++      for (vector<string>::const_iterator I = Archs.begin();
++	   I != Archs.end(); ++I) {
++	 if (stringcmp(*I,Start,Stop) == 0)
++	    return true;
++      }
++
+       iOffset = Tags.Offset();
+    }   
+    return false;
+@@ -613,15 +622,15 @@
+ // ---------------------------------------------------------------------
+ /* */
+ bool debListParser::LoadReleaseInfo(pkgCache::PkgFileIterator FileI,
+-				    FileFd &File, string component)
++				    FileFd &File, string component,
++				    string Arch)
+ {
+    pkgTagFile Tags(&File, File.Size() + 256); // XXX
+    pkgTagSection Section;
+    if (Tags.Step(Section) == false)
+       return false;
+ 
+-   //mvo: I don't think we need to fill that in (it's unused since apt-0.6)
+-   //FileI->Architecture = WriteUniqString(Arch);
++   FileI->Architecture = WriteUniqString(Arch);
+    
+    // apt-secure does no longer download individual (per-section) Release
+    // file. to provide Component pinning we use the section name now
+diff -Nru apt-0.7.21/apt-pkg/deb/deblistparser.h apt-0.7.21a0.mrvn.1/apt-pkg/deb/deblistparser.h
+--- apt-0.7.21/apt-pkg/deb/deblistparser.h	2008-06-09 23:10:09.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/apt-pkg/deb/deblistparser.h	2009-07-06 22:02:03.000000000 +0200
+@@ -11,10 +11,14 @@
+ #ifndef PKGLIB_DEBLISTPARSER_H
+ #define PKGLIB_DEBLISTPARSER_H
+ 
++#include <vector>
++
+ #include <apt-pkg/pkgcachegen.h>
+ #include <apt-pkg/indexfile.h>
+ #include <apt-pkg/tagfile.h>
+ 
++using std::vector;
++
+ class debListParser : public pkgCacheGenerator::ListParser
+ {
+    public:
+@@ -32,7 +36,8 @@
+    pkgTagSection Section;
+    unsigned long iOffset;
+    string Arch;
+-   
++   vector<string> Archs;
++
+    unsigned long UniqFindTagWrite(const char *Tag);
+    bool ParseStatus(pkgCache::PkgIterator Pkg,pkgCache::VerIterator Ver);
+    bool ParseDepends(pkgCache::VerIterator Ver,const char *Tag,
+@@ -60,7 +65,7 @@
+    virtual bool Step();
+    
+    bool LoadReleaseInfo(pkgCache::PkgFileIterator FileI,FileFd &File,
+-			string section);
++			string section,string Arch);
+    
+    static const char *ParseDepends(const char *Start,const char *Stop,
+ 			    string &Package,string &Ver,unsigned int &Op,
+diff -Nru apt-0.7.21/apt-pkg/deb/debmetaindex.cc apt-0.7.21a0.mrvn.1/apt-pkg/deb/debmetaindex.cc
+--- apt-0.7.21/apt-pkg/deb/debmetaindex.cc	2008-06-09 23:10:09.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/apt-pkg/deb/debmetaindex.cc	2009-07-06 20:06:07.000000000 +0200
+@@ -5,11 +5,10 @@
+ #include <apt-pkg/strutl.h>
+ #include <apt-pkg/acquire-item.h>
+ #include <apt-pkg/configuration.h>
+-#include <apt-pkg/error.h>
+ 
+ using namespace std;
+ 
+-string debReleaseIndex::Info(const char *Type, const string Section) const
++string debReleaseIndex::Info(const char *Type, const string Section, const string Arch) const
+ {
+    string Info = ::URI::SiteOnly(URI) + ' ';
+    if (Dist[Dist.size() - 1] == '/')
+@@ -20,6 +19,8 @@
+    else
+       Info += Dist + '/' + Section;   
+    Info += " ";
++   Info += Arch;
++   Info += " ";
+    Info += Type;
+    return Info;
+ }
+@@ -60,16 +61,16 @@
+    return Res;
+ }
+ 
+-string debReleaseIndex::IndexURISuffix(const char *Type, const string Section) const
++string debReleaseIndex::IndexURISuffix(const char *Type, const string Section, const string Arch) const
+ {
+    string Res ="";
+    if (Dist[Dist.size() - 1] != '/')
+-      Res += Section + "/binary-" + _config->Find("APT::Architecture") + '/';
++      Res += Section + "/binary-" + Arch + '/';
+    return Res + Type;
+ }
+    
+ 
+-string debReleaseIndex::IndexURI(const char *Type, const string Section) const
++string debReleaseIndex::IndexURI(const char *Type, const string Section, const string Architecture) const
+ {
+    if (Dist[Dist.size() - 1] == '/')
+    {
+@@ -81,7 +82,7 @@
+       return Res + Type;
+    }
+    else
+-      return URI + "dists/" + Dist + '/' + IndexURISuffix(Type, Section);
++      return URI + "dists/" + Dist + '/' + IndexURISuffix(Type, Section, Architecture);
+  }
+ 
+ string debReleaseIndex::SourceIndexURISuffix(const char *Type, const string Section) const
+@@ -107,7 +108,15 @@
+       return URI + "dists/" + Dist + "/" + SourceIndexURISuffix(Type, Section);
+ }
+ 
+-debReleaseIndex::debReleaseIndex(string URI,string Dist)
++debReleaseIndex::debReleaseIndex(string URI,string Dist,vector<string> Archs) : metaIndex(Archs)
++{
++   this->URI = URI;
++   this->Dist = Dist;
++   this->Indexes = NULL;
++   this->Type = "deb";
++}
++
++debReleaseIndex::debReleaseIndex(string URI,string Dist,string Arch) : metaIndex(Arch)
+ {
+    this->URI = URI;
+    this->Dist = Dist;
+@@ -122,17 +131,30 @@
+ 	I != SectionEntries.end();
+ 	I++)
+    {
+-      IndexTarget * Target = new IndexTarget();
+-      Target->ShortDesc = (*I)->IsSrc ? "Sources" : "Packages";
+-      Target->MetaKey
+-	= (*I)->IsSrc ? SourceIndexURISuffix(Target->ShortDesc.c_str(), (*I)->Section)
+-	              : IndexURISuffix(Target->ShortDesc.c_str(), (*I)->Section);
+-      Target->URI 
+-	= (*I)->IsSrc ? SourceIndexURI(Target->ShortDesc.c_str(), (*I)->Section)
+-	              : IndexURI(Target->ShortDesc.c_str(), (*I)->Section);
++       if ((*I)->IsSrc) {
++	  IndexTarget * Target = new IndexTarget();
++	  Target->ShortDesc = "Sources";
++	  Target->MetaKey
++	      = SourceIndexURISuffix(Target->ShortDesc.c_str(), (*I)->Section);
++	  Target->URI 
++	      = SourceIndexURI(Target->ShortDesc.c_str(), (*I)->Section);
++	  Target->Description
++	      = Info (Target->ShortDesc.c_str(), (*I)->Section, "source");
++	  IndexTargets->push_back (Target);
++       } else {
++	  for (vector<string>::const_iterator J = Archs.begin();
++	       J != Archs.end(); ++J) {
++	     IndexTarget * Target = new IndexTarget();
++	     Target->ShortDesc = "Packages";
++	     Target->MetaKey
++		 = IndexURISuffix(Target->ShortDesc.c_str(), (*I)->Section, *J);
++	     Target->URI
++		 = IndexURI(Target->ShortDesc.c_str(), (*I)->Section, *J);
+       
+-      Target->Description = Info (Target->ShortDesc.c_str(), (*I)->Section);
+-      IndexTargets->push_back (Target);
++	     Target->Description = Info (Target->ShortDesc.c_str(), (*I)->Section, *J);
++	     IndexTargets->push_back (Target);
++	  }
++       }
+    }
+    return IndexTargets;
+ }
+@@ -201,7 +223,10 @@
+          Indexes->push_back(new debSourcesIndex (URI, Dist, (*I)->Section, IsTrusted()));
+       else 
+       {
+-         Indexes->push_back(new debPackagesIndex (URI, Dist, (*I)->Section, IsTrusted()));
++	  for (vector<string>::const_iterator J = Archs.begin();
++	      J != Archs.end(); ++J) {
++	    Indexes->push_back(new debPackagesIndex (URI, Dist, (*I)->Section, IsTrusted(),*J));
++	 }
+ 	 Indexes->push_back(new debTranslationsIndex(URI, Dist, (*I)->Section));
+       }
+    }
+@@ -223,8 +248,9 @@
+ {
+    protected:
+ 
+-   bool CreateItemInternal(vector<metaIndex *> &List,string URI,
+-			   string Dist,string Section,
++   bool CreateItemInternal(vector<metaIndex *> &List,
++			   map<string, string> Options,
++			   string URI,string Dist,string Section,
+ 			   bool IsSrc) const
+    {
+       for (vector<metaIndex *>::const_iterator I = List.begin(); 
+@@ -242,13 +268,16 @@
+ 	    if (Deb->GetURI() == URI && Deb->GetDist() == Dist)
+ 	    {
+ 	       Deb->PushSectionEntry(new debReleaseIndex::debSectionEntry(Section, IsSrc));
++	       // FIXME: push archs
+ 	       return true;
+ 	    }
+ 	 }
+       }
+       // No currently created Release file indexes this entry, so we create a new one.
+       // XXX determine whether this release is trusted or not
+-      debReleaseIndex *Deb = new debReleaseIndex(URI,Dist);
++      // FIXME: get archs from options
++      vector<string> Archs = _config->FindList("APT::architectures");
++      debReleaseIndex *Deb = new debReleaseIndex(URI,Dist,Archs);
+       Deb->PushSectionEntry (new debReleaseIndex::debSectionEntry(Section, IsSrc));
+       List.push_back(Deb);
+       return true;
+@@ -259,10 +288,10 @@
+ {
+    public:
+ 
+-   bool CreateItem(vector<metaIndex *> &List,string URI,
+-		   string Dist,string Section) const
++   bool CreateItem(vector<metaIndex *> &List,map<string,string> Options,
++		   string URI,string Dist,string Section) const
+    {
+-      return CreateItemInternal(List, URI, Dist, Section, false);
++      return CreateItemInternal(List, Options, URI, Dist, Section, false);
+    }
+ 
+    debSLTypeDeb()
+@@ -276,10 +305,10 @@
+ {
+    public:
+ 
+-   bool CreateItem(vector<metaIndex *> &List,string URI,
+-		   string Dist,string Section) const 
++   bool CreateItem(vector<metaIndex *> &List,map<string,string> Options,
++		   string URI,string Dist,string Section) const 
+    {
+-      return CreateItemInternal(List, URI, Dist, Section, true);
++      return CreateItemInternal(List, Options, URI, Dist, Section, true);
+    }
+    
+    debSLTypeDebSrc()
+diff -Nru apt-0.7.21/apt-pkg/deb/debmetaindex.h apt-0.7.21a0.mrvn.1/apt-pkg/deb/debmetaindex.h
+--- apt-0.7.21/apt-pkg/deb/debmetaindex.h	2008-06-09 23:10:09.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/apt-pkg/deb/debmetaindex.h	2009-07-06 20:05:49.000000000 +0200
+@@ -21,17 +21,18 @@
+ 
+    public:
+ 
+-   debReleaseIndex(string URI, string Dist);
++   debReleaseIndex(string URI,string Dist,vector<string> Archs);
++   debReleaseIndex(string URI,string Dist,string Arch);
+ 
+    virtual string ArchiveURI(string File) const {return URI + File;};
+    virtual bool GetIndexes(pkgAcquire *Owner, bool GetAll=false) const;
+    vector <struct IndexTarget *>* ComputeIndexTargets() const;
+-   string Info(const char *Type, const string Section) const;
++   string Info(const char *Type, const string Section, const string Arch) const;
+    string MetaIndexInfo(const char *Type) const;
+    string MetaIndexFile(const char *Types) const;
+    string MetaIndexURI(const char *Type) const;
+-   string IndexURI(const char *Type, const string Section) const;
+-   string IndexURISuffix(const char *Type, const string Section) const;
++   string IndexURI(const char *Type, const string Section, const string Architecture) const;
++   string IndexURISuffix(const char *Type, const string Section, const string Architecture) const;
+    string SourceIndexURI(const char *Type, const string Section) const;
+    string SourceIndexURISuffix(const char *Type, const string Section) const;
+    virtual vector <pkgIndexFile *> *GetIndexFiles();
+diff -Nru apt-0.7.21/apt-pkg/indexcopy.cc apt-0.7.21a0.mrvn.1/apt-pkg/indexcopy.cc
+--- apt-0.7.21/apt-pkg/indexcopy.cc	2009-04-14 14:20:29.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/apt-pkg/indexcopy.cc	2009-07-06 22:53:42.000000000 +0200
+@@ -378,6 +378,7 @@
+ void IndexCopy::ConvertToSourceList(string CD,string &Path)
+ {
+    char S[300];
++   // FIXME: allow for APT::Architectures
+    snprintf(S,sizeof(S),"binary-%s",_config->Find("Apt::Architecture").c_str());
+    
+    // Strip the cdrom base path
+diff -Nru apt-0.7.21/apt-pkg/indexfile.h apt-0.7.21a0.mrvn.1/apt-pkg/indexfile.h
+--- apt-0.7.21/apt-pkg/indexfile.h	2008-06-09 23:10:08.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/apt-pkg/indexfile.h	2009-07-06 17:40:08.000000000 +0200
+@@ -37,7 +37,8 @@
+ {
+    protected:
+    bool Trusted;
+-     
++   string Arch;
++
+    public:
+ 
+    class Type
+@@ -83,8 +84,9 @@
+    static string LanguageCode();
+ 
+    bool IsTrusted() const { return Trusted; };
+-   
+-   pkgIndexFile(bool Trusted): Trusted(Trusted) {};
++   string GetArch() const { return Arch; };
++
++   pkgIndexFile(bool Trusted,string Arch): Trusted(Trusted), Arch(Arch) {};
+    virtual ~pkgIndexFile() {};
+ };
+ 
+diff -Nru apt-0.7.21/apt-pkg/init.cc apt-0.7.21a0.mrvn.1/apt-pkg/init.cc
+--- apt-0.7.21/apt-pkg/init.cc	2008-06-09 23:10:08.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/apt-pkg/init.cc	2009-07-06 18:30:19.000000000 +0200
+@@ -95,7 +95,12 @@
+    
+    if (Res == false)
+       return false;
+-   
++
++   // If APT::Architectures is unset initialize with APT::Architecture
++   if (Cnf.Tree("APT::Architectures::") == NULL) {
++      Cnf.Set("APT::Architectures::", Cnf.Find("APT::Architecture"));
++   }
++
+    if (Cnf.FindB("Debug::pkgInitConfig",false) == true)
+       Cnf.Dump();
+    
+diff -Nru apt-0.7.21/apt-pkg/metaindex.h apt-0.7.21a0.mrvn.1/apt-pkg/metaindex.h
+--- apt-0.7.21/apt-pkg/metaindex.h	2008-06-09 23:10:08.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/apt-pkg/metaindex.h	2009-07-06 22:54:29.000000000 +0200
+@@ -3,6 +3,7 @@
+ 
+ 
+ #include <string>
++#include <vector>
+ #include <apt-pkg/pkgcache.h>
+ #include <apt-pkg/srcrecords.h>
+ #include <apt-pkg/pkgrecords.h>
+@@ -10,6 +11,7 @@
+ #include <apt-pkg/vendor.h>
+     
+ using std::string;
++using std::vector;
+ 
+ class pkgAcquire;
+ class pkgCacheGenerator;
+@@ -23,6 +25,7 @@
+    string URI;
+    string Dist;
+    bool Trusted;
++   vector<string> Archs;
+ 
+    public:
+ 
+@@ -39,6 +42,8 @@
+    virtual vector<pkgIndexFile *> *GetIndexFiles() = 0; 
+    virtual bool IsTrusted() const = 0;
+ 
++   metaIndex(vector<string> Archs) : Archs(Archs) { };
++   metaIndex(string Arch) { Archs.push_back(Arch); };
+    virtual ~metaIndex() {};
+ };
+ 
+diff -Nru apt-0.7.21/apt-pkg/pkgcache.cc apt-0.7.21a0.mrvn.1/apt-pkg/pkgcache.cc
+--- apt-0.7.21/apt-pkg/pkgcache.cc	2009-04-09 04:31:56.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/apt-pkg/pkgcache.cc	2009-07-06 22:03:25.000000000 +0200
+@@ -147,7 +147,8 @@
+        (VS = pkgVersioningSystem::GetVS(StrP + HeaderP->VerSysName)) == 0)
+       return _error->Error(_("This APT does not support the versioning system '%s'"),StrP + HeaderP->VerSysName);
+ 
+-   // Chcek the arhcitecture
++   // Check the architecture
++   // FIXME: Should this check architectures?
+    if (HeaderP->Architecture == 0 ||
+        _config->Find("APT::Architecture") != StrP + HeaderP->Architecture)
+       return _error->Error(_("The package cache was built for a different architecture"));
+@@ -611,6 +612,8 @@
+       Res = Res + (Res.empty() == true?"l=":",l=")  + Label();
+    if (Component() != 0)
+       Res = Res + (Res.empty() == true?"c=":",c=")  + Component();
++   if (Architecture() != 0)
++      Res = Res + (Res.empty() == true?"b=":",b=")  + Architecture();
+    return Res;
+ }
+ 									/*}}}*/
+diff -Nru apt-0.7.21/apt-pkg/policy.cc apt-0.7.21a0.mrvn.1/apt-pkg/policy.cc
+--- apt-0.7.21/apt-pkg/policy.cc	2008-06-09 23:10:08.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/apt-pkg/policy.cc	2009-07-06 22:10:05.000000000 +0200
+@@ -71,7 +71,10 @@
+ 	 PFPriority[I->ID] = 100;
+       else
+ 	 if ((I->Flags & pkgCache::Flag::NotAutomatic) == pkgCache::Flag::NotAutomatic)
+-	    PFPriority[I->ID] = 1;
++	    PFPriority[I->ID] = 2;
++      // FIXME: reduce priority if not native arch
++      if (I.Architecture() == 0 || (I.Architecture() != string("all") && I.Architecture() != string("amd64")))
++         --PFPriority[I->ID];
+    }
+ 
+    // Apply the defaults..
+diff -Nru apt-0.7.21/apt-pkg/sourcelist.cc apt-0.7.21a0.mrvn.1/apt-pkg/sourcelist.cc
+--- apt-0.7.21/apt-pkg/sourcelist.cc	2008-06-09 23:10:08.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/apt-pkg/sourcelist.cc	2009-07-06 16:37:14.000000000 +0200
+@@ -79,6 +79,7 @@
+    Weird types may override this. */
+ bool pkgSourceList::Type::ParseLine(vector<metaIndex *> &List,
+ 				    const char *Buffer,
++				    map<string, string> Options,
+ 				    unsigned long CurLine,
+ 				    string File) const
+ {
+@@ -100,7 +101,7 @@
+       if (ParseQuoteWord(Buffer,Section) == true)
+ 	 return _error->Error(_("Malformed line %lu in source list %s (absolute dist)"),CurLine,File.c_str());
+       Dist = SubstVar(Dist,"$(ARCH)",_config->Find("APT::Architecture"));
+-      return CreateItem(List,URI,Dist,Section);
++      return CreateItem(List,Options,URI,Dist,Section);
+    }
+    
+    // Grab the rest of the dists
+@@ -109,7 +110,7 @@
+    
+    do
+    {
+-      if (CreateItem(List,URI,Dist,Section) == false)
++      if (CreateItem(List,Options,URI,Dist,Section) == false)
+ 	 return false;
+    }
+    while (ParseQuoteWord(Buffer,Section) == true);
+@@ -239,7 +240,8 @@
+       if (Parse == 0)
+ 	 return _error->Error(_("Type '%s' is not known on line %u in source list %s"),LineType.c_str(),CurLine,File.c_str());
+       
+-      // Vendor name specified
++      // FIXME: Parse options
++      map<string,string> Options;
+       if (C[0] == '[')
+       {
+ 	 string VendorID;
+@@ -268,7 +270,7 @@
+ // 				 VendorID.c_str(),CurLine,File.c_str());
+       }
+ 
+-      if (Parse->ParseLine(SrcList,C,CurLine,File) == false)
++      if (Parse->ParseLine(SrcList,C,Options,CurLine,File) == false)
+ 	 return false;
+    }
+    return true;
+diff -Nru apt-0.7.21/apt-pkg/sourcelist.h apt-0.7.21a0.mrvn.1/apt-pkg/sourcelist.h
+--- apt-0.7.21/apt-pkg/sourcelist.h	2008-06-09 23:10:08.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/apt-pkg/sourcelist.h	2009-07-06 16:34:11.000000000 +0200
+@@ -29,12 +29,13 @@
+ 
+ #include <string>
+ #include <vector>
++#include <map>
+ #include <apt-pkg/pkgcache.h>
+ #include <apt-pkg/metaindex.h>
+ 
+ using std::string;
+ using std::vector;
+-    
++using std::map;
+ 
+ class pkgAquire;
+ class pkgSourceList
+@@ -57,8 +58,10 @@
+       bool FixupURI(string &URI) const;
+       virtual bool ParseLine(vector<metaIndex *> &List,
+ 			     const char *Buffer,
++			     map<string, string> Options,
+ 			     unsigned long CurLine,string File) const;
+-      virtual bool CreateItem(vector<metaIndex *> &List,string URI,
++      virtual bool CreateItem(vector<metaIndex *> &List,
++			      map<string, string> Options, string URI,
+ 			      string Dist,string Section) const = 0;
+       Type();
+       virtual ~Type() {};
+diff -Nru apt-0.7.21/apt-pkg/versionmatch.cc apt-0.7.21a0.mrvn.1/apt-pkg/versionmatch.cc
+--- apt-0.7.21/apt-pkg/versionmatch.cc	2008-11-24 10:32:23.000000000 +0100
++++ apt-0.7.21a0.mrvn.1/apt-pkg/versionmatch.cc	2009-07-06 21:41:34.000000000 +0200
+@@ -98,6 +98,8 @@
+ 	    RelLabel = Fragments[J]+2;
+ 	 else if (stringcasecmp(Fragments[J],Fragments[J]+2,"c=") == 0)
+ 	    RelComponent = Fragments[J]+2;
++	 else if (stringcasecmp(Fragments[J],Fragments[J]+2,"b=") == 0)
++	    RelArch = Fragments[J]+2;
+       }
+       
+       if (RelVerStr.end()[-1] == '*')
+@@ -175,7 +177,7 @@
+       
+       if (RelVerStr.empty() == true && RelOrigin.empty() == true &&
+ 	  RelArchive.empty() == true && RelLabel.empty() == true &&
+-	  RelComponent.empty() == true)
++	  RelComponent.empty() == true && RelArch.empty() == true)
+ 	 return false;
+       
+       if (RelVerStr.empty() == false)
+@@ -200,6 +202,9 @@
+ 	 if (File->Component == 0 ||
+ 	     stringcasecmp(RelComponent,File.Component()) != 0)
+ 	    return false;
++      // FIXME:
++      // if (RelArch.empty() == false)
++      // compare arch
+       return true;
+    }
+    
+diff -Nru apt-0.7.21/apt-pkg/versionmatch.h apt-0.7.21a0.mrvn.1/apt-pkg/versionmatch.h
+--- apt-0.7.21/apt-pkg/versionmatch.h	2008-06-09 23:10:08.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/apt-pkg/versionmatch.h	2009-07-06 21:39:32.000000000 +0200
+@@ -20,6 +20,7 @@
+       Archive (a=)
+       Label (l=)
+       Component (c=)
++      Build architecture (b=)
+    If there are no equals signs in the string then it is scanned in short
+    form - if it starts with a number it is Version otherwise it is an 
+    Archive.
+@@ -50,6 +51,7 @@
+    string RelArchive;
+    string RelLabel;
+    string RelComponent;
++   string RelArch;
+    bool MatchAll;
+    
+    // Origin Matching
+diff -Nru apt-0.7.21/cmdline/apt-get.cc apt-0.7.21a0.mrvn.1/cmdline/apt-get.cc
+--- apt-0.7.21/cmdline/apt-get.cc	2009-04-14 14:20:29.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/cmdline/apt-get.cc	2009-07-06 22:57:22.000000000 +0200
+@@ -1360,7 +1360,7 @@
+    
+    // Create the progress
+    AcqTextStatus Stat(ScreenWidth,_config->FindI("quiet",0));
+-      
++   
+    // Just print out the uris an exit if the --print-uris flag was used
+    if (_config->FindB("APT::Get::Print-URIs") == true)
+    {
+diff -Nru apt-0.7.21/configure apt-0.7.21a0.mrvn.1/configure
+--- apt-0.7.21/configure	2009-04-14 14:21:45.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/configure	2009-07-06 18:11:14.000000000 +0200
+@@ -1901,7 +1901,7 @@
+ 
+ 
+ cat >>confdefs.h <<_ACEOF
+-#define VERSION "0.7.21"
++#define VERSION "0.7.21a0.mrvn.1"
+ _ACEOF
+ 
+ PACKAGE="apt"
+diff -Nru apt-0.7.21/configure.in apt-0.7.21a0.mrvn.1/configure.in
+--- apt-0.7.21/configure.in	2009-04-14 14:21:18.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/configure.in	2009-07-06 18:11:13.000000000 +0200
+@@ -18,7 +18,7 @@
+ AC_CONFIG_HEADER(include/config.h:buildlib/config.h.in include/apti18n.h:buildlib/apti18n.h.in)
+ 
+ dnl -- SET THIS TO THE RELEASE VERSION --
+-AC_DEFINE_UNQUOTED(VERSION,"0.7.21")
++AC_DEFINE_UNQUOTED(VERSION,"0.7.21a0.mrvn.1")
+ PACKAGE="apt"
+ AC_DEFINE_UNQUOTED(PACKAGE,"$PACKAGE")
+ AC_SUBST(PACKAGE)
+diff -Nru apt-0.7.21/debian/changelog apt-0.7.21a0.mrvn.1/debian/changelog
+--- apt-0.7.21/debian/changelog	2009-04-14 14:20:29.000000000 +0200
++++ apt-0.7.21a0.mrvn.1/debian/changelog	2009-07-06 15:44:09.000000000 +0200
+@@ -1,3 +1,10 @@
++apt (0.7.21a0.mrvn.1) unstable; urgency=low
++
++  [ Goswin von Brederlow ]
++  * Add architectures config option
++
++ -- Goswin von Brederlow <goswin-v-b@web.de>  Mon, 06 Jul 2009 15:39:48 +0200
++
+ apt (0.7.21) unstable; urgency=low
+ 
+   [ Christian Perrier ]

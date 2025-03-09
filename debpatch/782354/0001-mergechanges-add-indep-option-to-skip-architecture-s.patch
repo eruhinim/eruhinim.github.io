@@ -1,0 +1,109 @@
+From 78605629c088250d3a2899513ab5cc3c982ad7f2 Mon Sep 17 00:00:00 2001
+From: Simon McVittie <smcv@debian.org>
+Date: Fri, 10 Apr 2015 20:26:16 +0100
+Subject: [PATCH] mergechanges: add --indep option to skip
+ architecture-specific packages
+
+This makes it easy to upload the minimum required packages for the
+Debian archive (source + Architecture: all), and have all architectures'
+binary packages built by the buildds.
+---
+ scripts/mergechanges.1  | 11 ++++++++---
+ scripts/mergechanges.sh | 37 ++++++++++++++++++++++++++++++++++---
+ 2 files changed, 42 insertions(+), 6 deletions(-)
+
+diff --git a/scripts/mergechanges.1 b/scripts/mergechanges.1
+index 9496731..e68b587 100644
+--- a/scripts/mergechanges.1
++++ b/scripts/mergechanges.1
+@@ -2,7 +2,7 @@
+ .SH NAME
+ mergechanges \- merge multiple changes files
+ .SH SYNOPSIS
+-\fBmergechanges\fR [\fB\-f\fR] \fIfile1 file2\fR [\fIfile\fR...]
++\fBmergechanges\fR [\fB\-f\fR] [\fB\-i\fR] \fIfile1 file2\fR [\fIfile\fR...]
+ .SH DESCRIPTION
+ \fBmergechanges\fR merges two or more \fI.changes\fR files, merging
+ the Architecture, Description and Files (and Checksums-*, if present)
+@@ -15,7 +15,12 @@ The output is normally written to \fIstdout\fR.  If the \fB\-f\fR
+ option is given, the output is written to
+ \fIpackage\fR_\fIversion\fR_multi.changes instead, in the same
+ directory as the first changes file listed.
++.PP
++If the \fB\-i\fR or \fB\-\-indep\fR option is given, source packages
++and architecture-independent (Architecture: all) packages are included
++in the output, but architecture-dependent packages are not.
+ .SH AUTHOR
+ Gergely Nagy <algernon@debian.org>,
+-modifications by Julian Gilbey <jdg@debian.org> and
+-Adam D. Barratt <adam@adam-barratt.org.uk>.
++modifications by Julian Gilbey <jdg@debian.org>,
++Adam D. Barratt <adam@adam-barratt.org.uk> and
++Simon McVittie <smcv@debian.org>.
+diff --git a/scripts/mergechanges.sh b/scripts/mergechanges.sh
+index 3ecb355..439aa95 100755
+--- a/scripts/mergechanges.sh
++++ b/scripts/mergechanges.sh
+@@ -43,6 +43,7 @@ GNU General Public License, version 2 or later."
+ 
+ # Commandline parsing
+ FILE=0
++INDEP_ONLY=0
+ 
+ while [ $# -gt 0 ]; do
+     case "$1" in
+@@ -58,6 +59,10 @@ while [ $# -gt 0 ]; do
+ 	    FILE=1
+ 	    shift
+ 	    ;;
++	-i|--indep)
++	    INDEP_ONLY=1
++	    shift
++	    ;;
+ 	-*)
+ 	    echo "Unrecognised option $1.  Use $progname --help for help" >&2
+ 	    exit 1
+@@ -84,11 +89,37 @@ for f in "$@"; do
+ done
+ 
+ # Extract the Architecture: field from all .changes files,
+-# and merge them, sorting out duplicates
+-ARCHS=$(grep -h "^Architecture: " "$@" | sed -e "s,^Architecture: ,," | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/ $//')
++# and merge them, sorting out duplicates. Skip architectures
++# other than all and source if desired.
++ARCHS=$(grep -h "^Architecture: " "$@" | sed -e "s,^Architecture: ,," | tr ' ' '\n' | sort -u)
++if test ${INDEP_ONLY} = 1; then
++    ARCHS=$(echo "$ARCHS" | grep -E '^(all|source)$')
++fi
++ARCHS=$(echo "$ARCHS" | tr '\n' ' ' | sed 's/ $//')
+ 
+ checksum_uniq() {
+-    awk '{if(arr[$NF] != 1){arr[$NF] = 1; print;}}'
++    local line
++    local IFS=
++    if test ${INDEP_ONLY} = 1; then
++        while read line; do
++            case "$line" in
++                (*.dsc|*.diff.gz|*.tar.*|*_all.deb|*_all.udeb)
++                    # source or architecture-independent
++                    echo "$line"
++                    ;;
++                (*.deb|*.udeb)
++                    # architecture-specific, ignore
++                    ;;
++                (*)
++                    echo "Unrecognised file, is it architecture-dependent?" >&2
++                    echo "$line" >&2
++                    exit 1
++                    ;;
++            esac
++        done | awk '{if(arr[$NF] != 1){arr[$NF] = 1; print;}}'
++    else
++        awk '{if(arr[$NF] != 1){arr[$NF] = 1; print;}}'
++    fi
+ }
+ 
+ # Extract & merge the Version: field from all files..
+-- 
+2.1.4
+

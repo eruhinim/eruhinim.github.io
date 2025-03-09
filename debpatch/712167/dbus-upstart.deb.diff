@@ -1,0 +1,103 @@
+diff -Nru dbus-1.6.12/debian/changelog dbus-1.6.12/debian/changelog
+--- dbus-1.6.12/debian/changelog	2013-06-12 14:41:05.000000000 +0100
++++ dbus-1.6.12/debian/changelog	2013-06-13 18:11:34.000000000 +0100
+@@ -1,3 +1,15 @@
++dbus (1.6.12-1.1) UNRELEASED; urgency=low
++
++  * Non-maintainer upload.
++  * Add upstart integration:
++    - Check if init is upstart in the init.d script and exit
++    appropriately.
++    - Add upstart job, preserving setting $PARAMS via /etc/defaults/dbus.
++    - Depend on lsb-base that provides init_is_upstart function.
++    - Also check with upstart, if reboot-required should be triggered.
++
++ -- Dmitrijs Ledkovs <dmitrij.ledkov@ubuntu.com>  Thu, 13 Jun 2013 17:18:48 +0100
++
+ dbus (1.6.12-1) unstable; urgency=high
+ 
+   * New upstream stable release 1.6.12
+diff -Nru dbus-1.6.12/debian/control dbus-1.6.12/debian/control
+--- dbus-1.6.12/debian/control	2013-06-12 14:41:05.000000000 +0100
++++ dbus-1.6.12/debian/control	2013-06-13 17:18:41.000000000 +0100
+@@ -50,7 +50,7 @@
+ Depends: ${shlibs:Depends},
+          ${misc:Depends},
+          adduser,
+-         lsb-base (>= 3.2-14)
++         lsb-base (>= 4.1+Debian3)
+ Suggests: dbus-x11
+ Multi-Arch: foreign
+ Description: simple interprocess messaging system (daemon and utilities)
+diff -Nru dbus-1.6.12/debian/dbus.init dbus-1.6.12/debian/dbus.init
+--- dbus-1.6.12/debian/dbus.init	2013-06-12 14:41:05.000000000 +0100
++++ dbus-1.6.12/debian/dbus.init	2013-06-13 17:18:41.000000000 +0100
+@@ -97,6 +97,17 @@
+   log_action_end_msg $?
+ }
+ 
++if init_is_upstart; then
++    case "$1" in
++	stop)
++	    exit 0
++	    ;;
++	*)
++	    exit 1
++	    ;;
++    esac
++fi
++
+ case "$1" in
+   start)
+     start_it_up
+diff -Nru dbus-1.6.12/debian/dbus.postinst dbus-1.6.12/debian/dbus.postinst
+--- dbus-1.6.12/debian/dbus.postinst	2013-06-12 14:41:05.000000000 +0100
++++ dbus-1.6.12/debian/dbus.postinst	2013-06-13 18:10:30.000000000 +0100
+@@ -38,7 +38,14 @@
+     # system bus is not supported by upstream). The code added by
+     # dh_installinit -r creates a start action, below.
+ 
+-    if [ -x "/etc/init.d/dbus" ] && /etc/init.d/dbus status > /dev/null; then
++    REBOOT=""
++    if which initctl >/dev/null && initctl version | grep -q upstart; then
++	REBOOT=$(status "dbus" 2>/dev/null | awk '/[0-9]$/ { print $NF }')
++    elif [ -x "/etc/init.d/dbus" ] && /etc/init.d/dbus status > /dev/null; then
++	REBOOT=yes
++    fi
++
++    if [ -n "$REBOOT" ]; then
+         # trigger an update notification which recommends to reboot
+         [ -x /usr/share/update-notifier/notify-reboot-required ] && \
+             /usr/share/update-notifier/notify-reboot-required || true
+diff -Nru dbus-1.6.12/debian/dbus.upstart dbus-1.6.12/debian/dbus.upstart
+--- dbus-1.6.12/debian/dbus.upstart	1970-01-01 01:00:00.000000000 +0100
++++ dbus-1.6.12/debian/dbus.upstart	2013-06-13 17:18:41.000000000 +0100
+@@ -0,0 +1,28 @@
++# dbus - D-Bus system message bus
++#
++# The D-Bus system message bus allows system daemons and user applications
++# to communicate.
++
++description	"D-Bus system message bus"
++
++start on local-filesystems
++stop on deconfiguring-networking
++
++expect fork
++respawn
++
++pre-start script
++    mkdir -p /var/run/dbus
++    chown messagebus:messagebus /var/run/dbus
++
++    exec dbus-uuidgen --ensure
++end script
++
++script
++	. /etc/default/dbus || :
++	exec dbus-daemon --system $PARAMS --fork
++end script
++
++post-start exec kill -USR1 1
++
++post-stop exec rm -f /var/run/dbus/pid

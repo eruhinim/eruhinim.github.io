@@ -1,0 +1,98 @@
+From 2f524fcda1163ed3d4d000ac7725ff2245380564 Mon Sep 17 00:00:00 2001
+From: Julian Andres Klode <jak@debian.org>
+Date: Sun, 17 Apr 2011 17:20:40 +0200
+Subject: [PATCH] Introduce rudimentary support for InRelease files
+
+As APT now uses InRelease files, we want cupt to do it
+as well. This patch introduces support for InRelease files
+in cases where a previous InRelease file already exists.
+
+What we're still missing is verification of InRelease files
+on download and renaming invalid InRelease files to Release
+files (to not confuse APT).
+---
+ cpp/lib/src/cache.cpp                    |    7 ++++---
+ cpp/lib/src/internal/cacheimpl.cpp       |   10 ++++++++--
+ cpp/lib/src/internal/worker/metadata.cpp |    4 ++++
+ 3 files changed, 16 insertions(+), 5 deletions(-)
+
+diff --git a/cpp/lib/src/cache.cpp b/cpp/lib/src/cache.cpp
+index 9c0a55b..92ad792 100644
+--- a/cpp/lib/src/cache.cpp
++++ b/cpp/lib/src/cache.cpp
+@@ -304,13 +304,14 @@ bool Cache::verifySignature(const shared_ptr< const Config >& config, const stri
+ 		debug("keyring file is '%s'", keyringPath.c_str());
+ 	}
+ 
+-	auto signaturePath = path + ".gpg";
++	// A Release file has a signature, an InRelease file not.
++	auto signaturePath = (path.rfind("InRelease") == string::npos) ? path + ".gpg" : "";
+ 	if (debugging)
+ 	{
+ 		debug("signature file is '%s'", signaturePath.c_str());
+ 	}
+ 
+-	if (!internal::fs::fileExists(signaturePath))
++	if (!signaturePath.empty() && !internal::fs::fileExists(signaturePath))
+ 	{
+ 		if (debugging)
+ 		{
+@@ -320,7 +321,7 @@ bool Cache::verifySignature(const shared_ptr< const Config >& config, const stri
+ 	}
+ 
+ 	// file checks
+-	{
++	if (!signaturePath.empty()) {
+ 		string openError;
+ 		File file(signaturePath, "r", openError);
+ 		if (!openError.empty())
+diff --git a/cpp/lib/src/internal/cacheimpl.cpp b/cpp/lib/src/internal/cacheimpl.cpp
+index 8654d99..8938953 100644
+--- a/cpp/lib/src/internal/cacheimpl.cpp
++++ b/cpp/lib/src/internal/cacheimpl.cpp
+@@ -373,11 +373,16 @@ string CacheImpl::getPathOfIndexList(const IndexEntry& entry) const
+ 
+ string CacheImpl::getPathOfReleaseList(const IndexEntry& entry) const
+ {
+-	return getPathOfIndexEntry(entry) + "_Release";
++	auto release = getPathOfIndexEntry(entry) + "_Release";
++	auto inRelease = getPathOfIndexEntry(entry) + "_InRelease";
++
++	return fs::fileExists(inRelease) ? inRelease : release;
+ }
+ 
+ string CacheImpl::getDownloadUriOfReleaseList(const IndexEntry& entry) const
+ {
++	if (getPathOfReleaseList(entry).rfind("_InRelease") != string::npos)
++		return getUriOfIndexEntry(entry) + "/InRelease";
+ 	return getUriOfIndexEntry(entry) + "/Release";
+ }
+ 
+@@ -499,7 +504,8 @@ shared_ptr< ReleaseInfo > CacheImpl::getReleaseInfo(const string& path) const
+ 		{
+ 			if (!regex_match(line, matches, fieldRegex))
+ 			{
+-				break;
++				// Ignore invalid lines, makes it work on InRelease
++				continue;
+ 			}
+ 			string fieldName = matches[1];
+ 			string fieldValue = matches[2];
+diff --git a/cpp/lib/src/internal/worker/metadata.cpp b/cpp/lib/src/internal/worker/metadata.cpp
+index 9bde103..ecb39b5 100644
+--- a/cpp/lib/src/internal/worker/metadata.cpp
++++ b/cpp/lib/src/internal/worker/metadata.cpp
+@@ -182,6 +182,10 @@ bool MetadataWorker::__update_release(download::Manager& downloadManager,
+ 
+ 	releaseFileChanged = !hashSums.verify(targetPath);
+ 
++	// InRelease files do not have a detached signature.
++	if (uri.rfind("InRelease") != string::npos)
++		return true;
++
+ 	// downloading signature for Release file
+ 	auto signatureUri = uri + ".gpg";
+ 	auto signatureTargetPath = targetPath + ".gpg";
+-- 
+1.7.4.4
+

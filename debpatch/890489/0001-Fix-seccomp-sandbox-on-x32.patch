@@ -1,0 +1,56 @@
+From 3b88f5d71e1ec850ad9f692a687c66ef1c714897 Mon Sep 17 00:00:00 2001
+From: Colin Watson <cjwatson@debian.org>
+Date: Thu, 15 Feb 2018 09:22:10 +0000
+Subject: [PATCH] Fix seccomp sandbox on x32
+
+On x32, the kernel VDSO that provides clock_gettime and gettimeofday
+sometimes falls back to the underlying syscall.  Unfortunately, it falls
+back to the x86-64 variant of that syscall
+(https://bugs.debian.org/850047), so we need to allow those too.
+---
+ methods/aptmethod.h | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/methods/aptmethod.h b/methods/aptmethod.h
+index 3314115..4ca80f0 100644
+--- a/methods/aptmethod.h
++++ b/methods/aptmethod.h
+@@ -136,7 +136,6 @@ protected:
+       ALLOW(chown);
+       ALLOW(chown32);
+       ALLOW(clock_getres);
+-      ALLOW(clock_gettime);
+       ALLOW(clock_nanosleep);
+       ALLOW(close);
+       ALLOW(creat);
+@@ -188,7 +187,6 @@ protected:
+       ALLOW(get_robust_list);
+       ALLOW(getrusage);
+       ALLOW(gettid);
+-      ALLOW(gettimeofday);
+       ALLOW(getuid);
+       ALLOW(getuid32);
+       ALLOW(ioctl);
+@@ -310,6 +308,19 @@ protected:
+ 	    return _error->FatalE("aptMethod::Configuration", "Cannot allow %s: %s", custom.c_str(), strerror(-rc));
+       }
+ 
++      // On x32, the clock_gettime and gettimeofday syscalls fall back to
++      // the x86-64 syscall in some circumstances
++      // (https://bugs.debian.org/850047).  Note that these must be the last
++      // syscalls added to the filter, as once we've called seccomp_arch_add
++      // all syscalls after that point will be allowed for both
++      // architectures.
++#if defined(__x86_64__) && defined(__ILP32__)
++      if ((rc = seccomp_arch_add(ctx, SCMP_ARCH_X86_64)))
++	 return _error->FatalE("HttpMethod::Configuration", "Cannot add x86-64 architecture: %s", strerror(-rc));
++#endif
++      ALLOW(clock_gettime);
++      ALLOW(gettimeofday);
++
+ #undef ALLOW
+ 
+       rc = seccomp_load(ctx);
+-- 
+2.7.4
+

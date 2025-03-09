@@ -1,0 +1,96 @@
+From bae4706120f05b4ba528071490f86474a022b626 Mon Sep 17 00:00:00 2001
+From: Regis Boudin <regis@boudin.name>
+Date: Mon, 13 Jun 2011 21:47:42 +0100
+Subject: [PATCH] Try to create the database files if they don't exist
+
+---
+ debian/changelog                   |    1 +
+ src/modules/db/rfc822db/rfc822db.c |   40 +++++++++++++++++++++++++++---------
+ 2 files changed, 31 insertions(+), 10 deletions(-)
+
+diff --git a/debian/changelog b/debian/changelog
+index 7d7300b..8338229 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -7,6 +7,7 @@ cdebconf (0.156) UNRELEASED; urgency=low
+   * Fix FTBFS with the future GCC 4.6.1 (Closes: #625317).
+   * Implement handling of multiple flags in the rfc822db backend. Fix some
+     issue in it, thanks to Samuel Thibault (Closes: #628084).
++  * Try to create the database files if they don't exist. Closes: #451130.
+ 
+   [ Samuel Thibault ]
+   * Add -lpthread to fix loading on hurd the gtk backend which needs it.
+diff --git a/src/modules/db/rfc822db/rfc822db.c b/src/modules/db/rfc822db/rfc822db.c
+index fd7063b..0897679 100644
+--- a/src/modules/db/rfc822db/rfc822db.c
++++ b/src/modules/db/rfc822db/rfc822db.c
+@@ -163,6 +163,19 @@ static unsigned int parse_flags(char *string)
+     return ret;
+ }
+ 
++static int crate_database_file(const char *path)
++{
++    int retval = DC_NOTOK;
++    INFO(INFO_VERBOSE, "Database file doesn't exist. Trying to create it");
++    if (((outf = fopen(path, "w")) != NULL) && (fclose(outf) != EOF))
++        retval = DC_OK;
++    else
++        INFO(INFO_VERBOSE, "Cannot create database file %s: %s",
++             path, strerror(errno));
++    outf = NULL;
++    return retval;
++}
++
+ void rfc822db_template_destroyitem(void *data)
+ {
+     template_deref((struct template *) data);
+@@ -217,13 +230,18 @@ static int rfc822db_template_load(struct template_db *db)
+     INFO(INFO_VERBOSE, "rfc822db_template_load(db)");
+     snprintf(tmp, sizeof(tmp), "%s::path", db->configpath);
+     path = db->config->get(db->config, tmp, 0);
+-    if (path == NULL ||
+-        (inf = fopen(path, "r")) == NULL)
++    if (path == NULL)
+     {
+-        INFO(INFO_VERBOSE, "Cannot open template file %s",
+-            path ? path : "<empty>");
++        INFO(INFO_VERBOSE, "Cannot open template file. Path not set");
+         return DC_NOTOK;
+     }
++    else if ((inf = fopen(path, "r")) == NULL)
++    {
++        if (errno == ENOENT)
++            return crate_database_file(path);
++        else
++            return DC_NOTOK;
++    }
+ 
+     while ((header = rfc822_parse_stanza(inf)) != NULL)
+     {
+@@ -573,15 +591,17 @@ static int rfc822db_question_load(struct question_db *db)
+     INFO(INFO_VERBOSE, "rfc822db_question_load(db)");
+     snprintf(tmp, sizeof(tmp), "%s::path", db->configpath);
+     path = db->config->get(db->config, tmp, 0);
+-    if (path == NULL ||
+-        (inf = fopen(path, "r")) == NULL)
++    if (path == NULL)
++    {
++        INFO(INFO_VERBOSE, "Cannot open config database. Path not set");
++        return DC_NOTOK;
++    }
++    else if ((inf = fopen(path, "r")) == NULL)
+     {
+         if (errno == ENOENT)
++            return crate_database_file(path);
++        else
+             return DC_NOTOK;
+-
+-        INFO(INFO_VERBOSE, "Cannot open config database %s: %s",
+-            path ? path : "<empty>", strerror(errno));
+-        return DC_NOTOK;
+     }
+ 
+     while ((header = rfc822_parse_stanza(inf)) != NULL)
+-- 
+1.7.6.rc1
+

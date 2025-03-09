@@ -1,0 +1,60 @@
+From dbda0e98074b8b6ec20f4bdf5479b2847cc8eb0e Mon Sep 17 00:00:00 2001
+From: Tim Riemenschneider <git@tim-riemenschneider.de>
+Date: Mon, 6 Mar 2017 23:08:46 +0100
+Subject: [PATCH] Saveguard against deleting new pack-file (f.e. with
+ threshold=0)
+
+Signed-off-by: Tim Riemenschneider <git@tim-riemenschneider.de>
+[rlb@defaultvalue.org: wrap comment line in test-gc.sh; adjust comment
+ whitespace in gc.py]
+Reviewed-by: Rob Browning <rlb@defaultvalue.org>
+Tested-by: Rob Browning <rlb@defaultvalue.org>
+---
+ lib/bup/gc.py |  2 ++
+ t/test-gc.sh  | 19 +++++++++++++++++++
+ 2 files changed, 21 insertions(+)
+
+diff --git a/lib/bup/gc.py b/lib/bup/gc.py
+index c0a1c0e..395094a 100644
+--- a/lib/bup/gc.py
++++ b/lib/bup/gc.py
+@@ -135,6 +135,8 @@ def sweep(live_objects, existing_count, cat_pipe, threshold, compression,
+         if verbosity and new_pack_prefix:
+             log('created ' + basename(new_pack_prefix) + '\n')
+         for p in ns.stale_files:
++            if new_pack_prefix and p.startswith(new_pack_prefix):
++                continue  # Don't remove the new pack file
+             if verbosity:
+                 log('removing ' + basename(p) + '\n')
+             os.unlink(p)
+diff --git a/t/test-gc.sh b/t/test-gc.sh
+index 82be29c..2739ae7 100755
+--- a/t/test-gc.sh
++++ b/t/test-gc.sh
+@@ -219,4 +219,23 @@ WVPASSEQ 1 $(echo "$only_in_before" | wc -l)
+ WVPASSEQ 1 $(echo "$only_in_after" | wc -l)
+ WVPASSEQ 1 $(echo "$in_both" | wc -l)
+ 
++WVSTART "gc (threshold 0)"
++
++WVPASS rm -rf "$BUP_DIR"
++WVPASS bup init
++WVPASS rm -rf src && mkdir src
++WVPASS echo 0 > src/0
++WVPASS echo 1 > src/1
++
++WVPASS bup index src
++WVPASS bup save -n src-1 src
++
++packs_before="$(ls "$BUP_DIR/objects/pack/"*.pack)" || exit $?
++WVPASS bup gc -v $GC_OPTS --threshold 0 2>&1 | tee gc.log
++packs_after="$(ls "$BUP_DIR/objects/pack/"*.pack)" || exit $?
++# Check that the pack was rewritten, but not removed (since the
++# result-pack is equal to the source pack)
++WVPASSEQ 1 "$(grep -cE '^rewriting ' gc.log)"
++WVPASSEQ "$packs_before" "$packs_after"
++
+ WVPASS rm -rf "$tmpdir"
+-- 
+2.11.0
+

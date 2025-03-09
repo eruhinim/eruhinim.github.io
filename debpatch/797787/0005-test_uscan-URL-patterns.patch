@@ -1,0 +1,173 @@
+From 3b8cb94c33530173630d8a77922fbb56ff9a8476 Mon Sep 17 00:00:00 2001
+From: Osamu Aoki <osamu@debian.org>
+Date: Wed, 2 Sep 2015 21:17:08 +0900
+Subject: [PATCH 5/8] test_uscan: URL patterns
+
+---
+ test/test_uscan | 152 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 152 insertions(+)
+
+diff --git a/test/test_uscan b/test/test_uscan
+index 8637b6e..24c5202 100755
+--- a/test/test_uscan
++++ b/test/test_uscan
+@@ -328,4 +328,156 @@ END
+ 
+ }
+ 
++# test a watch file HTML rules
++
++testWatchFile() {
++# setup test environment
++    TMPDIR=$(mktemp -d)
++    cd $TMPDIR
++    echo " * WORK DIRECTORY: `pwd`"
++    PKG=foo
++# start HTTP server with its root at $TMPDIR/repo
++    mkdir -p repo
++    spawnHttpServer
++    PORT=$(cat $TMPDIR/repo/port)
++    echo " * WEBSITE:         http://localhost:$PORT"
++    UTARBALL=${PKG}-2.0.tar.gz
++    STARBALL=${PKG}_2.0.orig.tar.gz
++
++# repo has pid and port files (create a dummy upstream tarball)
++    tar -czf keep.tar.gz repo/
++
++#############################################################################
++# create minimum repository for $PKG to start uscan except for debian/watch
++    mkdir -p $PKG/debian/source
++
++# native package
++    cat <<END > $PKG/debian/changelog
++$PKG (1.0) unstable; urgency=low
++
++  * Initial release
++
++ -- Joe Developer <jd@debian.org>  Mon, 02 Nov 2013 22:21:31 -0100
++END
++
++    cat <<END > $PKG/debian/source/format
++3.0 (native)
++END
++    cat <<'END' > $PKG/debian/copyright
++Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
++END
++    echo "=== 1 string without index.html, directory scan (native)"
++    mkdir -p $TMPDIR/repo/123/foo/ooo/
++    cp keep.tar.gz repo/123/foo/ooo/$UTARBALL
++    cat <<END > $PKG/debian/watch
++version=3
++http://localhost:$PORT/(\d+)/(.+)/(.+)/$PKG-([\.\d]+).tar.gz
++END
++    (cd $TMPDIR/$PKG ; $COMMAND )
++    WATCH=`grep -e "http:" $PKG/debian/watch`
++    assertTrue "$UTARBALL missing: $WATCH" "[ -f $UTARBALL ]"
++    assertTrue "$STARBALL missing: $WATCH" "[ -f $STARBALL ]"
++    rm $UTARBALL $STARBALL
++
++#############################################################################
++    echo "=== 2 strings without index.html, directory scan (native)"
++    cat <<END > $PKG/debian/watch
++version=3
++http://localhost:$PORT/(\d+)/(.+)/(.+)/ \\
++$PKG-([\d\.]+).tar.gz
++END
++    (cd $TMPDIR/$PKG ; $COMMAND )
++    WATCH=`grep -e "http:" $PKG/debian/watch`
++    assertTrue "$UTARBALL missing: $WATCH" "[ -f $UTARBALL ]"
++    assertTrue "$STARBALL missing: $WATCH" "[ -f $STARBALL ]"
++    rm $UTARBALL $STARBALL
++
++#############################################################################
++    echo "=== 2 strings via a web page (native)"
++    cat <<END > $PKG/debian/watch
++version=3
++http://localhost:$PORT \\
++(?:.*)/$PKG-([\d\.]+).tar.gz
++END
++    cat <<END > repo/index.html
++<html>
++<head>
++  <meta charset="utf-8">
++</head>
++<body>
++<a href="/123/foo/ooo/$PKG-0.0.tar.gz">Very old</a> <br/ >
++<a href="/123/foo/ooo/$PKG-1.0.tar.gz">A bit OLD</a> <br />
++<a href="/123/foo/ooo/$PKG-2.0.tar.gz">Latest</a> <br />
++</body>
++<html>
++END
++    (cd $TMPDIR/$PKG ; $COMMAND )
++    WATCH=`grep -A2 -e "http:" $PKG/debian/watch`
++    assertTrue "$UTARBALL missing: $WATCH" "[ -f $UTARBALL ]"
++    assertTrue "$STARBALL missing: $WATCH" "[ -f $STARBALL ]"
++    rm -f $UTARBALL $STARBALL
++
++#############################################################################
++    echo "=== 2 strings with / via a web page (native)"
++    cat <<END > $PKG/debian/watch
++version=3
++http://localhost:$PORT/ \\
++(?:.*)/$PKG-([\d\.]+).tar.gz \\
++debian uupdate
++END
++# having uupdate for native package is stupid but it safely accept it and do nothing bad
++    cat <<END > repo/index.html
++<html>
++<head>
++  <meta charset="utf-8">
++</head>
++<body>
++<a href="/123/foo/ooo/$PKG-0.0.tar.gz">Very old</a> <br/ >
++<a href="/123/foo/ooo/$PKG-1.0.tar.gz">A bit OLD</a> <br />
++<a href="/123/foo/ooo/$PKG-2.0.tar.gz">Latest</a> <br />
++</body>
++<html>
++END
++    (cd $TMPDIR/$PKG ; $COMMAND )
++    WATCH=`grep -A2 -e "http:" $PKG/debian/watch`
++    assertTrue "$UTARBALL missing: $WATCH" "[ -f $UTARBALL ]"
++    assertTrue "$STARBALL missing: $WATCH" "[ -f $STARBALL ]"
++    rm -f $UTARBALL $STARBALL
++#############################################################################
++    echo "=== non-native package uupdate"
++    cat <<END > $PKG/debian/changelog
++$PKG (1.0-1) unstable; urgency=low
++
++  * Initial release
++
++ -- Joe Developer <jd@debian.org>  Mon, 02 Nov 2013 22:21:31 -0100
++END
++    cat <<END > $PKG/debian/rules
++%:
++	dh $@
++END
++    cat <<END > $PKG/debian/source/format
++3.0 (quilt)
++END
++    cat <<END > $PKG/debian/watch
++version=3
++http://localhost:$PORT \\
++(?:.*)/$PKG-(\d+)\.(\d+)\.tar\.gz \\
++debian uupdate
++END
++
++    DTARBALL=${PKG}_1.0-1.debian.tar.xz
++    ( cd $TMPDIR/$PKG ; tar -cJf $TMPDIR/$DTARBALL debian )
++    ( cd $TMPDIR/$PKG ; $COMMAND )
++    STREE="$PKG-2.0/debian/changelog"
++    WATCH=`grep -A3 -e "http:" $PKG/debian/watch`
++    assertTrue "$STREE missing: $WATCH" "[ -f $STREE ]"
++    rm -f $UTARBALL $STARBALL $DTARBALL
++    rm -rf $PKG-2.0 $PKG-2.0.orig
++
++    cd - >/dev/null
++
++    cleanup
++}
++
+ . shunit2
+-- 
+2.1.4
+

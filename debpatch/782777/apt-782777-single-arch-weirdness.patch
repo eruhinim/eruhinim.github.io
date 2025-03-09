@@ -1,0 +1,164 @@
+commit 6c9937da76b9155d166092b9dda22d06200510c1
+Author: David Kalnischkies <david@kalnischkies.de>
+Date:   Wed Apr 22 12:06:40 2015 +0200
+
+    remove "first package seen is native package" assumption
+    
+    The fix for #777760 causes packages of foreign (and the native)
+    architectures, to be created correctly, but invalidates (like the
+    previously existing, but policy-forbidden architecture-less packages
+    we had to support for some upgrade scenarios) the assumption that the
+    first (and only) package in the cache for a single architecture system
+    must be the package for the native architecture (as, where should the
+    other architectures come from, right? Wrong.).
+    
+    Depending on the order of parsing sources more or less packages can be
+    effected by this. The effects are strange (for apt it mostly effects
+    simulation/debug output, but also apt-mark on these specific packages),
+    which complicates debugging, but relatively harmless if understood as
+    most actions do not need direct named access to packages.
+    
+    The problem is fixed by removing the single-arch special casing in the
+    paths who had them (Cache.FindPkg), so they use the same code as
+    multi-arch systems, which use them as a wrapper for Grp.FindPkg.
+    
+    Note that single-arch system code was using Grp.FindPkg before as well
+    if a Grp structure was handily available, so we don't introduce new
+    untested code here: We remove more brittle special cases which are less
+    tested instead (this was planed to be done for Stretch anyhow).
+    
+    Note further that the method with the assumption itself isn't fixed. As
+    it is a private method I opted for declaring it deprecated instead and
+    remove all its call positions. As it is private no-one can call this
+    method legally (thanks to how c++ works by default its still an exported
+    symbol through) and fixing it basically means reimplementing code we
+    already have in Grp.FindPkg.
+    
+    Removing rather than fixing seems hence like a good solution.
+    
+    Closes: 782777
+    Thanks: Axel Beckert for testing
+
+diff --git a/apt-pkg/pkgcache.cc b/apt-pkg/pkgcache.cc
+index d7c9656..a7b75da 100644
+--- a/apt-pkg/pkgcache.cc
++++ b/apt-pkg/pkgcache.cc
+@@ -230,12 +230,7 @@ pkgCache::PkgIterator pkgCache::SingleArchFindPkg(const string &Name)
+ pkgCache::PkgIterator pkgCache::FindPkg(const string &Name) {
+ 	size_t const found = Name.find(':');
+ 	if (found == string::npos)
+-	{
+-		if (MultiArchCache() == false)
+-			return SingleArchFindPkg(Name);
+-		else
+-			return FindPkg(Name, "native");
+-	}
++	   return FindPkg(Name, "native");
+ 	string const Arch = Name.substr(found+1);
+ 	/* Beware: This is specialcased to handle pkg:any in dependencies as
+ 	   these are linked to virtual pkg:any named packages with all archs.
+@@ -249,13 +244,6 @@ pkgCache::PkgIterator pkgCache::FindPkg(const string &Name) {
+ // ---------------------------------------------------------------------
+ /* Returns 0 on error, pointer to the package otherwise */
+ pkgCache::PkgIterator pkgCache::FindPkg(const string &Name, string const &Arch) {
+-	if (MultiArchCache() == false && Arch != "none") {
+-		if (Arch == "native" || Arch == "all" || Arch == "any" ||
+-		    Arch == NativeArch())
+-			return SingleArchFindPkg(Name);
+-		else
+-			return PkgIterator(*this,0);
+-	}
+ 	/* We make a detour via the GrpIterator here as
+ 	   on a multi-arch environment a group is easier to
+ 	   find than a package (less entries in the buckets) */
+diff --git a/apt-pkg/pkgcache.h b/apt-pkg/pkgcache.h
+index 5e8a963..a7e520b 100644
+--- a/apt-pkg/pkgcache.h
++++ b/apt-pkg/pkgcache.h
+@@ -218,7 +218,7 @@ class pkgCache								/*{{{*/
+ 
+ private:
+    bool MultiArchEnabled;
+-   PkgIterator SingleArchFindPkg(const std::string &Name);
++   APT_DEPRECATED PkgIterator SingleArchFindPkg(const std::string &Name);
+ };
+ 									/*}}}*/
+ // Header structure							/*{{{*/
+diff --git a/test/integration/test-bug-782777-single-arch-weirdness b/test/integration/test-bug-782777-single-arch-weirdness
+new file mode 100755
+index 0000000..0049033
+--- /dev/null
++++ b/test/integration/test-bug-782777-single-arch-weirdness
+@@ -0,0 +1,72 @@
++#!/bin/sh
++# Ensure that the order in which packages are in the binary cache
++# does not effect if they can be found or not
++set -e
++
++TESTDIR=$(readlink -f $(dirname $0))
++. $TESTDIR/framework
++setupenvironment
++configarchitecture 'i386'
++
++insertpackage 'unstable' 'abar' 'i386' '1'
++insertpackage 'unstable' 'foobar' 'i386' '1' 'Depends: abar:amd64, zfoo:amd64'
++insertpackage 'unstable' 'zfoo' 'i386' '1'
++
++setupaptarchive
++
++testrun() {
++	rm -f rootdir/var/lib/apt/extended_states
++
++	testequal 'Reading package lists...
++Building dependency tree...
++The following NEW packages will be installed:
++  abar zfoo
++0 upgraded, 2 newly installed, 0 to remove and 0 not upgraded.
++Inst abar (1 unstable [i386])
++Inst zfoo (1 unstable [i386])
++Conf abar (1 unstable [i386])
++Conf zfoo (1 unstable [i386])' aptget install abar zfoo -s
++
++	testequal 'Reading package lists...
++Building dependency tree...
++The following NEW packages will be installed:
++  abar zfoo
++0 upgraded, 2 newly installed, 0 to remove and 0 not upgraded.
++Inst abar (1 unstable [i386])
++Inst zfoo (1 unstable [i386])
++Conf abar (1 unstable [i386])
++Conf zfoo (1 unstable [i386])' aptget install abar:i386 zfoo:i386 -s
++
++	testequal "Reading package lists...
++Building dependency tree...
++Package abar:amd64 is not available, but is referred to by another package.
++This may mean that the package is missing, has been obsoleted, or
++is only available from another source
++
++Package zfoo:amd64 is not available, but is referred to by another package.
++This may mean that the package is missing, has been obsoleted, or
++is only available from another source
++
++E: Package 'abar:amd64' has no installation candidate
++E: Package 'zfoo:amd64' has no installation candidate" aptget install abar:amd64 zfoo:amd64 -s
++
++	cp -f rootdir/var/lib/dpkg/status status.backup
++	insertinstalledpackage 'abar' 'i386' '1'
++	insertinstalledpackage 'zfoo' 'i386' '1'
++
++	testequal 'abar
++zfoo' aptmark showmanual abar zfoo
++	testequal 'abar set to automatically installed.
++zfoo set to automatically installed.' aptmark auto abar zfoo
++	testempty aptmark showmanual abar zfoo
++	testequal 'abar
++zfoo' aptmark showauto abar zfoo
++
++	mv -f status.backup rootdir/var/lib/dpkg/status
++}
++
++msgmsg 'Single-Arch testrun'
++testrun
++msgmsg 'Multi-Arch testrun'
++configarchitecture 'i386' 'amd64'
++testrun

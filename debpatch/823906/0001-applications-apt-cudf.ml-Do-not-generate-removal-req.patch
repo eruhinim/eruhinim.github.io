@@ -1,0 +1,60 @@
+From 27afc8f6d290dd7f31a6bcde6b8761d0b55e87bd Mon Sep 17 00:00:00 2001
+From: Johannes 'josch' Schauer <josch@mister-muffin.de>
+Date: Thu, 12 May 2016 06:37:47 +0200
+Subject: [PATCH] applications/apt-cudf.ml: Do not generate removal requests
+ for up/downgrades
+
+As far as solvers are concerned, changes in package versions mean that
+the old package is removed and the package in the new version is
+installed. This is how it was encoded in the EDSP output so far.
+
+Recently, (commit c0d57a2a) the order of installation and removal
+requests was turned around and it was discovered that apt will only
+parse the *last* request for a package (see Debian bug #823906). Thus,
+apt would remove a certain package but not install it in its new
+version.
+
+As a remedy, this commit makes sure that package up or downgrades are
+expressed in a single "Install" request and that these do not show up as
+a "Remove" request anymore.
+---
+ applications/apt-cudf.ml | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/applications/apt-cudf.ml b/applications/apt-cudf.ml
+index 29eb7b5..90fd450 100644
+--- a/applications/apt-cudf.ml
++++ b/applications/apt-cudf.ml
+@@ -506,10 +506,19 @@ let main () =
+   Util.Timer.start timer3;
+   let empty = ref true in
+   let cache = CudfAdd.Cudf_hashtbl.create 1023 in
++  (* In Debian (and thus for apt and dpkg), packages can only be installed in a
++   * single version at a time. Thus, any up or downgrades always implicitly
++   * remove the old version. Therefore, if a package installation request just
++   * changes the version of the package, we remember this in a hash table such
++   * that we do not generate a removal request for that package as well. As a
++   * result, every package (name) only shows up exactly once in the solution.
++   * Package removals are not explicitly shown for upgrades. *)
++  let notremoved = Util.StringHashtbl.create 1023 in
+ 
+   let (install,remove) = CudfDiff.make_solution ~universe ~solution:soluniv in
+   CudfAdd.Cudf_set.iter (fun pkg ->
+     CudfAdd.Cudf_hashtbl.add cache pkg ();
++    Util.StringHashtbl.add notremoved pkg.Cudf.package ();
+     Format.printf "Install: %a@." pp_pkg (pkg,univ)
+   ) install;
+ 
+@@ -527,7 +536,8 @@ let main () =
+   ) cudf_request.Cudf.install;
+ 
+   CudfAdd.Cudf_set.iter (fun p ->
+-    Format.printf "Remove: %a@." pp_pkg (p,univ)
++    if Util.StringHashtbl.mem notremoved p.Cudf.package then ()
++    else Format.printf "Remove: %a@." pp_pkg (p,univ)
+   ) remove;
+ 
+   Util.Timer.stop timer3 ();
+-- 
+2.5.1
+

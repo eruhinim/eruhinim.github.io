@@ -1,0 +1,95 @@
+From fda828a6aca867be7e48997c90ca67386c646365 Mon Sep 17 00:00:00 2001
+From: Apollon Oikonomopoulos <apoikos@debian.org>
+Date: Wed, 12 Jul 2017 10:41:58 +0300
+Subject: [PATCH] Handle supported components with slashes in sources.list
+
+Commit d7c92411dc1f4c6be098d1425f9c1c075e0c2154 parses the Components
+section of (In)Release and attempts to detect the distribution's
+supported components. While doing so, it handles component names with
+slashes in a special manner, assuming that the actual component is only
+the part after the final slash. This is done to handle
+security.debian.org, which usually appears in sources.list as follows:
+
+ deb http://s.d.o/debian-security stretch/updates main contrib non-free
+
+while the actual release file has:
+ Codename: stretch
+ Components: updates/main updates/contrib updates/non-free
+
+While this special handing on APTs part indeed works for
+debian-security, it emits spurious warnings on repositories that
+actually use slashes in the component names *and* appear so in
+sources.list.
+
+We fix this by adding both component versions (whole and final part) to
+the SupportedComponents array.
+---
+ apt-pkg/deb/debmetaindex.cc                            |  5 ++---
+ test/integration/test-apt-update-disappeared-component | 14 ++++++++++----
+ 2 files changed, 12 insertions(+), 7 deletions(-)
+
+diff --git a/apt-pkg/deb/debmetaindex.cc b/apt-pkg/deb/debmetaindex.cc
+index df7419ddd..d7c458e66 100644
+--- a/apt-pkg/deb/debmetaindex.cc
++++ b/apt-pkg/deb/debmetaindex.cc
+@@ -414,10 +414,9 @@ bool debReleaseIndex::Load(std::string const &Filename, std::string * const Erro
+       if (comp.empty())
+ 	 continue;
+       auto const pos = comp.find_last_of('/');
+-      if (pos == std::string::npos)
+-	 d->SupportedComponents.push_back(std::move(comp));
+-      else // e.g. security.debian.org uses this style
++      if (pos != std::string::npos) // e.g. security.debian.org uses this style
+ 	 d->SupportedComponents.push_back(comp.substr(pos + 1));
++      d->SupportedComponents.push_back(std::move(comp));
+    }
+    {
+       decltype(pkgCache::ReleaseFile::Flags) flags = 0;
+diff --git a/test/integration/test-apt-update-disappeared-component b/test/integration/test-apt-update-disappeared-component
+index d38405bc2..7c7dd7711 100755
+--- a/test/integration/test-apt-update-disappeared-component
++++ b/test/integration/test-apt-update-disappeared-component
+@@ -10,13 +10,14 @@ insertpackage 'unstable' 'foobar' 'all' '1'
+ 
+ APTARCHIVE="file:$(readlink -f ./aptarchive) unstable InRelease"
+ setupaptarchive --no-update
+-sed -i -e 's#main\s*$#main contrib non-free#' rootdir/etc/apt/sources.list.d/*
++sed -i -e 's#main\s*$#main contrib non-free sub/component#' rootdir/etc/apt/sources.list.d/*
+ 
+ # if no Component info is available we assume all are supported, which means
+ # that non-existent Packages files are assumed to be missing because they are
+ # empty (as the repository is declaring support for them via Architectures)
+ testwarningmsg "W: Skipping acquire of configured file 'contrib/source/Sources' as repository '${APTARCHIVE}' does not seem to provide it (sources.list entry misspelt?)
+-W: Skipping acquire of configured file 'non-free/source/Sources' as repository '${APTARCHIVE}' does not seem to provide it (sources.list entry misspelt?)" apt update
++W: Skipping acquire of configured file 'non-free/source/Sources' as repository '${APTARCHIVE}' does not seem to provide it (sources.list entry misspelt?)
++W: Skipping acquire of configured file 'sub/component/source/Sources' as repository '${APTARCHIVE}' does not seem to provide it (sources.list entry misspelt?)" apt update
+ 
+ sed -i -e '/^Codename: / a\
+ Components: main contrib' $(find ./aptarchive -name 'Release')
+@@ -24,16 +25,21 @@ signreleasefiles
+ 
+ testwarningmsg "W: Skipping acquire of configured file 'contrib/source/Sources' as repository '${APTARCHIVE}' does not seem to provide it (sources.list entry misspelt?)
+ W: Skipping acquire of configured file 'non-free/source/Sources' as repository '${APTARCHIVE}' doesn't have the component 'non-free' (component misspelt in sources.list?)
++W: Skipping acquire of configured file 'sub/component/source/Sources' as repository '${APTARCHIVE}' doesn't have the component 'sub/component' (component misspelt in sources.list?)
+ W: Skipping acquire of configured file 'non-free/binary-amd64/Packages' as repository '${APTARCHIVE}' doesn't have the component 'non-free' (component misspelt in sources.list?)
+ W: Skipping acquire of configured file 'non-free/binary-all/Packages' as repository '${APTARCHIVE}' doesn't have the component 'non-free' (component misspelt in sources.list?)
+-W: Skipping acquire of configured file 'non-free/i18n/Translation-en' as repository '${APTARCHIVE}' doesn't have the component 'non-free' (component misspelt in sources.list?)" apt update
++W: Skipping acquire of configured file 'non-free/i18n/Translation-en' as repository '${APTARCHIVE}' doesn't have the component 'non-free' (component misspelt in sources.list?)
++W: Skipping acquire of configured file 'sub/component/binary-amd64/Packages' as repository '${APTARCHIVE}' doesn't have the component 'sub/component' (component misspelt in sources.list?)
++W: Skipping acquire of configured file 'sub/component/binary-all/Packages' as repository '${APTARCHIVE}' doesn't have the component 'sub/component' (component misspelt in sources.list?)
++W: Skipping acquire of configured file 'sub/component/i18n/Translation-en' as repository '${APTARCHIVE}' doesn't have the component 'sub/component' (component misspelt in sources.list?)" apt update
+ 
+ # the field looks like this e.g. for security.debian.org sources
+-sed -i -e 's#^Components:.*$#Components: updates/main updates/contrib#' $(find ./aptarchive -name 'Release')
++sed -i -e 's#^Components:.*$#Components: updates/main updates/contrib sub/component#' $(find ./aptarchive -name 'Release')
+ signreleasefiles
+ 
+ testwarningmsg "W: Skipping acquire of configured file 'contrib/source/Sources' as repository '${APTARCHIVE}' does not seem to provide it (sources.list entry misspelt?)
+ W: Skipping acquire of configured file 'non-free/source/Sources' as repository '${APTARCHIVE}' doesn't have the component 'non-free' (component misspelt in sources.list?)
++W: Skipping acquire of configured file 'sub/component/source/Sources' as repository '${APTARCHIVE}' does not seem to provide it (sources.list entry misspelt?)
+ W: Skipping acquire of configured file 'non-free/binary-amd64/Packages' as repository '${APTARCHIVE}' doesn't have the component 'non-free' (component misspelt in sources.list?)
+ W: Skipping acquire of configured file 'non-free/binary-all/Packages' as repository '${APTARCHIVE}' doesn't have the component 'non-free' (component misspelt in sources.list?)
+ W: Skipping acquire of configured file 'non-free/i18n/Translation-en' as repository '${APTARCHIVE}' doesn't have the component 'non-free' (component misspelt in sources.list?)" apt update
+-- 
+2.11.0
+

@@ -1,0 +1,66 @@
+From 888158fc7e0c7b9bc33281c2f80c5501f01b304e Mon Sep 17 00:00:00 2001
+From: Stefan Tauner <stefan.tauner@student.tuwien.ac.at>
+Date: Sun, 7 Aug 2011 20:24:44 +0200
+Subject: [PATCH] Make dmi_chassis_type aware of the lock bit.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+To: dmidecode-devel@nongnu.org
+
+Previously all bits of the parameter passed to dmi_chassis_type were
+used to derive the chassis type although the 7th bit indicates a
+lock and only bits 6:0 encode the chassis type (7.4 System Enclosure
+or Chassis (Type 3), offset 05h). This is ok as long as the input is
+masked as it was done in dmi_decode, but it was forgotten in
+dmi_table_string, resulting in wrong output if there is a lock
+present:
+dmidecode -s chassis-type
+<OUT OF SPEC>
+although the normal output is correct:
+[â¦]
+Handle 0x0003, DMI type 3, 17 bytes
+Chassis Information
+	Manufacturer: Chassis Manufacture
+	Type: Desktop
+	Lock: Present
+	[â¦]
+
+dump (the 5th byte (83) is the interesting one):
+dmidecode -t chassis -u
+SMBIOS 2.3 present.
+
+Handle 0x0003, DMI type 3, 17 bytes
+        Header and Data:
+                03 11 03 00 01 83 02 03 04 03 03 03 03 01 00 00
+                00
+
+Tested with current CVS code on a "Laptop" without a lock (by me)
+and on the "Desktop" board dumped above (by Florian Zumbiehl, thanks!).
+---
+ dmidecode.c |    3 ++-
+ 1 files changed, 2 insertions(+), 1 deletions(-)
+
+diff --git a/dmidecode.c b/dmidecode.c
+index f7b23c1..af2bfc5 100644
+--- a/dmidecode.c
++++ b/dmidecode.c
+@@ -532,6 +532,7 @@ static const char *dmi_chassis_type(u8 code)
+ 		"Blade Enclosing" /* 0x1D */
+ 	};
+ 
++	code &= 0x7F; /* bits 6:0 are chassis type, 7th bit is the lock bit */
+ 	if (code >= 0x01 && code <= 0x1D)
+ 		return type[code - 0x01];
+ 	return out_of_spec;
+@@ -3237,7 +3238,7 @@ static void dmi_decode(const struct dmi_header *h, u16 ver)
+ 			printf("\tManufacturer: %s\n",
+ 				dmi_string(h, data[0x04]));
+ 			printf("\tType: %s\n",
+-				dmi_chassis_type(data[0x05] & 0x7F));
++				dmi_chassis_type(data[0x05]));
+ 			printf("\tLock: %s\n",
+ 				dmi_chassis_lock(data[0x05] >> 7));
+ 			printf("\tVersion: %s\n",
+-- 
+1.7.1
+

@@ -1,0 +1,165 @@
+From 1c0cdae1e7369112433e472df159b91546b2b515 Mon Sep 17 00:00:00 2001
+From: Stefano Zacchiroli <zack@upsilon.cc>
+Date: Thu, 16 Apr 2009 13:20:08 +0200
+Subject: [PATCH] grep-dctrl: add new mode for exact package name matching
+
+Add to grep-dctrl the new matching mode --whole-pkg / -w. It behaves
+as -e (extended regexp matching), but matches over exact package
+names, thus avoiding sub-package name matching.
+
+Closes: #383921
+
+Signed-off-by: Stefano Zacchiroli <zack@debian.org>
+---
+ debian/changelog        |    5 +++++
+ grep-dctrl/grep-dctrl.c |   10 ++++++++++
+ lib/predicate.c         |   18 ++++++++++++++++--
+ lib/predicate.h         |    2 ++
+ man/grep-dctrl.1.cp     |    6 ++++++
+ 5 files changed, 39 insertions(+), 2 deletions(-)
+
+diff --git a/debian/changelog b/debian/changelog
+index bc607f2..a549164 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -16,6 +16,11 @@ dctrl-tools (2.14) UNRELEASED; urgency=low
+     Closes: #506138 (Segfault when calling with wrong order of parameters)
+     Reported by Marco Túlio Gontijo e Silva <marcot@holoscopio.com>.
+ 
++  [ Stefano Zacchiroli ]
++  * grep-dctrl: add new matching mode --whole-pkg/-w: it is an improved -e
++    matching exact package names, i.e., no sub-string matching on package
++    names. Closes: #383921
++
+  -- Antti-Juhani Kaijanaho <ajk@debian.org>  Tue, 06 Jan 2009 20:20:17 +0200
+ 
+ dctrl-tools (2.13.0) unstable; urgency=low
+diff --git a/grep-dctrl/grep-dctrl.c b/grep-dctrl/grep-dctrl.c
+index 70a1fd1..7eab847 100644
+--- a/grep-dctrl/grep-dctrl.c
++++ b/grep-dctrl/grep-dctrl.c
+@@ -139,6 +139,7 @@ static struct argp_option options[] = {
+ 	{ "mmap",           OPT_MMAP, 0,            0, N_("Attempt mmapping input files") },
+ 	{ "ignore-parse-errors", OPT_IGN_ERRS, 0,   0, N_("Ignore parse errors") },
+         { "pattern",        OPT_PATTERN, N_("PATTERN"), 0, N_("Specify the pattern to search for") },
++	{ "whole-pkg",	    'w', 0,                 0, N_("Do (eregex) matching on whole package names") },
+ 	{ 0 }
+ };
+ 
+@@ -235,6 +236,7 @@ struct atom * clone_atom(struct arguments * args)
+ 	rv->field_inx = atom->field_inx;
+ 	rv->mode = atom->mode;
+ 	rv->ignore_case = atom->ignore_case;
++	rv->whole_pkg = atom->whole_pkg;
+ 	rv->pat = atom->pat;
+ 	rv->patlen = atom->patlen;
+ 	struct atom_code * ac = args->atom_code[oa];
+@@ -357,6 +359,7 @@ static struct atom * enter_atom(struct arguments * args)
+ 	rv->field_inx = -1;
+ 	rv->mode = M_SUBSTR;
+ 	rv->ignore_case = 0;
++	rv->whole_pkg = 0;
+ 	rv->pat = 0;
+ 	rv->patlen = 0;
+ 	return rv;
+@@ -551,6 +554,12 @@ static error_t parse_opt (int key, char * arg, struct argp_state * state)
+ 		if (atom->pat == 0) fatal_enomem(0);
+ 		strcpy((char*)atom->pat, arg);
+ 		break;
++	case 'w':
++		debug_message("parse_opt: whole-pkg", 0);
++		atom = ENTER_ATOM;
++		atom->whole_pkg = 1;
++		set_mode(M_EREGEX);
++		break;
+ 	case ARGP_KEY_ARG:
+ 		debug_message("parse_opt: argument", 0);
+ 	redo:
+@@ -620,6 +629,7 @@ static void dump_args(struct arguments * args)
+ 		printf("atoms[%zi].field_name = %s\n", i, args->p.atoms[i].field_name);
+ 		printf("atoms[%zi].mode = %i\n", i, args->p.atoms[i].mode);
+ 		printf("atoms[%zi].ignore_case = %i\n", i, args->p.atoms[i].ignore_case);
++		printf("atoms[%zi].whole_pkg = %i\n", i, args->p.atoms[i].whole_pkg);
+ 		printf("atoms[%zi].pat = %s\n", i, args->p.atoms[i].pat);
+ 	}
+ 	printf("proglen = %zi\n", args->p.proglen);
+diff --git a/lib/predicate.c b/lib/predicate.c
+index 2657457..02617d4 100644
+--- a/lib/predicate.c
++++ b/lib/predicate.c
+@@ -27,6 +27,9 @@
+ #include "strutil.h"
+ #include "version.h"
+ 
++#define RE_PKG_BEGIN	"(^| )"
++#define RE_PKG_END	"([, \\(]|$)"
++
+ void init_predicate(struct predicate * p)
+ {
+ 	p->num_atoms = 0;
+@@ -46,6 +49,9 @@ void addinsn(struct predicate * p, int insn)
+ void predicate_finish_atom(struct predicate * p)
+ {
+ 	struct atom * atom =  get_current_atom(p);
++	char * regex_pat = NULL;
++	int regex_patlen = atom->patlen + strlen(RE_PKG_BEGIN)
++				+ strlen(RE_PKG_END) + 1;
+ 	debug_message("predicate_finish_atom", 0);
+ 	if (atom->field_name != 0) {
+                 char * repl = strchr(atom->field_name, ':');
+@@ -59,12 +65,20 @@ void predicate_finish_atom(struct predicate * p)
+ 	}
+ 
+ 	if (atom->mode == M_REGEX || atom->mode == M_EREGEX) {
++		regex_pat = calloc(1, regex_patlen);	/* rely on mem 0-ing */
++		if (regex_pat == 0)  fatal_enomem(0);
++		if (atom->whole_pkg)
++			strncat(regex_pat, RE_PKG_BEGIN, strlen(RE_PKG_BEGIN));
++		strncat(regex_pat, atom->pat, atom->patlen);
++		if (atom->whole_pkg)
++			strncat(regex_pat, RE_PKG_END, strlen(RE_PKG_END));
+ 		debug_message("compiling:", 0);
+-		debug_message(atom->pat, 0);
+-		int rerr = regcomp(&atom->regex, atom->pat,
++		debug_message(regex_pat, 0);
++		int rerr = regcomp(&atom->regex, regex_pat,
+ 				   (atom->mode == M_EREGEX ? REG_EXTENDED : 0)
+ 				   | REG_NOSUB
+ 				   | (atom->ignore_case ? REG_ICASE : 0));
++		free(regex_pat);
+ 		if (rerr != 0) {
+ 			char * s;
+ 			s = get_regerror(rerr, &atom->regex);
+diff --git a/lib/predicate.h b/lib/predicate.h
+index 6720ed7..d58b71f 100644
+--- a/lib/predicate.h
++++ b/lib/predicate.h
+@@ -66,6 +66,8 @@ struct atom {
+ 	/* A compiled version of pat; valid only when mode is M_REGEX
+ 	 * or M_EREGEX.  */
+ 	regex_t regex;
++	/* Flag: (extended) regex should match whole package names */
++	unsigned whole_pkg;
+ };
+ 
+ /* A predicate is represented as a set of atomic predicates and a
+diff --git a/man/grep-dctrl.1.cp b/man/grep-dctrl.1.cp
+index 36741e7..6b47c71 100644
+--- a/man/grep-dctrl.1.cp
++++ b/man/grep-dctrl.1.cp
+@@ -137,6 +137,12 @@ Ignore case when looking for a match in the current simple filter.
+ .IP "\-X, \-\-exact\-match"
+ Do an exact match (as opposed to a substring match) in the current
+ simple filter.
++.IP "\-w, \-\-whole\-pkg"
++Do an extended regular expression match on whole package names,
++assuming the syntax of inter-package relationship fields such as
++Depends, Recommends, ... When this flag is given you should not worry
++about sub-package names such as "libpcre3" also matching
++"libpcre3-dev". This flag implies (and is incompatible with) \-e.
+ .IP "\-\-eq"
+ Do an equality comparison under the Debian version number system.  If
+ the pattern or the field to be searched in is not a valid Debian
+-- 
+1.6.2.3
+

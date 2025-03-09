@@ -1,0 +1,278 @@
+From bcb0674f7a0acf8c76d93109deb82cbb62ba8cd9 Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Mon, 9 Jan 2017 05:22:59 +0100
+Subject: [PATCH 4/4] Update build system for DocBook conversion
+
+---
+ .gitignore     |  2 +-
+ Makefile       | 44 ++++++++++++++++++++++++++------------------
+ README.md      | 10 +++++-----
+ debian/control |  8 +-------
+ debian/rules   | 40 ++++++++++++++++++++--------------------
+ 5 files changed, 53 insertions(+), 51 deletions(-)
+
+diff --git a/.gitignore b/.gitignore
+index 66b5940..66c32a5 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -17,7 +17,7 @@
+ /stamp-build
+ /stamp-binary
+ /upgrading-checklist.html/
+-/version.ent
++/version.xml
+ *-1.html
+ *.html.tar.gz
+ *.pdf
+diff --git a/Makefile b/Makefile
+index 288c4ae..ad69dca 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,8 +1,9 @@
+ include debian/rules
+ 
+-policy.sgml: version.ent
+-menu-policy.sgml: version.ent
+-perl-policy.sgml: version.ent
++policy.xml: version.xml
++menu-policy.xml: version.xml
++perl-policy.xml: version.xml
++upgrading-checklist.xml: version.xml
+ 
+ $(MDWN_FILES:=.txt): %.txt: %.md
+ 	cat $^ > $@
+@@ -11,34 +12,41 @@ $(MDWN_FILES:=.txt): %.txt: %.md
+ $(MDWN_FILES:=.html): %.html: %.md
+ 	$(MDWN) $< > $@
+ 
+-%.validate: %
+-	onsgmls -wall -gues $<
++OPENJADE_OPTS = -b utf-8 -t sgml -d html.dsl
++OPENJADE_OPT_NOTOC = -V "(define %generate-book-toc% \#f)"
+ 
+-%.html/index.html: %.sgml
+-	LANG=C debiandoc2html $<
++upgrading-checklist-1.html \
++upgrading-checklist.html/index.html: OPENJADE_OPTS += $(OPENJADE_OPT_NOTOC)
+ 
+-%-1.html: %.sgml
+-	LANG=C debiandoc2html -1 -b $*-1d $< && \
+-        mv $*-1d.html/index.html $*-1.html && \
+-        rmdir $*-1d.html
++%.html/index.html: %.xml html.dsl
++	mkdir -p $(@D)
++	openjade $(OPENJADE_OPTS) \
++	  -V use-output-dir -V %output-dir%=$(@D)/ -V %root-filename%=index \
++	  /usr/share/xml/declaration/xml.dcl $<
++
++%-1.html: %.xml html.dsl
++	openjade $(OPENJADE_OPTS) \
++	  -V nochunks \
++	  /usr/share/xml/declaration/xml.dcl $< > $@
++	-tidy -raw -q -f /dev/null -i -m $@
+ 
+ %.html.tar.gz: %.html/index.html
+ 	GZIP=-n9 tar -czf $(<:/index.html=.tar.gz) $(<:/index.html=)
+ 
+-$(SGML_FILES:=.txt): %.txt: %.sgml
+-	LANG=C debiandoc2text $<
++$(XML_FILES:=.txt): %.txt: %-1.html
++	links -dump $< | perl -pe 's/[\r\0]//g' > $@
+ 
+ %.txt.gz: %.txt
+ 	gzip -ncf9 $< > $@
+ 
+-%.ps: %.sgml
+-	LANG=C debiandoc2latexps $<
++%.ps: %.xml
++	dblatex --ps $<
+ 
+ %.ps.gz: %.ps
+ 	gzip -ncf9 $< > $@
+ 
+-%.pdf: %.sgml
+-	LANG=C debiandoc2latexpdf $<
++%.pdf: %.xml
++	dblatex --pdf $<
+ 
+ %.pdf.gz: %.pdf
+ 	gzip -ncf9 $< > $@
+@@ -70,7 +78,7 @@ distclean:
+ 	rm -f $(filter-out $(leavealone),$(wildcard *.txt *.txt.gz *.html.tar.gz *.pdf *.ps))
+ 	rm -f *.lout* lout.li *.sasp* *.tex *.aux *.toc *.idx *.log *.out *.dvi *.tpt
+ 	rm -f `find . -name "*~" -o -name "*.bak" -o -name ".#*" -o -name core`
+-	rm -f version.ent
++	rm -f version.xml
+ 	rm -f *.rej *.orig
+ 
+ # if a rule bombs out, delete the target
+diff --git a/README.md b/README.md
+index 76a236b..68085e7 100644
+--- a/README.md
++++ b/README.md
+@@ -192,14 +192,14 @@ proposed wording, is:
+   &lt;number&gt; is the bug number in the BTS and &lt;user&gt;is a
+   designator of the Policy team member who is shepherding the bug.
+ + Commit wording changes in that branch until consensus is
+-  achieved. Do not modify debian/changelog or upgrading-checklist.html
++  achieved. Do not modify debian/changelog or upgrading-checklist.xml
+   during this phase. Use the BTS to track who proposed the wording and
+   who seconded it.
+ + git pull master to make sure you have the latest version.
+ + Once the change has been approved by enough people, git merge the
+   branch into master immediately after making the final commit adding
+   the changelog entry to minimize conflicts.
+-+ add the debian/changelog and upgrading-checklist.html changes, and
+++ add the debian/changelog and upgrading-checklist.xml changes, and
+   commit to master.
+ + Push master out so other people may merge in their own bug branches
+   without conflicts.
+@@ -233,8 +233,8 @@ The Git commands used for this workflow are:
+ 
+     git checkout master
+     git merge bug12345-rra
+-    # edit debian/changelog and upgrading-checklist.html
+-    git add debian/changelog upgrading-checklist.html
++    # edit debian/changelog and upgrading-checklist.xml
++    git add debian/changelog upgrading-checklist.xml
+     git commit
+     git push origin master
+     git branch -d bug12345-rra
+@@ -278,7 +278,7 @@ assuming that you haven't packed the refs in your repository.
+ For a final Policy release, change UNRELEASED to unstable in
+ debian/changelog and update the timestamp to match the final release
+ time (dch -r may be helpful for this), update the release date in
+-upgrading-checklist.html, update Standards-Version in debian/control,
++upgrading-checklist.xml, update Standards-Version in debian/control,
+ and commit that change. Then do the final release build and make sure
+ that it builds and installs.
+ 
+diff --git a/debian/control b/debian/control
+index 49a8aa4..a3f45c2 100644
+--- a/debian/control
++++ b/debian/control
+@@ -9,19 +9,13 @@ Section: doc
+ Priority: optional
+ Build-Depends:
+  bsdmainutils,
+- debiandoc-sgml (>= 1.1.47),
++ dblatex,
+  docbook-dsssl,
+  docbook-xml,
+- ghostscript,
+- groff,
+  libtext-multimarkdown-perl,
+  links | elinks,
+  openjade,
+- opensp,
+- pstoedit,
+  sgml-data,
+- texlive,
+- texlive-latex-extra,
+  tidy,
+ Standards-Version: 3.9.9
+ Vcs-Browser: https://anonscm.debian.org/git/dbnpolicy/policy.git
+diff --git a/debian/rules b/debian/rules
+index 88ca46e..c338f11 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -16,9 +16,9 @@ TMPTOP	:= $(SRCTOP)/debian/tmp
+ DOCDIR	:= $(TMPTOP)/usr/share/doc/$(package)
+ LIBDIR	:= $(TMPTOP)/usr/share/doc-base
+ 
+-# SGML source files in the top-level directory.  We do some common actions
+-# with each of these: validate, build text, HTML, and one-page HTML output.
+-SGML_FILES  := policy menu-policy perl-policy upgrading-checklist
++# DocBook source files in the top-level directory.  We do some common actions
++# with each of these: build text, HTML, and one-page HTML output.
++XML_FILES   := policy menu-policy perl-policy upgrading-checklist
+ 
+ # Markdown source files in the top-level directory.  We generate text and
+ # HTML versions from these.
+@@ -36,8 +36,8 @@ FHS_FILES   := fhs-2.3.html fhs-2.3.ps.gz fhs-2.3.txt.gz fhs-2.3.pdf.gz
+ # A list of the simple Policy files that we include in the documentation
+ # directory of the generated package.  The directories of HTML output are
+ # handled separately.
+-POLICY_FILES := $(SGML_FILES:=.txt.gz)					\
+-		$(SGML_FILES:=-1.html)					\
++POLICY_FILES := $(XML_FILES:=.txt.gz)					\
++		$(XML_FILES:=-1.html)					\
+ 		virtual-package-names-list.txt	                        \
+ 		copyright-format/copyright-format-1.0.html		\
+ 		copyright-format/copyright-format-1.0.txt.gz		\
+@@ -54,15 +54,15 @@ POLICY_FILES := $(SGML_FILES:=.txt.gz)					\
+ # are individual generated files to remove.  DIRS_TO_CLEAN are entire
+ # directories to remove.
+ STAMPS_TO_CLEAN := stamp-binary stamp-build
+-DIRS_TO_CLEAN   := $(SGML_FILES:=.html) debian/tmp fhs
+-FILES_TO_CLEAN	:= $(SGML_FILES:=.txt) $(SGML_FILES:=.txt.gz)		\
+-		   $(SGML_FILES:=.html.tar.gz) $(SGML_FILES:=-1.html)	\
++DIRS_TO_CLEAN   := $(XML_FILES:=.html) debian/tmp fhs
++FILES_TO_CLEAN  := $(XML_FILES:=.txt) $(XML_FILES:=.txt.gz)		\
++		   $(XML_FILES:=.html.tar.gz) $(XML_FILES:=-1.html)	\
+ 		   $(MDWN_FILES:=.html) $(MDWN_FILES:=.txt)		\
+ 		   policy.pdf.gz policy.ps.gz				\
+ 		   policy.pdf policy.ps policy.tpt policy.txt		\
+ 		   copyright-format/version.xml				\
+ 		   autopkgtest/version.txt				\
+-		   debconf_spec/include/version.xml version.ent		\
++		   debconf_spec/include/version.xml version.xml		\
+ 		   debian/files
+ 
+ # Install files and directories with the correct ownership and permissions.
+@@ -73,8 +73,8 @@ mkdir   := install -d -o root -g root -m 755
+ all build build-indep: stamp-build
+ build-arch:
+ stamp-build: $(MDWN_FILES:=.md)				\
+-	     $(SGML_FILES:=.sgml)			\
+-	     version.ent				\
++	     $(XML_FILES:=.xml)				\
++	     version.xml				\
+ 	     copyright-format/copyright-format-1.0.xml	\
+ 	     copyright-format/version.xml		\
+ 	     autopkgtest/autopkgtest.md			\
+@@ -84,10 +84,9 @@ stamp-build: $(MDWN_FILES:=.md)				\
+ 	     debconf_spec/include/statuscodes.xml	\
+ 	     debconf_spec/include/types.xml		\
+ 	     debconf_spec/include/version.xml
+-	$(MAKE) $(SGML_FILES:=.sgml.validate) \
+-		$(SGML_FILES:=.html.tar.gz) \
+-                $(SGML_FILES:=-1.html) \
+-		$(SGML_FILES:=.txt.gz) \
++	$(MAKE)	$(XML_FILES:=.html.tar.gz) \
++		$(XML_FILES:=-1.html) \
++		$(XML_FILES:=.txt.gz) \
+ 		policy.ps.gz policy.pdf.gz
+ 	$(MAKE) $(MDWN_FILES:=.html) \
+ 		$(MDWN_FILES:=.txt)
+@@ -99,13 +98,14 @@ stamp-build: $(MDWN_FILES:=.md)				\
+ # Create the version files for inclusion in the various documents.  We want
+ # to put the Policy version and date in each document, even if they
+ # separately have their own versions.
+-configure: version.ent copyright-format/version.xml \
++configure: version.xml copyright-format/version.xml \
+ 	   autopkgtest/version.txt \
+ 	   debconf_spec/include/version.xml
+-version.ent: debian/changelog
++version.xml: debian/changelog
+ 	rm -f $@
+-	echo "<!entity version \"$(version)\">" >> $@
+-	echo "<!entity date    \"$(date)\">"	>> $@
++	echo '<?xml version="1.0" encoding="utf-8"?>' > $@
++	echo '<!ENTITY version "$(version)">'        >> $@
++	echo '<!ENTITY date    "$(date)">'           >> $@
+ copyright-format/version.xml: debian/changelog
+ 	rm -f $@
+ 	echo '<?xml version="1.0" standalone="no"?>' >  $@
+@@ -155,7 +155,7 @@ stamp-binary: stamp-build
+ #
+ # Install generated HTML directories.
+ #
+-	@set -ex; for file in $(SGML_FILES); do			\
++	@set -ex; for file in $(XML_FILES); do			\
+ 		tar -C $(DOCDIR) -zxf $$file.html.tar.gz;	\
+ 	done
+ #
+-- 
+2.12.1.578.ge9c3154ca4
+

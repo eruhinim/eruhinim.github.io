@@ -1,0 +1,172 @@
+From a80dd94cf062fbcd6fb0e675d714556f6f68d3d9 Mon Sep 17 00:00:00 2001
+From: Simon McVittie <smcv@debian.org>
+Date: Fri, 16 Aug 2019 09:42:00 +0100
+Subject: [PATCH] dh_installgsettings: Allow dependency to be weakened
+
+Signed-off-by: Simon McVittie <smcv@debian.org>
+---
+ dh_installgsettings                         | 18 ++++++-
+ t/dh_installgsettings/debian/changelog      |  5 ++
+ t/dh_installgsettings/debian/control        | 25 +++++++++
+ t/dh_installgsettings/dh_installgsettings.t | 59 +++++++++++++++++++++
+ 4 files changed, 106 insertions(+), 1 deletion(-)
+ create mode 100644 t/dh_installgsettings/debian/changelog
+ create mode 100644 t/dh_installgsettings/debian/control
+ create mode 100755 t/dh_installgsettings/dh_installgsettings.t
+
+diff --git a/dh_installgsettings b/dh_installgsettings
+index 45b228eb..3198929e 100755
+--- a/dh_installgsettings
++++ b/dh_installgsettings
+@@ -53,9 +53,20 @@ priority instead of 10. Higher values than ten can be used by
+ derived distributions (20), blend distributions (50), or site-specific
+ packages (90).
+ 
++=item B<--field> I<field>
++
++If the package contains GSettings schemas, add a suitable GSettings
++backend to the substvar B<misc:>I<field> instead of B<misc:Depends>.
++For example, if the settings described in a package's schemas are
++considered to be non-critical and it would be acceptable to fall back
++to the in-memory backend on unusually minimal systems, the maintainer
++could use B<dh_installgsettings --field Recommends>, and add
++B<Recommends: ${misc:Recommends}> in F<debian/control>.
++
+ =cut
+ 
+ init(options => {
++	"field=s" => \$dh{FIELD},
+ 	"priority=s" => \$dh{PRIORITY},
+ });
+ 
+@@ -64,6 +75,11 @@ if (defined $dh{PRIORITY}) {
+ 	$priority=$dh{PRIORITY};
+ }
+ 
++my $field='Depends';
++if (defined $dh{FIELD}) {
++	$field=$dh{FIELD};
++}
++
+ # PROMISE: DH NOOP WITHOUT gsettings-override tmp(usr/share/glib-2.0/schemas) cli-options()
+ 
+ foreach my $package (@{$dh{DOPACKAGES}}) {
+@@ -84,7 +100,7 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 							 '(', '-name', '*.xml', '-o', '-name', '*.override',
+ 							 ')', '-printf', '%P');
+ 		if ($schemas ne '') {
+-			addsubstvar($package, "misc:Depends", "dconf-gsettings-backend | gsettings-backend");
++			addsubstvar($package, "misc:$field", "dconf-gsettings-backend | gsettings-backend");
+ 		}
+ 	}
+ }
+diff --git a/t/dh_installgsettings/debian/changelog b/t/dh_installgsettings/debian/changelog
+new file mode 100644
+index 00000000..5850f0e2
+--- /dev/null
++++ b/t/dh_installgsettings/debian/changelog
+@@ -0,0 +1,5 @@
++foo (1.0-1) unstable; urgency=low
++
++  * Initial release. (Closes: #XXXXXX)
++
++ -- Test <testing@nowhere>  Mon, 11 Jul 2016 18:10:59 +0200
+diff --git a/t/dh_installgsettings/debian/control b/t/dh_installgsettings/debian/control
+new file mode 100644
+index 00000000..b402ff69
+--- /dev/null
++++ b/t/dh_installgsettings/debian/control
+@@ -0,0 +1,25 @@
++Source: foo
++Section: misc
++Priority: optional
++Maintainer: Test <testing@nowhere>
++Standards-Version: 3.9.8
++
++Package: has-settings
++Architecture: all
++Depends: ${misc:Depends}
++Description: package has-settings
++ This package has a GSettings schema.
++
++Package: has-unimportant-settings
++Architecture: all
++Depends: ${misc:Depends}
++Recommends: ${misc:Recommends}
++Description: package has-unimportant-settings
++ This package has a GSettings schema but it represents unimportant
++ settings.
++
++Package: no-settings
++Architecture: all
++Depends: ${misc:Depends}
++Description: package no-settings
++ This package doesn't have a GSettings schema.
+diff --git a/t/dh_installgsettings/dh_installgsettings.t b/t/dh_installgsettings/dh_installgsettings.t
+new file mode 100755
+index 00000000..36953d95
+--- /dev/null
++++ b/t/dh_installgsettings/dh_installgsettings.t
+@@ -0,0 +1,59 @@
++#!/usr/bin/perl
++use strict;
++use Test::More;
++
++use autodie;
++use File::Basename qw(dirname);
++use lib dirname(dirname(__FILE__));
++use Test::DH;
++use File::Path qw(remove_tree make_path);
++use Debian::Debhelper::Dh_Lib qw(!dirname);
++
++our @TEST_DH_EXTRA_TEMPLATE_FILES = (qw(
++    debian/changelog
++    debian/control
++));
++
++my $SCHEMAS = 'usr/share/glib-2.0/schemas';
++
++sub touch {
++	my $path = shift;
++	open(my $fh, '>>', $path);
++	close $fh;
++}
++
++sub slurp {
++	my $path = shift;
++	local $/ = undef;
++	open(my $fh, '<', $path);
++	my $contents = <$fh>;
++	close $fh;
++	return $contents;
++}
++
++each_compat_subtest {
++	make_path("debian/has-settings/$SCHEMAS");
++	touch("debian/has-settings/$SCHEMAS/com.example.HasSettings.xml");
++	make_path("debian/has-unimportant-settings/$SCHEMAS");
++	touch("debian/has-unimportant-settings/$SCHEMAS/com.example.HasUnimportantSettings.xml");
++	touch("debian/no-settings.substvars");
++	ok(run_dh_tool('dh_installgsettings', '-phas-settings'), 'run for has-settings');
++	ok(run_dh_tool('dh_installgsettings', '-phas-unimportant-settings', '--field=Recommends'),
++		'run for has-unimportant-settings');
++	ok(run_dh_tool('dh_installgsettings', '-pno-settings'), 'run for no-settings');
++	remove_tree(qw(debian/has-settings debian/has-unimportant-settings));
++	like(slurp('debian/has-settings.substvars'),
++		qr{^misc:Depends=dconf-gsettings-backend \| gsettings-backend$}m,
++		'has-settings should depend on a backend');
++	like(slurp('debian/has-unimportant-settings.substvars'),
++		qr{^misc:Recommends=dconf-gsettings-backend \| gsettings-backend$}m,
++		'has-unimportant-settings should Recommend a backend');
++	unlike(slurp('debian/has-unimportant-settings.substvars'),
++		qr{^misc:Depends=dconf-gsettings-backend \| gsettings-backend$}m,
++		'has-unimportant-settings should not depend on a backend');
++	unlike(slurp('debian/no-settings.substvars'),
++		qr{^misc:Depends=dconf-gsettings-backend \| gsettings-backend$}m,
++		'no-settings should not depend on a backend');
++};
++
++done_testing;
+-- 
+2.23.0.rc1
+

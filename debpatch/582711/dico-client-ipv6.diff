@@ -1,0 +1,120 @@
+diff --git a/dico/cmdline.opt b/dico/cmdline.opt
+index 3bd2cb3..8d4eb20 100644
+--- a/dico/cmdline.opt
++++ b/dico/cmdline.opt
+@@ -51,7 +51,7 @@ END
+ OPTION(source,,ADDR,
+        [<Set a source address for TCP connections.>])
+ BEGIN
+-  source_addr = get_ipaddr(optarg);
++  source_addr = optarg;
+   if (source_addr == 0)
+     dico_die(1, 0, L_ERR, _("%s: Invalid IP or unknown host name"),
+              optarg);
+diff --git a/dico/connect.c b/dico/connect.c
+index 738b28f..dfcdfb1 100644
+--- a/dico/connect.c
++++ b/dico/connect.c
+@@ -272,44 +272,57 @@ dict_transcript(struct dict_connection *conn, int state)
+ int
+ dict_connect(struct dict_connection **pconn, dico_url_t url)
+ {
+-    struct sockaddr_in s;
++    struct addrinfo hints, *s;
++    char urlport[6];
+     int fd;
+-    IPADDR ip;
+     dico_stream_t str;
+     struct dict_connection *conn;
+     
+     XDICO_DEBUG_F2(1, _("Connecting to %s:%d\n"), url->host,
+ 		   url->port ? url->port : DICO_DICT_PORT);
+-    fd = socket(PF_INET, SOCK_STREAM, 0);
+-    if (fd == -1) {
+-	dico_log(L_ERR, errno,
+-		 _("cannot create dict socket"));
+-	return 1;
+-    }
+ 
+-    s.sin_family = AF_INET;
+-    s.sin_addr.s_addr = htonl(source_addr);
+-    s.sin_port = 0;
+-    if (bind(fd, (struct sockaddr*) &s, sizeof(s)) < 0) {
+-	dico_log(L_ERR, errno,
+-		 _("cannot bind AUTH socket"));
++    memset(&hints, 0, sizeof hints);
++    hints.ai_family = AF_UNSPEC;  // use IPv4 or IPv6, whichever, TODO: user configurable?
++    hints.ai_socktype = SOCK_STREAM;
++
++    if(source_addr != NULL) {
++      getaddrinfo(source_addr, "0", &hints, &s);
++      fd = socket(s->ai_family, s->ai_socktype, s->ai_protocol);
++      if (fd == -1) {
++		dico_log(L_ERR, errno,
++			 _("cannot create dict socket"));
++		return 1;
++      }
++      if (bind(fd, s->ai_addr, s->ai_addrlen) < 0) {
++		dico_log(L_ERR, errno,
++			 _("cannot bind AUTH socket"));
++      }
++      freeaddrinfo(s);
+     }
+ 
+-    ip = get_ipaddr(url->host);
+-    if (ip == 0) {
++    sprintf(urlport, "%d", (url->port ? url->port : DICO_DICT_PORT));
++    
++    if (getaddrinfo(url->host, urlport, &hints, &s) != 0) {
+ 	dico_log(L_ERR, 0, _("%s: Invalid IP or unknown host name"),
+ 		 url->host);
+ 	return 1;
+     }
+-    s.sin_addr.s_addr = htonl(ip);
+-    s.sin_port = htons(url->port ? url->port : DICO_DICT_PORT);
+-    if (connect(fd, (struct sockaddr*) &s, sizeof(s)) == -1) {
++    if(source_addr == NULL) {
++      fd = socket(s->ai_family, s->ai_socktype, s->ai_protocol);
++      if (fd == -1) {
++		dico_log(L_ERR, errno,
++			 _("cannot create dict socket"));
++		return 1;
++      }
++    }
++    if (connect(fd,  s->ai_addr, s->ai_addrlen) == -1) {
+ 	dico_log(L_ERR, errno,
+ 		 _("cannot connect to DICT server %s:%d"),
+ 		 url->host, url->port ? url->port : DICO_DICT_PORT);
+ 	close(fd);
+ 	return 1;
+     }
++    freeaddrinfo(s);
+ 
+     if ((str = dico_fd_io_stream_create(fd, fd)) == NULL) {
+ 	dico_log(L_ERR, errno,
+diff --git a/dico/dico-priv.h b/dico/dico-priv.h
+index 046ad3f..8c711aa 100644
+--- a/dico/dico-priv.h
++++ b/dico/dico-priv.h
+@@ -140,7 +140,7 @@ extern struct auth_cred default_cred;
+ extern char *client;
+ extern enum dico_client_mode mode;
+ extern int transcript;
+-extern IPADDR source_addr;
++extern char *source_addr;
+ extern int noauth_option;
+ extern unsigned levenshtein_threshold;
+ extern char *autologin_file;
+diff --git a/dico/dico.c b/dico/dico.c
+index 86491ce..4e9fd77 100644
+--- a/dico/dico.c
++++ b/dico/dico.c
+@@ -21,7 +21,7 @@ struct auth_cred default_cred;
+ char *client = DICO_CLIENT_ID;
+ enum dico_client_mode mode = mode_define;
+ int transcript;
+-IPADDR source_addr = INADDR_ANY;
++char *source_addr = NULL;
+ int noauth_option;
+ unsigned levenshtein_threshold;
+ char *autologin_file;

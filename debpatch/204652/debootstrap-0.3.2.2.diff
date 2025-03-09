@@ -1,0 +1,539 @@
+diff -Nru debootstrap-0.3.2.1/debian/changelog debootstrap-0.3.2.2/debian/changelog
+--- debootstrap-0.3.2.1/debian/changelog	2005-10-28 20:14:57 +0200
++++ debootstrap-0.3.2.2/debian/changelog	2005-10-29 11:31:06 +0200
+@@ -1,3 +1,10 @@
++debootstrap (0.3.2.2) unstable; urgency=low
++
++  * NMU
++  * Added relicensed fakechroot variant. Closes: #204652.
++
++ -- Piotr Roszatycki <dexter@debian.org>  Sat, 29 Oct 2005 11:29:00 +0200
++
+ debootstrap (0.3.2.1) unstable; urgency=low
+ 
+   * NMU with maintainer approval
+diff -Nru debootstrap-0.3.2.1/debian/rules debootstrap-0.3.2.2/debian/rules
+--- debootstrap-0.3.2.1/debian/rules	2005-10-23 10:26:50 +0200
++++ debootstrap-0.3.2.2/debian/rules	2005-10-29 11:28:41 +0200
+@@ -77,7 +77,8 @@
+ 	dh_testroot
+ 	-rm -rf debian/debootstrap-udeb/usr/share \
+ 		debian/debootstrap-udeb/usr/lib/debootstrap/scripts/potato \
+-		debian/debootstrap-udeb/usr/lib/debootstrap/scripts/*.buildd
++		debian/debootstrap-udeb/usr/lib/debootstrap/scripts/*.buildd \
++		debian/debootstrap-udeb/usr/lib/debootstrap/scripts/*.fakechroot
+ 	dh_strip -s
+ 	dh_compress -s
+ 	dh_fixperms -s
+diff -Nru debootstrap-0.3.2.1/debootstrap debootstrap-0.3.2.2/debootstrap
+--- debootstrap-0.3.2.1/debootstrap	2005-10-23 17:31:32 +0200
++++ debootstrap-0.3.2.2/debootstrap	2005-10-29 11:28:41 +0200
+@@ -78,7 +78,7 @@
+       --components=A,B,C     use packages from the listed components of the 
+                              archive
+       --variant=X            use variant X of the bootstrap scripts
+-                             (currently supported variants: buildd)
++                             (currently supported variants: buildd, fakechroot)
+       --keyring=K            check Release files against keyring K
+       --no-resolve-deps      don't try to resolve dependencies automatically
+ 
+diff -Nru debootstrap-0.3.2.1/debootstrap.8 debootstrap-0.3.2.2/debootstrap.8
+--- debootstrap-0.3.2.1/debootstrap.8	2005-10-23 16:54:11 +0200
++++ debootstrap-0.3.2.2/debootstrap.8	2005-10-29 11:28:41 +0200
+@@ -54,10 +54,11 @@
+ to specify the entire base system than rely on this option. With this
+ option set, this behaviour is disabled.
+ .IP
+-.IP "\fB\-\-variant=buildd\fP"
+-Name of the bootstrap script variant to use.  Currently, the only variant
+-supported is buildd, which installs the build-essential packages into
+-.IR TARGET .
++.IP "\fB\-\-variant=buildd|fakechroot\fP"
++Name of the bootstrap script variant to use.  Currently, the variant
++supported are buildd, which installs the build-essential packages into
++.IR TARGET
++and fakechroot, which installs the packages without root privileges.
+ The default, with no \fB\-\-variant=X\fP argument, is to create a base
+ Debian installation in
+ .IR TARGET .
+diff -Nru debootstrap-0.3.2.1/functions debootstrap-0.3.2.2/functions
+--- debootstrap-0.3.2.1/functions	2005-10-28 20:15:39 +0200
++++ debootstrap-0.3.2.2/functions	2005-10-29 11:31:48 +0200
+@@ -782,6 +782,11 @@
+   esac
+ }
+ 
++setup_proc_fakechroot () {
++  rm -rf "$TARGET/proc"
++  ln -s /proc "$TARGET"
++}
++
+ setup_devices () {
+   case "$ARCH" in
+     kfreebsd-*)
+@@ -800,6 +805,11 @@
+   esac
+ }
+ 
++setup_devices_fakechroot () {
++  rm -rf "$TARGET/dev"
++  ln -s /dev "$TARGET"
++}
++
+ setup_dselect_method () {
+   case "$1" in
+     "apt")
+@@ -973,3 +983,189 @@
+   eval `echo EXIT_THING_${N_EXIT_THINGS}=\"$1\"`
+   N_EXIT_THINGS="$(( $N_EXIT_THINGS + 1 ))"
+ }
++
++############################################################## fakechroot tools
++
++install_fakechroot_tools () {
++  mv "$TARGET/sbin/ldconfig" "$TARGET/sbin/ldconfig.REAL"
++  echo \
++"#!/bin/sh
++echo
++echo \"Warning: Fake ldconfig called, doing nothing\"" > "$TARGET/sbin/ldconfig"
++  chmod 755 "$TARGET/sbin/ldconfig"
++
++  echo \
++"/sbin/ldconfig
++/sbin/ldconfig.REAL
++fakechroot" >> "$TARGET/var/lib/dpkg/diversions"
++
++  mv "$TARGET/usr/bin/ldd" "$TARGET/usr/bin/ldd.REAL"
++  cat << 'END' > "$TARGET/usr/bin/ldd"
++#!/usr/bin/perl
++
++# fakeldd
++#
++# Replacement for ldd with usage of objdump
++#
++# (c) 2003-2005 Piotr Roszatycki <dexter@debian.org>, BSD
++
++
++my %libs = ();
++
++my $status = 0;
++my $dynamic = 0;
++my $biarch = 0;
++
++my $ldlinuxsodir = "/lib";
++my @ld_library_path = qw(/usr/lib /lib);
++
++
++sub ldso($) {
++    my ($lib) = @_;
++    my @files = ();
++
++    if ($lib =~ /^\//) {
++	$libs{$lib} = $lib;
++	push @files, $lib;
++    } else {
++	foreach my $ld_path (@ld_library_path) {
++	    next unless -f "$ld_path/$lib";
++            my $badformat = 0;
++	    open OBJDUMP, "objdump -p $ld_path/$lib 2>/dev/null |";
++   	    while (my $line = <OBJDUMP>) {
++        	if ($line =~ /file format (\S*)$/) {
++		    $badformat = 1 unless $format eq $1;
++		    last;
++        	}
++	    }
++	    close OBJDUMP;
++	    next if $badformat;
++	    $libs{$lib} = "$ld_path/$lib";
++	    push @files, "$ld_path/$lib";
++	}
++	objdump(@files);
++    }
++}
++
++
++sub objdump(@) {
++    my (@files) = @_;
++    my @libs = ();
++
++    foreach my $file (@files) {
++	open OBJDUMP, "objdump -p $file 2>/dev/null |";
++	while (my $line = <OBJDUMP>) {
++	    $line =~ s/^\s+//;
++	    my @f = split (/\s+/, $line);
++    	    if ($line =~ /file format (\S*)$/) {
++        	if (not $format) {
++            	    $format = $1;
++		    if ($unamearch eq "x86_64" and $format eq "elf32-i386") {
++		        my $link = readlink "/lib/ld-linux.so.2";
++			if ($link =~ /^\/emul\/ia32-linux\//) {
++			    $ld_library_path[-2] = "/emul/ia32-linux/usr/lib";
++			    $ld_library_path[-1] = "/emul/ia32-linux/lib";
++			}
++		    } elsif ($unamearch =~ /^(sparc|sparc64)$/ and $format eq "elf64-sparc") {
++			$ldlinuxsodir = "/lib64";
++			$ld_library_path[-2] = "/usr/lib64";
++			$ld_library_path[-1] = "/lib64";
++		    }
++        	} else {
++		    next unless $format eq $1;
++        	}
++	    }
++	    if (not $dynamic and $f[0] eq "Dynamic") {
++		$dynamic = 1;
++	    }
++	    next unless $f[0] eq "NEEDED";
++	    if ($f[1] =~ /^ld-linux(\.|-)/) {
++	        $f[1] = "$ldlinuxsodir/" . $f[1];
++	    }
++	    if (not defined $libs{$f[1]}) {
++	        $libs{$f[1]} = undef;
++		push @libs, $f[1];
++	    }
++	}
++	close OBJDUMP;
++    }
++
++    foreach my $lib (@libs) {
++	ldso($lib);
++    }
++}
++
++
++if ($#ARGV < 0) {
++    print STDERR "fakeldd: missing file arguments\n";
++    exit 1;
++}
++
++while ($ARGV[0] =~ /^-/) {
++    my $arg = $ARGV[0];
++    shift @ARGV;
++    last if $arg eq "--";
++}
++
++open LD_SO_CONF, "/etc/ld.so.conf";
++while ($line = <LD_SO_CONF>) {
++    chomp $line;
++    unshift @ld_library_path, $line;
++}
++close LD_SO_CONF;
++
++unshift @ld_library_path, split(/:/, $ENV{LD_LIBRARY_PATH});
++
++$unamearch = `/bin/uname -m`;
++chomp $unamearch;
++
++foreach my $file (@ARGV) {
++    my $address;
++    %libs = ();
++    $dynamic = 0;
++
++    if ($#ARGV > 0) {
++	print "$file:\n";
++    }
++
++    if (not -f $file) {
++	print STDERR "ldd: $file: No such file or directory\n";
++	$status = 1;
++	next;
++    }
++
++    objdump($file);
++    
++    if ($dynamic == 0) {
++	print "\tnot a dynamic executable\n";
++	$status = 1;
++    } elsif (scalar %libs eq "0") {
++	print "\tstatically linked\n";
++    }
++
++    if ($format =~ /^elf64-/) {
++        $address = "0x0000000000000000";
++    } else {
++        $address = "0x00000000";
++    }
++
++    foreach $lib (keys %libs) {
++	if ($libs{$lib}) {
++    	    printf "\t%s => %s (%s)\n", $lib, $libs{$lib}, $address;
++	} else {
++	    printf "\t%s => not found\n", $lib;
++	}
++    }
++    
++}
++
++exit $status;
++END
++  chmod 755 "$TARGET/usr/bin/ldd"
++
++  echo \
++"/usr/bin/ldd
++/usr/bin/ldd.REAL
++fakechroot" >> "$TARGET/var/lib/dpkg/diversions"
++
++}
+diff -Nru debootstrap-0.3.2.1/Makefile debootstrap-0.3.2.2/Makefile
+--- debootstrap-0.3.2.1/Makefile	2005-10-23 16:27:16 +0200
++++ debootstrap-0.3.2.2/Makefile	2005-10-29 11:28:41 +0200
+@@ -29,6 +29,7 @@
+ 	install -o root -g root -m 0644 woody.buildd $(DSDIR)/scripts/
+ 	install -o root -g root -m 0644 sarge $(DSDIR)/scripts/
+ 	install -o root -g root -m 0644 sarge.buildd $(DSDIR)/scripts/
++	install -o root -g root -m 0644 sarge.fakechroot $(DSDIR)/scripts/
+ 	install -o root -g root -m 0644 sid $(DSDIR)/scripts/
+ 	install -o root -g root -m 0644 warty $(DSDIR)/scripts/
+ 	install -o root -g root -m 0644 warty.buildd $(DSDIR)/scripts/
+diff -Nru debootstrap-0.3.2.1/sarge.fakechroot debootstrap-0.3.2.2/sarge.fakechroot
+--- debootstrap-0.3.2.1/sarge.fakechroot	1970-01-01 01:00:00 +0100
++++ debootstrap-0.3.2.2/sarge.fakechroot	2005-10-29 11:28:41 +0200
+@@ -0,0 +1,174 @@
++test "$FAKECHROOT" = "true" || error 1 FAKECHROOTREQ "This variant requires fakechroot environment to be started"
++
++mirror_style release
++download_style apt
++
++work_out_debs () {
++
++    required="base-files base-passwd bash bsdutils coreutils debianutils diff dpkg dselect e2fslibs e2fsprogs findutils gcc-3.3-base grep gzip hostname initscripts libacl1 libattr1 libblkid1 libc6 libcap1 libcomerr2 libdb1-compat libdb3 libgcc1 libncurses5 libpam-modules libpam-runtime libpam0g libss2 libstdc++5 libuuid1 login mawk mount ncurses-base ncurses-bin passwd perl-base sed slang1a-utf8 sysv-rc sysvinit tar util-linux zlib1g"
++
++    base="apt binutils cpio cpp cpp-3.3 dpkg-dev g++ g++-3.3 gcc gcc-3.3 libc6-dev libdb4.2 libgdbm3 libstdc++5-3.3-dev linux-kernel-headers make patch perl perl-modules"
++
++    without_package () {
++        echo "$2" | tr ' ' '\n' | grep -v "^$1$" | tr '\n' ' '
++    }
++    subst_package () {
++        echo "$3" | tr ' ' '\n' | sed "s/^$1$/$2/" | tr '\n' ' '
++    }
++
++    required="$required binutils fakechroot"
++    base="$(without_package "binutils" "$base")"
++
++    LIBC6=libc6
++
++    case $ARCH in
++        "alpha")
++            required="$(subst_package "libc6" "libc6.1" "$required")"
++	    base="$(subst_package "libc6-dev" "libc6.1-dev" "$base")"
++            LIBC6="libc6.1"
++            ;;
++        "arm")
++            ;;
++        "i386")
++            ;;
++        "ia64")
++            required="$(subst_package "libc6" "libc6.1" "$required")"
++	    base="$(subst_package "libc6-dev" "libc6.1-dev" "$base")"
++            LIBC6="libc6.1"
++            ;;
++        "m68k")
++            ;;
++        "powerpc")
++            ;;
++        "sparc")
++            ;;
++        "mips")
++            ;;
++        "mipsel")
++            ;;
++        "hppa")
++            ;;
++        s390|s390x)
++            ;;
++	sh*)
++	    ;;
++        *)
++            # who knows?
++            ;;
++    esac
++}
++
++first_stage_install () {
++    extract $required
++
++    mkdir -p "$TARGET/var/lib/dpkg"
++    : >"$TARGET/var/lib/dpkg/status"
++    : >"$TARGET/var/lib/dpkg/available"
++
++    setup_etc
++    if [ ! -e "$TARGET/etc/fstab" ]; then
++        echo '# UNCONFIGURED FSTAB FOR BASE SYSTEM' > "$TARGET/etc/fstab"
++        chown 0.0 "$TARGET/etc/fstab"; chmod 644 "$TARGET/etc/fstab"
++    fi
++
++    setup_devices_fakechroot
++
++    x_feign_install () {
++        local pkg="$1"
++        local deb="$(debfor $pkg)"
++        local ver="$(
++            ar -p "$TARGET/$deb" control.tar.gz | zcat |
++                tar -O -xf - control ./control 2>/dev/null |
++                sed -ne 's/^Version: *//Ip' | head -n 1
++        )"
++
++        mkdir -p "$TARGET/var/lib/dpkg/info"
++
++        echo \
++"Package: $pkg
++Version: $ver
++Status: install ok installed" >> "$TARGET/var/lib/dpkg/status"
++
++        touch "$TARGET/var/lib/dpkg/info/${pkg}.list"
++    }
++
++    x_feign_install dpkg
++}
++
++second_stage_install () {
++    x_core_install () {
++	smallyes '' | in_target dpkg --force-depends --install $(debfor "$@")
++    }
++
++    p () {
++	baseprog="$(($baseprog + ${1:-1}))"
++    }
++
++    setup_proc_fakechroot
++
++    DEBIAN_FRONTEND=noninteractive
++    export DEBIAN_FRONTEND
++
++    baseprog=0
++    bases=40
++
++    p; progress $baseprog $bases INSTBASE "Installing base system" #1
++    info INSTCORE "Installing core packages..."
++
++    p; progress $baseprog $bases INSTBASE "Installing base system" #2
++    ln -s mawk $TARGET/usr/bin/awk
++    x_core_install base-files base-passwd
++    p; progress $baseprog $bases INSTBASE "Installing base system" #3
++    x_core_install dpkg
++
++    if [ ! -e "$TARGET/etc/localtime" ]; then
++        ln -sf /usr/share/zoneinfo/UTC "$TARGET/etc/localtime"
++    fi
++
++    install_fakechroot_tools
++
++    p; progress $baseprog $bases INSTBASE "Installing base system" #4
++    x_core_install $LIBC6
++
++    p; progress $baseprog $bases INSTBASE "Installing base system" #5
++    x_core_install perl-base
++    p; progress $baseprog $bases INSTBASE "Installing base system" #6
++    rm $TARGET/usr/bin/awk
++    x_core_install mawk
++    p; progress $baseprog $bases INSTBASE "Installing base system" #7
++
++    info UNPACKREQ "Unpacking required packages..."
++
++    p; progress $baseprog $bases INSTBASE "Installing base system" #8
++    smallyes '' | repeat 5 in_target_failmsg UNPACK_REQ_FAIL_FIVE "Failure while unpacking required packages.  This will be attempted up to five times." "" dpkg --force-depends --unpack $(debfor $required)
++    p 10; progress $baseprog $bases INSTBASE "Installing base system" #18
++
++    info CONFREQ "Configuring required packages..."
++
++    mv "$TARGET/sbin/start-stop-daemon" "$TARGET/sbin/start-stop-daemon.REAL"
++    echo \
++"#!/bin/sh
++echo
++echo \"Warning: Fake start-stop-daemon called, doing nothing\"" > "$TARGET/sbin/start-stop-daemon"
++    chmod 755 "$TARGET/sbin/start-stop-daemon"
++
++    setup_dselect_method apt
++
++    p; progress $baseprog $bases INSTBASE "Installing base system" #19
++    smallyes '' | in_target_failmsg CONF_REQ_FAIL "Failure while configuring required packages." "" dpkg --configure --pending --force-configure-any --force-depends
++    p 10; progress $baseprog $bases INSTBASE "Installing base system" #29 
++
++    info INSTBASE "Installing base packages..."
++
++    p; progress $baseprog $bases INSTBASE "Installing base system" #30
++    smallyes '' | repeat 5 in_target_failmsg INST_BASE_FAIL_FIVE "Failure while installing base packages.  This will be re-attempted up to five times." "" dpkg --force-auto-select --force-overwrite --force-confold --skip-same-version --unpack $(debfor $base)
++
++    smallyes '' | repeat 5 in_target_failmsg CONF_BASE_FAIL_FIVE "Failure while configuring base packages.  This will be attempted 5 times." "" dpkg  --force-confold --skip-same-version  --configure -a
++
++    p 9; progress $baseprog $bases INSTBASE "Installing base system" #39
++
++    mv "$TARGET/sbin/start-stop-daemon.REAL" "$TARGET/sbin/start-stop-daemon"
++
++    progress $bases $bases INSTBASE "Installing base system" #40
++    info BASESUCCESS "Base system installed successfully."
++}
+diff -Nru debootstrap-0.3.2.1/sid debootstrap-0.3.2.2/sid
+--- debootstrap-0.3.2.1/sid	2005-10-23 17:05:05 +0200
++++ debootstrap-0.3.2.2/sid	2005-10-29 11:28:41 +0200
+@@ -1,7 +1,11 @@
+ mirror_style release
+ download_style apt
+ finddebs_style from-indices
+-variants - buildd
++variants - buildd fakechroot
++
++if doing_variant fakechroot; then
++    test "$FAKECHROOT" = "true" || error 1 FAKECHROOTREQ "This variant requires fakechroot environment to be started"
++fi
+ 
+ work_out_debs () {
+     LIBC6=libc6
+@@ -9,13 +13,18 @@
+ 
+     required="$(get_debs Priority: required)"
+ 
+-    if doing_variant -; then 
++    if doing_variant - || doing_variant fakechroot; then 
+       #required="$required $(get_debs Priority: important)"
+       #  ^^ should be getting debconf here somehow maybe
+       base="$(get_debs Priority: important)"
+     elif doing_variant buildd; then
+       base="$(get_debs Build-Essential: yes)"
+     fi
++
++    if doing_variant fakechroot; then 
++      # ldd.fake needs binutils
++      required="$required binutils"
++    fi
+ }
+ 
+ first_stage_install () {
+@@ -35,7 +44,11 @@
+         cp $TARGET/usr/bin/md5sum.textutils $TARGET/usr/bin/md5sum
+     fi
+ 
+-    setup_devices
++    if doing_variant fakechroot; then 
++        setup_devices_fakechroot
++    else
++        setup_devices
++    fi
+ 
+     x_feign_install () {
+         local pkg="$1"
+@@ -68,8 +81,12 @@
+ 	baseprog="$(($baseprog + ${1:-1}))"
+     }
+ 
+-    setup_proc
+-    in_target /sbin/ldconfig
++    if doing_variant fakechroot; then 
++	setup_proc_fakechroot
++    else
++	setup_proc
++	in_target /sbin/ldconfig
++    fi
+ 
+     DEBIAN_FRONTEND=noninteractive
+     DEBCONF_NONINTERACTIVE_SEEN=true
+@@ -91,6 +108,10 @@
+         ln -sf /usr/share/zoneinfo/UTC "$TARGET/etc/localtime"
+     fi
+ 
++    if doing_variant fakechroot; then 
++	install_fakechroot_tools
++    fi
++
+     p; progress $baseprog $bases INSTCORE "Installing core packages" #4
+     x_core_install $LIBC6
+ 

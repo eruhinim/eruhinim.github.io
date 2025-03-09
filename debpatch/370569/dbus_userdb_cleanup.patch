@@ -1,0 +1,490 @@
+Index: configure.in
+===================================================================
+RCS file: /cvs/dbus/dbus/configure.in,v
+retrieving revision 1.199
+diff -u -r1.199 configure.in
+--- configure.in	10 Nov 2006 02:48:46 -0000	1.199
++++ configure.in	9 Dec 2006 13:56:02 -0000
+@@ -59,6 +59,7 @@
+ AC_ARG_ENABLE(dnotify, AS_HELP_STRING([--enable-dnotify],[build with dnotify support (linux only)]),enable_dnotify=$enableval,enable_dnotify=auto)
+ AC_ARG_ENABLE(kqueue, AS_HELP_STRING([--enable-kqueue],[build with kqueue support]),enable_kqueue=$enableval,enable_kqueue=auto)
+ AC_ARG_ENABLE(console-owner-file, AS_HELP_STRING([--enable-console-owner-file],[enable console owner file]),enable_console_owner_file=$enableval,enable_console_owner_file=auto)
++AC_ARG_ENABLE(userdb-cache, AS_HELP_STRING([--enable-userdb-cache],[build with userdb-cache support]),enable_userdb_cache=$enableval,enable_userdb_cache=yes)
+ 
+ AC_ARG_WITH(xml, AS_HELP_STRING([--with-xml=[libxml/expat]],[XML library to use]))
+ AC_ARG_WITH(init-scripts, AS_HELP_STRING([--with-init-scripts=[redhat]],[Style of init scripts to install]))
+@@ -105,6 +106,10 @@
+     AC_DEFINE(G_DISABLE_CHECKS,1,[Disable GLib public API sanity checking])
+ fi
+ 
++if test x$enable_userdb_cache = xyes; then
++    AC_DEFINE(DBUS_ENABLE_USERDB_CACHE,1,[Build with caching of user data])
++fi
++
+ #### gcc warning flags
+ 
+ cc_supports_flag() {
+@@ -1259,6 +1264,7 @@
+         Building X11 code:        ${enable_x11}
+         Building Doxygen docs:    ${enable_doxygen_docs}
+         Building XML docs:        ${enable_xml_docs}
++        Building cache support:   ${enable_userdb_cache}
+         Gettext libs (empty OK):  ${INTLLIBS}
+         Using XML parser:         ${with_xml}
+         Init scripts style:       ${with_init_scripts}
+Index: bus/bus.c
+===================================================================
+RCS file: /cvs/dbus/dbus/bus/bus.c,v
+retrieving revision 1.72
+diff -u -r1.72 bus.c
+--- bus/bus.c	6 Nov 2006 16:02:19 -0000	1.72
++++ bus/bus.c	9 Dec 2006 13:56:02 -0000
+@@ -34,6 +34,7 @@
+ #include <dbus/dbus-list.h>
+ #include <dbus/dbus-hash.h>
+ #include <dbus/dbus-internals.h>
++#include <dbus/dbus-userdb.h>
+ 
+ struct BusContext
+ {
+@@ -50,7 +51,6 @@
+   BusRegistry *registry;
+   BusPolicy *policy;
+   BusMatchmaker *matchmaker;
+-  DBusUserDatabase *user_database;
+   BusLimits limits;
+   unsigned int fork : 1;
+ };
+@@ -596,13 +596,6 @@
+   if (!dbus_server_allocate_data_slot (&server_data_slot))
+     _dbus_assert_not_reached ("second ref of server data slot failed");
+ 
+-  context->user_database = _dbus_user_database_new ();
+-  if (context->user_database == NULL)
+-    {
+-      BUS_SET_OOM (error);
+-      goto failed;
+-    }
+-  
+   /* Note that we don't know whether the print_addr_fd is
+    * one of the sockets we're using to listen on, or some
+    * other random thing. But I think the answer is "don't do
+@@ -800,7 +793,7 @@
+   dbus_bool_t ret;
+ 
+   /* Flush the user database cache */
+-  _dbus_user_database_flush(context->user_database);
++  _dbus_user_database_flush_system ();
+ 
+   ret = FALSE;
+   _dbus_string_init_const (&config_file, context->config_file);
+@@ -951,10 +944,6 @@
+ 
+           dbus_free (context->pidfile); 
+ 	}
+-
+-      if (context->user_database != NULL)
+-	_dbus_user_database_unref (context->user_database);
+-      
+       dbus_free (context);
+ 
+       dbus_server_free_data_slot (&server_data_slot);
+@@ -1004,18 +993,11 @@
+   return context->loop;
+ }
+ 
+-DBusUserDatabase*
+-bus_context_get_user_database (BusContext *context)
+-{
+-  return context->user_database;
+-}
+-
+ dbus_bool_t
+ bus_context_allow_user (BusContext   *context,
+                         unsigned long uid)
+ {
+   return bus_policy_allow_user (context->policy,
+-                                context->user_database,
+                                 uid);
+ }
+ 
+Index: bus/bus.h
+===================================================================
+RCS file: /cvs/dbus/dbus/bus/bus.h,v
+retrieving revision 1.27
+diff -u -r1.27 bus.h
+--- bus/bus.h	22 Nov 2005 20:37:00 -0000	1.27
++++ bus/bus.h	9 Dec 2006 13:56:02 -0000
+@@ -29,7 +29,6 @@
+ #include <dbus/dbus.h>
+ #include <dbus/dbus-string.h>
+ #include <dbus/dbus-mainloop.h>
+-#include <dbus/dbus-userdb.h>
+ 
+ typedef struct BusActivation    BusActivation;
+ typedef struct BusConnections   BusConnections;
+@@ -86,8 +85,6 @@
+ BusActivation*    bus_context_get_activation                     (BusContext       *context);
+ BusMatchmaker*    bus_context_get_matchmaker                     (BusContext       *context);
+ DBusLoop*         bus_context_get_loop                           (BusContext       *context);
+-DBusUserDatabase* bus_context_get_user_database                  (BusContext       *context);
+-
+ dbus_bool_t       bus_context_allow_user                         (BusContext       *context,
+                                                                   unsigned long     uid);
+ BusPolicy*        bus_context_get_policy                         (BusContext       *context);
+Index: bus/connection.c
+===================================================================
+RCS file: /cvs/dbus/dbus/bus/connection.c,v
+retrieving revision 1.65
+diff -u -r1.65 connection.c
+--- bus/connection.c	1 Oct 2006 03:18:47 -0000	1.65
++++ bus/connection.c	9 Dec 2006 13:56:04 -0000
+@@ -31,6 +31,7 @@
+ #include <dbus/dbus-list.h>
+ #include <dbus/dbus-hash.h>
+ #include <dbus/dbus-timeout.h>
++#include <dbus/dbus-userdb.h>
+ 
+ static void bus_connection_remove_transactions (DBusConnection *connection);
+ 
+@@ -778,24 +779,18 @@
+ {
+   BusConnectionData *d;
+   unsigned long uid;
+-  DBusUserDatabase *user_database;
+   
+   d = BUS_CONNECTION_DATA (connection);
+ 
+   _dbus_assert (d != NULL);
+ 
+-  user_database = bus_context_get_user_database (d->connections->context);
+-  
+   *groups = NULL;
+   *n_groups = 0;
+ 
+   if (dbus_connection_get_unix_user (connection, &uid))
+     {
+-      if (!_dbus_user_database_get_groups (user_database,
+-                                           uid, groups, n_groups,
+-                                           error))
++      if (!_dbus_groups_from_uid (uid, groups, n_groups))
+         {
+-          _DBUS_ASSERT_ERROR_IS_SET (error);
+           _dbus_verbose ("Did not get any groups for UID %lu\n",
+                          uid);
+           return FALSE;
+Index: bus/policy.c
+===================================================================
+RCS file: /cvs/dbus/dbus/bus/policy.c,v
+retrieving revision 1.23
+diff -u -r1.23 policy.c
+--- bus/policy.c	29 Aug 2005 20:19:19 -0000	1.23
++++ bus/policy.c	9 Dec 2006 13:56:04 -0000
+@@ -28,6 +28,7 @@
+ #include <dbus/dbus-list.h>
+ #include <dbus/dbus-hash.h>
+ #include <dbus/dbus-internals.h>
++#include <dbus/dbus-userdb.h>
+ 
+ BusPolicyRule*
+ bus_policy_rule_new (BusPolicyRuleType type,
+@@ -438,7 +439,6 @@
+ 
+ dbus_bool_t
+ bus_policy_allow_user (BusPolicy        *policy,
+-                       DBusUserDatabase *user_database,
+                        unsigned long     uid)
+ {
+   dbus_bool_t allowed;
+@@ -446,8 +446,7 @@
+   int n_group_ids;
+ 
+   /* On OOM or error we always reject the user */
+-  if (!_dbus_user_database_get_groups (user_database,
+-                                       uid, &group_ids, &n_group_ids, NULL))
++  if (!_dbus_groups_from_uid (uid, &group_ids, &n_group_ids))
+     {
+       _dbus_verbose ("Did not get any groups for UID %lu\n",
+                      uid);
+Index: bus/policy.h
+===================================================================
+RCS file: /cvs/dbus/dbus/bus/policy.h,v
+retrieving revision 1.16
+diff -u -r1.16 policy.h
+--- bus/policy.h	25 Aug 2004 22:11:49 -0000	1.16
++++ bus/policy.h	9 Dec 2006 13:56:04 -0000
+@@ -113,7 +113,6 @@
+                                                    DBusConnection   *connection,
+                                                    DBusError        *error);
+ dbus_bool_t      bus_policy_allow_user            (BusPolicy        *policy,
+-                                                   DBusUserDatabase *user_database,
+                                                    unsigned long     uid);
+ dbus_bool_t      bus_policy_append_default_rule   (BusPolicy        *policy,
+                                                    BusPolicyRule    *rule);
+Index: dbus/dbus-userdb-util.c
+===================================================================
+RCS file: /cvs/dbus/dbus/dbus/dbus-userdb-util.c,v
+retrieving revision 1.7
+diff -u -r1.7 dbus-userdb-util.c
+--- dbus/dbus-userdb-util.c	7 Jun 2006 19:59:11 -0000	1.7
++++ dbus/dbus-userdb-util.c	9 Dec 2006 13:56:05 -0000
+@@ -86,6 +86,8 @@
+       return FALSE;
+     }
+ 
++  /* TPTD: this should be cache-safe, we've locked the DB and
++    _dbus_user_at_console doesn't pass it on. */
+   info = _dbus_user_database_lookup (db, uid, NULL, error);
+ 
+   if (info == NULL)
+@@ -232,7 +234,7 @@
+         gid = n;
+     }
+ 
+-
++#ifdef DBUS_ENABLE_USER_CACHE
+   if (gid != DBUS_GID_UNSET)
+     info = _dbus_hash_table_lookup_ulong (db->groups, gid);
+   else
+@@ -245,6 +247,9 @@
+       return info;
+     }
+   else
++#else
++  if (1)
++#endif
+     {
+       if (gid != DBUS_GID_UNSET)
+ 	_dbus_verbose ("No cache for GID "DBUS_GID_FORMAT"\n",
+@@ -347,45 +352,51 @@
+ 
+ 
+ /**
+- * Gets all groups for a particular user. Returns #FALSE
++ * Gets all groups  corresponding to the given UID. Returns #FALSE
+  * if no memory, or user isn't known, but always initializes
+- * group_ids to a NULL array. Sets error to the reason
+- * for returning #FALSE.
++ * group_ids to a NULL array. 
+  *
+- * @param db the user database object
+- * @param uid the user ID
++ * @param uid the UID
+  * @param group_ids return location for array of group IDs
+  * @param n_group_ids return location for length of returned array
+- * @param error return location for error
+- * @returns #TRUE on success
++ * @returns #TRUE if the UID existed and we got some credentials
+  */
++//FIXME: This doesn't set an error when memory runs out,
++// but then again, neither does _dbus_homedir_from_username, etc
+ dbus_bool_t
+-_dbus_user_database_get_groups (DBusUserDatabase  *db,
+-                                dbus_uid_t         uid,
+-                                dbus_gid_t       **group_ids,
+-                                int               *n_group_ids,
+-                                DBusError         *error)
++_dbus_groups_from_uid (dbus_uid_t         uid,
++                       dbus_gid_t       **group_ids,
++                       int               *n_group_ids)
+ {
+-  DBusUserInfo *info;
+-  
+-  _DBUS_ASSERT_ERROR_IS_CLEAR (error);
+-
++  DBusUserDatabase *db;
++  const DBusUserInfo *info;
+   *group_ids = NULL;
+   *n_group_ids = 0;
+-  
+-  info = _dbus_user_database_lookup (db, uid, NULL, error);
+-  if (info == NULL)
++
++  _dbus_user_database_lock_system ();
++
++  db = _dbus_user_database_get_system ();
++  if (db == NULL)
++    {
++      _dbus_user_database_unlock_system ();
++      return FALSE;
++    }
++
++  if (!_dbus_user_database_get_uid (db, uid,
++                                    &info, NULL))
+     {
+-      _DBUS_ASSERT_ERROR_IS_SET (error);
++      _dbus_user_database_unlock_system ();
+       return FALSE;
+     }
+ 
++  _dbus_assert (info->uid == uid);
++  
+   if (info->n_group_ids > 0)
+     {
+       *group_ids = dbus_new (dbus_gid_t, info->n_group_ids);
+       if (*group_ids == NULL)
+         {
+-          dbus_set_error (error, DBUS_ERROR_NO_MEMORY, NULL);
++	  _dbus_user_database_unlock_system ();
+           return FALSE;
+         }
+ 
+@@ -394,9 +405,9 @@
+       memcpy (*group_ids, info->group_ids, info->n_group_ids * sizeof (dbus_gid_t));
+     }
+ 
++  _dbus_user_database_unlock_system ();
+   return TRUE;
+ }
+-
+ /** @} */
+ 
+ #ifdef DBUS_BUILD_TESTS
+@@ -412,6 +423,9 @@
+ {
+   const DBusString *username;
+   const DBusString *homedir;
++  dbus_uid_t uid;
++  unsigned long *group_ids;
++  int n_group_ids, i;
+ 
+   if (!_dbus_username_from_current_process (&username))
+     _dbus_assert_not_reached ("didn't get username");
+@@ -419,10 +433,24 @@
+   if (!_dbus_homedir_from_current_process (&homedir))
+     _dbus_assert_not_reached ("didn't get homedir");  
+ 
+-  printf ("    Current user: %s homedir: %s\n",
++  if (!_dbus_get_user_id (username, &uid))
++    _dbus_assert_not_reached ("didn't get uid");
++
++
++  if (!_dbus_groups_from_uid (uid, &group_ids, &n_group_ids))
++    _dbus_assert_not_reached ("didn't get groups");
++
++  printf ("    Current user: %s homedir: %s gids:",
+           _dbus_string_get_const_data (username),
+           _dbus_string_get_const_data (homedir));
+-  
++
++  for (i=0; i<n_group_ids; i++)
++      printf(" %ld", group_ids[i]);
++
++  printf ("\n");
++ 
++  dbus_free (group_ids);
++
+   return TRUE;
+ }
+ #endif /* DBUS_BUILD_TESTS */
+Index: dbus/dbus-userdb.c
+===================================================================
+RCS file: /cvs/dbus/dbus/dbus/dbus-userdb.c,v
+retrieving revision 1.20
+diff -u -r1.20 dbus-userdb.c
+--- dbus/dbus-userdb.c	10 Sep 2006 21:37:10 -0000	1.20
++++ dbus/dbus-userdb.c	9 Dec 2006 13:56:05 -0000
+@@ -79,7 +79,7 @@
+ {
+   int end;
+ 
+-  if (_dbus_string_parse_int (str, 0, num, &end) &&
++  if (_dbus_string_parse_uint (str, 0, num, &end) &&
+       end == _dbus_string_get_length (str))
+     return TRUE;
+   else
+@@ -118,11 +118,12 @@
+         uid = n;
+     }
+ 
++#ifdef DBUS_ENABLE_USER_CACHE  
+   if (uid != DBUS_UID_UNSET)
+     info = _dbus_hash_table_lookup_ulong (db->users, uid);
+   else
+     info = _dbus_hash_table_lookup_string (db->users_by_name, _dbus_string_get_const_data (username));
+-  
++
+   if (info)
+     {
+       _dbus_verbose ("Using cache for UID "DBUS_UID_FORMAT" information\n",
+@@ -130,6 +131,9 @@
+       return info;
+     }
+   else
++#else 
++  if (1)
++#endif
+     {
+       if (uid != DBUS_UID_UNSET)
+ 	_dbus_verbose ("No cache for UID "DBUS_UID_FORMAT"\n",
+@@ -312,6 +316,19 @@
+ }
+ 
+ /**
++ * Flushes the system global user database;
++ */
++void
++_dbus_user_database_flush_system (void)
++{
++  _dbus_user_database_lock_system ();
++   
++  _dbus_user_database_flush (system_db);
++
++  _dbus_user_database_unlock_system ();
++}
++
++/**
+  * Gets username of user owning current process.  The returned string
+  * is valid until dbus_shutdown() is called.
+  *
+Index: dbus/dbus-userdb.h
+===================================================================
+RCS file: /cvs/dbus/dbus/dbus/dbus-userdb.h,v
+retrieving revision 1.11
+diff -u -r1.11 dbus-userdb.h
+--- dbus/dbus-userdb.h	6 Mar 2006 19:06:45 -0000	1.11
++++ dbus/dbus-userdb.h	9 Dec 2006 13:56:05 -0000
+@@ -47,17 +47,11 @@
+ 
+ };
+ 
+-#endif /* DBUS_USERDB_INCLUDES_PRIVATE */
+ 
+ DBusUserDatabase* _dbus_user_database_new           (void);
+ DBusUserDatabase* _dbus_user_database_ref           (DBusUserDatabase     *db);
+ void              _dbus_user_database_flush         (DBusUserDatabase     *db);
+ void              _dbus_user_database_unref         (DBusUserDatabase     *db);
+-dbus_bool_t       _dbus_user_database_get_groups    (DBusUserDatabase     *db,
+-                                                     dbus_uid_t            uid,
+-                                                     dbus_gid_t          **group_ids,
+-                                                     int                  *n_group_ids,
+-                                                     DBusError            *error);
+ dbus_bool_t       _dbus_user_database_get_uid       (DBusUserDatabase     *db,
+                                                      dbus_uid_t            uid,
+                                                      const DBusUserInfo  **info,
+@@ -75,7 +69,6 @@
+                                                      const DBusGroupInfo **info,
+                                                      DBusError            *error);
+ 
+-#ifdef DBUS_USERDB_INCLUDES_PRIVATE
+ DBusUserInfo*  _dbus_user_database_lookup       (DBusUserDatabase *db,
+                                                  dbus_uid_t        uid,
+                                                  const DBusString *username,
+@@ -91,6 +84,7 @@
+ DBusUserDatabase* _dbus_user_database_get_system    (void);
+ void              _dbus_user_database_lock_system   (void);
+ void              _dbus_user_database_unlock_system (void);
++void              _dbus_user_database_flush_system  (void);
+ 
+ dbus_bool_t _dbus_username_from_current_process (const DBusString **username);
+ dbus_bool_t _dbus_homedir_from_current_process  (const DBusString **homedir);
+@@ -104,6 +98,9 @@
+                                                  DBusCredentials   *credentials);
+ dbus_bool_t _dbus_credentials_from_uid          (dbus_uid_t         user_id,
+                                                  DBusCredentials   *credentials);
++dbus_bool_t _dbus_groups_from_uid		(dbus_uid_t            uid,
++                                                 dbus_gid_t          **group_ids,
++                                                 int                  *n_group_ids);
+ dbus_bool_t _dbus_is_console_user               (dbus_uid_t         uid,
+                                                  DBusError         *error);
+ 

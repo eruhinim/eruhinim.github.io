@@ -1,0 +1,260 @@
+From 34aba54b0afb66a42456bb347739973433f4fce0 Mon Sep 17 00:00:00 2001
+From: Dennis Kaarsemaker <dennis@kaarsemaker.net>
+Date: Fri, 30 Nov 2012 15:20:52 +0100
+Subject: [PATCH 1/2] Add an option to generate sent files dynamically
+
+Similar to what an httpd can do with cgi scripts, atftpd can now call
+separate programs to generate file contents it should send back.
+
+e.g.
+
+atftpd --content-generator /usr/local/bin/my_generator
+
+This generator can for instance write dynamically generated pxelinux.cfg
+files, or really anythong you want. It's only called if the requested
+file does not exist.
+---
+ README           |  1 +
+ README.GENERATED | 61 ++++++++++++++++++++++++++++++++++++++++++++++++
+ atftpd.8         |  9 +++++++
+ tftpd.c          | 13 +++++++++++
+ tftpd_file.c     | 53 +++++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 137 insertions(+)
+ create mode 100644 README.GENERATED
+
+diff --git a/README b/README
+index 2f3b962..01a13b8 100644
+--- a/README
++++ b/README
+@@ -47,3 +47,4 @@ Thayne Harbaugh		<tharbaugh@lnxi.com>
+ Thomas Anders		<thomas.anders@blue-cable.de>
+ Michał Rzechonek	<m.rzechonek@kelvatek.com>
+ Florian Fainelli	<f.fainelli@gmail.com>
++Dennis Kaarsemaker	<dennis@kaarsemaker.net>
+diff --git a/README.GENERATED b/README.GENERATED
+new file mode 100644
+index 0000000..455edd8
+--- /dev/null
++++ b/README.GENERATED
+@@ -0,0 +1,61 @@
++Dynamically generating content with atftpd
++------------------------------------------
++
++When installing many machines via PXEboot kickstart/d-i installs, it is often
++useful to generate pxelinux.cfg files on demand with contents grabbed from a
++database. Or when you have an Asus Wl500g router, you have only tftp available
++to download data, being able to generate this data could be useful (eg. lists
++of macaddresses or iptables rules).
++
++These were my two use cases for implementing support for dynamic content in 
++atftpd. Here is how to use it:
++
++* Add the "--content-generator /path/to/executable" argument to the atftpd 
++  commandline (eg. in xinetd.conf or /etc/default/atftpd, depending on your
++  setup).
++* Whenever a requested file cannot be found, atftpd will open a temporary
++  file with tmpfile(3) and will execute your application, with the
++  requested name as arguments (example: 
++  /usr/local/bin/tftp-generator --file /var/lib/tftpboot/some_file)
++  The application must ignore unknown arguments, more arguments might be added
++  later.
++* Your application is now responsible for writing the content that atftpd
++  should send to the given fd (6 in the example). If the content needs to
++  be stored, your application also must do so itself.
++* If your application exists with a non-zero exitstatus or writes zero bytes,
++  atftpd will treat that as "file not found". If data is written and your
++  application exits with code 0, the written data is sent to the client.
++
++-- 
++Dennis Kaarsemaker
++<dennis@kaarsemaker.net>
++
++-------------------------------------------------------------------------------
++Example application for use case #2: Grabbing a list of mac addresses from a
++database. The database is maintained using the django framework.
++
++#!/usr/bin/python
++
++import os
++import sys
++from optparse import OptionParser
++
++parser = OptionParser()
++parser.add_option("--file", dest="filename", help="Requested file", metavar="FILE")
++options, args = parser.parse_args()
++
++if os.path.basename(options.filename) != 'maclist':
++    sys.exit(1)
++fd = os.fdopen(3, 'w')
++
++sys.path.insert(0,'/srv/www/intranet')
++os.environ['DJANGO_SETTINGS_MODULE'] = 'infra.settings'
++from infra.machine.models import Interface
++
++fd.write("""#!/bin/sh
++# Shellscript generated from infra database
++# Do not edit by hand
++
++wl mac none
++wl mac %s 00:00:00:00:00:00
++""" % ' '.join([x.mac for x in Interface.objects.filter(wireless=True)]))
+diff --git a/atftpd.8 b/atftpd.8
+index c4d7a8f..2c3293c 100644
+--- a/atftpd.8
++++ b/atftpd.8
+@@ -161,6 +161,15 @@ Test a pattern/replacement file. When using this option, the server
+ will not start as usual but just read file name from stdin and
+ printout the substitution.
+ 
++.TP
++.B \-\-content\-generator <path>
++Execute <path> to generate content for nonexisting files. If a
++requested file does not exist, the program will be called as <path>
++--file <requested file>. The generated contents must be written to
++file descriptor 3,  which will be opened by atftpd using tmpfile().
++If the contents need to be stored as well, the program itself is
++responsible for doing so, atftpd will not store the contents.
++
+ .TP
+ .B \-\-mtftp <file>
+ This will start a mtftp server thread for each valid entry in the
+diff --git a/tftpd.c b/tftpd.c
+index b9822c4..7306f5a 100644
+--- a/tftpd.c
++++ b/tftpd.c
+@@ -115,6 +115,8 @@ tftpd_pcre_self_t *pcre_top = NULL;
+ char *pcre_file;
+ #endif
+ 
++char *content_generator = NULL;
++
+ #ifdef HAVE_MTFTP
+ /* mtftp options */
+ struct mtftp_data *mtftp_data = NULL;
+@@ -908,6 +910,7 @@ int tftpd_cmd_line_options(int argc, char **argv)
+           { "pcre", 1, NULL, OPT_PCRE },
+           { "pcre-test", 1, NULL, OPT_PCRE_TEST },
+ #endif
++          { "content-generator", 1, NULL, 'g' },
+ #ifdef HAVE_MTFTP
+           { "mtftp", 1, NULL, OPT_MTFTP },
+           { "mtftp-port", 1, NULL, OPT_MTFTP_PORT },
+@@ -1043,6 +1046,13 @@ int tftpd_cmd_line_options(int argc, char **argv)
+                          printf("Substitution: \"%s\" -> \"%s\"\n", string, out);
+                }
+ #endif
++          case 'g':
++               content_generator = strdup(optarg);
++               if(access(content_generator, X_OK)) {
++                   fprintf(stderr, "Cannot use %s as content generator: %s\n", content_generator, strerror(errno));
++                   content_generator = NULL;
++               }
++               break;
+           case OPT_PORT_CHECK:
+                source_port_checking = 0;
+                break;
+@@ -1135,6 +1145,8 @@ void tftpd_log_options(void)
+      if (pcre_top)
+           logger(LOG_INFO, "  PCRE: using file: %s", pcre_file);
+ #endif
++     if(content_generator)
++        logger(LOG_INFO, "  content generator: %s", content_generator);
+ #ifdef HAVE_MTFTP
+      if (strcmp(mtftp_file, "") != 0)
+      {
+@@ -1225,6 +1237,7 @@ void tftpd_usage(void)
+             "  --pcre <file>              : use this file for pattern replacement\n"
+             "  --pcre-test <file>         : just test pattern file, not starting server\n"
+ #endif
++            "  --content-generator <path>         : use <path> to generate content\n"
+ #ifdef HAVE_MTFTP
+             "  --mtftp <file>             : mtftp configuration file\n"
+             "  --mtftp-port <port>        : port mtftp will listen\n"
+diff --git a/tftpd_file.c b/tftpd_file.c
+index da1d6c9..b8ff1fc 100644
+--- a/tftpd_file.c
++++ b/tftpd_file.c
+@@ -36,6 +36,8 @@
+ #ifdef HAVE_PCRE
+ #include "tftpd_pcre.h"
+ #endif
++#include <sys/types.h>
++#include <sys/wait.h>
+ 
+ #define S_BEGIN         0
+ #define S_SEND_REQ      1
+@@ -60,6 +62,7 @@ extern int tftpd_cancel;
+ extern tftpd_pcre_self_t *pcre_top;
+ #endif
+ 
++extern char* content_generator;
+ 
+ /*
+  * Rules for filenames. This is common to both tftpd_recieve_file
+@@ -434,6 +437,8 @@ int tftpd_send_file(struct thread_data *data)
+      int prev_block_number = 0; /* needed to support netascii convertion */
+      int prev_file_pos = 0;
+      int temp = 0;
++     pid_t generator_pid = 0;
++     int generator_status;
+ 
+      /* look for mode option */
+      if (strcasecmp(data->tftp_options[OPT_MODE].value, "netascii") == 0)
+@@ -491,6 +496,54 @@ int tftpd_send_file(struct thread_data *data)
+           }
+      }
+ #endif
++     if (fp == NULL)
++     {
++          if (content_generator)
++          {
++               logger(LOG_DEBUG, "Trying to generate contents for %s", filename);
++               fp = tmpfile();
++               generator_pid = fork();
++               switch(generator_pid) {
++                   case 0:
++                       /* In the child */
++                       close(3);
++                       dup2(fileno(fp), 3);
++                       for(temp=4; temp < 1024; temp++)
++                           close(temp);
++                       execl(content_generator, content_generator, "--file", filename, (char *)NULL);
++                       /* Exec failed, make sure the parent notices */
++                       exit(66);
++                       ;;
++                   case -1:
++                       logger(LOG_WARNING, "fork() failed: %s", strerror(errno));
++                       fclose(fp);
++                       fp = NULL;
++                   default:
++                       /* In the parent */
++                       while(1) {
++                            errno = 0;
++                            temp = waitpid(generator_pid, &generator_status, 0);
++                            if(temp == -1 && errno == EINTR)
++                                continue;
++                            break;
++                       }
++                       if(!WIFEXITED(generator_status) || (WEXITSTATUS(generator_status) != 0)) {
++                            logger(LOG_WARNING, "generating content failed: %d %d", generator_status, WEXITSTATUS(generator_status));
++                            fclose(fp);
++                            fp = NULL;
++                       }
++                       else {
++                            fstat(fileno(fp), &file_stat);
++                            if(file_stat.st_size == 0) {
++                                 logger(LOG_WARNING, "content generator wrote 0 bytes");
++                                 fclose(fp);
++                                 fp = NULL;
++                            }
++                       }
++                       break;
++               }
++          }
++     }
+      if (fp == NULL)
+      {
+           tftp_send_error(sockfd, sa, ENOTFOUND, data->data_buffer, data->data_buffer_size);
+-- 
+2.17.1
+

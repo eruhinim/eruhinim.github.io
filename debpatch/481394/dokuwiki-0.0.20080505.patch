@@ -1,0 +1,343 @@
+diff -Naur dokuwiki-0.0.20080505.orig/debian/control dokuwiki-0.0.20080505/debian/control
+--- dokuwiki-0.0.20080505.orig/debian/control	2008-09-20 14:37:25.000000000 +0400
++++ dokuwiki-0.0.20080505/debian/control	2008-09-20 14:39:48.000000000 +0400
+@@ -8,7 +8,7 @@
+ 
+ Package: dokuwiki
+ Architecture: all
+-Depends: ${misc:Depends}, ucf, php5 | php4
++Depends: ${misc:Depends}, ucf, php5 | libapache-mod-php4 | libapache2-mod-php4
+ Recommends: imagemagick | php4-gd | php5-gd, php4-cli | php5-cli
+ Description: standards compliant simple to use wiki
+  DokuWiki is a wiki mainly aimed at creating documentation of any kind.
+diff -Naur dokuwiki-0.0.20080505.orig/debian/postinst dokuwiki-0.0.20080505/debian/postinst
+--- dokuwiki-0.0.20080505.orig/debian/postinst	2008-09-20 14:37:25.000000000 +0400
++++ dokuwiki-0.0.20080505/debian/postinst	2008-09-20 14:39:11.000000000 +0400
+@@ -1,227 +1,126 @@
+-#!/usr/bin/perl -w
++#!/bin/sh -e
+ 
+ # Postinst script for Dokuwiki.
+-# Based on postinst for PHPWiki written by Matthew Palmer.
+-
+-use strict;
+-use File::Copy;
+-use Debconf::Client::ConfModule ':all';
+-
+-# List of supported webservers
+-my @webserver = ('apache', 'apache2', 'apache-ssl', 'apache-perl');
+-
+-if ($ARGV[0] eq "configure") {
+-    if ($ARGV[1] eq '' || $ARGV[1] eq '<>')
+-    {
+-	
+-    }
+-    
+-    write_apache_conf();
+-    setup_acl();
+-    configure_webservers();
+-    # has not to be done in postinst
+-    #restart_webservers();
+-    
+-    `/usr/bin/ucf /usr/share/dokuwiki/.htaccess /usr/share/dokuwiki/.htaccess < /dev/tty > /dev/tty`;
+-    `/usr/bin/ucf /var/lib/dokuwiki/data/.htaccess /var/lib/dokuwiki/data/.htaccess < /dev/tty > /dev/tty`;
+-    `/usr/bin/ucf /usr/share/dokuwiki/bin/.htaccess /usr/share/dokuwiki/bin/.htaccess < /dev/tty > /dev/tty`;
+-    `/usr/bin/ucf /usr/share/dokuwiki/inc/.htaccess /usr/share/dokuwiki/inc/.htaccess < /dev/tty > /dev/tty`;
+-    `/usr/bin/ucf /usr/share/dokuwiki/inc/lang/.htaccess /usr/share/dokuwiki/inc/lang/.htaccess < /dev/tty > /dev/tty`;
+-
+-    # Move template directory from /usr/share/dokuwiki/lib/tpl to
+-    # /var/lib/dokuwiki/tpl and create a symlink to it
+-    my $version = $ARGV[1];
+-
+-    if ( system( "dpkg --compare-versions $version lt 0\.0\.20080411\~rc\.1") )
+-    {
+-        if ( not -l "/usr/share/dokuwiki/lib/tpl" )
+-        {
+-            print STDERR "Moving template directory from /usr/share to /var/lib... ";
+-            move("/usr/share/dokuwiki/lib/tpl", "/var/lib/dokuwiki/tpl")
+-                or die "copy failed: $!";
+-            symlink("/var/lib/dokuwiki/tpl", "/usr/share/dokuwiki/lib/tpl");
+-            print STDERR  "[done]\n";
+-        }
+-    }
+-
+-}
+-
+-# Dirty hack of the year to fix a possible Perl 5.8 bug (for #163380)
+-system('true');
+ 
+ # Create an apache configuration file for dokuwiki
+-sub write_apache_conf
++write_apache_conf()
+ {
+-    my $apacheconf = `tempfile`;
+-    chomp($apacheconf);
+-    
+-    open(CONF, "> $apacheconf")
+-	or die("Can't open $apacheconf: $!\n");
++    apacheconf=`tempfile`;
+     
+     # Get config options
+-    my @ret = get("dokuwiki/system/documentroot");
+-    if ($ret[0] != 0) {
+-	die "Failed to get config item dokuwiki/system/documentroot: ".$ret[1]."\n";
+-    }
+-    my $docroot = $ret[1];
++    db_get dokuwiki/system/documentroot
++    docroot=$RET;
+ 
+-    print CONF "Alias $docroot		/usr/share/dokuwiki\n";
++    echo "Alias $docroot		/usr/share/dokuwiki" > $apacheconf
+ 
+     # Print directory options for /usr/share/dokuwiki
+-    print CONF "<Directory /usr/share/dokuwiki/>\n";
+-    print CONF "	Options +FollowSymLinks\n";
+-    print CONF "	AllowOverride All\n";
+-    print CONF "	order allow,deny\n";
+-    @ret = get("dokuwiki/system/accessible");
+-    if ($ret[0] != 0) {
+-	die "Failed to get config item dokuwiki/system/accessible: $ret[1]\n";
+-    }
+-
+-    # Globally accessible
+-    if ($ret[1] eq "global") {
+-	print CONF "	allow from all\n";
+-
+-    # Access only from localhost
+-    } elsif ($ret[1] eq "localhost only") {
+-	print CONF "	allow from 127.0.0.1\n";
+-
+-    # Access from localnet
+-    } else {
+-	@ret = get("dokuwiki/system/localnet");
+-	if ($ret[0] != 0) {
+-	    die "Failed to get config item dokuwiki/system/localnet: $ret[1]\n";
+-	}
+-	print CONF "    allow from 127.0.0.1\n";
+-	print CONF "	allow from $ret[1]\n";
+-    }
++    echo "<Directory /usr/share/dokuwiki/>" >> $apacheconf
++    echo "	Options +FollowSymLinks" >> $apacheconf
++    echo "	AllowOverride All" >> $apacheconf
++    echo "	order allow,deny" >> $apacheconf
++
++    db_get dokuwiki/system/accessible
++    if [ "$RET" = "global" ]; then  # Globally accessible
++      echo "	allow from all" >> $apacheconf
++    elif [ "$RET" = "localhost only" ]; then  # Access only from localhost
++	echo "	allow from 127.0.0.1" >> $apacheconf
++    else  # Access from localnet
++	db_get dokuwiki/system/localnet
++	echo "	allow from 127.0.0.1" >> $apacheconf
++	echo "	allow from $RET" >> $apacheconf
++    fi
+     
+-    print CONF "</Directory>\n";
+-    close CONF;
++    echo "</Directory>" >> $apacheconf
+     
+-    `/usr/bin/ucf $apacheconf /etc/dokuwiki/apache.conf < /dev/tty > /dev/tty`;
++    /usr/bin/ucf $apacheconf /etc/dokuwiki/apache.conf
+ 
+     # Remove temporary file
+-    unlink $apacheconf;
++    rm $apacheconf;
+ 
+-    chmod(0664, "/etc/dokuwiki/apache.conf")
+-	or die("Could not set mode for /etc/dokuwiki/apache.conf");
++    chmod 0664 /etc/dokuwiki/apache.conf
+ }
+ 
+-# Add a configuration file and restart the http server(s)
+-sub configure_webservers
++# Subroutine to set up an initial access control system
++setup_acl()
+ {
+-# Should not be done in postinst
+-#    foreach (@webserver) {
+-#	
+-#	if (-e "/etc/$_/conf.d/dokuwiki.conf") {
+-#	    unlink "/etc/$_/conf.d/dokuwiki.conf"
+-#		or warn "Could not remove /etc/$_/conf.d/dokuwiki.conf";
+-#	}
+-#    }
++    # By default allow everyone read access
++    if [ ! -a /var/lib/dokuwiki/acl/acl.auth.php ]; then
++	aclauth=`tempfile`
++
++	echo '*                     @ALL        4' > $aclauth
++
++    	/usr/bin/ucf $aclauth /var/lib/dokuwiki/acl/acl.auth.php
++
++        # Remove temporary file
++        rm $aclauth;
+     
+-    # Get list of servers to install into
+-    my @dwserver = split(", ", get("dokuwiki/webservers"));
++	chown www-data:root /var/lib/dokuwiki/acl/acl.auth.php
++    fi
+     
+-    foreach (@dwserver)
+-    {
+-	print STDERR "Installing into... [$_] \n";
+-	
+-	my $dir = "/etc/$_";
++    if [ ! -a /var/lib/dokuwiki/acl/users.auth.php ]; then
++	usersauth=`tempfile`;
++	> $usersauth
++    	/usr/bin/ucf $usersauth /var/lib/dokuwiki/acl/users.auth.php
++
++        # Remove temporary file
++        rm $usersauth;
++
++	chown www-data:root /var/lib/dokuwiki/acl/users.auth.php
++    fi
++}
++
++configure_webservers()
++{
++    # Get list of servers to install into
++    db_get dokuwiki/webservers
++
++    for dwserver in $RET; do
++        dir="/etc/${dwserver%,}"
++
++	echo "Installing into... [$dir]" >/dev/stderr
+ 	
+ 	# Skip servers with no configuration
+-	if (! -d $dir)
+-	{
+-	    next;
+-	}
++	[ -d $dir ] || continue
+ 	
+ 	# Link the apache configuration file to the server's
+ 	# conf.d directory
+-	if (! -f "$dir/conf.d/dokuwiki.conf") {
+-	    symlink('/etc/dokuwiki/apache.conf', "$dir/conf.d/dokuwiki.conf")
+-		or die("Failed to link configuration file to $dir/conf.d/dokuwiki.conf\n");
+-      }
+-	
+-	chmod(0644, "/etc/dokuwiki/apache.conf")
+-	    or die("Failed to set permissions for /etc/dokuwiki/apache.conf\n");
+-	
+-    }
+-}
++	ln -fs /etc/dokuwiki/apache.conf "$dir/conf.d/dokuwiki.conf"
+ 
+-# Restart the webservers after the reconfiguration
+-sub restart_webservers
+-{
+-    foreach (@webserver) {
+-	
+-	# If server binary does not exist, move to next one
+-	if (! -x "/usr/sbin/$_")
+-	{
+-	    next;
+-	}
+-	
+-	# Restart the server either by invoke-rc.d or init.d
+-	if (-x "/usr/sbin/invoke-rc.d")
+-	{
+-	    (!system("/usr/sbin/invoke-rc.d $_ restart >/dev/tty 2>&1"))
+-		or warn "Failed to restart $_\n";
+-	}
+-	else
+-	{
+-	    if (-x "/etc/init.d/$_") {
+-		(!system("/etc/init.d/$_ restart >/dev/tty 2>&1"))
+-		    or warn "Failed to restart $_\n";
+-	    }
+-	}
+-	
+-    }
++	chmod 0644 /etc/dokuwiki/apache.conf
++    done
+ }
+ 
+-# Subroutine to set up an initial access control system
+-sub setup_acl
+-{
+-    
+-    # By default allow everyone read access
+-    if (! -e "/var/lib/dokuwiki/acl/acl.auth.php") {
+-	my $aclauth = `tempfile`;
+-	chomp($aclauth);
+-
+-	open(AUTHFILE, "> $aclauth")
+-		or die("Can't open $aclauth: $!\n");
+-
+-	print AUTHFILE '*                     @ALL        4';
+-	print AUTHFILE "\n";
+-	close AUTHFILE;
+-	my $wwwuid = getpwnam("www-data");
+-	my $rootuid = getpwnam("root");
+-
+-    	`/usr/bin/ucf $aclauth /var/lib/dokuwiki/acl/acl.auth.php < /dev/tty > /dev/tty`;
+ 
+-        # Remove temporary file
+-        unlink $aclauth;
+-    
+-	chown $wwwuid, $rootuid, "/var/lib/dokuwiki/acl/acl.auth.php"
+-	    or warn "Could not change owner for /var/lib/dokuwiki/acl/acl.auth.php";
+-    }
+-    
+-    if (! -e "/var/lib/dokuwiki/acl/users.auth.php") {
+-	
+-	my $usersauth = `tempfile`;
+-	chomp($usersauth);
++if [ $1 = "configure" ]; then
++    . /usr/share/debconf/confmodule
+ 
+-	open(USERFILE, "> $usersauth")
+-		or die("Can't open $usersauth: $!\n");
+-	close USERFILE;
+-	my $wwwuid = getpwnam("www-data");
+-	my $rootuid = getpwnam("root");
++    write_apache_conf
++    setup_acl
++    configure_webservers
++    
++    /usr/bin/ucf /usr/share/dokuwiki/.htaccess /usr/share/dokuwiki/.htaccess
++    /usr/bin/ucf /var/lib/dokuwiki/data/.htaccess /var/lib/dokuwiki/data/.htaccess
++    /usr/bin/ucf /usr/share/dokuwiki/bin/.htaccess /usr/share/dokuwiki/bin/.htaccess
++    /usr/bin/ucf /usr/share/dokuwiki/inc/.htaccess /usr/share/dokuwiki/inc/.htaccess
++    /usr/bin/ucf /usr/share/dokuwiki/inc/lang/.htaccess /usr/share/dokuwiki/inc/lang/.htaccess
+ 
+-    	`/usr/bin/ucf $usersauth /var/lib/dokuwiki/acl/users.auth.php < /dev/tty > /dev/tty`;
++    db_stop
+ 
+-        # Remove temporary file
+-        unlink $usersauth;
++    # TODO: Web servers have to be restarted elsewhere
+ 
+-	chown $wwwuid, $rootuid, "/var/lib/dokuwiki/acl/users.auth.php"
+-	    or warn "Could not change ownership for /var/lib/dokuwiki/acl/users.auth.php";
+-    }
+-    
+-}
++    # Move template directory from /usr/share/dokuwiki/lib/tpl to
++    # /var/lib/dokuwiki/tpl and create a symlink to it
++    if dpkg --compare-versions "$2" lt "0.0.20080411~rc.1"; then
++        if [ ! -L /usr/share/dokuwiki/lib/tpl ]; then
++            echo -n "Moving template directory from /usr/share to /var/lib... " >/dev/stderr
++            mv /usr/share/dokuwiki/lib/tpl /var/lib/dokuwiki/tpl
++            ln -fs /var/lib/dokuwiki/tpl /usr/share/dokuwiki/lib/
++            echo "[done]" >/dev/stderr
++        fi
++    fi
++
++    # doku.php?do=check takes version from this file
++    ln -fs /usr/share/doc/dokuwiki/VERSION /usr/share/dokuwiki/
++fi
+ 
+ #DEBHELPER#
+diff -Naur dokuwiki-0.0.20080505.orig/debian/postrm dokuwiki-0.0.20080505/debian/postrm
+--- dokuwiki-0.0.20080505.orig/debian/postrm	2008-09-20 14:37:25.000000000 +0400
++++ dokuwiki-0.0.20080505/debian/postrm	2008-09-20 14:39:11.000000000 +0400
+@@ -65,3 +65,5 @@
+     fi
+ 
+ fi
++
++rm -f /usr/share/dokuwiki/VERSION

@@ -1,0 +1,122 @@
+Index: piuparts.py
+===================================================================
+--- piuparts.py	(revision 691)
++++ piuparts.py	(working copy)
+@@ -49,6 +49,7 @@
+ import unittest
+ import urllib
+ import uuid
++import glob
+ 
+ try:
+     from debian import deb822
+@@ -1003,6 +1004,40 @@
+                 panic()
+         else:
+             logging.debug("No broken symlinks as far as we can find.")
++
++    def check_for_missing_emacsen_el_symlinks(self):
++        """emacsen policy 6E, debian policy 10.5. Check that for each
++        /usr/share/<flavour>/site-lisp/<pkg>/<module>.elc there exists
++        a /usr/share/<flavour>/site-lisp/<pkg>/<module>.el which is a
++        relative symlink to ../../../emacs/site-lisp/<pkg>/<module>.el"""
++        broken = []
++        for elc_file in glob.glob("%s/usr/share/*/site-lisp/*/*.elc" % self.name):
++            package = elc_file.split("/")[-2]
++            module = (elc_file.split("/")[-1]).split(".")[0]
++            el_symlink = elc_file[:-1]
++            el_file = "../../../emacs/site-lisp/%s/%s.el" % (package, module)
++            expected_link = "%s -> %s" % (el_symlink, el_file)
++            if not os.path.exists(el_symlink):
++                broken.append(expected_link)
++                continue
++            try:
++                target = os.readlink(el_symlink)
++            except os.error:
++                broken.append(expected_link)
++                continue
++            if target != el_file:
++                broken.append(expected_link)
++                continue
++        if broken:
++            if settings.warn_broken_symlinks:
++                logging.error("WARN: Missing emacsen el symlinks:\n%s" %
++                              indent_string("\n".join(broken)))
++            else:
++                logging.error("FAIL: Missing emacsen el symlinks:\n%s" %
++                              indent_string("\n".join(broken)))
++                panic()
++        else:
++            logging.debug("All emacsen el symlinks are in place.")
+ 	    
+     def check_if_cronfiles(self, packages):
+         """Check if the packages have cron files under /etc/cron.d and in case positive, 
+@@ -1607,31 +1642,32 @@
+ 
+     # Install packages into the chroot.
+ 
++    # Create a metapackage with dependencies from the given packages
++    if package_list:
++        control_infos = []
++        # We were given package files, so let's get the Depends and
++        # Conflicts directly from the .debs
++        for deb in package_list:
++            returncode, output = run(["dpkg", "-f", deb])
++            control = deb822.Deb822(output)
++            control_infos.append(control)
++    else:
++        # We have package names.  Use apt to get all their control
++        # information.
++        apt_cache_args = ["apt-cache", "show"]
++        apt_cache_args.extend(packages)
++        returncode, output = chroot.run(apt_cache_args)
++        control_infos = deb822.Deb822.iter_paragraphs(output.splitlines())
++
++    depends = []
++    conflicts = []
++    for control in control_infos:
++        if control.get("depends"):
++            depends.append(control["depends"])
++        if control.get("conflicts"):
++            conflicts.append(control["conflicts"])
++
+     if settings.warn_on_others:
+-        # Create a metapackage with dependencies from the given packages
+-        if package_list:
+-            control_infos = []
+-            # We were given package files, so let's get the Depends and
+-            # Conflicts directly from the .debs
+-            for deb in package_list:
+-                returncode, output = run(["dpkg", "-f", deb])
+-                control = deb822.Deb822(output)
+-                control_infos.append(control)
+-        else:
+-            # We have package names.  Use apt to get all their control
+-            # information.
+-            apt_cache_args = ["apt-cache", "show"]
+-            apt_cache_args.extend(packages)
+-            returncode, output = chroot.run(apt_cache_args)
+-            control_infos = deb822.Deb822.iter_paragraphs(output.splitlines())
+-            
+-        depends = []
+-        conflicts = []
+-        for control in control_infos:
+-            if control.get("depends"):
+-                depends.append(control["depends"])
+-            if control.get("conflicts"):
+-                conflicts.append(control["conflicts"])
+         all_depends = ", ".join(depends)
+         all_conflicts = ", ".join(conflicts)
+         metapackage = make_metapackage("piuparts-depends-dummy",
+@@ -1660,6 +1696,11 @@
+ 
+     chroot.check_for_no_processes()
+     chroot.check_for_broken_symlinks()
++    if "emacsen-common" in depends:
++        # FIXME: depends could also contain e.g. "emacs | emacsen"
++        chroot.run(["apt-get", "install", "emacs"])
++        chroot.check_for_missing_emacsen_el_symlinks()
++        chroot.run(["apt-get", "purge", "emacs"])
+ 
+     file_owners = chroot.get_files_owned_by_packages()
+ 

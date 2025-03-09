@@ -1,0 +1,50 @@
+From 0f524fc4a48128b6d81fae0f92aca177a6e33bb2 Mon Sep 17 00:00:00 2001
+From: Benjamin Drung <benjamin.drung@canonical.com>
+Date: Mon, 9 Jan 2023 10:48:40 +0100
+Subject: [PATCH] Fix uninitialized value on "EOF" (^D)
+
+During a `dpkg-reconfigure localepurge`, hitting "EOF" (^D) to one of
+the questions will trigger a warning about using an uninitialized value:
+
+```
+Use of uninitialized value $_[1] in join or string at /usr/share/perl5/Debconf/DbDriver/Stack.pm line 111.
+```
+
+The same happens when hitting "EOF" (^D) when reconfiguring tzdata
+(`dpkg-reconfigure --frontend readline tzdata`).
+
+When a user hits ^D on a `readline` or `teletype` front end,
+`Debconf::FrontEnd::Teletype->prompt` will return `undef`. The function
+description says: "Anything that uses this function should catch that
+and handle it, probably by exiting any read/validate loop it is in."
+
+Checking the return value of the `show` function in the `readline`
+front end will fix the warning and revert to the backup (if the debconf
+is backup capable). The bug should probably fixed in a different
+location to also cover the `teletype` front end.
+
+Closes: #723843
+LP: #1899343
+Signed-off-by: Benjamin Drung <benjamin.drung@canonical.com>
+---
+ Debconf/FrontEnd/Readline.pm | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/Debconf/FrontEnd/Readline.pm b/Debconf/FrontEnd/Readline.pm
+index 62b3c6c9..2116ba83 100644
+--- a/Debconf/FrontEnd/Readline.pm
++++ b/Debconf/FrontEnd/Readline.pm
+@@ -151,6 +151,10 @@ sub go {
+ 	$this->_direction(1);
+ 	for (; $current > -1 && $current < @elements; $current += $this->_direction) {
+ 		my $value=$elements[$current]->show;
++		if (not defined $value) {
++			$this->_didbackup(1);
++			return;
++		}
+ 	}
+ 
+ 	if ($current < 0) {
+-- 
+2.37.2
+

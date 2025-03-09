@@ -1,0 +1,98 @@
+diff -urN base-files-6.3.original/debian/changelog base-files-6.4/debian/changelog
+--- base-files-6.3.original/debian/changelog	2011-05-25 18:46:08.276544484 +0100
++++ base-files-6.4/debian/changelog	2011-05-27 09:50:45.296957386 +0100
+@@ -1,5 +1,25 @@
+ base-files (6.3) unstable; urgency=low
+ 
++  * Provide /run directory.  Closes: #620157.
++  * For new installations:
++    - /run/lock is created if not present (note that debian-installer
++      will remove it after installation is complete so that it does not
++      leave mess in /run; it will persist in chroot environments).
++      This ensures that the /var/lock symlink will always be valid.
++    - /var/run is symlinked to /run.
++    - /var/lock is symlinked to /run/lock.
++  * For upgrades, initscripts will handle the /var/run and /var/lock
++    migration to /run.
++  * Break initscripts << 2.88dsf-13.3 to ensure that once we provide
++    /run, it is guaranteed to be present and functional.  This is to
++    prevent udev breakage by preventing base-files from being
++    upgraded prior to initscripts on upgrade from squeeze.  This
++    ensures that initscripts must be upgraded first.
++
++ -- Roger Leigh <rleigh@debian.org>  Fri, 27 May 2011 09:45:39 +0100
++
++base-files (6.3) unstable; urgency=low
++
+   * Dropped /run until everything else is ready for it. In particular,
+     udev should not blindly assume that it works just because it exists.
+ 
+diff -urN base-files-6.3.original/debian/control base-files-6.4/debian/control
+--- base-files-6.3.original/debian/control	2011-05-25 18:46:08.276544484 +0100
++++ base-files-6.4/debian/control	2011-05-26 15:16:37.342127868 +0100
+@@ -11,6 +11,7 @@
+ Essential: yes
+ Priority: required
+ Replaces: base, miscutils, dpkg (<= 1.15.0)
++Breaks: initscripts (<< 2.88dsf-13.3)
+ Description: Debian base system miscellaneous files
+  This package contains the basic filesystem hierarchy of a Debian system, and
+  several important miscellaneous files, such as /etc/debian_version,
+diff -urN base-files-6.3.original/debian/directory-list base-files-6.4/debian/directory-list
+--- base-files-6.3.original/debian/directory-list	2011-05-25 18:46:08.276544484 +0100
++++ base-files-6.4/debian/directory-list	2011-05-27 08:49:16.486529468 +0100
+@@ -10,6 +10,7 @@
+ mnt
+ proc
+ root
++run
+ sbin
+ tmp
+ usr
+diff -urN base-files-6.3.original/debian/postinst.in base-files-6.4/debian/postinst.in
+--- base-files-6.3.original/debian/postinst.in	2011-05-25 18:46:08.276544484 +0100
++++ base-files-6.4/debian/postinst.in	2011-05-27 09:49:59.124336034 +0100
+@@ -23,6 +23,25 @@
+   fi
+ }
+ 
++migrate_directory() {
++  # Skip if already a symlink
++  if [ -L $1 ]; then
++    :
++  else
++    # Move any files to the new location
++    if [ -d $1 ]; then
++     for file in $1/*; do
++       if [ -e "$file" ]; then
++	 mv $file $2
++       fi
++     done
++     rmdir $1
++    fi
++    # Replace with symlink
++    ln -s $2 $1
++  fi
++}
++
+ if [ ! -e /etc/dpkg/origins/default ]; then
+   if [ -e /etc/dpkg/origins/#VENDORFILE# ]; then
+     ln -sf #VENDORFILE# /etc/dpkg/origins/default
+@@ -41,10 +60,17 @@
+   install_directory var/opt   755 root
+   install_directory media     755 root
+   install_directory var/mail 2775 mail
++  # Note that /run/lock will be later removed by debian-installer on
++  # completion of the install (a tmpfs will be mounted on /run at
++  # reboot).  It will persist in debootstrapped chroots.
++  install_directory run/lock 1777 root
+   if [ ! -L /var/spool/mail ]; then
+     ln -s ../mail /var/spool/mail
+   fi
+ 
++  migrate_directory /var/run /run
++  migrate_directory /var/lock /run/lock
++
+   install_local_dir /usr/local
+   install_local_dir /usr/local/share
+   install_local_dir /usr/local/share/man

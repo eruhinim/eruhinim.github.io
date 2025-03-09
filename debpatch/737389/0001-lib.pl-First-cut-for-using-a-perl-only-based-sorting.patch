@@ -1,0 +1,239 @@
+>From 12c1ce80f1a86ff27c77f3a7e81cb30761c72d7f Mon Sep 17 00:00:00 2001
+From: Agustin Martin Domingo <agmartin@debian.org>
+Date: Fri, 23 May 2014 16:59:35 +0200
+Subject: [PATCH] lib.pl: First cut for using a perl-only based sorting
+ algorithm.
+
+ * Make more use of hashes.
+ * Use a single dpkg-query call for all add-ons to be installed.
+ * Use a perl-only sorting algorithm.
+ * Merged sone interrelated functions into a single function.
+---
+ lib.pl | 185 +++++++++++++++++++++++++++++++----------------------------------
+ 1 file changed, 88 insertions(+), 97 deletions(-)
+ mode change 100755 => 100644 lib.pl
+
+diff --git a/lib.pl b/lib.pl
+old mode 100755
+new mode 100644
+index f0aa670..2d0097e
+--- a/lib.pl
++++ b/lib.pl
+@@ -3,6 +3,8 @@
+ use strict;
+ use Cwd;
+ 
++my $debug++ if $ENV{'EMACSEN_COMMON_DEBUG'};
++
+ # depends on: dpkg, tsort, perl
+ 
+ my $lib_dir = "/usr/lib/emacsen-common";
+@@ -63,8 +65,7 @@ sub get_installed_add_on_packages
+   {
+     delete $ready_pkgs{$p} unless (-e "$::installed_package_state_dir/$p");
+   }
+-  my @result = keys %ready_pkgs;
+-  return \@result;
++  return \%ready_pkgs;
+ }
+ 
+ sub get_installed_flavors
+@@ -73,110 +74,100 @@ sub get_installed_flavors
+   return @$flavors;
+ }
+ 
+-sub get_package_status
+-{
+-  my($pkg) = @_;
+-  my $status = `dpkg --status $pkg`;
+-  die 'emacsen-common: dpkg invocation failed' if($? != 0);
+-  $status =~ s/\n\s+//gmo; # handle any continuation lines...
+-  return $status;
+-}
+-
+-sub filter_depends
+-{
+-  my($depends_string, $installed_add_ons) = @_;
+-
+-  # Filter out all the "noise" (version number dependencies, etc)
+-  # and handle or deps too, i.e. "Depends: foo, bar | baz" 
+-  my @relevant_depends = split(/[,|]/, $depends_string);
+-  @relevant_depends = map { /\s*(\S+)/o; $1; } @relevant_depends;
+-
+-  # Filter out all non-add-on packages.
+-  @relevant_depends = grep {
+-    my $candidate = $_;
+-    grep { $_ eq $candidate } @$installed_add_ons;
+-  } @relevant_depends;
+-  
+-  return @relevant_depends;
+-}
++# ------------------------------------------------------------
++sub generate_add_on_install_list {
++# ------------------------------------------------------------
++# generate_add_on_install_list_new \@packages_to_sort
++# generate_add_on_install_list_new \%packages_to_sort
++# ------------------------------------------------------------
++  my $packages_to_sort  = shift;
++  my $installed_add_ons = get_installed_add_on_packages;
++  my %depends_hash      = ();
++
++  return unless $packages_to_sort;
++
++  # emacsen-install calls this function as the output of
++  # get_installed_add_on_packages, which has been changed to an ARRAY
++  # reference. Convert to an array reference if so.
++  if ( ref($packages_to_sort) eq 'HASH' ){
++    $packages_to_sort = [sort keys %$packages_to_sort];
++  }
+ 
+-sub generate_relevant_tsort_dependencies_internals
+-{
+-  my($pkglist, $installed_add_ons, $progress_hash) = @_;
+-
+-  # print "GRD: " . join(" ", @$pkglist) . "\n";
+-  
+-  my $pkg = shift @$pkglist;
+-
+-  if(!$pkg || $$progress_hash{$pkg}) {
+-    return ();
+-  } else {
+-    my $status = get_package_status($pkg);
+-    $status =~ /^Depends:\s+(.*)/mo;
+-    my $depends = $1; $depends = "" if ! $depends;
+-    my @relevant_depends = filter_depends($depends, $installed_add_ons);
+-    my $newpkglist = [@$pkglist, @relevant_depends];
+-
+-    $$progress_hash{$pkg} = 1;
+-
+-    # pkg is in twice so we don't have to worry about package with no
+-    # relevant dependencies.  tsort can't handle that.
+-    my @tsort_strings = "$pkg $pkg\n"; 
+-    map { push @tsort_strings, "$_ $pkg\n"; } @relevant_depends;
+-    
+-    return (@tsort_strings,
+-            generate_relevant_tsort_dependencies_internals($newpkglist,
+-                                                           $installed_add_ons,
+-                                                           $progress_hash));
++  my $packages_to_sort_string = join(' ', @$packages_to_sort);
++  my $dpkg_query_output = `dpkg-query -W -f='package:\${Package}, \${Depends}\n' $packages_to_sort_string`;
++  die 'emacsen-common: dpkg-query invocation failed' unless ($? == 0);
++
++  if ( $debug ){
++    print "------------------------------------------------------------------------------\n";
++    print "Packages to sort:\n$packages_to_sort_string\n";
++    print "-------------------------------------------------------------\n";
++    print "dpkg-query output:\n---\n$dpkg_query_output---\n";
++    print "-------------------------------------------------------------\n";
++    print "Installed add-ons:\n", join(', ',sort keys %{$installed_add_ons}), "\n";
++    print "-------------------------------------------------------------\n";
+   }
+-}
+ 
+-sub generate_relevant_tsort_dependencies
+-{
+-  my($pkglist, $installed_add_ons, $progress_hash) = @_;
+-  # Make a copy because we're going to mangle it.
+-  my @listcopy = @$pkglist;
+-  shift @_;
+-  return(generate_relevant_tsort_dependencies_internals(\@listcopy, @_));
+-}
++  foreach my $dpkg_query_line ( split("\n", $dpkg_query_output) ){
++    my @package_depends = split(/[,|]/, $dpkg_query_line);
++    my $package = shift @package_depends;
+ 
++    # Remove consistency string or ignore line if missing.
++    next unless $package =~ s/^package://;
+ 
+-sub reorder_add_on_packages
+-{
+-  my($pkglist, $installed_add_ons) = @_;
+-  my @depends = generate_relevant_tsort_dependencies($pkglist,
+-                                                     $installed_add_ons,
+-                                                     {});
+-  my $pid = open(TSORT, "-|");
+-  die "Couldn't fork for tsort: $!" unless defined($pid);
+-
+-  # What a strange idiom...
+-  if($pid == 0) {
+-    my $sub_pid = open(IN, "|-");
+-    die "Couldn't sub-fork for tsort: $!" unless defined($sub_pid);
+-    if($sub_pid == 0) {
+-      exec 'tsort' or die "Couldn't run tsort: $!";
++    # Filter out all the "noise" (version number dependencies, etc)
++    @package_depends = map { /\s*(\S+)/o; $1; } @package_depends;
++
++    my %tmp_deps = ();
++    foreach my $dependency ( @package_depends ){
++      # dpkg-query regexp above will result in empty dependency for
++      # packages with no dependencies at all. Discard if so.
++      next unless $dependency;
++
++      # Filter out dependencies on non-add-on packages.
++      next unless ( defined $installed_add_ons->{"$dependency"} );
++
++      # Populate the temporal dependencies hash for this package
++      $tmp_deps{$dependency}++;
++    }
++
++    if ( %tmp_deps ){
++      foreach my $dependency ( sort keys %tmp_deps ){
++	# Populate the real add-ons dependencies hash
++	print "* Setting $package dependency on $dependency.\n" if $debug;
++	$depends_hash{'deps'}{$package}{$dependency}++;
++      }
++    } else {
++      # $package does not depend on any add-on
++      print "* Setting $package to not depend on add-ons.\n" if $debug;
++      $depends_hash{'nodeps'}{$package}++;
+     }
+-    print IN @depends;
+-    exit 0;
+   }
+-  my @ordered_pkgs = <TSORT>;
+-  chomp @ordered_pkgs;
+-  return @ordered_pkgs
+-}
+ 
+-sub generate_add_on_install_list
+-{
+-  my($packages_to_sort) = @_;
+-  my @sorted_pkgs = reorder_add_on_packages($packages_to_sort,
+-                                            get_installed_add_on_packages());
+-  return(@sorted_pkgs);
++  # Sort add-on packages to byte-compile
++  my @sorted_add_ons =sort {
++    # Sort emacsen-common first if is to be byte-compiled
++    $b =~ m/emacsen-common/ <=>  $a =~ m/emacsen-common/
++      ||
++	# Then sort add-ons without dependencies first
++	defined $depends_hash{'nodeps'}{$b} cmp defined $depends_hash{'nodeps'}{$a}
++	  ||
++	    # Then sort add-ons depending on another add-on after it
++	    defined $depends_hash{'deps'}{$a}{$b} cmp defined $depends_hash{'deps'}{$b}{$a}
++	      ||
++		# Should be none, but sort circular dependencies alphabetically.
++		$a cmp $b;
++  } @$packages_to_sort;
++
++  # More debugging code
++  print "--------------------------------------------\n",
++    "Sorted packages:\n",
++      join(', ',@sorted_add_ons),
++	"\n",
++	  "--------------------------------------------\n"
++	    if $debug;
++
++  return @sorted_add_ons;
+ }
+ 
+-# Test code
+-# my @input_packages = <STDIN>;
+-# my @result = generate_add_on_install_list(@input_packages);
+-# print "  " . join("\n  ", @result);
+-
+ # To make require happy...
+ 1;
+-- 
+2.0.0.rc4
+

@@ -1,0 +1,65 @@
+From 6091ffa2b8c1d6729bf10c8263bac1e47fb9d7d1 Mon Sep 17 00:00:00 2001
+From: Modestas Vainius <modax@debian.org>
+Date: Sat, 18 Jun 2011 23:02:42 +0300
+Subject: [PATCH] Use Dpkg::BuildFlags module directly in set_buildflags().
+
+Dpkg::BuildFlags API is declared stable. It should be safe to use it directly
+rather than dpkg-buildflags wrapper. In addition, do not do any
+DEB_BUILD_OPTIONS=noopt handling in debhelper. Dpkg::BuildFlags already does it
+for us.
+---
+ Debian/Debhelper/Dh_Lib.pm |   33 ++++++++++++---------------------
+ 1 files changed, 12 insertions(+), 21 deletions(-)
+
+diff --git a/Debian/Debhelper/Dh_Lib.pm b/Debian/Debhelper/Dh_Lib.pm
+index 51f16a6..0c779d1 100644
+--- a/Debian/Debhelper/Dh_Lib.pm
++++ b/Debian/Debhelper/Dh_Lib.pm
+@@ -901,32 +901,23 @@ sub cross_command {
+ }
+ 
+ # Sets environment variables from dpkg-buildflags. Avoids changing
+-# any existing environment variables. Supports DEB_BUILD_OPTIONS=noopt.
++# any existing environment variables.
+ sub set_buildflags {
+ 	# optimisation
+ 	return if $ENV{DH_INTERNAL_BUILDFLAGS};
+ 	$ENV{DH_INTERNAL_BUILDFLAGS}=1;
+ 
+-	my $noopt=$ENV{DEB_BUILD_OPTIONS}=~/noopt/;
+-
+-	my @shell=`dpkg-buildflags --export`;
+-	foreach my $line (@shell) {
+-		chomp $line;
+-		if ($line=~/^export\s+([^=]+)=(["'])(.*)\2$/) {
+-			my $var=$1;
+-			my $val=$3;
+-			if ($noopt) {
+-				$val=$ENV{$var} if exists $ENV{$var};
+-				$val=~s/-O\d+/-O0/;
+-				$ENV{$var}=$val;
+-				next;
+-			}
+-			elsif (! exists $ENV{$var}) {
+-				$ENV{$var}=$val;
+-			}
+-		}
+-		else {
+-			warning "unparsable line from dpkg-buildflags: $line";
++	eval "use Dpkg::BuildFlags";
++	if ($@) {
++		warning "unable to load build flags: $@";
++	}
++
++	my $buildflags = Dpkg::BuildFlags->new();
++	$buildflags->load_config();
++	foreach my $flag ($buildflags->list()) {
++		next unless $flag =~ /^[A-Z]/; # Skip flags starting with lowercase
++		if (! exists $ENV{$flag}) {
++			$ENV{$flag} = $buildflags->get($flag);
+ 		}
+ 	}
+ }
+-- 
+1.7.5.4
+

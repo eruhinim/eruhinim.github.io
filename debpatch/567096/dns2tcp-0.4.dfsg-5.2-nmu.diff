@@ -1,0 +1,126 @@
+diff -u dns2tcp-0.4.dfsg/debian/changelog dns2tcp-0.4.dfsg/debian/changelog
+--- dns2tcp-0.4.dfsg/debian/changelog
++++ dns2tcp-0.4.dfsg/debian/changelog
+@@ -1,3 +1,10 @@
++dns2tcp (0.4.dfsg-5.2) unstable; urgency=low
++
++  * Non-maintainer upload.
++  * Added answer_NS_queries.patch(thanks to  Helmut Grohne) (Closes: #567096). 
++
++ -- Martijn van Brummelen <martijn@brumit.nl>  Tue, 11 May 2010 20:51:10 +0200
++
+ dns2tcp (0.4.dfsg-5.1) unstable; urgency=low
+ 
+   * Non-maintainer upload.
+diff -u dns2tcp-0.4.dfsg/debian/patches/series dns2tcp-0.4.dfsg/debian/patches/series
+--- dns2tcp-0.4.dfsg/debian/patches/series
++++ dns2tcp-0.4.dfsg/debian/patches/series
+@@ -1,3 +1,4 @@
++answer_NS_queries.patch
+ man-pages.patch
+ buffer-overflow-0.4.1.diff
+ dnsbof.diff
+only in patch2:
+unchanged:
+--- dns2tcp-0.4.dfsg.orig/debian/patches/answer_NS_queries.patch
++++ dns2tcp-0.4.dfsg/debian/patches/answer_NS_queries.patch
+@@ -0,0 +1,99 @@
++Index: dns2tcp-0.4.dfsg/common/includes/dns.h
++===================================================================
++--- dns2tcp-0.4.dfsg.orig/common/includes/dns.h	2010-05-11 20:38:10.000000000 +0200
+++++ dns2tcp-0.4.dfsg/common/includes/dns.h	2010-05-11 20:39:16.000000000 +0200
++@@ -128,6 +128,7 @@
++ 
++ struct		rr_hdr {
++   uint16_t	type;
+++#define TYPE_NS 2
++ #define TYPE_TXT 16
++ #define TYPE_KEY 25
++   uint16_t	klass;
++Index: dns2tcp-0.4.dfsg/server/requests.c
++===================================================================
++--- dns2tcp-0.4.dfsg.orig/server/requests.c	2010-05-11 20:39:42.000000000 +0200
+++++ dns2tcp-0.4.dfsg/server/requests.c	2010-05-11 20:46:22.000000000 +0200
++@@ -167,6 +167,73 @@
++   return (0);
++  }
++ 
+++static int		answer_ns(t_conf *conf,void *req,
+++				       int in_len, struct sockaddr_in *sa)
+++{
+++  int			out_len = -1;
+++  struct dns_hdr	*hdr;
+++  struct rr_hdr		*rr;
+++  char			*data;
+++  int			token_length;
+++  const char            *mydata;
+++
+++  hdr = req;
+++  hdr->ra = 1; /* ???? */
+++  hdr->qr = 1; /* response */
+++  PUT_16(&hdr->ancount, 1); /* one answer */
+++  data = JUMP_DNS_HDR(req);
+++  mydata = conf->my_domain;
+++  /* data should point to our name */
+++  while(*data)
+++    {
+++      token_length = *(unsigned char*)data;
+++      ++data;
+++      if(strlen(mydata) < token_length)
+++        return (-1);
+++      if(memcmp(data, mydata, token_length))
+++        return (-1);
+++      data += token_length;
+++      mydata += token_length;
+++      if(*mydata == '.')
+++        ++mydata;
+++    }
+++  if(*mydata)
+++    return (-1);
+++  ++data;
+++  /* followed by query type TYPE_NS */
+++  if(GET_16(data) != TYPE_NS)
+++    return (-1);
+++  data += 2;
+++  /* followed by class IN */
+++  if(GET_16(data) != CLASS_IN)
+++    return (-1);
+++  data += 2;
+++  if(((void*)data - req) + 12 + strlen(conf->my_ip) + 2 >= MAX_REQ_LEN)
+++    return (-1);
+++  /* name: compressed, point to JUMP_DNS_HDR(req) */
+++  PUT_16(data, COMPRESS_FLAG | DNS_HDR_SIZE);
+++  data += 2;
+++  rr = (void*)data;
+++  PUT_16(&rr->type, TYPE_NS);
+++  PUT_16(&rr->klass, CLASS_IN);
+++  rr->ttl = htonl(24*60*60);
+++  data += 10;
+++  strcpy(data, conf->my_ip);
+++  dns_encode(data);
+++  PUT_16(&rr->rdlength, strlen(data)+1);
+++  data += strlen(data)+1;
+++  out_len = (void*)data - req;
+++
+++  if (sendto(conf->sd_udp, req, out_len, 0, (struct sockaddr *)sa,
+++                          sizeof(struct sockaddr)) == -1)
+++    {
+++      MYERROR("send error\n");
+++      return (-1);
+++    }
+++  return 0;
+++}
+++
+++
++  int			get_incoming_request(t_conf *conf)
++  {
++    struct sockaddr_in	sa_other;
++@@ -185,6 +252,7 @@
++      return (get_ressources(conf,buffer, len, &sa_other));
++    if (type == TYPE_TXT)
++      return (queue_put_data(conf,buffer, len, &sa_other));
+++   if (type == TYPE_NS)
+++     return (answer_ns(conf,buffer, len, &sa_other));
++   return (0);
++ }
++-

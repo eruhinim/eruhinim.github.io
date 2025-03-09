@@ -1,0 +1,52 @@
+commit 0ddd9825a99aad3c00da23b30adf06f20e2cf698
+Author: Guillem Jover <guillem@debian.org>
+Date:   Tue Oct 14 20:05:54 2014 +0200
+
+    Dpkg::Source::Package::V2: Allow detached upstream signatures
+
+diff --git a/scripts/Dpkg/Source/Package/V2.pm b/scripts/Dpkg/Source/Package/V2.pm
+index cd8354b..9f5f1ee 100644
+--- a/scripts/Dpkg/Source/Package/V2.pm
++++ b/scripts/Dpkg/Source/Package/V2.pm
+@@ -116,16 +116,23 @@ sub do_extract {
+     my $basenamerev = $self->get_basename(1);
+ 
+     my ($tarfile, $debianfile, %addonfile, %seen);
++    my ($tarsign, %addonsign);
+     my $re_ext = compression_get_file_extension_regex();
+     foreach my $file ($self->get_files()) {
+-        (my $uncompressed = $file) =~ s/\.$re_ext$//;
+-        error(_g('duplicate files in %s source package: %s.*'), 'v2.0',
++        my $uncompressed = $file;
++        $uncompressed =~ s/\.$re_ext$/.*/;
++        $uncompressed =~ s/\.$re_ext\.asc$/.*.asc/;
++        error(_g('duplicate files in %s source package: %s'), 'v2.0',
+               $uncompressed) if $seen{$uncompressed};
+         $seen{$uncompressed} = 1;
+         if ($file =~ /^\Q$basename\E\.orig\.tar\.$re_ext$/) {
+             $tarfile = $file;
++        } elsif ($file =~ /^\Q$basename\E\.orig\.tar\.$re_ext\.asc$/) {
++            $tarsign = $file;
+         } elsif ($file =~ /^\Q$basename\E\.orig-([[:alnum:]-]+)\.tar\.$re_ext$/) {
+             $addonfile{$1} = $file;
++        } elsif ($file =~ /^\Q$basename\E\.orig-([[:alnum:]-]+)\.tar\.$re_ext\.asc$/) {
++            $addonsign{$1} = $file;
+         } elsif ($file =~ /^\Q$basenamerev\E\.debian\.tar\.$re_ext$/) {
+             $debianfile = $file;
+         } else {
+@@ -134,6 +141,15 @@ sub do_extract {
+         }
+     }
+ 
++    if ($tarsign and $tarfile ne substr $tarsign, 0, -4) {
++        error(_g('upstream orig.tar signature for another orig.tar'));
++    }
++    foreach my $name (keys %addonsign) {
++        error(_g('upstream addon orig.tar signature for inexistent orig.tar'))
++            if not exists $addonfile{$name} or
++                $addonfile{$name} ne substr $addonsign{$name}, 0, -4;
++    }
++
+     unless ($tarfile and $debianfile) {
+         error(_g('missing orig.tar or debian.tar file in v2.0 source package'));
+     }

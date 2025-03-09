@@ -1,0 +1,74 @@
+From 2f394a8b1e24b1bd0cef22cb2891c69f07820643 Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@hadrons.org>
+Date: Sun, 5 Mar 2023 18:16:17 +0100
+Subject: [PATCH] Fix _aide user handling
+
+Add dependencies on adduser | systemd-sysusers to guarantee either of
+the commands are around and the user can be created.
+
+Add libcap2-bin to aide-common Recommends so that it is obvious it will
+be optionally used.
+
+Call adduser to create the user, by using the old options to guarantee
+smooth partial upgrades, as a versioned dependency would not guarantee
+the options are around given the alternative dependency.
+
+We also need to fix the ownership of the aideinit.* log files, and update
+the version where all ownership and permissions get applied to the
+current version, otherwise with a previous version where the user was
+not created these will remain with the wrong metadata.
+
+Closes: #1032381
+---
+ debian/aide-common.postinst | 11 +++++++++--
+ debian/control              |  2 ++
+ 2 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/debian/aide-common.postinst b/debian/aide-common.postinst
+index 6cf4be6..05f7eed 100755
+--- a/debian/aide-common.postinst
++++ b/debian/aide-common.postinst
+@@ -42,16 +42,23 @@ esac
+ SRCDIR="/usr/share/$PKGNAME/config"
+ TRGDIR="/etc"
+ 
+-if command -v systemd-sysusers >/dev/null; then
++if command -v adduser >/dev/null; then
++    # XXX: Use deprecated options to handle a smooth partial upgrade,
++    # switch the the new options after bookworm's release.
++    adduser --system --group --force-badname --quiet \
++        --no-create-home --home /var/lib/aide --shell /usr/sbin/nologin \
++        ---gecos 'Advanced Intrusion Detection Environment' _aide
++elif command -v systemd-sysusers >/dev/null; then
+     systemd-sysusers
+ fi
+ 
+ # added updating to 0.18-1
+ rm -rf /var/tmp/aide.cron.daily /var/tmp/aide.cron.daily.old.*
+ 
+-if dpkg --compare-versions "$2" lt 0.17.5-1; then
++if dpkg --compare-versions "$2" lt "0.18-2"; then
+     # we're updating from a version earlier than 0.17.5, chown logs and databases
+     chown --quiet _aide:adm /var/log/aide /var/log/aide/aide.log /var/log/aide/aide.log.* || true
++    chown --quiet _aide:adm /var/log/aide/aideinit.log /var/log/aide/aideinit.errors || true
+     chmod --quiet 2755 /var/log/aide || true
+     chown --quiet _aide:root /var/lib/aide/aide.db /var/lib/aide/aide.db.new || true
+ fi
+diff --git a/debian/control b/debian/control
+index 4730c43..c7a8438 100644
+--- a/debian/control
++++ b/debian/control
+@@ -49,8 +49,10 @@ Architecture: all
+ Depends: aide (>= 0.17),
+          liblockfile1,
+          ucf (>= 2.0020),
++         adduser | systemd-sysusers,
+          ${misc:Depends}
+ Recommends: cron,
++         libcap2-bin,
+          bsd-mailx | mailx | s-nail
+ Description: Advanced Intrusion Detection Environment - Common files
+  AIDE is an intrusion detection system that detects changes to files on
+-- 
+2.39.2
+

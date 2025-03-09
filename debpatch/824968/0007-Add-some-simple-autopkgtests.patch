@@ -1,0 +1,194 @@
+From cb3042bd4ca549e9b6452bc9afdd65929f287f81 Mon Sep 17 00:00:00 2001
+From: Simon McVittie <smcv@debian.org>
+Date: Sat, 21 May 2016 21:44:19 +0100
+Subject: [PATCH 07/11] Add some simple autopkgtests
+
+In particular, "userns" verifies that upstream bug 71 is fixed.
+---
+ debian/changelog        |  1 +
+ debian/tests/basic      | 13 +++++++++++++
+ debian/tests/control    |  5 +++++
+ debian/tests/dev        | 36 ++++++++++++++++++++++++++++++++++++
+ debian/tests/testlib.sh | 40 ++++++++++++++++++++++++++++++++++++++++
+ debian/tests/userns     | 35 +++++++++++++++++++++++++++++++++++
+ 6 files changed, 130 insertions(+)
+ create mode 100755 debian/tests/basic
+ create mode 100644 debian/tests/control
+ create mode 100755 debian/tests/dev
+ create mode 100644 debian/tests/testlib.sh
+ create mode 100755 debian/tests/userns
+
+diff --git a/debian/changelog b/debian/changelog
+index 77fece6..7435098 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -9,6 +9,7 @@ bubblewrap (0~git160513-3) UNRELEASED; urgency=medium
+   * debian/gbp.conf: add DEP-14-style git-buildpackage configuration
+   * Add patches from upstream bug 71 to make --dev coexist with
+     --unshare-user
++  * Add some simple autopkgtests, including one for bug 71
+ 
+  -- Simon McVittie <smcv@debian.org>  Sat, 21 May 2016 15:10:56 +0100
+ 
+diff --git a/debian/tests/basic b/debian/tests/basic
+new file mode 100755
+index 0000000..41d6597
+--- /dev/null
++++ b/debian/tests/basic
+@@ -0,0 +1,13 @@
++#!/usr/bin/bats
++# vim:set sw=4 sts=4 et ft=sh:
++
++set -e
++
++. debian/tests/testlib.sh
++
++@test "Basic usage" {
++    ret=0
++    run bwrap --ro-bind / / /usr/bin/id
++    is "$status" 0
++    is "$output" "$(id)"
++}
+diff --git a/debian/tests/control b/debian/tests/control
+new file mode 100644
+index 0000000..9774a97
+--- /dev/null
++++ b/debian/tests/control
+@@ -0,0 +1,5 @@
++Tests:
++ userns
++Depends:
++ bats,
++ bubblewrap,
+diff --git a/debian/tests/dev b/debian/tests/dev
+new file mode 100755
+index 0000000..f14b7e8
+--- /dev/null
++++ b/debian/tests/dev
+@@ -0,0 +1,36 @@
++#!/usr/bin/bats
++# vim:set sw=4 sts=4 et ft=sh:
++
++set -e
++
++. debian/tests/testlib.sh
++
++@test "Mount new minimal /dev" {
++    run bwrap --ro-bind / / --dev /dev /bin/sh -c 'echo /dev/*'
++
++    like " $output " " /dev/full "
++    like " $output " " /dev/null "
++    like " $output " " /dev/pts "
++    like " $output " " /dev/random "
++    like " $output " " /dev/shm "
++    like " $output " " /dev/stderr "
++    like " $output " " /dev/stdin "
++    like " $output " " /dev/stdout "
++    like " $output " " /dev/tty "
++    like " $output " " /dev/urandom "
++    like " $output " " /dev/zero "
++
++    # an arbitrary selection of devices not expected to be passed through
++    unlike " $output " " /dev/hda "
++    unlike " $output " " /dev/dsp "
++    unlike " $output " " /dev/fuse "
++    unlike " $output " " /dev/kmsg "
++    unlike " $output " " /dev/loop0 "
++    unlike " $output " " /dev/mem "
++    unlike " $output " " /dev/sda "
++    unlike " $output " " /dev/snd "
++    unlike " $output " " /dev/tty1 "
++    unlike " $output " " /dev/vda "
++
++    is "$status" 0
++}
+diff --git a/debian/tests/testlib.sh b/debian/tests/testlib.sh
+new file mode 100644
+index 0000000..31946b0
+--- /dev/null
++++ b/debian/tests/testlib.sh
+@@ -0,0 +1,40 @@
++# vim:set sw=4 sts=4 et ft=sh:
++
++# is GOT EXPECTED
++# Assert that GOT == EXPECTED.
++# (Inspired by Perl's Test::More)
++is () {
++    if [ "x$1" = "x$2" ]; then
++        return 0
++    else
++        printf "# got:      %q\n" "$1"
++        printf "# expected: %q\n" "$2"
++        return 1
++    fi
++}
++
++# like GOT EREGEX
++# Assert that GOT matches EREGEX.
++# (Inspired by Perl's Test::More)
++like () {
++    if [[ $1 =~ $2 ]]; then
++        return 0
++    else
++        printf "# got:              %q\n" "$1"
++        printf "# should match ERE: %q\n" "$2"
++        return 1
++    fi
++}
++
++# unlike GOT EREGEX
++# Assert that GOT matches EREGEX.
++# (Inspired by Perl's Test::More)
++unlike () {
++    if [[ $1 =~ $2 ]]; then
++        printf "# got:                  %q\n" "$1"
++        printf "# should not match ERE: %q\n" "$2"
++        return 1
++    else
++        return 0
++    fi
++}
+diff --git a/debian/tests/userns b/debian/tests/userns
+new file mode 100755
+index 0000000..c8862c6
+--- /dev/null
++++ b/debian/tests/userns
+@@ -0,0 +1,35 @@
++#!/usr/bin/bats
++# vim:set sw=4 sts=4 et ft=sh:
++
++set -e
++
++. debian/tests/testlib.sh
++
++@test "Unshare user ID" {
++    run bwrap --ro-bind / / --unshare-user --uid 2 --gid 3 /usr/bin/id -u
++    is "$status" 0
++    is "$output" 2
++    run bwrap --ro-bind / / --unshare-user --uid 2 --gid 3 /usr/bin/id -g
++    is "$status" 0
++    is "$output" 3
++    run bwrap --ro-bind / / --unshare-user --uid 2 --gid 3 /bin/sh -c 'ls -l /etc/passwd'
++    is "$status" 0
++    like "$output" " nobody nogroup "
++}
++
++@test "Combine new /dev with new user namespace (#71)" {
++    run bwrap --ro-bind / / --unshare-user --uid 2 --gid 3 --dev /dev /bin/sh -c 'echo /dev/*'
++
++    like " $output " " /dev/full "
++    unlike " $output " " /dev/tty1 "
++
++    is "$status" 0
++
++    run bwrap --ro-bind / / --unshare-user --uid 2 --gid 3 --dev /dev /usr/bin/id -u
++    is "$status" 0
++    is "$output" 2
++
++    run bwrap --ro-bind / / --unshare-user --uid 2 --gid 3 --dev /dev /usr/bin/id -g
++    is "$status" 0
++    is "$output" 3
++}
+-- 
+2.8.1
+

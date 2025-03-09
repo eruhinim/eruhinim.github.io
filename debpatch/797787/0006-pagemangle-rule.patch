@@ -1,0 +1,152 @@
+From 9bdf05d0f2774a4284b9ddb484f1a680751caafa Mon Sep 17 00:00:00 2001
+From: Osamu Aoki <osamu@debian.org>
+Date: Thu, 27 Aug 2015 22:35:38 +0900
+Subject: [PATCH 6/8] pagemangle rule
+
+ * generic way to mangle the whole web page.
+ * s3.amazonaws.com special case code is marked deprecated.
+ * address needs for fullsourcemangle.  Closes: #395439
+ * text in <a>...</a> is a special case.  Closes: #705989
+ * s/data-realurl/href/g is a special case.  Closes: #773390
+---
+ scripts/uscan.pl | 22 ++++++++++++++++++-
+ test/test_uscan  | 66 +++++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 86 insertions(+), 2 deletions(-)
+
+diff --git a/scripts/uscan.pl b/scripts/uscan.pl
+index c5503e1..8b9bc74 100644
+--- a/scripts/uscan.pl
++++ b/scripts/uscan.pl
+@@ -1742,6 +1742,9 @@ sub process_watchline ($$$$$$)
+ 		    @{$options{'uversionmangle'}} = split /;/, $1;
+ 		    @{$options{'dversionmangle'}} = split /;/, $1;
+ 		}
++		elsif ($opt =~ /^pagemangle\s*=\s*(.+)/) {
++		    @{$options{'pagemangle'}} = split /;/, $1;
++		}
+ 		elsif ($opt =~ /^filenamemangle\s*=\s*(.+)/) {
+ 		    @{$options{'filenamemangle'}} = split /;/, $1;
+ 		}
+@@ -1917,10 +1920,25 @@ sub process_watchline ($$$$$$)
+ 	print STDERR "$progname debug: received content:\n$content\[End of received content]\n"
+ 	    if $debug;
+ 
++	print STDERR "PRE-pagemangle \$content\n$content\n\n" if $debug;
++	# pagenmangle: should not abuse this slow operation
++	foreach my $pat (@{$options{'pagemangle'}}) {
++	    print STDERR "opts=\"pagemangle=$pat\"\n" if $debug;
++	    if (! safe_replace(\$content, $pat)) {
++		uscan_warn "$progname: In $watchfile, potentially"
++		  . " unsafe or malformed pagemangle"
++		  . " pattern:\n  '$pat'"
++		  . " found. Skipping watchline\n"
++		  . "  $line\n";
++		return 1;
++	    }
++	}
+ 	if ($content =~ m%^<[?]xml%i &&
+-	    $content =~ m%xmlns="http://s3.amazonaws.com/doc/2006-03-01/"%) {
++	    $content =~ m%xmlns="http://s3.amazonaws.com/doc/2006-03-01/"% &&
++	    $content !~ m%<Key><a\s+href%) {
+ 	    # this is an S3 bucket listing.  Insert an 'a href' tag
+ 	    # into the content for each 'Key', so that it looks like html (LP: #798293)
++	    uscan_warn "*** Amazon special case code is deprecated***\nUse opts=pagemangle rule, instead\n";
+ 	    print STDERR "$progname debug: fixing s3 listing\n" if $debug;
+ 	    $content =~ s%<Key>([^<]*)</Key>%<Key><a href="$1">$1</a></Key>%g
+ 	}
+@@ -1941,6 +1959,8 @@ sub process_watchline ($$$$$$)
+ 	    ($urlbase = $base) =~ s%/[^/]*$%/%;
+ 	}
+ 
++	print STDERR "POST-pagemangle \$content\n$content\n\n" if $debug;
++
+ 	print STDERR "$progname debug: matching pattern(s) @patterns\n" if $debug;
+ 	my @hrefs;
+ 	while ($content =~ m/<\s*a\s+[^>]*href\s*=\s*([\"\'])(.*?)\1/sgi) {
+diff --git a/test/test_uscan b/test/test_uscan
+index 24c5202..1c318a9 100755
+--- a/test/test_uscan
++++ b/test/test_uscan
+@@ -435,6 +435,59 @@ END
+ <a href="/123/foo/ooo/$PKG-0.0.tar.gz">Very old</a> <br/ >
+ <a href="/123/foo/ooo/$PKG-1.0.tar.gz">A bit OLD</a> <br />
+ <a href="/123/foo/ooo/$PKG-2.0.tar.gz">Latest</a> <br />
++<<<<<<< HEAD
++=======
++</body>
++<html>
++END
++    (cd $TMPDIR/$PKG ; $COMMAND )
++    WATCH=`grep -A2 -e "http:" $PKG/debian/watch`
++    assertTrue "$UTARBALL missing: $WATCH" "[ -f $UTARBALL ]"
++    assertTrue "$STARBALL missing: $WATCH" "[ -f $STARBALL ]"
++    rm -f $UTARBALL $STARBALL
++#############################################################################
++    echo "=== 2 strings with / via a web page after pagemangle bogus (native)"
++    cat <<END > $PKG/debian/watch
++version=3
++opts="pagemangle=s/bogus/href/g" \\
++http://localhost:$PORT/ \\
++(?:.*)/$PKG-([\d\.]+).tar.gz
++END
++    cat <<END > repo/index.html
++<html>
++<head>
++  <meta charset="utf-8">
++</head>
++<body>
++<a bogus="/123/foo/ooo/$PKG-0.0.tar.gz">Very old</a> <br/ >
++<a bogus="/123/foo/ooo/$PKG-1.0.tar.gz">A bit OLD</a> <br />
++<a bogus="/123/foo/ooo/$PKG-2.0.tar.gz">Latest</a> <br />
++</body>
++<html>
++END
++    (cd $TMPDIR/$PKG ; $COMMAND )
++    WATCH=`grep -A2 -e "http:" $PKG/debian/watch`
++    assertTrue "$UTARBALL missing: $WATCH" "[ -f $UTARBALL ]"
++    assertTrue "$STARBALL missing: $WATCH" "[ -f $STARBALL ]"
++    rm -f $UTARBALL $STARBALL
++#############################################################################
++    echo "=== 2 strings with / via a web page after pagemangle <key> (native)"
++    cat <<END > $PKG/debian/watch
++version=3
++opts="pagemangle=s%<Key>([^<]*)</Key>%<Key><a href="\$1">\$1</a></Key>%g" \\
++http://localhost:$PORT/ \\
++(?:.*)/$PKG-([\d\.]+).tar.gz
++END
++    cat <<END > repo/index.html
++<html>
++<head>
++  <meta charset="utf-8">
++</head>
++<body>
++<Key>/123/foo/ooo/$PKG-0.0.tar.gz</Key> <br/ >
++<Key>/123/foo/ooo/$PKG-1.0.tar.gz</Key> <br />
++<Key>/123/foo/ooo/$PKG-2.0.tar.gz</Key> <br />
++>>>>>>> 43e73bc... test uscan for pagemangle
+ </body>
+ <html>
+ END
+@@ -465,7 +518,18 @@ http://localhost:$PORT \\
+ (?:.*)/$PKG-(\d+)\.(\d+)\.tar\.gz \\
+ debian uupdate
+ END
+-
++    cat <<END > repo/index.html
++<html>
++<head>
++  <meta charset="utf-8">
++</head>
++<body>
++<a href="/123/foo/ooo/$PKG-0.0.tar.gz">Very old</a> <br/ >
++<a href="/123/foo/ooo/$PKG-1.0.tar.gz">A bit OLD</a> <br />
++<a href="/123/foo/ooo/$PKG-2.0.tar.gz">Latest</a> <br />
++</body>
++<html>
++END
+     DTARBALL=${PKG}_1.0-1.debian.tar.xz
+     ( cd $TMPDIR/$PKG ; tar -cJf $TMPDIR/$DTARBALL debian )
+     ( cd $TMPDIR/$PKG ; $COMMAND )
+-- 
+2.1.4
+

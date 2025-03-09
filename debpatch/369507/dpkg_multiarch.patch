@@ -1,0 +1,530 @@
+--- orig/configure.ac
++++ mod/configure.ac
+@@ -10,6 +10,17 @@
+ 
+ AM_INIT_AUTOMAKE([1.8 gnu])
+ 
++dpkg_archlist=''
++AC_MSG_CHECKING(Debian compatible-architecture list)
++dpkg_archlist="`awk '$1 == "'$dpkg_archset'" { $1=""; print $0 }' $srcdir/subarchtable`"
++if test "x$dpkg_archlist" = "x"; then
++   AC_MSG_RESULT([$dpkg_archset not found in subarchtable])
++   dpkg_archlist='{ "'$dpkg_archset'" }'
++   else
++   AC_MSG_RESULT([found])
++fi
++AC_DEFINE_UNQUOTED(ARCH_LIST, ${dpkg_archlist}, [Set this to the list of allowable architectures for this CPU type.])
++
+ AM_GNU_GETTEXT_VERSION(0.14.1)
+ AM_GNU_GETTEXT()
+ 
+
+
+--- orig/debian/changelog
++++ mod/debian/changelog
+@@ -1,3 +1,9 @@
++dpkg (1.13.2~multiarch1) multiarch; urgency=low
++
++  * Update multiarch patches to current newest version
++
++ -- Tollef Fog Heen <tfheen@debian.org>  Tue,  8 Mar 2005 13:50:31 +0100
++  
+ dpkg (1.13.2~) experimental; urgency=low
+ 
+   * 
+@@ -278,6 +284,22 @@
+ 
+  -- Scott James Remnant <scott@netsplit.com>  Tue,  1 Jun 2004 18:21:40 -0300
+ 
++dpkg (1.10.21.multiarch.20040601.01) unstable; urgency=low
++
++  * Fix (badly) problem of migrating uniarch libs to multiarch.
++
++ -- Hugo Mills <hugo@carfax.org.uk>  Tue, 1 Jun 2004 20:29:40 +0100
++
++dpkg (1.10.21.multiarch.20040528.01) unstable; urgency=low
++
++  * Accept Multi-Arch: field in control files.
++  * Add database of acceptable architectures for multi-arch systems.
++  * Use libfoo:arch for package name internally for all multi-arch
++    packages.
++  * Handle shared symlinks for multi-arch packages.
++
++ -- Hugo Mills <hugo@carfax.org.uk>  Fri, 28 May 2004 20:18:19 +0100
++
+ dpkg (1.10.21) unstable; urgency=low
+ 
+   * Fix incorrect linked list node removal code that caused every second
+
+
+--- orig/dpkg-deb/build.c
++++ mod/dpkg-deb/build.c
+@@ -211,9 +211,11 @@
+     parsedb(controlfile, pdb_recordavailable|pdb_rejectstatus,
+             &checkedinfo, stderr, &warns);
+     assert(checkedinfo->available.valid);
++	/* The name of the package may be libfoo:arch if it's a multiarch
++	 * package. */
+     if (strspn(checkedinfo->name,
+                "abcdefghijklmnopqrstuvwxyz0123456789+-.")
+-        != strlen(checkedinfo->name))
++        < strcspn(checkedinfo->name, ":"))
+       ohshit(_("package name has characters that aren't lowercase alphanums or `-+.'"));
+     if (checkedinfo->priority == pri_other) {
+       fprintf(stderr, _("warning, `%s' contains user-defined Priority value `%s'\n"),
+
+
+--- orig/lib/database.c
++++ mod/lib/database.c
+@@ -86,6 +86,7 @@
+   pifp->conffiles= NULL;
+   pifp->arbs= NULL;
+   pifp->valid= 1;
++  pifp->multiarch= 0;
+ }
+ 
+ static int nes(const char *s) { return s && *s; }
+@@ -121,6 +122,15 @@
+   struct pkginfo **pointerp, *newpkg;
+   char *name = strdup(inname), *p;
+ 
++/*
++  if(strchr(inname, ':') || strncmp(inname, "libfoo", 6) == 0)
++  {
++	  fprintf(stderr,
++			  "Findpackage looking for an interesting package: %s\n", 
++			  inname);
++  }
++*/
++
+   if (name == NULL)
+     ohshite(_("couldn't allocate memory for strdup in findpackage(%s)"),inname);
+   p= name;
+@@ -129,7 +139,22 @@
+   pointerp= bins + (hash(name) % (BINS));
+   while (*pointerp && strcasecmp((*pointerp)->name,name))
+     pointerp= &(*pointerp)->next;
+-  if (*pointerp) { free(name); return *pointerp; }
++  if (*pointerp) 
++  { 
++	  free(name); 
++
++/*
++	  if(strchr(inname, ':') || strncmp(inname, "libfoo", 6) == 0)
++	  {
++		  fprintf(stderr, "  Found package: multiarch flags are: "
++				  "%d (available) %d (installed)\n",
++				  (*pointerp)->available.multiarch,
++				  (*pointerp)->installed.multiarch);
++	  }
++*/
++
++	  return *pointerp; 
++  }
+ 
+   newpkg= nfmalloc(sizeof(struct pkginfo));
+   blankpackage(newpkg);
+
+
+--- orig/lib/dpkg-db.h
++++ mod/lib/dpkg-db.h
+@@ -103,6 +103,7 @@
+   struct versionrevision version;
+   struct conffile *conffiles;
+   struct arbitraryfield *arbs;
++  int multiarch; /* The 'Multi-Arch' flag, 1=yes, 0=no */
+ };
+ 
+ struct perpackagestate; /* dselect and dpkg have different versions of this */
+
+
+--- orig/lib/dpkg.h
++++ mod/lib/dpkg.h
+@@ -108,6 +108,7 @@
+ #define DEFAULTSHELL        "sh"
+ #define PAGERENV            "PAGER"
+ #define DEFAULTPAGER        "pager"
++#define ARCHLISTENV         "DPKG_ARCH"
+ 
+ #define IMETHODMAXLEN        50
+ #define IOPTIONMAXLEN        IMETHODMAXLEN
+@@ -362,6 +363,10 @@
+ 
+ extern volatile int onerr_abort;
+ 
++/*** from multi-arch.c ***/
++
++int is_allowable_arch(char*);
++
+ /*** from showcright.c ***/
+ 
+ struct cmdinfo;
+
+
+--- orig/lib/dump.c
++++ mod/lib/dump.c
+@@ -42,7 +42,11 @@
+   assert(pigp->name);
+   if (flags&fw_printheader)
+     varbufaddstr(vb,"Package: ");
+-  varbufaddstr(vb, pigp->name);
++  if (pifp->multiarch) {
++	varbufaddbuf(vb, pigp->name, strcspn(pigp->name, ":"));
++  } else {
++	varbufaddstr(vb, pigp->name);
++  }
+   if (flags&fw_printheader)
+     varbufaddc(vb,'\n');
+ }
+
+
+--- orig/lib/fields.c
++++ mod/lib/fields.c
+@@ -70,9 +70,24 @@
+             const char *filename, int lno, FILE *warnto, int *warncount,
+             const char *value, const struct fieldinfo *fip) {
+   const char *e;
++  char *p;
+   if ((e= illegal_packagename(value,NULL)) != NULL)
+     parseerr(NULL,filename,lno, warnto,warncount,pigp,0, _("invalid package name (%.250s)"),e);
+-  pigp->name= findpackage(value)->name;
++  pigp->name= strdup(value);
++  /* @@@ FIXME Check for return value of the strdup here and bitch
++   * about it if it couldn't allocate memory */
++  /* @@@ Optimisation opportunity: allocate a single static buffer for
++   * this purpose, instead of using strdup() */
++
++  /* @@@ Don't use findpackage here yet -- do the tolower mangling
++   * ourselves. The findpackage will be called after all the fields
++   * have been read in, and the architecture is known.  Also, allocate
++   * our own temporary memory for the name here.
++   */
++  p= pigp->name;
++  while(*p) { *p= tolower(*p); p++; }
++
++/*  pigp->name= findpackage(value)->name; */
+   /* We use the new name, as findpackage() may have
+      done a tolower for us.
+    */
+@@ -129,11 +144,10 @@
+                enum parsedbflags flags,
+                const char *filename, int lno, FILE *warnto, int *warncount,
+                const char *value, const struct fieldinfo *fip) {
+-  pifp->essential=
+-    *value ? convert_string(filename,lno,_("yes/no in boolean field"), -1,
+-                            warnto,warncount,pigp,
+-                            value,booleaninfos,NULL)
+-           : 0;
++  if (!*value) return;
++  PKGPFIELD(pifp,fip->integer,int)= 
++	convert_string(filename,lno,_("yes/no in boolean field"),
++				   -1,warnto,warncount,pigp,value,booleaninfos,NULL);
+ }
+ 
+ void f_section(struct pkginfo *pigp, struct pkginfoperfile *pifp,
+
+
+--- orig/lib/parse.c
++++ mod/lib/parse.c
+@@ -69,6 +69,7 @@
+   { "MD5sum",           f_filecharf,       w_filecharf,      FILEFOFF(md5sum)         },
+   { "MSDOS-Filename",   f_filecharf,       w_filecharf,      FILEFOFF(msdosname)      },
+   { "Description",      f_charfield,       w_charfield,      PKGIFPOFF(description)   },
++  { "Multi-Arch",       f_boolean,         w_booleandefno,   PKGIFPOFF(multiarch)     },
+   /* Note that aliases are added to the nicknames table in parsehelp.c. */
+   {  NULL   /* sentinel - tells code that list is ended */                               }
+ };
+@@ -98,6 +99,7 @@
+   int fieldlen= 0, valuelen= 0;
+   int *ip, c;
+   struct stat stat;
++  const char *tmp_name;
+ 
+   if (warncount) *warncount= 0;
+   newpifp= (flags & pdb_recordavailable) ? &newpig.available : &newpig.installed;
+@@ -194,6 +196,7 @@
+ 	fieldstart= nick->canon;
+ 	fieldlen= strlen(fieldstart);
+       }
++/* @@@ Start of field loading code. Everything above here is basic parsing */
+       for (fip= fieldinfos, ip= fieldencountered;
+            fip->name && strncasecmp(fieldstart,fip->name, fieldlen);
+            fip++, ip++);
+@@ -224,6 +227,17 @@
+       }
+       if (EOF_mmap(dataptr, endptr) || c == '\n' || c == MSDOS_EOF_CHAR) break;
+     } /* loop per field */
++/* @@@ Done loading the package info now */
++	/* @@@ Check to see if we have a multiarch package. If so, modify
++	 * its name */
++	if (newpifp->multiarch) {
++		tmp_name= newpig.name;
++		newpig.name= m_malloc(strlen(newpig.name) + strlen(newpifp->architecture) + 2);
++		strcpy(newpig.name, tmp_name);
++		strcat(newpig.name, ":");
++		strcat(newpig.name, newpifp->architecture);
++	}
++
+     if (pdone && donep)
+       parseerr(NULL,filename,lno, warnto,warncount,&newpig,0,
+                _("several package info entries found, only one allowed"));
+@@ -270,9 +284,26 @@
+       newpifp->conffiles= NULL;
+     }
+ 
++/*
++	if(newpifp->multiarch || strncmp(newpig.name, "libfoo", 6) == 0) {
++		fprintf(stderr, "Found an interesting package: %s %s %d\n",
++				newpig.name,
++				newpifp->architecture,
++				newpifp->multiarch);
++		if(flags & pdb_recordavailable)
++			fprintf(stderr, "  Recording as available\n");
++		else
++			fprintf(stderr, "  Recording as installed?\n");
++	}
++*/
++
+     pigp= findpackage(newpig.name);
+     pifp= (flags & pdb_recordavailable) ? &pigp->available : &pigp->installed;
+     if (!pifp->valid) blankpackageperfile(pifp);
++	/* @@@ Throw away the old temporary name we were using and rewrite
++	 * to use the one that findpackage gave us */
++	free(newpig.name);
++	newpig.name= pigp->name;
+ 
+     /* Copy the priority and section across, but don't overwrite existing
+      * values if the pdb_weakclassification flag is set.
+@@ -313,7 +344,7 @@
+     pdone++;
+     if (EOF_mmap(dataptr, endptr)) break;
+     if (c == '\n') lno++;
+-  }
++  } /* Loop per package */
+   pop_cleanup(0);
+ #ifdef HAVE_MMAP
+   munmap(data, stat.st_size);
+
+
+--- orig/src/archives.c
++++ mod/src/archives.c
+@@ -235,6 +235,7 @@
+                           struct pkginfoperfile *newpifp,
+                           struct pkginfo *oldpigp) {
+   struct dependency *dep;
++  int len;
+   
+   debug(dbg_depcon,"does_replace new=%s old=%s (%s)",newpigp->name,
+         oldpigp->name,versiondescribe(&oldpigp->installed.version,
+@@ -247,6 +248,18 @@
+     debug(dbg_depcon,"does_replace ... yes");
+     return 1;
+   }
++
++  /* @@@ Implicit replaces between multiarch and uniarch packages with
++   * the same name. Nasty hackery here. */
++  if (newpifp->multiarch) {
++	  len = strcspn(newpigp->name, ":");
++	  if (strncmp(newpigp->name, oldpigp->name, len) == 0
++		  && oldpigp->name[len] == 0) {
++		  debug(dbg_depcon,"does_replace ... yes (implicit multiarch)");
++		  return 1;
++	  }
++  }
++
+   debug(dbg_depcon,"does_replace ... no");
+   return 0;
+ }
+@@ -458,16 +471,50 @@
+             forcibleerr(fc_overwritedir, _("trying to overwrite directory `%.250s' "
+                         "in package %.250s with nondirectory"),
+                         nifd->namenode->name,otherpkg->name);
+-          } else {
+-            /* WTA: At this point we are replacing something without a Replaces.
+-	     * if the new object is a directory and the previous object does not
+-	     * exist assume it's also a directory and don't complain
+-	     */
+-            if (! (statr && ti->Type==Directory))
+-              forcibleerr(fc_overwrite,
+-                        _("trying to overwrite `%.250s', which is also in package %.250s"),
+-                        nifd->namenode->name,otherpkg->name);
++			continue;
++		  }
++		  /* If both packages are multiarch, and we're replacing a link
++		   * with a link */
++		  if (tc->pkg->available.multiarch && otherpkg->installed.multiarch
++			  && !statr && S_ISLNK(stab.st_mode) && ti->Type == SymbolicLink) {
++			/* If both packages have the same name, modulo architecture */
++			if(strncmp(tc->pkg->name, 
++					   otherpkg->name, 
++					   strcspn(tc->pkg->name, ":")
++					   ) == 0) {
++			  /* Bah. readlink() doesn't tell us how much space it
++			   * actually needs, so keep trying until it works */
++			  int bufsize= 250;
++			  char *buf= m_malloc(sizeof(char)*bufsize);
++			  int sizeread= readlink(fnamevb.buf, buf, bufsize);
++
++			  while(sizeread == bufsize) {
++				bufsize *= 2;
++				buf= m_realloc(buf, sizeof(char)*bufsize);
++				sizeread= readlink(fnamevb.buf, buf, bufsize);
++			  }
++
++			  if(sizeread == -1) {
++				perror("readlink() problem: ");
++				ohshite("Had trouble reading link %.250s which previous experience suggests existed not 100 lines above", otherpkg->name);
++			  }
++
++			  /* If both links point to the same place */
++			  if(strncmp(buf, ti->LinkName, sizeread) == 0) {
++				free(buf);
++				continue;
++			  }
++			  free(buf);
++			}
+           }
++		  /* WTA: At this point we are replacing something without a Replaces.
++		   * if the new object is a directory and the previous object does not
++		   * exist assume it's also a directory and don't complain
++		   */
++		  if (! (statr && ti->Type==Directory))
++			forcibleerr(fc_overwrite,
++                      _("trying to overwrite `%.250s', which is also in package %.250s"),
++                      nifd->namenode->name,otherpkg->name);
+         }
+       }
+     }
+
+
+--- orig/src/main.c
++++ mod/src/main.c
+@@ -547,6 +547,8 @@
+   jmp_buf ejbuf;
+   static void (*actionfunction)(const char *const *argv);
+ 
++  fprintf(stderr, "EXPERIMENTAL BIARCH DPKG 2004-06-01.01\n");
++
+   standard_startup(&ejbuf, argc, &argv, DPKG, 1, cmdinfos);
+   if (!cipaction) badusage(_("need an action option"));
+ 
+
+
+--- orig/src/processarc.c
++++ mod/src/processarc.c
+@@ -84,6 +84,8 @@
+   struct stat stab;
+   struct packageinlist *deconpil, *deconpiltemp;
+   
++  char *truncname;
++
+   cleanup_pkg_failed= cleanup_conflictor_failed= 0;
+   admindirlen= strlen(admindir);
+ 
+@@ -190,6 +192,10 @@
+   waitsubproc(c1,BACKEND " --control",0);
+   strcpy(cidirrest,CONTROLFILE);
+ 
++/*
++  fprintf(stderr, "processarc.c: Loading package details from %s\n", cidir);
++*/
++
+   parsedb(cidir, pdb_recordavailable|pdb_rejectstatus|pdb_ignorefiles|pdb_weakclassification,
+           &pkg,NULL,NULL);
+   if (!pkg->files) {
+@@ -208,8 +214,7 @@
+   }
+ 
+   if (pkg->available.architecture && *pkg->available.architecture &&
+-      strcmp(pkg->available.architecture,"all") &&
+-      strcmp(pkg->available.architecture,architecture))
++	  ! is_allowable_arch(pkg->available.architecture))
+     forcibleerr(fc_architecture,
+                 _("package architecture (%s) does not match system (%s)"),
+                 pkg->available.architecture,architecture);
+@@ -217,6 +222,11 @@
+   if (!pkg->installed.valid) blankpackageperfile(&pkg->installed);
+   assert(pkg->available.valid);
+ 
++/*
++  fprintf(stderr, "  Package %s has multiarch flags %d,%d\n",
++		  pkg->name, pkg->available.multiarch, pkg->installed.multiarch);
++*/
++
+   for (deconpil= deconfigure;
+        deconpil;
+        deconpil= deconpiltemp) {
+@@ -275,6 +285,7 @@
+     if (psearch->up->type != dep_conflicts) continue;
+     check_conflict(psearch->up, pkg, pfilename);
+   }
++  /* @@@ Implied conflicts checks here? */
+   
+   ensure_allinstfiles_available();
+   filesdbinit();
+@@ -809,6 +820,7 @@
+   pkg->installed.version= pkg->available.version;
+   pkg->installed.origin = pkg->available.origin;                               
+   pkg->installed.bugs = pkg->available.bugs;                                   
++  pkg->installed.multiarch = pkg->available.multiarch;
+ 
+   /* We have to generate our own conffiles structure. */
+   pkg->installed.conffiles= 0; iconffileslastp= &pkg->installed.conffiles;
+
+
+
+--- /dev/null
++++ mod/lib/multi-arch.c
+@@ -0,0 +1,46 @@
++/*
++ * libdpkg - Debian packaging suite library routines
++ * multi-arch.c - support for the Multi-Arch: extensions
++ * 
++ * Copyright (C) 2004 Hugo Mills <hugo@carfax.org.uk>
++ *
++ * This is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2,
++ * or (at your option) any later version.
++ *
++ * This is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public
++ * License along with dpkg; if not, write to the Free Software
++ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
++ */
++
++#include <config.h>
++
++#include <string.h>
++#include <stdlib.h>
++
++#include "dpkg.h"
++
++/* List of acceptable architectures */
++const char *architectures[] = ARCH_LIST;
++
++int is_allowable_arch(char *archtest)
++{
++  const char **ptr;
++
++  if(strcmp(archtest,"all") == 0)
++	return 1;
++
++  ptr = architectures;
++  while(*ptr) {
++	if(strcmp(archtest,*ptr) == 0) return 1;
++	ptr++;
++  }
++
++  return 0;
++}
+--- /dev/null
++++ mod/subarchtable
+@@ -0,0 +1,2 @@
++amd64	{ "amd64", "i386", NULL }
++i386	{ "amd64", "i386", NULL }
+

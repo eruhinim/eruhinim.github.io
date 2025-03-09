@@ -1,0 +1,141 @@
+From 3b1f47ce14848be18572233a79c23c7e785c7491 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Rapha=C3=ABl=20Hertzog?= <hertzog@debian.org>
+Date: Fri, 9 Sep 2016 16:03:54 +0200
+Subject: [PATCH] Initialize /etc/radcli only with modified files from
+ /etc/radiusclient/.
+
+Properly install them after initial install from postinst to avoid prompt
+during initial install. Handle the abort case as well.
+
+Closes: #825121
+---
+ debian/changelog           |  9 +++++++++
+ debian/libradcli4.postinst | 17 ++++++++++++++++
+ debian/libradcli4.postrm   | 12 +++++++++++
+ debian/libradcli4.preinst  | 50 ++++++++++++++++++++++++++++++----------------
+ 4 files changed, 71 insertions(+), 17 deletions(-)
+ create mode 100644 debian/libradcli4.postinst
+ create mode 100644 debian/libradcli4.postrm
+
+diff --git a/debian/changelog b/debian/changelog
+index 6fa461e..b9429dd 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,3 +1,12 @@
++radcli (1.2.6-2.1) unstable; urgency=medium
++
++  * Non-maintainer upload.
++  * Initialize /etc/radcli only with modified files from /etc/radiusclient/.
++    Properly install them after initial install from postinst to avoid prompt
++    during initial install. Handle the abort case as well. Closes: #825121
++
++ -- Raphaël Hertzog <hertzog@debian.org>  Fri, 09 Sep 2016 15:53:50 +0200
++
+ radcli (1.2.6-2) unstable; urgency=high
+ 
+   * preinst: update absolute directory paths in files from legacy client
+diff --git a/debian/libradcli4.postinst b/debian/libradcli4.postinst
+new file mode 100644
+index 0000000..d5318a7
+--- /dev/null
++++ b/debian/libradcli4.postinst
+@@ -0,0 +1,17 @@
++#!/bin/sh
++
++set -e
++
++case $1 in
++    configure)
++	for file in /etc/radcli/*.dpkg-migrated; do
++	    if [ ! -e "$file" ]; then
++		continue
++	    fi
++	    echo "Overwriting ${file%%.dpkg-migrated} with original file from libfreeradius-client2"
++	    mv $file ${file%%.dpkg-migrated}
++	done
++    ;;
++esac
++
++#DEBHELPER#
+diff --git a/debian/libradcli4.postrm b/debian/libradcli4.postrm
+new file mode 100644
+index 0000000..e55f50a
+--- /dev/null
++++ b/debian/libradcli4.postrm
+@@ -0,0 +1,12 @@
++#!/bin/sh
++
++set -e
++
++case $1 in
++    abort-install|abort-upgrade)
++	rm -f /etc/radcli/*.migrated
++	rmdir --ignore-fail-on-non-empty /etc/radcli
++    ;;
++esac
++
++#DEBHELPER#
+diff --git a/debian/libradcli4.preinst b/debian/libradcli4.preinst
+index a1f61eb..c854df3 100644
+--- a/debian/libradcli4.preinst
++++ b/debian/libradcli4.preinst
+@@ -1,23 +1,39 @@
+ #!/bin/sh
++
+ set -e
+ 
+-if [ ! -d /etc/radcli ];
+-then
+-    # no radcli config exists
++FILES_TO_MIGRATE="
++/etc/radiusclient/dictionary
++/etc/radiusclient/dictionary.ascend
++/etc/radiusclient/dictionary.compat
++/etc/radiusclient/dictionary.merit
++/etc/radiusclient/dictionary.sip
++/etc/radiusclient/radiusclient.conf
++/etc/radiusclient/servers
++"
+ 
+-    if [ -d /etc/radiusclient ];
+-    then
+-        # a legacy configuration from radiusclient-ng exists, use it,
+-        # as this package is a fork of radiusclient-ng
+-        echo "Using copy of existing /etc/radiusclient to initialize /etc/radcli"
+-        cp -ar /etc/radiusclient /etc/radcli
+-        for f in /etc/radcli/* ;
+-        do
+-            if [ -f "${f}" -a ! -h "${f}" ];
+-            then
+-                sed -i -e 's!/etc/radiusclient/!/etc/radcli/!g' "${f}"
+-            fi
+-        done
+-    fi
++is_modified_conffile() {
++    actual_md5=$(md5sum $1 | awk '{print $1}')
++    expected_md5=$(dpkg-query -f '${Conffiles}' -W libfreeradius-client2 | awk '$1 == "'"$1"'" { print $2 }')
++    test "$actual_md5" != "$expected_md5"
++}
++
++if [ ! -d /etc/radcli ] && [ -d /etc/radiusclient ];
++then
++    # no radcli config exists but a legacy configuration from
++    # radiusclient-ng exists, use it, as this package is a fork of
++    # radiusclient-ng
++    mkdir -p /etc/radcli
++    for file in $FILES_TO_MIGRATE; do
++	if is_modified_conffile $file; then
++	    new_file="/etc/radcli/$(basename $file).dpkg-migrated"
++	    echo "Preparing a copy of $file to initialize ${new_file%%.dpkg-migrated}"
++	    cp -a $file $new_file
++            if [ -f "$new_file" -a ! -h "$new_file" ]; then
++		sed -i -e 's!/etc/radiusclient/!/etc/radcli/!g' "$new_file"
++	    fi
++	fi
++    done
+ fi
+ 
++#DEBHELPER#
+-- 
+2.9.3
+

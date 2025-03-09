@@ -1,0 +1,91 @@
+From 63b4c577c951245904fd59ac8c6021bab18b0de4 Mon Sep 17 00:00:00 2001
+From: Antonio Ospite <ospite@studenti.unina.it>
+Date: Sat, 17 Dec 2011 15:45:16 +0100
+Subject: [PATCH] Make blender compile with FFmpeg from Debian.
+X-Face: z*RaLf`X<@C75u6Ig9}{oW$H;1_\2t5)({*|jhM<pyWR#k60!#=#>/Vb;]yA5<GWI5`6u&+
+ ;6b'@y|8w"wB;4/e!7wYYrcqdJFY,~%Gk_4]cq$Ei/7<j&N3ah(m`ku?pX.&+~:_/wC~dwn^)MizBG
+ !pE^+iDQQ1yC6^,)YDKkxDd!T>\I~93>J<_`<4)A{':UrE
+
+avformat_alloc_output_context2() should be in the libavformat 53.2.0 but
+it isn't in Debian, re-define it.
+
+Signed-off-by: Antonio Ospite <ospite@studenti.unina.it>
+---
+ intern/ffmpeg/ffmpeg_compat.h |   61 +++++++++++++++++++++++++++++++++++++++++
+ 1 files changed, 61 insertions(+), 0 deletions(-)
+
+diff --git a/intern/ffmpeg/ffmpeg_compat.h b/intern/ffmpeg/ffmpeg_compat.h
+index dfdad22..5259f69 100644
+--- a/intern/ffmpeg/ffmpeg_compat.h
++++ b/intern/ffmpeg/ffmpeg_compat.h
+@@ -48,6 +48,67 @@
+ #define FFMPEG_HAVE_AVIO 1
+ #endif
+ 
++#if (LIBAVFORMAT_VERSION_MAJOR < 53) || ((LIBAVFORMAT_VERSION_MAJOR == 53) && (LIBAVFORMAT_VERSION_MINOR < 3))
++/* XXX The last check above should be (LIBAVFORMAT_VERSION_MINOR < 2),
++ * look at http://patches.libav.org/patch/3333/ but ffmpeg in Debian is
++ * strange: 53.2.0 should have avformat_alloc_output_context2() but it does
++ * not.
++ */
++#include <libavutil/avstring.h>
++static int avformat_alloc_output_context2(AVFormatContext **avctx, AVOutputFormat *oformat,
++                                   const char *format, const char *filename)
++{
++    AVFormatContext *s = avformat_alloc_context();
++    int ret = 0;
++
++    *avctx = NULL;
++    if (!s)
++        goto nomem;
++
++    if (!oformat) {
++        if (format) {
++            oformat = av_guess_format(format, NULL, NULL);
++            if (!oformat) {
++                av_log(s, AV_LOG_ERROR, "Requested output format '%s' is not a suitable output format\n", format);
++                ret = AVERROR(EINVAL);
++                goto error;
++            }
++        } else {
++            oformat = av_guess_format(NULL, filename, NULL);
++            if (!oformat) {
++                ret = AVERROR(EINVAL);
++                av_log(s, AV_LOG_ERROR, "Unable to find a suitable output format for '%s'\n",
++                       filename);
++                goto error;
++            }
++        }
++    }
++
++    s->oformat = oformat;
++    if (s->oformat->priv_data_size > 0) {
++        s->priv_data = av_mallocz(s->oformat->priv_data_size);
++        if (!s->priv_data)
++            goto nomem;
++        if (s->oformat->priv_class) {
++            *(const AVClass**)s->priv_data= s->oformat->priv_class;
++            av_opt_set_defaults(s->priv_data);
++        }
++    } else
++        s->priv_data = NULL;
++
++    if (filename)
++        av_strlcpy(s->filename, filename, sizeof(s->filename));
++    *avctx = s;
++    return 0;
++nomem:
++    av_log(s, AV_LOG_ERROR, "Out of memory\n");
++    ret = AVERROR(ENOMEM);
++error:
++    avformat_free_context(s);
++    return ret;
++}
++#endif
++
+ #if (LIBAVCODEC_VERSION_MAJOR > 53) || ((LIBAVCODEC_VERSION_MAJOR == 53) && (LIBAVCODEC_VERSION_MINOR > 1)) || ((LIBAVCODEC_VERSION_MAJOR == 53) && (LIBAVCODEC_VERSION_MINOR == 1) && (LIBAVCODEC_VERSION_MICRO >= 1)) || ((LIBAVCODEC_VERSION_MAJOR == 52) && (LIBAVCODEC_VERSION_MINOR >= 121))
+ #define FFMPEG_HAVE_DEFAULT_VAL_UNION 1
+ #endif
+-- 
+1.7.7.3
+

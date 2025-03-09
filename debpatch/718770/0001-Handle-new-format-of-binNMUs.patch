@@ -1,0 +1,105 @@
+From f5b7faa05990eea9bb90b3e8720592d446b9223e Mon Sep 17 00:00:00 2001
+Message-Id: <f5b7faa05990eea9bb90b3e8720592d446b9223e.1377642612.git.simon@ruderich.org>
+From: Simon Ruderich <simon@ruderich.org>
+Date: Wed, 28 Aug 2013 00:30:09 +0200
+Subject: [PATCH] Handle new format of binNMUs.
+
+---
+ apt-listchanges.py             | 11 +++++++++--
+ apt-listchanges/DebianFiles.py |  8 +++++++-
+ 2 files changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/apt-listchanges.py b/apt-listchanges.py
+index 79b2298..d91e100 100755
+--- a/apt-listchanges.py
++++ b/apt-listchanges.py
+@@ -89,6 +89,7 @@ def main():
+ 
+     all_news = {}
+     all_changelogs = {}
++    all_binnmus = {}
+     notes = []
+ 
+     # Mapping of source->binary packages
+@@ -144,7 +145,7 @@ def main():
+                                                                       srcversion))
+             continue
+ 
+-        (news, changelog) = pkg.extract_changes(config.which, fromversion, config.reverse)
++        (news, changelog, binnmu) = pkg.extract_changes(config.which, fromversion, config.reverse)
+ 
+         if news or changelog:
+             found[srcpackage] = srcversion
+@@ -152,6 +153,8 @@ def main():
+                 all_news[srcpackage] = news
+             if changelog:
+                 all_changelogs[srcpackage] = changelog
++            if binnmu:
++                all_binnmus[srcpackage] = binnmu
+             if config.save_seen:
+                 seen_new[srcpackage] = srcversion
+ 
+@@ -162,10 +165,14 @@ def main():
+ 
+     all_news = all_news.values()
+     all_changelogs = all_changelogs.values()
+-    for batch in (all_news, all_changelogs):
++    all_binnmus = all_binnmus.values()
++    for batch in (all_news, all_changelogs, all_binnmus):
+         batch.sort(lambda a, b: -cmp(a.urgency, b.urgency) or
+                    cmp(a.package, b.package))
+ 
++    # FIXME: two headers with -h
++    all_changelogs = all_binnmus + all_changelogs
++
+     if config.headers:
+         changes = ''
+         news = ''
+diff --git a/apt-listchanges/DebianFiles.py b/apt-listchanges/DebianFiles.py
+index c162d96..9124927 100644
+--- a/apt-listchanges/DebianFiles.py
++++ b/apt-listchanges/DebianFiles.py
+@@ -31,6 +31,7 @@ import errno
+ import glob
+ import shutil
+ import signal
++import subprocess
+ 
+ import apt_pkg
+ from ALChacks import *
+@@ -139,8 +140,11 @@ class Package:
+         If since_version is specified, only return entries later than the specified version.
+         returns a sequence of Changes objects.'''
+ 
++        arch = subprocess.check_output(['dpkg-architecture', '-qDEB_HOST_ARCH']).rstrip()
++
+         news_filenames = self._changelog_variations('NEWS.Debian')
+         changelog_filenames = self._changelog_variations('changelog.Debian')
++        changelog_filenames_binnmu = self._changelog_variations('changelog.Debian.' + arch)
+         changelog_filenames_native = self._changelog_variations('changelog')
+ 
+         filenames = []
+@@ -148,6 +152,7 @@ class Package:
+             filenames.extend(news_filenames)
+         if which == 'both' or which == 'changelogs':
+             filenames.extend(changelog_filenames)
++            filenames.extend(changelog_filenames_binnmu)
+             filenames.extend(changelog_filenames_native)
+ 
+         tempdir = self.extract_contents(filenames)
+@@ -156,10 +161,11 @@ class Package:
+ 
+         news       = reduce(find_first, news_filenames, None)
+         changelog  = reduce(find_first, changelog_filenames + changelog_filenames_native, None)
++        binnmu     = reduce(find_first, changelog_filenames_binnmu, None)
+ 
+         shutil.rmtree(tempdir, 1)
+ 
+-        return (news, changelog)
++        return (news, changelog, binnmu)
+ 
+     def extract_contents(self, filenames):
+         tempdir = tempfile.mkdtemp(prefix='apt-listchanges')
+-- 
+1.8.4.rc3
+

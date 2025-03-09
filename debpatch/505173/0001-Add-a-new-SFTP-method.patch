@@ -1,0 +1,224 @@
+From 38231b91b71f83eecc781512e93ef5be119fd43c Mon Sep 17 00:00:00 2001
+From: Iain Lane <laney@debian.org>
+Date: Thu, 14 Jul 2011 23:08:57 +0100
+Subject: [PATCH] Add a new SFTP method
+
+Users can either use a running SSH agent (the default), authenticate via
+username/password, or specify an RSA key with which to authenticate.
+---
+ debian/changelog |    6 ++++
+ debian/rules     |    1 +
+ dput             |   19 +++++++++++++
+ dput.1           |    2 +-
+ dput.cf.5        |   23 ++++++++++++++-
+ sftp.py          |   77 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 125 insertions(+), 3 deletions(-)
+ create mode 100644 sftp.py
+
+diff --git a/debian/changelog b/debian/changelog
+index 23cda3a..a6912cd 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,3 +1,9 @@
++dput (0.9.6.3) UNRELEASED; urgency=low
++
++  * Add SFTP support 
++
++ -- Iain Lane <laney@debian.org>  Thu, 14 Jul 2011 23:08:20 +0100
++
+ dput (0.9.6.2) unstable; urgency=low
+ 
+   [ Gerfried Fuchs ]
+diff --git a/debian/rules b/debian/rules
+index e1121ca..c5f1d47 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -40,6 +40,7 @@ binary-indep: build debian/control
+ 	install --mode=0644 http.py $(TMPDIR)/usr/share/dput
+ 	install --mode=0644 https.py $(TMPDIR)/usr/share/dput
+ 	install --mode=0644 scp.py $(TMPDIR)/usr/share/dput
++	install --mode=0644 sftp.py $(TMPDIR)/usr/share/dput
+ 	install --mode=0644 local.py $(TMPDIR)/usr/share/dput
+ 	install --mode=0644 rsync.py $(TMPDIR)/usr/share/dput
+ 	install --mode=0644 dputhelper.py $(TMPDIR)/usr/share/dput/helper
+diff --git a/dput b/dput
+index 1916eca..5d588fc 100755
+--- a/dput
++++ b/dput
+@@ -884,6 +884,25 @@ def main():
+                   print "D: ssh config options:\n  "+'\n  '.join(ssh_config_options)
+                 upload_methods[method](fqdn, login, incoming, \
+                     files_to_upload, debug, scp_compress, ssh_config_options)
++            elif method == 'sftp':
++                if debug and config.get(host, 'sftp_rsa_key_file'):
++                    print "D: Using specified RSA key file"
++                try:
++                    password = config.get(host, 'sftp_password')
++                except ConfigParser.NoOptionError:
++                    password = None
++                try:
++                    sftp_rsa_key_file = config.get(host, 'sftp_rsa_key_file')
++                except ConfigParser.NoOptionError:
++                    sftp_rsa_key_file = 'agent' # Default to using the SSH agent
++                try:
++                    sftp_rsa_key_password = config.get(host, 'sftp_rsa_key_password')
++                except ConfigParser.NoOptionError:
++                    sftp_rsa_key_password = None
++                upload_methods[method](fqdn, login, incoming, \
++                files_to_upload, debug, 0, password = password, \
++                rsa_key_file=sftp_rsa_key_file, rsa_key_password = \
++                sftp_rsa_key_password, progress=progress)
+             else:
+                 upload_methods[method](fqdn, login, incoming, \
+                     files_to_upload, debug, 0, progress=progress)
+diff --git a/dput.1 b/dput.1
+index 9fb0d8a..9ff212a 100644
+--- a/dput.1
++++ b/dput.1
+@@ -21,7 +21,7 @@ files and then they will be sequentially uploaded.
+ .P
+ This program will then upload the package for you into the archive, using a
+ selected upload method. Currently dput supports ftp, scp, rsync, http,
+-https, and local. The
++https, sftp and local. The
+ method scripts have been split from the main script so it is easy to add
+ new methods.  Look in /usr/share/dput/ for examples.
+ 
+diff --git a/dput.cf.5 b/dput.cf.5
+index ca14cf0..5f173db 100644
+--- a/dput.cf.5
++++ b/dput.cf.5
+@@ -24,12 +24,12 @@ each host section. The available parameters are listed below:
+ .TP
+ .B fqdn
+ This is the fully qualified domain name that will be used (can be specified
+-as host:port for HTTP, HTTPS and FTP).
++as host:port for HTTP, HTTPS, SFTP and FTP).
+ .TP
+ .B login
+ Your login on the machine named before. A single asterisk \fB*\fR will
+ cause the scp and rsync uploaders to not use supply a login name when
+-calling to ssh, scp, and rsync.
++calling to ssh, scp, and rsync, and the sftp uploader to use your username.
+ .TP
+ .B incoming
+ The directory that you should upload the files to.
+@@ -53,6 +53,10 @@ if necessary.
+ the package will be uploaded using ssh's scp. This transfers files using a
+ secure ssh tunnel, and needs an account on the upload machine.
+ .TP
++.I sftp
++the package will be uploaded using sftp. This transfers files using a secure
++ssh tunnel, and needs an account on the upload machine.
++.TP
+ .I rsync
+ the package will be uploaded using rsync over ssh. This is similar to scp,
+ but can save some bandwidth if the destination file already exists on the
+@@ -140,6 +144,21 @@ automatic invocations of \fIssh\fR and \fIscp\fR by dput. Note that you can
+ define multiline (dput) configuration options by indenting the second
+ line with whitespace (i.e. similar to RFC822 header continuations).
+ .TP
++.B sftp_password
++When using the sftp method with username/password authentication, this option
++specifies the password.
++.TP
++.B sftp_rsa_key_file
++This option specifies the RSA key file to use when connecting via the sftp
++method.
++.br
++Supported values: agent (default) \- try all keys from a running SSH agent, and
++a path to a specific RSA key to use
++.TP
++.B sftp_rsa_key_password
++This option specifies the password to the RSA key file, if it is encrypted.
++This is only needed if a file is specified in \fIsftp_rsa_key_file\fR.
++.TP
+ .B post_upload_command
+ This option defines a command to be run by dput after a successful upload.
+ .TP
+diff --git a/sftp.py b/sftp.py
+new file mode 100644
+index 0000000..b10b8c5
+--- /dev/null
++++ b/sftp.py
+@@ -0,0 +1,77 @@
++# sftp.py - dput method for sftp transport
++#
++# @author Cody A.W. Somerville <cody.somerville@canonical.com>
++# @author Iain Lane <laney@debian.org>
++# @company Canonical Ltd.
++# @date 07 November 2008 
++#
++
++import os, sys
++
++try:
++    import paramiko
++except Exception, e:
++    print "E: python-paramiko must be installed to use sftp transport."
++    sys.exit(1)
++
++def upload(fqdn, login, incoming, files, debug, compress, password = None, rsa_key_file=None, rsa_key_password=None, progress=0):
++    if not login or login == '*':
++        login = os.getenv("USER")
++    
++    if fqdn.find(':') < 0:
++        host = fqdn
++        port = 22
++    else:
++        (host, port) = fqdn.rsplit(':', 1)
++
++    try:
++        t = paramiko.Transport((host, port))
++        t.start_client()
++        if rsa_key_file is None: # password login
++            t.connect(username = login, password = password)
++        else: # rsa key login
++            if rsa_key_file == 'agent': # get key from ssh agent
++                try:
++                    agent = paramiko.Agent()
++                except paramiko.SSHException, e:
++                    print "%s\nE: SSH agent use requested, but no agent is running" % e
++                agent_keys = agent.get_keys()
++                for key in agent_keys:
++                    try:
++                        t.auth_publickey(login, key)
++                        break
++                    except paramiko.SSHException, e:
++                        pass
++            else:
++                key = paramiko.RSAKey.from_private_key_file(rsa_key_file, rsa_key_password)
++                t.auth_publickey(login, key)
++
++        if not t.is_authenticated():
++            print "E: Tried all available SSH keys, could not login."
++            sys.exit(1)
++
++        sftp = paramiko.SFTPClient.from_transport(t)
++
++    except paramiko.SSHException, e:
++        print "%s\nE: Error connecting to remote host." % e      
++        sys.exit(1)
++    
++
++    for f in files:
++        remote = os.path.join(incoming, os.path.basename(f))
++
++        try:
++            print "Uploading %s to %s" % (f, remote)
++            # Just doing put didn't work
++            remote_file = sftp.file(remote, mode='wb')
++            source_file = open(f, 'rb')
++            remote_file.write(source_file.read())
++            remote_file.close()
++            source_file.close()
++        except Exception, e:
++            print "\n%s\nE: Error uploading file." % e
++            sys.exit(1)
++        print "done." 
++
++    sftp.close()
++    t.close()
+-- 
+1.7.5.4
+

@@ -1,0 +1,120 @@
+diff -rud dunst-1.0.0.Orig/dunstrc dunst-1.0.0/dunstrc
+--- dunst-1.0.0.Orig/dunstrc	2014-03-05 12:41:03.274349758 +0100
++++ dunst-1.0.0/dunstrc	2014-03-05 14:18:34.002606394 +0100
+@@ -166,7 +166,7 @@
+ 
+ # Every section that isn't one of the above is interpreted as a rules
+ # to override settings for certain messages.
+-# Messages can be matched by 'appname', 'summary', 'body' or 'icon'
++# Messages can be matched by 'appname', 'summary', 'body', 'icon' or 'msg_urgency'.
+ # and you can override the 'timeout', 'urgency', 'foreground', 'background'
+ # and 'format'.
+ # Shell-like globbing will get expanded.
+diff -rud dunst-1.0.0.Orig/rules.c dunst-1.0.0/rules.c
+--- dunst-1.0.0.Orig/rules.c	2014-03-05 12:41:03.274349758 +0100
++++ dunst-1.0.0/rules.c	2014-03-05 14:20:56.246612633 +0100
+@@ -49,6 +49,7 @@
+         r->body = NULL;
+         r->icon = NULL;
+         r->timeout = -1;
++        r->msg_urgency = -1;
+         r->urgency = -1;
+         r->fg = NULL;
+         r->bg = NULL;
+@@ -64,6 +65,7 @@
+         return ((!r->appname || !fnmatch(r->appname, n->appname, 0))
+                 && (!r->summary || !fnmatch(r->summary, n->summary, 0))
+                 && (!r->body || !fnmatch(r->body, n->body, 0))
+-                && (!r->icon || !fnmatch(r->icon, n->icon, 0)));
++                && (!r->icon || !fnmatch(r->icon, n->icon, 0))
++                && (r->msg_urgency == -1 || r->msg_urgency == n->urgency));
+ }
+ /* vim: set ts=8 sw=8 tw=0: */
+diff -rud dunst-1.0.0.Orig/rules.h dunst-1.0.0/rules.h
+--- dunst-1.0.0.Orig/rules.h	2014-03-05 12:41:03.274349758 +0100
++++ dunst-1.0.0/rules.h	2014-03-05 14:21:44.014614729 +0100
+@@ -13,6 +13,7 @@
+         char *summary;
+         char *body;
+         char *icon;
++        int msg_urgency;
+ 
+         /* actions */
+         int timeout;
+diff -rud dunst-1.0.0.Orig/settings.c dunst-1.0.0/settings.c
+--- dunst-1.0.0.Orig/settings.c	2014-03-05 12:41:03.274349758 +0100
++++ dunst-1.0.0/settings.c	2014-03-05 14:21:23.242613817 +0100
+@@ -31,6 +31,27 @@
+ 
+ }
+ 
++static int ini_get_urgency(char *section, char *key, int def)
++{
++        int ret = def;
++        char *urg = ini_get_string(section, key, "");
++
++        if (strlen(urg) > 0) {
++                if (strcmp(urg, "low") == 0)
++                        ret = LOW;
++                else if (strcmp(urg, "normal") == 0)
++                        ret = NORM;
++                else if (strcmp(urg, "critical") == 0)
++                        ret = CRIT;
++                else
++                        fprintf(stderr,
++                                "unknown urgency: %s, ignoring\n",
++                                urg);
++                free(urg);
++        }
++        return ret;
++}
++
+ void load_settings(char *cmdline_config_path)
+ {
+ 
+@@ -280,22 +301,8 @@
+                 r->body = ini_get_string(cur_section, "body", r->body);
+                 r->icon = ini_get_string(cur_section, "icon", r->icon);
+                 r->timeout = ini_get_int(cur_section, "timeout", r->timeout);
+-                {
+-                        char *urg = ini_get_string(cur_section, "urgency", "");
+-                        if (strlen(urg) > 0) {
+-                                if (strcmp(urg, "low") == 0)
+-                                        r->urgency = LOW;
+-                                else if (strcmp(urg, "normal") == 0)
+-                                        r->urgency = NORM;
+-                                else if (strcmp(urg, "critical") == 0)
+-                                        r->urgency = CRIT;
+-                                else
+-                                        fprintf(stderr,
+-                                                "unknown urgency: %s, ignoring\n",
+-                                                urg);
+-                                free(urg);
+-                        }
+-                }
++                r->urgency = ini_get_urgency(cur_section, "urgency", r->urgency);
++                r->msg_urgency = ini_get_urgency(cur_section, "msg_urgency", r->msg_urgency);
+                 r->fg = ini_get_string(cur_section, "foreground", r->fg);
+                 r->bg = ini_get_string(cur_section, "background", r->bg);
+                 r->format = ini_get_string(cur_section, "format", r->format);
+--- dunst-1.0.0.Orig/config.def.h	2014-03-05 12:41:03.274349758 +0100
++++ dunst-1.0.0/config.def.h	2014-03-06 12:43:56.981454478 +0100
+@@ -81,11 +81,11 @@
+ rule_t default_rules[] = {
+         /* name can be any unique string. It is used to identify the rule in dunstrc to override it there */
+ 
+-        /*   name,     appname,       summary,         body,  icon,  timeout,  urgency,  fg,    bg, format, script */
+-        {"empty", NULL, NULL, NULL, NULL, -1, -1, NULL, NULL, NULL, NULL},
+-        /* { "rule1", "notify-send",  NULL,            NULL,  NULL,  -1,       -1,       NULL,  NULL, "%s %b", NULL }, */
+-        /* { "rule2", "Pidgin",       "*says*,         NULL,  NULL,  -1,       CRITICAL, NULL,  NULL, NULL, NULL    }, */
+-        /* { "rule3", "Pidgin",       "*signed on*",   NULL,  NULL,  -1,       LOW,      NULL,  NULL, NULL, NULL    }, */
+-        /* { "rule4", "Pidgin",       "*signed off*",  NULL,  NULL,  -1,       LOW,      NULL,  NULL, NULL, NULL    }, */
+-        /* { "rule5", NULL,           "*foobar*",      NULL,  NULL,  -1,       -1,       NULL,  "#00FF00", NULL, NULL }, */
++        /*   name,    appname,        summary,         body,  icon,  msg_urgency, timeout,  urgency,  fg,    bg,        format,  script */
++        {    "empty", NULL,           NULL,            NULL,  NULL,  -1,          -1,       -1,       NULL,  NULL,      NULL,    NULL},
++        /* { "rule1", "notify-send",  NULL,            NULL,  NULL,  NULL,        -1,       -1,       NULL,  NULL,      "%s %b", NULL }, */
++        /* { "rule2", "Pidgin",       "*says*,         NULL,  NULL,  NULL,        -1,       CRITICAL, NULL,  NULL,      NULL,    NULL    }, */
++        /* { "rule3", "Pidgin",       "*signed on*",   NULL,  NULL,  NULL,        -1,       LOW,      NULL,  NULL,      NULL,    NULL    }, */
++        /* { "rule4", "Pidgin",       "*signed off*",  NULL,  NULL,  NULL,        -1,       LOW,      NULL,  NULL,      NULL,    NULL    }, */
++        /* { "rule5", NULL,           "*foobar*",      NULL,  NULL,  NULL,        -1,       -1,       NULL,  "#00FF00", NULL,    NULL }, */
+ };

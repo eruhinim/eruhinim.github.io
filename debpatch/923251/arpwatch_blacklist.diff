@@ -1,0 +1,155 @@
+diff --git a/arpwatch.c b/arpwatch.c
+index 38e5e34..dc40d54 100644
+--- a/arpwatch.c
++++ b/arpwatch.c
+@@ -170,7 +170,7 @@ main(int argc, char **argv)
+ 	interface = NULL;
+ 	rfilename = NULL;
+ 	pd = NULL;
+-	while ((op = getopt(argc, argv, "df:i:n:Nr:")) != EOF)
++	while ((op = getopt(argc, argv, "df:i:n:Nr:B:")) != EOF)
+ 		switch (op) {
+ 
+ 		case 'd':
+@@ -202,6 +202,11 @@ main(int argc, char **argv)
+ 			rfilename = optarg;
+ 			break;
+ 
++		case 'B':
++			fprintf(stderr, "setting blacklistfile to %s\n", optarg);
++			blacklistfile = optarg;
++			break;
++
+ 		default:
+ 			usage();
+ 		}
+@@ -397,6 +402,19 @@ process_ether(register u_char *u, register const struct pcap_pkthdr *h,
+ 		return;
+ 	}
+ 
++
++	if( blacklistfile != NULL && blacklist_entries > 0 ) {
++		int i;
++		for( i=0; i<blacklist_entries; i++ ) {
++			if( sia == blacklist[i].s_addr ) {
++				if (debug) {
++					syslog(LOG_INFO, "ignored_b", sia, sea, sha);
++				}
++				return;
++			}
++		}
++	}
++
+ 	/* Got a live one */
+ 	t = h->ts.tv_sec;
+ 	can_checkpoint = 0;
+@@ -751,6 +769,6 @@ usage(void)
+ 
+ 	(void)fprintf(stderr, "Version %s\n", version);
+ 	(void)fprintf(stderr, "usage: %s [-dN] [-f datafile] [-i interface]"
+-	    " [-n net[/width]] [-r file]\n", prog);
++	    " [-n net[/width]] [-r file] [-B blacklistfile]\n", prog);
+ 	exit(1);
+ }
+diff --git a/util.c b/util.c
+index 4794a36..6eac027 100644
+--- a/util.c
++++ b/util.c
+@@ -39,6 +39,9 @@ static const char rcsid[] =
+ #include <stdlib.h>
+ #include <string.h>
+ #include <syslog.h>
++#include <netinet/in.h>
++#include <arpa/inet.h>
++
+ 
+ #include "gnuc.h"
+ #ifdef HAVE_OS_PROTO_H
+@@ -54,11 +57,16 @@ static const char rcsid[] =
+ char *arpdir = ARPDIR;
+ char *arpfile = ARPFILE;
+ char *ethercodes = ETHERCODES;
++char *blacklistfile = (void *) NULL;
+ 
+ /* Broadcast ethernet addresses */
+ u_char zero[6] = { 0, 0, 0, 0, 0, 0 };
+ u_char allones[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+ 
++/* Blacklist pointer & entries counter */
++struct in_addr *blacklist;
++u_int32_t   blacklist_entries;
++
+ int debug = 0;
+ int initializing = 1;			/* true if initializing */
+ 
+@@ -141,8 +149,11 @@ dump(void)
+ int
+ readdata(void)
+ {
++	char *buf = NULL;
++	size_t len = 0;
+ 	register FILE *f;
+ 
++
+ 	if ((f = fopen(arpfile, "r")) == NULL) {
+ 		syslog(LOG_ERR, "fopen(%s): %m", arpfile);
+ 		return(0);
+@@ -159,6 +170,32 @@ readdata(void)
+ 		(void)fclose(f);
+ 	}
+ 
++	if( blacklistfile != NULL ) {
++		if( (f = fopen(blacklistfile, "r")) == NULL ) {
++			syslog(LOG_ERR, "fopen(%s): %m", blacklistfile);
++			return(0);
++		}
++		blacklist_entries = 0;
++		blacklist = malloc( sizeof(struct in_addr) * BLACKLIST_MAX );
++		while( getline( &buf, &len, f ) > 0 ) {
++			if( blacklist_entries >= BLACKLIST_MAX ) {
++				syslog(LOG_ERR, "blacklist is full, too many entries in %s", blacklistfile);
++				break;
++			}
++			buf[strcspn(buf, "\n")] = '\0';
++			if(inet_aton(buf, &blacklist[blacklist_entries] ) == 0 ) {
++				syslog(LOG_ERR, "blacklist invalid ip: %s", buf);
++				continue;
++			}
++			blacklist_entries++;
++		}
++		if( buf != NULL ) {
++			free(buf);
++			buf = NULL;
++		}
++		(void)fclose(f);
++	}
++
+ 	return(1);
+ }
+ 
+diff --git a/util.h b/util.h
+index 824a1b5..31bb1e0 100644
+--- a/util.h
++++ b/util.h
+@@ -1,5 +1,11 @@
+ /* @(#) $Header: util.h,v 1.2 96/10/06 03:22:13 leres Exp $ (LBL) */
+ 
++#ifndef BLACKLIST_MAX
++/* Maximum number of addresses which can be added to blacklist */
++#define BLACKLIST_MAX          1024
++#endif
++
++
+ void	dosyslog(int, char *, u_int32_t, u_char *, u_char *);
+ int	dump(void);
+ void	dumpone(u_int32_t, u_char *, time_t, char *);
+@@ -11,6 +17,9 @@ extern char *newarpfile;
+ extern char *arpfile;
+ extern char *oldarpfile;
+ extern char *ethercodes;
++extern char *blacklistfile;
++extern struct in_addr *blacklist;
++extern u_int32_t   blacklist_entries;
+ 
+ extern u_char zero[6];
+ extern u_char allones[6];

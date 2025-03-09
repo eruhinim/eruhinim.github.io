@@ -1,0 +1,241 @@
+From 2d6777f77893b36db9ecf04cca34507411770b2d Mon Sep 17 00:00:00 2001
+From: Modestas Vainius <modestas@vainius.eu>
+Date: Mon, 2 Nov 2009 11:07:18 +0200
+Subject: [PATCH] Support --max-parallel=0 as "do nothing"
+
+Since now we use --max-parallel=-1 (default) to specify "unlimited parallel",
+handle --max-parallel=0 as "do nothing" (i.e. prevents dh_auto from messing
+with environment in order to enforce/disallow parallel). This patch also makes
+it mandatory to specify argument for --max-parallel (optional arg doesn't make
+sense since parallel is implicit), explicitly handles values of --max-parallel
+and DEB_BUILD_OPTIONS=parallel=n below -1 as -1 (strict interface for build
+system classes) and adjusts test suite a bit.
+---
+ Debian/Debhelper/Buildsystem.pm          |    2 +-
+ Debian/Debhelper/Buildsystem/makefile.pm |   12 ++++---
+ Debian/Debhelper/Dh_Buildsystems.pm      |   12 +++++--
+ debhelper.pod                            |    8 +++--
+ t/buildsystems/buildsystem_tests         |   53 ++++++++++++++++++-----------
+ 5 files changed, 55 insertions(+), 32 deletions(-)
+
+diff --git a/Debian/Debhelper/Buildsystem.pm b/Debian/Debhelper/Buildsystem.pm
+index 7354963..f5b52a5 100644
+--- a/Debian/Debhelper/Buildsystem.pm
++++ b/Debian/Debhelper/Buildsystem.pm
+@@ -49,7 +49,7 @@ sub DEFAULT_BUILD_DIRECTORY {
+ #                  current (top) directory. If undef or empty,
+ #                  DEFAULT_BUILD_DIRECTORY directory will be used.
+ # - parallel -     max number of parallel processes to be spawned for building
+-#                  sources (-1 = unlimited; 1 = no parallel)
++#                  sources (-1 = unlimited; 0 = do nothing; 1 = no parallel)
+ # Derived class can override the constructor to initialize common object
+ # parameters. Do NOT use constructor to execute commands or otherwise
+ # configure/setup build environment. There is absolutely no guarantee the
+diff --git a/Debian/Debhelper/Buildsystem/makefile.pm b/Debian/Debhelper/Buildsystem/makefile.pm
+index 704f9c9..e0b15c7 100644
+--- a/Debian/Debhelper/Buildsystem/makefile.pm
++++ b/Debian/Debhelper/Buildsystem/makefile.pm
+@@ -33,12 +33,14 @@ sub exists_make_target {
+ sub do_make {
+ 	my $this=shift;
+ 
+-	# Avoid possible warnings about unavailable jobserver,
+-	# and force make to start a new jobserver.
+-	clean_jobserver_makeflags();
++	if ($this->get_parallel()) {
++		# Avoid possible warnings about unavailable jobserver,
++		# and force make to start a new jobserver.
++		clean_jobserver_makeflags();
+ 
+-	# Note that this will override any -j settings in MAKEFLAGS.
+-	unshift @_, "-j" . ($this->get_parallel() > 0 ? $this->get_parallel() : "");
++		# Note that this will override any -j settings in MAKEFLAGS.
++		unshift @_, "-j" . ($this->get_parallel() > 0 ? $this->get_parallel() : "");
++	}
+ 
+ 	$this->doit_in_builddir($this->{makecmd}, @_);
+ }
+diff --git a/Debian/Debhelper/Dh_Buildsystems.pm b/Debian/Debhelper/Dh_Buildsystems.pm
+index fc06a2a..34fd61f 100644
+--- a/Debian/Debhelper/Dh_Buildsystems.pm
++++ b/Debian/Debhelper/Dh_Buildsystems.pm
+@@ -129,22 +129,27 @@ sub buildsystems_init {
+ 	    "l" => \$opt_list,
+ 	    "list" => \$opt_list,
+ 
+-	    "max-parallel:i" => \$max_parallel,
++	    "max-parallel=i" => \$max_parallel,
+ 	);
+ 	$args{options}{$_} = $options{$_} foreach keys(%options);
+ 	Debian::Debhelper::Dh_Lib::init(%args);
+ 	set_parallel($max_parallel);
+ }
+ 
++# $max == -1: unlimited parallel (default); $max == 0: do nothing;
++# $max ==  1: no parralel; $max > 1: maximum $max parallel jobs
+ sub set_parallel {
+ 	my $max=shift;
+ 
+ 	$opt_parallel=1;
+ 
+-	if (exists $ENV{DEB_BUILD_OPTIONS}) {
++	if ($max == 0) {
++		$opt_parallel = 0;
++	}
++	elsif (exists $ENV{DEB_BUILD_OPTIONS}) {
+ 		# Parse parallel=n tag
+ 		foreach my $opt (split(/\s+/, $ENV{DEB_BUILD_OPTIONS})) {
+-			if ($opt =~ /^parallel=([-\d]+)$/) {
++			if ($opt =~ /^parallel=(-?\d+)$/) {
+ 				my $n=$1;
+ 				if ($n > 0 && ($max == -1 || $n < $max)) {
+ 					$opt_parallel = $n;
+@@ -154,6 +159,7 @@ sub set_parallel {
+ 				}
+ 			}
+ 		}
++		$opt_parallel = -1 if $opt_parallel < -1;
+ 	}
+ }
+ 
+diff --git a/debhelper.pod b/debhelper.pod
+index 0a9ef41..45a4971 100644
+--- a/debhelper.pod
++++ b/debhelper.pod
+@@ -205,10 +205,10 @@ If the build system prefers out of source tree building but still
+ allows in source building, the latter can be re-enabled by passing a build
+ directory path that is the same as the source directory path.
+ 
+-=item B<--max-parallel>[I<=maximum>]
++=item B<--max-parallel=>I<maximum>
+ 
+-By default, the DEB_BUILD_OPTIONS environment variable can be used to
+-enable parallel building, when supported by the build system.
++If not specified or set to -1, the DEB_BUILD_OPTIONS environment variable can
++be used to enable parallel building, when supported by the build system.
+ 
+ This option allows controlling how many parallel jobs can be used in a
+ build. If set to 1, concurrent builds are disabled -- do this if
+@@ -216,6 +216,8 @@ the package build is known not to work in parallel. If the package build
+ is known to only work with certian levels of concurrency, you can set this
+ to the maximum level that is known to work, or that you wish to support.
+ 
++If you don't want debhelper to manage parallel building, set this to 0.
++
+ =item B<--list>, B<-l>
+ 
+ List all build systems supported by debhelper on this system. The list
+diff --git a/t/buildsystems/buildsystem_tests b/t/buildsystems/buildsystem_tests
+index 16a8a75..c85586b 100755
+--- a/t/buildsystems/buildsystem_tests
++++ b/t/buildsystems/buildsystem_tests
+@@ -1,6 +1,6 @@
+ #!/usr/bin/perl
+ 
+-use Test::More tests => 280;
++use Test::More tests => 284;
+ 
+ use strict;
+ use warnings;
+@@ -556,15 +556,17 @@ sub test_is_parallel {
+ }
+ 
+ test_isnt_parallel( do_parallel_mk(),
+-	"No parallel by default" );
+-test_isnt_parallel( do_parallel_mk("--max-parallel"),
+-	"No parallel by default with --max-parallel" );
++	"Empty DEB_BUILD_OPTIONS, no parallel" );
++test_isnt_parallel( do_parallel_mk("--max-parallel=-1"),
++	"Empty DEB_BUILD_OPTIONS, no parallel with --max-parallel=-1" );
+ 
+ $ENV{DEB_BUILD_OPTIONS}="parallel=5";
+ test_is_parallel( do_parallel_mk(),
+ 	"DEB_BUILD_OPTIONS=parallel=5 without --max-parallel" );
+-test_is_parallel( do_parallel_mk("--max-parallel"),
+-	"DEB_BUILD_OPTIONS=parallel=5 with --max-parallel" );
++test_is_parallel( do_parallel_mk("--max-parallel=-1"),
++	"DEB_BUILD_OPTIONS=parallel=5 with --max-parallel=-1" );
++test_isnt_parallel( do_parallel_mk("--max-parallel=0"),
++	"DEB_BUILD_OPTIONS=parallel=5 with --max-parallel=0" );
+ test_is_parallel( do_parallel_mk("--max-parallel=2"),
+ 	"DEB_BUILD_OPTIONS=parallel=5 with --max-parallel=2" );
+ test_isnt_parallel( do_parallel_mk("--max-parallel=1"),
+@@ -584,6 +586,8 @@ test_isnt_parallel( do_parallel_mk(),
+ 	"MAKEFLAGS=-j2: dh_auto_build ignores MAKEFLAGS" );
+ test_isnt_parallel( do_parallel_mk("--max-parallel=1"),
+ 	"MAKEFLAGS=-j2 with --max-parallel=1: dh_auto_build enforces -j1" );
++test_is_parallel( do_parallel_mk("--max-parallel=0"),
++	"MAKEFLAGS=-j2 with --max-parallel=0: dh_auto_build honours MAKEFLAGS" );
+ 
+ # Test dh dpkg-buildpackage -jX detection
+ sub do_rules_for_parallel {
+@@ -614,7 +618,8 @@ sub test_dh_parallel {
+ 	@dh --buildsystem=makefile --after=dh_auto_configure --until=dh_auto_build $@
+ 	@dh_clean > /dev/null 2>&1
+ EOF
+-
++	test_is_parallel( do_rules_for_parallel("build", $rules),
++		"dh under dpkg-buildpackage -j5 is parallel, no warnings $extra_dsc");
+ 	$ENV{MAKEFLAGS} = "";
+ 	test_is_parallel( do_rules_for_parallel("build", $rules),
+ 		"DEB_BUILD_OPTIONS=parallel=5 without MAKEFLAGS=-jX via dh $extra_dsc" );
+@@ -629,18 +634,6 @@ EOF
+ 	test_isnt_parallel( do_rules_for_parallel("build", $rules),
+ 		"dh --max-parallel=1 disables implicit parallel under dpkg-buildpackage -j5 $extra_dsc");
+ 
+-	$rules = <<'EOF';
+-%:
+-	@dh_clean > /dev/null 2>&1
+-	@dh -j --buildsystem=makefile --after=dh_auto_configure --until=dh_auto_build $@
+-	@dh_clean > /dev/null 2>&1
+-EOF
+-	test_is_parallel( do_rules_for_parallel("build", $rules),
+-		"dh -j under dpkg-buildpackage -j5 is parallel $extra_dsc");
+-	$ENV{MAKEFLAGS} = "";
+-	test_is_parallel( do_rules_for_parallel("build", $rules),
+-		"dh -j is parallel only with DEB_BUILD_OPTIONS=parallel=5 $extra_dsc");
+-
+ 	if (defined $tmpfile) {
+ 		rename($tmpfile, "debian/rules");
+ 	}
+@@ -681,9 +674,13 @@ override_dh_auto_build:
+ 	@dh_clean > /dev/null 2>&1
+ EOF
+ test_is_parallel( do_rules_for_parallel("build", "include debian/rules"),
+-	"legacy punctuation hacks: +dh, override without +, parallel, no make warnings" );
++	"legacy punctuation hacks: +dh, override without +" );
++$ENV{DEB_BUILD_OPTIONS} = "";
++test_isnt_parallel( do_rules_for_parallel("build", "include debian/rules"),
++	"legacy punctuation hacks: +dh, override without +, no DEB_BUILD_OPTIONS" );
+ unlink "debian/rules";
+ 
++$ENV{DEB_BUILD_OPTIONS} = "parallel=5";
+ write_debian_rules(<<'EOF');
+ #!/usr/bin/make -f
+ override_dh_auto_build:
+@@ -700,6 +697,22 @@ unlink "debian/rules";
+ write_debian_rules(<<'EOF');
+ #!/usr/bin/make -f
+ override_dh_auto_build:
++	+dh_auto_build
++%:
++	@dh_clean > /dev/null 2>&1
++	@+dh --max-parallel=0 --buildsystem=makefile --after=dh_auto_configure --until=dh_auto_build $@
++	@dh_clean > /dev/null 2>&1
++EOF
++test_is_parallel( do_rules_for_parallel("build", "include debian/rules"),
++	"punctuation hacks: +dh --max-parallel=0, override with +, with DEB_BUILD_OPTIONS" );
++$ENV{DEB_BUILD_OPTIONS} = "";
++test_is_parallel( do_rules_for_parallel("build", "include debian/rules"),
++	"punctuation hacks: +dh --max-parallel=0, override with +, no DEB_BUILD_OPTIONS" );
++unlink "debian/rules";
++
++write_debian_rules(<<'EOF');
++#!/usr/bin/make -f
++override_dh_auto_build:
+ 	$(MAKE)
+ %:
+ 	@dh_clean > /dev/null 2>&1
+-- 
+1.6.5
+

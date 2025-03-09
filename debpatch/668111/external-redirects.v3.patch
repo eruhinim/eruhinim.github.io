@@ -1,0 +1,169 @@
+diff --git a/apt-pkg/acquire-method.cc b/apt-pkg/acquire-method.cc
+index 294d78f..eddf443 100644
+--- a/apt-pkg/acquire-method.cc
++++ b/apt-pkg/acquire-method.cc
+@@ -417,26 +417,19 @@ void pkgAcqMethod::Status(const char *Format,...)
+ 									/*}}}*/
+ // AcqMethod::Redirect - Send a redirect message                       /*{{{*/
+ // ---------------------------------------------------------------------
+-/* This method sends the redirect message and also manipulates the queue
+-   to keep the pipeline synchronized. */
++/* This method sends the redirect message and dequeues the item. */
+ void pkgAcqMethod::Redirect(const string &NewURI)
+ {
+    std::cout << "103 Redirect\nURI: " << Queue->Uri << "\n"
+ 	     << "New-URI: " << NewURI << "\n"
+ 	     << "\n" << std::flush;
+ 
+-   // Change the URI for the request.
+-   Queue->Uri = NewURI;
+-
+-   /* To keep the pipeline synchronized, move the current request to
+-      the end of the queue, past the end of the current pipeline. */
+-   FetchItem *I;
+-   for (I = Queue; I->Next != 0; I = I->Next) ;
+-   I->Next = Queue;
++   // Dequeue
++   FetchItem *Tmp = Queue;
+    Queue = Queue->Next;
+-   I->Next->Next = 0;
+-   if (QueueBack == 0)
+-      QueueBack = I->Next;
++   delete Tmp;
++   if (Tmp == QueueBack)
++      QueueBack = Queue;
+ }
+                                                                         /*}}}*/
+ // AcqMethod::FetchResult::FetchResult - Constructor			/*{{{*/
+diff --git a/apt-pkg/acquire-worker.cc b/apt-pkg/acquire-worker.cc
+index 75e0323..54c8005 100644
+--- a/apt-pkg/acquire-worker.cc
++++ b/apt-pkg/acquire-worker.cc
+@@ -242,6 +242,21 @@ bool pkgAcquire::Worker::RunMessages()
+  
+             string NewURI = LookupTag(Message,"New-URI",URI.c_str());
+             Itm->URI = NewURI;
++
++	    ItemDone();
++
++	    pkgAcquire::Item *Owner = Itm->Owner;
++	    pkgAcquire::ItemDesc Desc = *Itm;
++
++            // Change the status so that it can be dequeued
++            Owner->Status = pkgAcquire::Item::StatIdle;
++            // Mark the item as done (taking care of all queues)
++            // and then put it in the main queue again
++	    OwnerQ->ItemDone(Itm);
++            OwnerQ->Owner->Enqueue(Desc);
++
++            if (Log != 0)
++               Log->Done(Desc);
+             break;
+          }
+    
+diff --git a/apt-pkg/acquire.cc b/apt-pkg/acquire.cc
+index ef120d8..318a0bb 100644
+--- a/apt-pkg/acquire.cc
++++ b/apt-pkg/acquire.cc
+@@ -46,6 +46,7 @@ pkgAcquire::pkgAcquire() : Queues(0), Workers(0), Configs(0), Log(NULL), ToFetch
+       QueueMode = QueueHost;
+    if (strcasecmp(Mode.c_str(),"access") == 0)
+       QueueMode = QueueAccess;
++   QueueHostLimit = _config->FindI("Acquire::QueueHost::Limit",10);
+ }
+ pkgAcquire::pkgAcquire(pkgAcquireStatus *Progress) : Queues(0), Workers(0),
+ 			   Configs(0), Log(Progress), ToFetch(0),
+@@ -57,6 +58,7 @@ pkgAcquire::pkgAcquire(pkgAcquireStatus *Progress) : Queues(0), Workers(0),
+       QueueMode = QueueHost;
+    if (strcasecmp(Mode.c_str(),"access") == 0)
+       QueueMode = QueueAccess;
++   QueueHostLimit = _config->FindI("Acquire::QueueHost::Limit",10);
+    Setup(Progress, "");
+ }
+ 									/*}}}*/
+@@ -242,11 +244,19 @@ void pkgAcquire::Dequeue(Item *Itm)
+ {
+    Queue *I = Queues;
+    bool Res = false;
+-   for (; I != 0; I = I->Next)
+-      Res |= I->Dequeue(Itm);
+-   
+    if (Debug == true)
+       clog << "Dequeuing " << Itm->DestFile << endl;
++
++   for (; I != 0; I = I->Next)
++   {
++      if (I->Dequeue(Itm))
++      {
++         Res = true;
++	 if (Debug == true)
++	    clog << "Dequeued from " << I->Name << endl;
++      }
++   }
++
+    if (Res == true)
+       ToFetch--;
+ }
+@@ -269,7 +279,28 @@ string pkgAcquire::QueueName(string Uri,MethodConfig const *&Config)
+    if (Config->SingleInstance == true || QueueMode == QueueAccess)
+        return U.Access;
+ 
+-   return U.Access + ':' + U.Host;
++   string AccessSchema = U.Access + ':',
++	FullQueueName = AccessSchema + U.Host;
++   unsigned int Instances = 0, SchemaLength = AccessSchema.length();
++
++   Queue *I = Queues;
++   for (; I != 0; I = I->Next) {
++      // if the queue already exists, re-use it
++      if (I->Name == FullQueueName)
++	return FullQueueName;
++
++      if (I->Name.compare(0, SchemaLength, AccessSchema) == 0)
++	Instances++;
++   }
++
++   if (Debug) {
++      clog << "Found " << Instances << " instances of " << U.Access << endl;
++   }
++
++   if (Instances >= QueueHostLimit)
++       return U.Access;
++
++   return FullQueueName;
+ }
+ 									/*}}}*/
+ // Acquire::GetConfig - Fetch the configuration information		/*{{{*/
+diff --git a/apt-pkg/acquire.h b/apt-pkg/acquire.h
+index 9fe0e8a..8b20b6a 100644
+--- a/apt-pkg/acquire.h
++++ b/apt-pkg/acquire.h
+@@ -163,6 +163,12 @@ class pkgAcquire
+       */
+      QueueAccess} QueueMode;
+ 
++   /** \brief If non-zero, limit the number of instances of a method in
++    * QueueHost mode. I.e. after the limit is reached, a given method
++    * is switched to a behaviour like QueueAccess mode.
++    */
++   unsigned long QueueHostLimit;
++
+    /** \brief If \b true, debugging information will be dumped to std::clog. */
+    bool const Debug;
+    /** \brief If \b true, a download is currently in progress. */
+diff --git a/methods/http.cc b/methods/http.cc
+index 65a0cbb..cbc6c69 100644
+--- a/methods/http.cc
++++ b/methods/http.cc
+@@ -967,7 +967,10 @@ HttpMethod::DealWithHeaders(FetchResult &Res,ServerState *Srv)
+       else
+       {
+          NextURI = DeQuoteString(Srv->Location);
+-         return TRY_AGAIN_OR_REDIRECT;
++         URI tmpURI = NextURI;
++         // Do not allow a redirection to switch protocol
++         if (tmpURI.Access == "http")
++            return TRY_AGAIN_OR_REDIRECT;
+       }
+       /* else pass through for error message */
+    }

@@ -1,0 +1,460 @@
+From: Jonathan Nieder <jrnieder@gmail.com>
+Date: Tue, 29 Sep 2009 21:21:36 -0500
+Subject: [PATCH 2/9] compression.c: handle each format in new compression.h
+
+Split off the details of compression library interfaces to a
+separate file from compression.c.  This should make compression.c
+itself a little easier to read.
+---
+ lib/dpkg/Makefile.am   |    2 +-
+ lib/dpkg/compression.c |  184 ++-----------------------------------------
+ lib/dpkg/compression.h |  204 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 212 insertions(+), 178 deletions(-)
+ create mode 100644 lib/dpkg/compression.h
+
+diff --git a/lib/dpkg/Makefile.am b/lib/dpkg/Makefile.am
+index d45bcd4..45fdaa9 100644
+--- a/lib/dpkg/Makefile.am
++++ b/lib/dpkg/Makefile.am
+@@ -21,7 +21,7 @@ libdpkg_a_SOURCES = \
+ 	dlist.h \
+ 	buffer.c buffer.h \
+ 	cleanup.c \
+-	compression.c \
++	compression.c compression.h \
+ 	database.c \
+ 	dbmodify.c \
+ 	dump.c \
+diff --git a/lib/dpkg/compression.c b/lib/dpkg/compression.c
+index 0b86916..f01a3f6 100644
+--- a/lib/dpkg/compression.c
++++ b/lib/dpkg/compression.c
+@@ -1,176 +1,11 @@
+ #include <config.h>
+ #include <compat.h>
+ 
+-#include <dpkg/i18n.h>
+-
++#include <stdarg.h>
+ #include <stdlib.h>
+-#include <unistd.h>
+-#include <string.h>
+-#include <errno.h>
+-
+-#ifdef WITH_ZLIB
+-#include <zlib.h>
+-#endif
+-#ifdef WITH_BZ2
+-#include <bzlib.h>
+-#endif
+-
+-#include <dpkg/dpkg.h>
+-#include <dpkg/dpkg-db.h>
+-#include <dpkg/buffer.h>
+-
+-static void
+-fd_fd_filter(int fd_in, int fd_out,
+-	     const char *file, const char *cmd, const char *args,
+-	     const char *desc)
+-{
+-  if (fd_in != 0) {
+-    m_dup2(fd_in, 0);
+-    close(fd_in);
+-  }
+-  if (fd_out != 1) {
+-    m_dup2(fd_out, 1);
+-    close(fd_out);
+-  }
+-  execlp(file, cmd, args, NULL);
+-  ohshite(_("%s: failed to exec '%s %s'"), desc, cmd, args);
+-}
+-
+-#ifdef WITH_ZLIB
+-static void decompress_gzip(int fd_in, int fd_out, const char *desc)
+-{
+-  char buffer[4096];
+-  int actualread;
+-  gzFile gzfile = gzdopen(fd_in, "r");
+-  while ((actualread= gzread(gzfile,buffer,sizeof(buffer))) > 0) {
+-    if (actualread < 0 ) {
+-      int err = 0;
+-      const char *errmsg = gzerror(gzfile, &err);
+-      if (err == Z_ERRNO) {
+-        if (errno == EINTR) continue;
+-        errmsg= strerror(errno);
+-      }
+-    ohshite(_("%s: internal gzip error: `%s'"), desc, errmsg);
+-    }
+-    write(fd_out,buffer,actualread);
+-  }
+-  exit(0);
+-}
+-
+-static void compress_gzip(int fd_in, int fd_out, char compression,
+-                          const char *desc)
+-{
+-  char combuf[6];
+-  int actualread, actualwrite;
+-  char buffer[4096];
+-  gzFile gzfile;
+-  strncpy(combuf, "w9", sizeof(combuf));
+-  combuf[1]= compression;
+-  gzfile = gzdopen(1, combuf);
+-  while((actualread = read(0,buffer,sizeof(buffer))) > 0) {
+-    if (actualread < 0 ) {
+-      if (errno == EINTR) continue;
+-      ohshite(_("%s: internal gzip error: read: `%s'"), desc, strerror(errno));
+-    }
+-    actualwrite= gzwrite(gzfile,buffer,actualread);
+-    if (actualwrite < 0 ) {
+-      int err = 0;
+-      const char *errmsg = gzerror(gzfile, &err);
+-      if (err == Z_ERRNO) {
+-        if (errno == EINTR) continue;
+-      errmsg= strerror(errno);
+-      }
+-      ohshite(_("%s: internal gzip error: write: `%s'"), desc, errmsg);
+-    }
+-    if (actualwrite != actualread)
+-      ohshite(_("%s: internal gzip error: read(%i) != write(%i)"), desc, actualread, actualwrite);
+-  }
+-  gzclose(gzfile);
+-  exit(0);
+-}
+-#else /* !WITH_ZLIB */
+-static void decompress_gzip(int fd_in, int fd_out, const char *desc)
+-{
+-  fd_fd_filter(fd_in, fd_out, GZIP, "gzip", "-dc", desc);
+-}
+-
+-static void compress_gzip(int fd_in, int fd_out, char compression,
+-                          const char *desc)
+-{
+-  char combuf[6];
+-  strncpy(combuf, "-9c", sizeof(combuf));
+-  combuf[1]= compression;
+-  fd_fd_filter(fd_in, fd_out, GZIP, "gzip", combuf, desc);
+-}
+-#endif
+-
+-#ifdef WITH_BZ2
+-static void decompress_bzip2(int fd_in, int fd_out, const char *desc)
+-{
+-  char buffer[4096];
+-  int actualread;
+-  BZFILE *bzfile = BZ2_bzdopen(fd_in, "r");
+-  while ((actualread= BZ2_bzread(bzfile,buffer,sizeof(buffer))) > 0) {
+-    if (actualread < 0 ) {
+-      int err = 0;
+-      const char *errmsg = BZ2_bzerror(bzfile, &err);
+-      if (err == BZ_IO_ERROR) {
+-        if (errno == EINTR) continue;
+-        errmsg= strerror(errno);
+-      }
+-    ohshite(_("%s: internal bzip2 error: `%s'"), desc, errmsg);
+-    }
+-    write(fd_out,buffer,actualread);
+-  }
+-  exit(0);
+-}
+-
+-static void compress_bzip2(int fd_in, int fd_out, char compression,
+-                           const char *desc)
+-{
+-  char combuf[6];
+-  int actualread, actualwrite;
+-  char buffer[4096];
+-  BZFILE *bzfile;
+-  strncpy(combuf, "w9", sizeof(combuf));
+-  combuf[1]= compression;
+-  bzfile = BZ2_bzdopen(1, combuf);
+-  while((actualread = read(0,buffer,sizeof(buffer))) > 0) {
+-    if (actualread < 0 ) {
+-      if (errno == EINTR) continue;
+-      ohshite(_("%s: internal bzip2 error: read: `%s'"), desc, strerror(errno));
+-    }
+-    actualwrite= BZ2_bzwrite(bzfile,buffer,actualread);
+-    if (actualwrite < 0 ) {
+-      int err = 0;
+-      const char *errmsg = BZ2_bzerror(bzfile, &err);
+-      if (err == BZ_IO_ERROR) {
+-        if (errno == EINTR) continue;
+-        errmsg= strerror(errno);
+-      }
+-      ohshite(_("%s: internal bzip2 error: write: `%s'"), desc, errmsg);
+-    }
+-    if (actualwrite != actualread)
+-      ohshite(_("%s: internal bzip2 error: read(%i) != write(%i)"), desc, actualread, actualwrite);
+-  }
+-  BZ2_bzclose(bzfile);
+-  exit(0);
+-}
+-#else /* !WITH_BZ2 */
+-static void decompress_bzip2(int fd_in, int fd_out, const char *desc)
+-{
+-  fd_fd_filter(fd_in, fd_out, BZIP2, "bzip2", "-dc", desc);
+-}
+ 
+-static void compress_bzip2(int fd_in, int fd_out, char compression,
+-                           const char *desc)
+-{
+-  char combuf[6];
+-  strncpy(combuf, "-9c", sizeof(combuf));
+-  combuf[1]= compression;
+-  fd_fd_filter(fd_in, fd_out, BZIP2, "bzip2", combuf, desc);
+-}
+-#endif
++#include <dpkg/varbuf.h>
++#include <dpkg/compression.h>
+ 
+ void decompress_cat(enum compress_type type, int fd_in, int fd_out, char *desc, ...) {
+   va_list al;
+@@ -186,10 +21,9 @@ void decompress_cat(enum compress_type type, int fd_in, int fd_out, char *desc,
+     case compress_type_bzip2:
+       decompress_bzip2(fd_in, fd_out, v.buf);
+     case compress_type_lzma:
+-      fd_fd_filter(fd_in, fd_out, LZMA, "lzma", "-dc", v.buf);
++      decompress_lzma(fd_in, fd_out, v.buf);
+     case compress_type_cat:
+-      fd_fd_copy(fd_in, fd_out, -1, _("%s: decompression"), v.buf);
+-      exit(0);
++      decompress_noop(fd_in, fd_out, v.buf);
+     default:
+       exit(1);
+   }
+@@ -198,7 +32,6 @@ void decompress_cat(enum compress_type type, int fd_in, int fd_out, char *desc,
+ void compress_cat(enum compress_type type, int fd_in, int fd_out, const char *compression, char *desc, ...) {
+   va_list al;
+   struct varbuf v = VARBUF_INIT;
+-  char combuf[6];
+ 
+   va_start(al,desc);
+   varbufvprintf(&v, desc, al);
+@@ -214,12 +47,9 @@ void compress_cat(enum compress_type type, int fd_in, int fd_out, const char *co
+     case compress_type_bzip2:
+       compress_bzip2(fd_in, fd_out, *compression, v.buf);
+     case compress_type_lzma:
+-      strncpy(combuf, "-9c", sizeof(combuf));
+-      combuf[1] = *compression;
+-      fd_fd_filter(fd_in, fd_out, LZMA, "lzma", combuf, v.buf);
++      compress_lzma(fd_in, fd_out, *compression, v.buf);
+     case compress_type_cat:
+-      fd_fd_copy(fd_in, fd_out, -1, _("%s: compression"), v.buf);
+-      exit(0);
++      compress_noop(fd_in, fd_out, *compression, v.buf);
+     default:
+       exit(1);
+   }
+diff --git a/lib/dpkg/compression.h b/lib/dpkg/compression.h
+new file mode 100644
+index 0000000..7dd93c4
+--- /dev/null
++++ b/lib/dpkg/compression.h
+@@ -0,0 +1,204 @@
++/*
++ * compression.h - internal functions to compress/decompress archives
++ *
++ * See dpkg.h for the public interface (compress_cat/decompress_cat).
++ */
++
++#include <config.h>
++#include <compat.h>
++
++#include <stdlib.h>
++#include <unistd.h>
++#include <string.h>
++#include <errno.h>
++
++#ifdef WITH_ZLIB
++#include <zlib.h>
++#endif
++#ifdef WITH_BZ2
++#include <bzlib.h>
++#endif
++
++#include <dpkg/i18n.h>
++#include <dpkg/buffer.h>
++#include <dpkg/dpkg.h>
++
++static void
++fd_fd_filter(int fd_in, int fd_out,
++	     const char *file, const char *cmd, const char *args,
++	     const char *desc)
++{
++  if (fd_in != 0) {
++    m_dup2(fd_in, 0);
++    close(fd_in);
++  }
++  if (fd_out != 1) {
++    m_dup2(fd_out, 1);
++    close(fd_out);
++  }
++  execlp(file, cmd, args, NULL);
++  ohshite(_("%s: failed to exec '%s %s'"), desc, cmd, args);
++}
++
++static void decompress_noop(int fd_in, int fd_out, const char *desc)
++{
++	fd_fd_copy(fd_in, fd_out, -1, _("%s: decompression"), desc);
++	exit(0);
++}
++
++static void compress_noop(int fd_in, int fd_out, char compression,
++                          const char *desc)
++{
++	fd_fd_copy(fd_in, fd_out, -1, _("%s: compression"), desc);
++	exit(0);
++}
++
++#ifdef WITH_ZLIB
++static void decompress_gzip(int fd_in, int fd_out, const char *desc)
++{
++  char buffer[4096];
++  int actualread;
++  gzFile gzfile = gzdopen(fd_in, "r");
++  while ((actualread= gzread(gzfile,buffer,sizeof(buffer))) > 0) {
++    if (actualread < 0 ) {
++      int err = 0;
++      const char *errmsg = gzerror(gzfile, &err);
++      if (err == Z_ERRNO) {
++        if (errno == EINTR) continue;
++        errmsg= strerror(errno);
++      }
++    ohshite(_("%s: internal gzip error: `%s'"), desc, errmsg);
++    }
++    write(fd_out,buffer,actualread);
++  }
++  exit(0);
++}
++
++static void compress_gzip(int fd_in, int fd_out, char compression,
++                          const char *desc)
++{
++  char combuf[6];
++  int actualread, actualwrite;
++  char buffer[4096];
++  gzFile gzfile;
++  strncpy(combuf, "w9", sizeof(combuf));
++  combuf[1]= compression;
++  gzfile = gzdopen(1, combuf);
++  while((actualread = read(0,buffer,sizeof(buffer))) > 0) {
++    if (actualread < 0 ) {
++      if (errno == EINTR) continue;
++      ohshite(_("%s: internal gzip error: read: `%s'"), desc, strerror(errno));
++    }
++    actualwrite= gzwrite(gzfile,buffer,actualread);
++    if (actualwrite < 0 ) {
++      int err = 0;
++      const char *errmsg = gzerror(gzfile, &err);
++      if (err == Z_ERRNO) {
++        if (errno == EINTR) continue;
++      errmsg= strerror(errno);
++      }
++      ohshite(_("%s: internal gzip error: write: `%s'"), desc, errmsg);
++    }
++    if (actualwrite != actualread)
++      ohshite(_("%s: internal gzip error: read(%i) != write(%i)"), desc, actualread, actualwrite);
++  }
++  gzclose(gzfile);
++  exit(0);
++}
++#else /* !WITH_ZLIB */
++static void decompress_gzip(int fd_in, int fd_out, const char *desc)
++{
++  fd_fd_filter(fd_in, fd_out, GZIP, "gzip", "-dc", desc);
++}
++
++static void compress_gzip(int fd_in, int fd_out, char compression,
++                          const char *desc)
++{
++  char combuf[6];
++  strncpy(combuf, "-9c", sizeof(combuf));
++  combuf[1]= compression;
++  fd_fd_filter(fd_in, fd_out, GZIP, "gzip", combuf, desc);
++}
++#endif
++
++#ifdef WITH_BZ2
++static void decompress_bzip2(int fd_in, int fd_out, const char *desc)
++{
++  char buffer[4096];
++  int actualread;
++  BZFILE *bzfile = BZ2_bzdopen(fd_in, "r");
++  while ((actualread= BZ2_bzread(bzfile,buffer,sizeof(buffer))) > 0) {
++    if (actualread < 0 ) {
++      int err = 0;
++      const char *errmsg = BZ2_bzerror(bzfile, &err);
++      if (err == BZ_IO_ERROR) {
++        if (errno == EINTR) continue;
++        errmsg= strerror(errno);
++      }
++    ohshite(_("%s: internal bzip2 error: `%s'"), desc, errmsg);
++    }
++    write(fd_out,buffer,actualread);
++  }
++  exit(0);
++}
++
++static void compress_bzip2(int fd_in, int fd_out, char compression,
++                           const char *desc)
++{
++  char combuf[6];
++  int actualread, actualwrite;
++  char buffer[4096];
++  BZFILE *bzfile;
++  strncpy(combuf, "w9", sizeof(combuf));
++  combuf[1]= compression;
++  bzfile = BZ2_bzdopen(1, combuf);
++  while((actualread = read(0,buffer,sizeof(buffer))) > 0) {
++    if (actualread < 0 ) {
++      if (errno == EINTR) continue;
++      ohshite(_("%s: internal bzip2 error: read: `%s'"), desc, strerror(errno));
++    }
++    actualwrite= BZ2_bzwrite(bzfile,buffer,actualread);
++    if (actualwrite < 0 ) {
++      int err = 0;
++      const char *errmsg = BZ2_bzerror(bzfile, &err);
++      if (err == BZ_IO_ERROR) {
++        if (errno == EINTR) continue;
++        errmsg= strerror(errno);
++      }
++      ohshite(_("%s: internal bzip2 error: write: `%s'"), desc, errmsg);
++    }
++    if (actualwrite != actualread)
++      ohshite(_("%s: internal bzip2 error: read(%i) != write(%i)"), desc, actualread, actualwrite);
++  }
++  BZ2_bzclose(bzfile);
++  exit(0);
++}
++#else /* !WITH_BZ2 */
++static void decompress_bzip2(int fd_in, int fd_out, const char *desc)
++{
++  fd_fd_filter(fd_in, fd_out, BZIP2, "bzip2", "-dc", desc);
++}
++
++static void compress_bzip2(int fd_in, int fd_out, char compression,
++                           const char *desc)
++{
++  char combuf[6];
++  strncpy(combuf, "-9c", sizeof(combuf));
++  combuf[1]= compression;
++  fd_fd_filter(fd_in, fd_out, BZIP2, "bzip2", combuf, desc);
++}
++#endif
++
++static void decompress_lzma(int fd_in, int fd_out, const char *desc)
++{
++	fd_fd_filter(fd_in, fd_out, LZMA, "lzma", "-dc", desc);
++}
++
++static void compress_lzma(int fd_in, int fd_out, char compression,
++                          const char *desc)
++{
++	char combuf[6];
++	strncpy(combuf, "-9c", sizeof(combuf));
++	combuf[1] = compression;
++	fd_fd_filter(fd_in, fd_out, LZMA, "lzma", combuf, desc);
++}
+-- 
+1.6.5.rc1.199.g596ec
+

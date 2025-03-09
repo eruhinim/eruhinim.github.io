@@ -1,0 +1,136 @@
+From 2bbea1f9ac6af17d8b801cd32bddc2da75224adb Mon Sep 17 00:00:00 2001
+From: Colin Watson <cjwatson@ubuntu.com>
+Date: Tue, 7 Jul 2009 11:05:45 +0100
+Subject: [PATCH 2/4] Fix changelog parsing when Ubuntu vendor class is in use
+
+The relevant hook is now called from Dpkg::Changelog::Debian rather than
+dpkg-genchanges, so that it can work for dpkg-parsechangelog etc. as
+well. Since the hook interface changed in the process, I've renamed it
+from before-changes-creation to parse-changelog.
+---
+ debian/changelog                 |    5 +++++
+ scripts/Dpkg/Changelog/Debian.pm |    2 ++
+ scripts/Dpkg/Vendor/Debian.pm    |    4 ++--
+ scripts/Dpkg/Vendor/Default.pm   |   12 ++++++------
+ scripts/Dpkg/Vendor/Ubuntu.pm    |    9 +++------
+ scripts/dpkg-genchanges.pl       |    1 -
+ 6 files changed, 18 insertions(+), 15 deletions(-)
+
+diff --git a/debian/changelog b/debian/changelog
+index 5218767..c875d44 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -23,6 +23,11 @@ dpkg (1.15.4) UNRELEASED; urgency=low
+ 
+   [ Colin Watson ]
+   * Localise $_ in Dpkg::Cdata::parsecdata to avoid confusing callers.
++  * Fix changelog parsing when Ubuntu vendor class is in use. The relevant
++    hook is now called from Dpkg::Changelog::Debian rather than
++    dpkg-genchanges, so that it can work for dpkg-parsechangelog etc. as
++    well. Since the hook interface changed in the process, I've renamed it
++    from before-changes-creation to parse-changelog.
+ 
+   [ Updated dpkg translations ]
+   * Asturian (Marcos Alvarez Costales). Closes: #535327
+diff --git a/scripts/Dpkg/Changelog/Debian.pm b/scripts/Dpkg/Changelog/Debian.pm
+index c702b79..9020354 100644
+--- a/scripts/Dpkg/Changelog/Debian.pm
++++ b/scripts/Dpkg/Changelog/Debian.pm
+@@ -68,6 +68,7 @@ use Date::Parse;
+ use Dpkg;
+ use Dpkg::Gettext;
+ use Dpkg::Changelog qw( :util );
++use Dpkg::Vendor qw(run_vendor_hook);
+ use base qw(Dpkg::Changelog);
+ 
+ =pod
+@@ -145,6 +146,7 @@ sub parse {
+ 	    }
+ 	    unless ($entry->is_empty) {
+ 		$entry->{'Closes'} = find_closes( $entry->{Changes} );
++		run_vendor_hook('parse-changelog', $entry);
+ #		    print STDERR, Dumper($entry);
+ 		push @{$self->{data}}, $entry;
+ 		$entry = new Dpkg::Changelog::Entry;
+diff --git a/scripts/Dpkg/Vendor/Debian.pm b/scripts/Dpkg/Vendor/Debian.pm
+index b121852..d2b696f 100644
+--- a/scripts/Dpkg/Vendor/Debian.pm
++++ b/scripts/Dpkg/Vendor/Debian.pm
+@@ -39,8 +39,8 @@ sub run_hook {
+ 
+     if ($hook eq "before-source-build") {
+         my $srcpkg = shift @params;
+-    } elsif ($hook eq "before-changes-creation") {
+-        my $fields = shift @params;
++    } elsif ($hook eq "parse-changelog") {
++        my $entry = shift @params;
+     } elsif ($hook eq "keyrings") {
+         return ('/usr/share/keyrings/debian-keyring.gpg',
+                 '/usr/share/keyrings/debian-maintainers.gpg');
+diff --git a/scripts/Dpkg/Vendor/Default.pm b/scripts/Dpkg/Vendor/Default.pm
+index 43d40cd..ba88dae 100644
+--- a/scripts/Dpkg/Vendor/Default.pm
++++ b/scripts/Dpkg/Vendor/Default.pm
+@@ -73,11 +73,11 @@ supported hooks are:
+ The first parameter is a Dpkg::Source::Package object. The hook is called
+ just before the execution of $srcpkg->build().
+ 
+-=item before-changes-creation ($fields)
++=item parse-changelog ($entry)
+ 
+-The hook is called just before the content of .changes file is output
+-by dpkg-genchanges. The first parameter is a Dpkg::Fields::Object
+-representing all the fields that are going to be output.
++The hook is called while parsing each non-empty changelog entry. The first
++parameter is a Dpkg::Changelog::Entry object containing the changelog entry
++being parsed.
+ 
+ =item keyrings ()
+ 
+@@ -94,8 +94,8 @@ sub run_hook {
+ 
+     if ($hook eq "before-source-build") {
+         my $srcpkg = shift @params;
+-    } elsif ($hook eq "before-changes-creation") {
+-        my $fields = shift @params;
++    } elsif ($hook eq "parse-changelog") {
++        my $entry = shift @params;
+     } elsif ($hook eq "keyrings") {
+         return ();
+     }
+diff --git a/scripts/Dpkg/Vendor/Ubuntu.pm b/scripts/Dpkg/Vendor/Ubuntu.pm
+index 2f31a8b..1df5126 100644
+--- a/scripts/Dpkg/Vendor/Ubuntu.pm
++++ b/scripts/Dpkg/Vendor/Ubuntu.pm
+@@ -60,14 +60,11 @@ sub run_hook {
+            }
+         }
+ 
+-    } elsif ($hook eq "before-changes-creation") {
+-        my $fields = shift @params;
++    } elsif ($hook eq "parse-changelog") {
++        my $entry = shift @params;
+ 
+         # Add Launchpad-Bugs-Fixed field
+-        my $bugs = find_launchpad_closes($fields->{"Changes"} || "");
+-        if (scalar(@{$bugs})) {
+-            $fields->{"Launchpad-Bugs-Fixed"} = join(" ", @{$bugs});
+-        }
++        $entry->{'Launchpad-Bugs-Fixed'} = find_launchpad_closes($entry->{Changes} || "");
+ 
+     } elsif ($hook eq "keyrings") {
+         my @keyrings = $self->SUPER::run_hook($hook);
+diff --git a/scripts/dpkg-genchanges.pl b/scripts/dpkg-genchanges.pl
+index 5c28859..a3ca95f 100755
+--- a/scripts/dpkg-genchanges.pl
++++ b/scripts/dpkg-genchanges.pl
+@@ -539,6 +539,5 @@ for my $f (keys %remove) {
+ }
+ 
+ tied(%{$fields})->set_field_importance(@changes_fields);
+-run_vendor_hook('before-changes-creation', $fields);
+ tied(%{$fields})->output(\*STDOUT); # Note: no substitution of variables
+ 
+-- 
+1.6.3.3
+

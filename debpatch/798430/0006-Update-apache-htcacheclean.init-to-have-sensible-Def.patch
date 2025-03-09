@@ -1,0 +1,180 @@
+From c5b62eaddedcb3d46d28cddb76c10e8c24612704 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Rapha=C3=ABl=20Hertzog?= <hertzog@debian.org>
+Date: Tue, 20 Sep 2016 18:52:30 +0200
+Subject: [PATCH 6/6] Update apache-htcacheclean.init to have sensible
+ Default-Start values
+
+With the old value, "systemctl enable apache-htcacheclean" would fail
+like this:
+ Synchronizing state of apache-htcacheclean.service with SysV service script with /lib/systemd/systemd-sysv-install.
+ Executing: /lib/systemd/systemd-sysv-install enable apache-htcacheclean
+ update-rc.d: error: apache-htcacheclean Default-Start contains no runlevels, aborting.
+
+So we add meta-data to make the script enabled by default but we actually disable
+it immediately in the postinst. And we can clean up some hacks that we introduced
+to cover for the Default-Start value being empty.
+---
+ debian/a2enmod                          |  4 +--
+ debian/apache2.apache-htcacheclean.init |  4 +--
+ debian/apache2.postinst                 | 49 +++++++++++++++++++++++----------
+ debian/changelog                        |  3 ++
+ debian/rules                            |  9 ++++--
+ 5 files changed, 46 insertions(+), 23 deletions(-)
+
+diff --git a/debian/a2enmod b/debian/a2enmod
+index 3116688..2656a2e 100755
+--- a/debian/a2enmod
++++ b/debian/a2enmod
+@@ -593,9 +593,7 @@ sub special_module_handling {
+                 $command = "systemctl $act $htc_service";
+             } else {
+                 info("$verb external service $htc\n");
+-                # The init script has no Default-Start runlevels, so we need to
+-                # specify them explicitly.
+-                $command = "update-rc.d $htc $act 2 3 4 5";
++                $command = "update-rc.d $htc $act";
+             }
+             my $res = system($command);
+             if ($res == 0) {
+diff --git a/debian/apache2.apache-htcacheclean.init b/debian/apache2.apache-htcacheclean.init
+index 026aec9..a704321 100755
+--- a/debian/apache2.apache-htcacheclean.init
++++ b/debian/apache2.apache-htcacheclean.init
+@@ -7,8 +7,8 @@ fi
+ # Provides:          apache-htcacheclean
+ # Required-Start:    $remote_fs $syslog
+ # Required-Stop:     $remote_fs $syslog
+-# Default-Start:
+-# Default-Stop:      0 1 2 3 4 5 6
++# Default-Start:     2 3 4 5
++# Default-Stop:      0 1 6
+ # Short-Description: Cache cleaner process for Apache2 web server
+ # Description:       Start the htcacheclean helper
+ #  This script will start htcacheclean which will periodically scan the
+diff --git a/debian/apache2.postinst b/debian/apache2.postinst
+index 7063dfa..f494434 100644
+--- a/debian/apache2.postinst
++++ b/debian/apache2.postinst
+@@ -147,26 +147,36 @@ start_htcacheclean ()
+ 	fi
+ }
+ 
++disable_htcacheclean()
++{
++	if deb-systemd-helper debian-installed apache-htcacheclean.service; then
++		deb-systemd-helper disable apache-htcacheclean.service >/dev/null || true
++	fi
++	update-rc.d apache-htcacheclean disable >/dev/null
++}
++
+ # The apache-htcacheclean service is disabled by default. Can't use
+-# debhelper. The update-rc.d 'enable' call must come after the 'defaults'
++# debhelper. The update-rc.d 'disable' call must come after the 'defaults'
+ # call, or the former will fail.
+ handle_htcacheclean ()
+ {
+-	if [ -x "/etc/init.d/apache-htcacheclean" ]; then
+-		update-rc.d apache-htcacheclean defaults >/dev/null
++	if dpkg --compare-versions "$2" lt "2.4.18-2~"; then
++		# Disable on initial installation or when upgrading from an old
++		# version without that init script and with the module disabled
++		# (or when configured to run from cron)
++		if [ ! -e "/etc/apache2/mods-enabled/cache_disk.load" ]; then
++			disable_htcacheclean
++			return
++		elif (. /etc/default/apache-htcacheclean && [ "$HTCACHECLEAN_MODE" = "cron" ]); then
++			disable_htcacheclean
++			return
++		fi
+ 	fi
+ 
+-	if dpkg --compare-versions "$2" gt "2.4.18-2~" ||
+-	   [ ! -e "/etc/apache2/mods-enabled/cache_disk.load" ] ; then
+-		return 0
+-	fi
+-	if ( . /etc/default/apache-htcacheclean &&
+-		[ "$HTCACHECLEAN_MODE" != "cron" ] &&
+-		[ "$HTCACHECLEAN_RUN" != "no" ] )
+-	then
+-		update-rc.d apache-htcacheclean enable 2 3 4 5
++	# Restart it if applicable
++	if [ -e "/etc/apache2/mods-enabled/cache_disk.load" ]; then
++		start_htcacheclean
+ 	fi
+-	start_htcacheclean
+ }
+ 
+ msg ()
+@@ -269,13 +279,12 @@ case "$1" in
+ 		enable_default_modules $@
+ 		enable_default_conf $@
+ 		install_default_site $@
+-		handle_htcacheclean $@
+ 		execute_deferred_actions
+ 
+ 	;;
+ 
+ 	abort-upgrade)
+-		start_htcacheclean $@
++
+ 	;;
+ 
+ 	abort-remove|abort-deconfigure)
+@@ -290,6 +299,16 @@ esac
+ 
+ #DEBHELPER#
+ 
++# Deal with htcacheclean after debhelper's initial init script handling
++case "$1" in
++	configure)
++		handle_htcacheclean $@
++	;;
++	abort-upgrade)
++		start_htcacheclean $@
++	;;
++esac
++
+ exit 0
+ 
+ # vim: syntax=sh ts=4 sw=4 sts=4 sr noet
+diff --git a/debian/changelog b/debian/changelog
+index 35d6988..cac4b24 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -13,6 +13,9 @@ apache2 (2.4.23-5) UNRELEASED; urgency=medium
+     multi-instance support.
+   * Drop /lib/systemd/system/apache2.service.d/forking.conf now that we have
+     proper native systemd support.
++  * Modify handling of /etc/init.d/apache-htcacheclean to have a usual
++    Default-Start value but instead we disable it manually in the postinst.
++    That way "systemctl enable apache-htcacheclean" works.
+ 
+  -- Stefan Fritsch <sf@debian.org>  Sat, 13 Aug 2016 13:38:30 +0200
+ 
+diff --git a/debian/rules b/debian/rules
+index 00dff14..5a96c95 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -148,13 +148,16 @@ override_dh_fixperms-indep:
+ 
+ override_dh_installinit:
+ 	dh_installinit --error-handler=true
+-	dh_installinit --name apache-htcacheclean --noscripts
++	# We enable apache-htcacheclean but we don't start it, some
++	# custom postinst code will then manually either disable it or
++	# start the service
++	dh_installinit --name apache-htcacheclean --no-start
+ 
+ override_dh_systemd_enable:
+ 	dh_systemd_enable -papache2 apache2.service
+ 	dh_systemd_enable -papache2 --name=apache2@ apache2@.service
+-	dh_systemd_enable -papache2 --no-enable --name=apache-htcacheclean apache-htcacheclean.service
+-	dh_systemd_enable -papache2 --no-enable --name=apache-htcacheclean@ apache-htcacheclean@.service
++	dh_systemd_enable -papache2 --name=apache-htcacheclean apache-htcacheclean.service
++	dh_systemd_enable -papache2 --name=apache-htcacheclean@ apache-htcacheclean@.service
+ 
+ override_dh_installdocs-indep:
+ 	# TODO: So, did anyone check convert_docs needs an update? ;)
+-- 
+2.9.3
+

@@ -1,0 +1,590 @@
+diff --git a/scripts/debcheckout.pl b/scripts/debcheckout.pl
+index 33520e78..85a63f3f 100755
+--- a/scripts/debcheckout.pl
++++ b/scripts/debcheckout.pl
+@@ -416,18 +416,14 @@ sub set_destdir($$@) {
+     my ($repo_type, $destdir, @cmd) = @_;
+     $destdir =~ s|^-d\s*||;
+ 
+-    given ($repo_type) {
+-        when ("cvs") {
+-            my $module = pop @cmd;
+-            push @cmd, ("-d", $destdir, $module);
+-        }
+-        when (/^(bzr|darcs|git|hg|svn)$/) {
+-            push @cmd, $destdir;
+-        }
+-        default {
+-            die
++    if ($repo_type eq "cvs") {
++        my $module = pop @cmd;
++        push @cmd, ("-d", $destdir, $module);
++    } elsif ($repo_type =~ /^(bzr|darcs|git|hg|svn)$/) {
++        push @cmd, $destdir;
++    } else {
++        die
+ "sorry, don't know how to set the destination directory for $repo_type repositories (patches welcome!)\n";
+-        }
+     }
+     return @cmd;
+ }
+@@ -461,20 +457,14 @@ sub set_auth($$$$) {
+     # other providers
+     $url =~ s!(?:git|https?)://github\.com/!git\@github.com:!;
+ 
+-    given ($repo_type) {
+-        when ("bzr") {
+-            $url
+-              =~ s[^\w+://(?:(bazaar|code)\.)?(launchpad\.net/.*)][bzr+ssh://${user}bazaar.$2];
+-        }
+-        when ("git") {
+-            $url =~ s!^https://salsa.debian.org/!git\@salsa.debian.org:!;
+-            $url
+-              =~ s[^\w+://(?:(git|code)\.)?(launchpad\.net/.*)][git+ssh://${user}git.$2];
+-        }
+-        default {
+-            die
++    if ($repo_type eq "bzr") {
++        $url =~ s[^\w+://(?:(bazaar|code)\.)?(launchpad\.net/.*)][bzr+ssh://${user}bazaar.$2];
++    } elsif ($repo_type eq "git") {
++        $url =~ s!^https://salsa.debian.org/!git\@salsa.debian.org:!;
++        $url =~ s[^\w+://(?:(git|code)\.)?(launchpad\.net/.*)][git+ssh://${user}git.$2];
++    } else {
++        die
+ "sorry, don't know how to enable authentication for $repo_type repositories (patches welcome!)\n";
+-        }
+     }
+     if ($url eq $old_url) {    # last attempt: try with user-defined rules
+         $url = user_set_auth($repo_type, $url);
+@@ -510,43 +500,46 @@ sub checkout_repo($$$$) {
+     my ($repo_type, $repo_url, $destdir, $anon_repo_url) = @_;
+     my (@cmd, @extracmd);
+ 
+-    given ($repo_type) {
+-        when ("arch") { @cmd = ("tla", "grab",   $repo_url); }    # XXX ???
+-        when ("bzr")  { @cmd = ("bzr", "branch", $repo_url); }
+-        when ("cvs") {
+-            $repo_url =~ s|^-d\s*||;
+-            my ($root, $module) = split /\s+/, $repo_url;
+-            $module ||= '';
+-            @cmd = ("cvs", "-d", $root, "checkout", $module);
+-        }
+-        when ("darcs") { @cmd = ("darcs", "get", $repo_url); }
+-        when ("git") {
+-            my $push_url;
+-
+-            if (defined $anon_repo_url and length $anon_repo_url) {
+-                if ($repo_url =~ m|(.*)\s+-b\s+(.*)|) {
+-                    $push_url = $1;
+-                } else {
+-                    $push_url = $repo_url;
+-                }
+-
+-                $repo_url = $anon_repo_url;
+-            }
+-
++    if ($repo_type eq "arch") {
++        @cmd = ("tla", "grab",   $repo_url);     # XXX ???
++    } elsif ($repo_type eq "bzr") {
++        @cmd = ("bzr", "branch", $repo_url);
++    } elsif ($repo_type eq "cvs") {
++        $repo_url =~ s|^-d\s*||;
++        my ($root, $module) = split /\s+/, $repo_url;
++        $module ||= '';
++        @cmd = ("cvs", "-d", $root, "checkout", $module);
++    } elsif ($repo_type eq "darcs") {
++        @cmd = ("darcs", "get", $repo_url);
++    } elsif ($repo_type eq "git") {
++        my $push_url;
++
++        if (defined $anon_repo_url and length $anon_repo_url) {
+             if ($repo_url =~ m|(.*)\s+-b\s+(.*)|) {
+-                @cmd = ("git", "clone", $1, "-b", $2);
++                $push_url = $1;
+             } else {
+-                @cmd = ("git", "clone", $repo_url);
++                $push_url = $repo_url;
+             }
+ 
+-            if ($push_url) {
+-                @extracmd = ('git', 'remote', 'set-url', '--push', 'origin',
+-                    $push_url);
+-            }
++            $repo_url = $anon_repo_url;
+         }
+-        when ("hg")  { @cmd = ("hg", "clone", $repo_url); }
+-        when ("svn") { @cmd = ("svn", "co", $repo_url); }
+-        default { die "unsupported version control system '$repo_type'.\n"; }
++
++        if ($repo_url =~ m|(.*)\s+-b\s+(.*)|) {
++            @cmd = ("git", "clone", $1, "-b", $2);
++        } else {
++            @cmd = ("git", "clone", $repo_url);
++        }
++
++        if ($push_url) {
++            @extracmd = ('git', 'remote', 'set-url', '--push', 'origin',
++                $push_url);
++        }
++    } elsif ($repo_type eq "hg") {
++        @cmd = ("hg", "clone", $repo_url);
++    } elsif ($repo_type eq "svn") {
++        @cmd = ("svn", "co", $repo_url);
++    } else {
++        die "unsupported version control system '$repo_type'.\n";
+     }
+     @cmd = set_destdir($repo_type, $destdir, @cmd) if length $destdir;
+     print "@cmd ...\n";
+@@ -602,8 +595,122 @@ sub checkout_files($$$$) {
+             return 1;
+         }
+ 
+-        given ($repo_type) {
+-            when ("arch") {
++        if ($repo_type eq "arch") {
++            # If we've already retrieved a copy of the repository,
++            # reuse it
++            if (!length($tempdir)) {
++                if (
++                    !(
++                        $tempdir = tempdir(
++                            "debcheckoutXXXX",
++                            TMPDIR  => 1,
++                            CLEANUP => 1
++                        ))
++                ) {
++                    print STDERR
++                      "Failed to create temporary directory . $!\n";
++                    return 1;
++                }
++
++                my $oldcwd = getcwd();
++                chdir $tempdir;
++                @cmd = ("tla", "grab", $repo_url);
++                print "@cmd ...\n";
++                my $rc = system(@cmd);
++                chdir $oldcwd;
++                return ($rc >> 8) if $rc != 0;
++            }
++
++            if (!copy("$tempdir/$file", $dir)) {
++                print STDERR "Failed to copy $file to $dir: $!\n";
++                return 1;
++            }
++        } elsif ($repo_type eq "cvs") {
++            if (!length($tempdir)) {
++                if (
++                    !(
++                        $tempdir = tempdir(
++                            "debcheckoutXXXX",
++                            TMPDIR  => 1,
++                            CLEANUP => 1
++                        ))
++                ) {
++                    print STDERR
++                      "Failed to create temporary directory . $!\n";
++                    return 1;
++                }
++            }
++            $repo_url =~ s|^-d\s*||;
++            my ($root, $module) = split /\s+/, $repo_url;
++            # If an explicit module name isn't present, use the last
++            # component of the URL
++            if (!length($module)) {
++                $module = $repo_url;
++                $module =~ s%^.*/(.*?)$%$1%;
++            }
++            $module .= "/$file";
++            $module =~ s%//%/%g;
++
++            my $oldcwd = getcwd();
++            chdir $tempdir;
++            @cmd = ("cvs", "-d", $root, "export", "-r", "HEAD", "-f",
++                $module);
++            print "\n@cmd ...\n";
++            system @cmd;
++            if (errorcode() != 0) {
++                chdir $oldcwd;
++                return (errorcode());
++            } else {
++                chdir $oldcwd;
++                if (copy("$tempdir/$module", $dir)) {
++                    print "Copied to $destdir/$file\n";
++                } else {
++                    print STDERR "Failed to copy $file to $dir: $!\n";
++                    return 1;
++                }
++            }
++        } elsif ($repo_type =~ /(svn|bzr)/) {
++            @cmd = ($repo_type, "cat", "$repo_url/$file");
++            print "@cmd > $dir/" . basename($file) . " ... \n";
++            if (!open CAT, '-|', @cmd) {
++                print STDERR "Failed to execute @cmd $!\n";
++                return 1;
++            }
++            local $/;
++            my $content = <CAT>;
++            close CAT;
++            if (!open OUTPUT, ">", $dir . "/" . basename($file)) {
++                print STDERR "Failed to create output file "
++                  . basename($file) . " $!\n";
++                return 1;
++            }
++            print OUTPUT $content;
++            close OUTPUT;
++        } elsif ($repo_type =~ /(darcs|hg)/) {
++            # Subtly different but close enough
++            if (have_lwp) {
++                print "Attempting to retrieve $file via HTTP ...\n";
++
++                my $file_url
++                  = $repo_type eq "darcs"
++                  ? "$repo_url/$escaped_file"
++                  : "$repo_url/raw-file/tip/$file";
++                init_agent() unless $ua;
++                my $request  = HTTP::Request->new('GET', "$file_url");
++                my $response = $ua->request($request);
++                if ($response->is_success) {
++                    if (!open OUTPUT, ">", $dir . "/" . basename($file)) {
++                        print STDERR "Failed to create output file "
++                          . basename($file) . " $!\n";
++                        return 1;
++                    }
++                    print "Writing to $dir/" . basename($file) . " ... \n";
++                    print OUTPUT $response->content;
++                    close OUTPUT;
++                    $fetched = 1;
++                }
++            }
++            if ($fetched == 0) {
+                 # If we've already retrieved a copy of the repository,
+                 # reuse it
+                 if (!length($tempdir)) {
+@@ -620,21 +727,78 @@ sub checkout_files($$$$) {
+                         return 1;
+                     }
+ 
+-                    my $oldcwd = getcwd();
+-                    chdir $tempdir;
+-                    @cmd = ("tla", "grab", $repo_url);
++                    # Can't get / clone in to a directory that already exists...
++                    $tempdir .= "/repo";
++                    if ($repo_type eq "darcs") {
++                        @cmd = ("darcs", "get", $repo_url, $tempdir);
++                    } else {
++                        @cmd = ("hg", "clone", $repo_url, $tempdir);
++                    }
+                     print "@cmd ...\n";
+                     my $rc = system(@cmd);
+-                    chdir $oldcwd;
+                     return ($rc >> 8) if $rc != 0;
++                    print "\n";
+                 }
+-
+-                if (!copy("$tempdir/$file", $dir)) {
+-                    print STDERR "Failed to copy $file to $dir: $!\n";
+-                    return 1;
++            }
++            if (copy "$tempdir/$file", $dir) {
++                print "Copied $file to $dir\n";
++            } else {
++                print STDERR "Failed to copy $file to $dir: $!\n";
++                return 1;
++            }
++        } elsif ($repo_type eq "git") {
++            # If there isn't a browse URL (either because the package
++            # doesn't ship one, or because we were called with a URL,
++            # try a common pattern for gitweb
++            if (!length($browse_url)) {
++                if ($repo_url =~ m%^\w+://([^/]+)/(?:git/)?(.*)$%) {
++                    $browse_url = "http://$1/?p=$2";
+                 }
+             }
+-            when ("cvs") {
++            if (have_lwp and $browse_url =~ /^http/) {
++                $escaped_file =~ s|/|%2F|g;
++
++                print "Attempting to retrieve $file via HTTP ...\n";
++
++                init_agent() unless $ua;
++                my $file_url = "$browse_url;a=blob_plain";
++                $file_url .= ";f=$escaped_file;hb=HEAD";
++                my $request  = HTTP::Request->new('GET', $file_url);
++                my $response = $ua->request($request);
++                my $error    = 0;
++                if (!$response->is_success) {
++                    if ($browse_url =~ /\.git$/) {
++                        print "Error retrieving file: "
++                          . $response->status_line . "\n";
++                        $error = 1;
++                    } else {
++                        $browse_url .= ".git";
++                        $file_url = "$browse_url;a=blob_plain";
++                        $file_url .= ";f=$escaped_file;hb=HEAD";
++                        $request  = HTTP::Request->new('GET', $file_url);
++                        $response = $ua->request($request);
++                        if (!$response->is_success) {
++                            print "Error retrieving file: "
++                              . $response->status_line . "\n";
++                            $error = 1;
++                        }
++                    }
++                }
++                if (!$error) {
++                    if (!open OUTPUT, ">", $dir . "/" . basename($file)) {
++                        print STDERR "Failed to create output file "
++                          . basename($file) . " $!\n";
++                        return 1;
++                    }
++                    print "Writing to $dir/" . basename($file) . " ... \n";
++                    print OUTPUT $response->content;
++                    close OUTPUT;
++                    $fetched = 1;
++                }
++            }
++            if ($fetched == 0) {
++                # If we've already retrieved a copy of the repository,
++                # reuse it
+                 if (!length($tempdir)) {
+                     if (
+                         !(
+@@ -648,44 +812,32 @@ sub checkout_files($$$$) {
+                           "Failed to create temporary directory . $!\n";
+                         return 1;
+                     }
++                    # Since git won't clone in to a directory that
++                    # already exists...
++                    $tempdir .= "/repo";
++                    # Can't shallow clone from an http:: URL
++                    $repo_url =~ s/^http/git/;
++                    @cmd = (
++                        "git", "clone", "--depth", "1", $repo_url,
++                        "$tempdir"
++                    );
++                    print "@cmd ...\n\n";
++                    my $rc = system(@cmd);
++                    return ($rc >> 8) if $rc != 0;
++                    print "\n";
+                 }
+-                $repo_url =~ s|^-d\s*||;
+-                my ($root, $module) = split /\s+/, $repo_url;
+-                # If an explicit module name isn't present, use the last
+-                # component of the URL
+-                if (!length($module)) {
+-                    $module = $repo_url;
+-                    $module =~ s%^.*/(.*?)$%$1%;
+-                }
+-                $module .= "/$file";
+-                $module =~ s%//%/%g;
+ 
+                 my $oldcwd = getcwd();
+                 chdir $tempdir;
+-                @cmd = ("cvs", "-d", $root, "export", "-r", "HEAD", "-f",
+-                    $module);
+-                print "\n@cmd ...\n";
+-                system @cmd;
+-                if (errorcode() != 0) {
+-                    chdir $oldcwd;
+-                    return (errorcode());
+-                } else {
+-                    chdir $oldcwd;
+-                    if (copy("$tempdir/$module", $dir)) {
+-                        print "Copied to $destdir/$file\n";
+-                    } else {
+-                        print STDERR "Failed to copy $file to $dir: $!\n";
+-                        return 1;
+-                    }
+-                }
+-            }
+-            when (/(svn|bzr)/) {
+-                @cmd = ($repo_type, "cat", "$repo_url/$file");
+-                print "@cmd > $dir/" . basename($file) . " ... \n";
++
++                @cmd = ($repo_type, "show", "HEAD:$file");
++                print "@cmd ... > $dir/" . basename($file) . "\n";
+                 if (!open CAT, '-|', @cmd) {
+                     print STDERR "Failed to execute @cmd $!\n";
++                    chdir $oldcwd;
+                     return 1;
+                 }
++                chdir $oldcwd;
+                 local $/;
+                 my $content = <CAT>;
+                 close CAT;
+@@ -697,174 +849,8 @@ sub checkout_files($$$$) {
+                 print OUTPUT $content;
+                 close OUTPUT;
+             }
+-            when (/(darcs|hg)/) {
+-                # Subtly different but close enough
+-                if (have_lwp) {
+-                    print "Attempting to retrieve $file via HTTP ...\n";
+-
+-                    my $file_url
+-                      = $repo_type eq "darcs"
+-                      ? "$repo_url/$escaped_file"
+-                      : "$repo_url/raw-file/tip/$file";
+-                    init_agent() unless $ua;
+-                    my $request  = HTTP::Request->new('GET', "$file_url");
+-                    my $response = $ua->request($request);
+-                    if ($response->is_success) {
+-                        if (!open OUTPUT, ">", $dir . "/" . basename($file)) {
+-                            print STDERR "Failed to create output file "
+-                              . basename($file) . " $!\n";
+-                            return 1;
+-                        }
+-                        print "Writing to $dir/" . basename($file) . " ... \n";
+-                        print OUTPUT $response->content;
+-                        close OUTPUT;
+-                        $fetched = 1;
+-                    }
+-                }
+-                if ($fetched == 0) {
+-                    # If we've already retrieved a copy of the repository,
+-                    # reuse it
+-                    if (!length($tempdir)) {
+-                        if (
+-                            !(
+-                                $tempdir = tempdir(
+-                                    "debcheckoutXXXX",
+-                                    TMPDIR  => 1,
+-                                    CLEANUP => 1
+-                                ))
+-                        ) {
+-                            print STDERR
+-                              "Failed to create temporary directory . $!\n";
+-                            return 1;
+-                        }
+-
+-                   # Can't get / clone in to a directory that already exists...
+-                        $tempdir .= "/repo";
+-                        if ($repo_type eq "darcs") {
+-                            @cmd = ("darcs", "get", $repo_url, $tempdir);
+-                        } else {
+-                            @cmd = ("hg", "clone", $repo_url, $tempdir);
+-                        }
+-                        print "@cmd ...\n";
+-                        my $rc = system(@cmd);
+-                        return ($rc >> 8) if $rc != 0;
+-                        print "\n";
+-                    }
+-                }
+-                if (copy "$tempdir/$file", $dir) {
+-                    print "Copied $file to $dir\n";
+-                } else {
+-                    print STDERR "Failed to copy $file to $dir: $!\n";
+-                    return 1;
+-                }
+-            }
+-            when ("git") {
+-                # If there isn't a browse URL (either because the package
+-                # doesn't ship one, or because we were called with a URL,
+-                # try a common pattern for gitweb
+-                if (!length($browse_url)) {
+-                    if ($repo_url =~ m%^\w+://([^/]+)/(?:git/)?(.*)$%) {
+-                        $browse_url = "http://$1/?p=$2";
+-                    }
+-                }
+-                if (have_lwp and $browse_url =~ /^http/) {
+-                    $escaped_file =~ s|/|%2F|g;
+-
+-                    print "Attempting to retrieve $file via HTTP ...\n";
+-
+-                    init_agent() unless $ua;
+-                    my $file_url = "$browse_url;a=blob_plain";
+-                    $file_url .= ";f=$escaped_file;hb=HEAD";
+-                    my $request  = HTTP::Request->new('GET', $file_url);
+-                    my $response = $ua->request($request);
+-                    my $error    = 0;
+-                    if (!$response->is_success) {
+-                        if ($browse_url =~ /\.git$/) {
+-                            print "Error retrieving file: "
+-                              . $response->status_line . "\n";
+-                            $error = 1;
+-                        } else {
+-                            $browse_url .= ".git";
+-                            $file_url = "$browse_url;a=blob_plain";
+-                            $file_url .= ";f=$escaped_file;hb=HEAD";
+-                            $request  = HTTP::Request->new('GET', $file_url);
+-                            $response = $ua->request($request);
+-                            if (!$response->is_success) {
+-                                print "Error retrieving file: "
+-                                  . $response->status_line . "\n";
+-                                $error = 1;
+-                            }
+-                        }
+-                    }
+-                    if (!$error) {
+-                        if (!open OUTPUT, ">", $dir . "/" . basename($file)) {
+-                            print STDERR "Failed to create output file "
+-                              . basename($file) . " $!\n";
+-                            return 1;
+-                        }
+-                        print "Writing to $dir/" . basename($file) . " ... \n";
+-                        print OUTPUT $response->content;
+-                        close OUTPUT;
+-                        $fetched = 1;
+-                    }
+-                }
+-                if ($fetched == 0) {
+-                    # If we've already retrieved a copy of the repository,
+-                    # reuse it
+-                    if (!length($tempdir)) {
+-                        if (
+-                            !(
+-                                $tempdir = tempdir(
+-                                    "debcheckoutXXXX",
+-                                    TMPDIR  => 1,
+-                                    CLEANUP => 1
+-                                ))
+-                        ) {
+-                            print STDERR
+-                              "Failed to create temporary directory . $!\n";
+-                            return 1;
+-                        }
+-                        # Since git won't clone in to a directory that
+-                        # already exists...
+-                        $tempdir .= "/repo";
+-                        # Can't shallow clone from an http:: URL
+-                        $repo_url =~ s/^http/git/;
+-                        @cmd = (
+-                            "git", "clone", "--depth", "1", $repo_url,
+-                            "$tempdir"
+-                        );
+-                        print "@cmd ...\n\n";
+-                        my $rc = system(@cmd);
+-                        return ($rc >> 8) if $rc != 0;
+-                        print "\n";
+-                    }
+-
+-                    my $oldcwd = getcwd();
+-                    chdir $tempdir;
+-
+-                    @cmd = ($repo_type, "show", "HEAD:$file");
+-                    print "@cmd ... > $dir/" . basename($file) . "\n";
+-                    if (!open CAT, '-|', @cmd) {
+-                        print STDERR "Failed to execute @cmd $!\n";
+-                        chdir $oldcwd;
+-                        return 1;
+-                    }
+-                    chdir $oldcwd;
+-                    local $/;
+-                    my $content = <CAT>;
+-                    close CAT;
+-                    if (!open OUTPUT, ">", $dir . "/" . basename($file)) {
+-                        print STDERR "Failed to create output file "
+-                          . basename($file) . " $!\n";
+-                        return 1;
+-                    }
+-                    print OUTPUT $content;
+-                    close OUTPUT;
+-                }
+-            }
+-            default {
+-                die "unsupported version control system '$repo_type'.\n";
+-            }
++        } else {
++            die "unsupported version control system '$repo_type'.\n";
+         }
+     }
+ 

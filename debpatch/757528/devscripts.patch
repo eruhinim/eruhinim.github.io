@@ -1,0 +1,82 @@
+diff -Nru devscripts-2.14.6/debian/changelog devscripts-2.14.6+nmu1/debian/changelog
+--- devscripts-2.14.6/debian/changelog	2014-08-05 02:34:56.000000000 +0000
++++ devscripts-2.14.6+nmu1/debian/changelog	2014-08-08 22:12:48.000000000 +0000
+@@ -1,3 +1,9 @@
++devscripts (2.14.6+nmu1) UNRELEASED; urgency=medium
++
++  * Speed up debdiff for source format 3.0 (quilt) packages.
++
++ -- Michael Gilbert <mgilbert@debian.org>  Fri, 08 Aug 2014 22:12:00 +0000
++
+ devscripts (2.14.6) unstable; urgency=medium
+ 
+   [ Benjamin Drung ]
+diff -Nru devscripts-2.14.6/scripts/debdiff.pl devscripts-2.14.6+nmu1/scripts/debdiff.pl
+--- devscripts-2.14.6/scripts/debdiff.pl	2014-08-05 02:34:56.000000000 +0000
++++ devscripts-2.14.6+nmu1/scripts/debdiff.pl	2014-08-08 20:25:33.000000000 +0000
+@@ -503,9 +503,12 @@
+ 		if ($file =~ /\.diff\.gz$/) {
+ 		    $diffs[$i] = cwd() . '/' . $file;
+ 		}
+-		elsif ($file =~ /((?:\.orig)?\.tar\.$compression_re|\.git)$/) {
+-		    $origs[$i] = $file;
++               elsif ($file =~ /\.debian\.tar\.$compression_re_file_ext$/) {
++                   $diffs[$i] = cwd() . '/' . $file;
+ 		}
++               elsif ($file =~ /((?:\.orig)?\.tar\.$compression_re_file_ext|\.git)$/) {
++                   $origs[$i] = $file;
++               }
+ 	    } else {
+ 		warn "Unrecognised file line in .dsc:\n$_\n";
+ 	    }
+@@ -544,7 +547,8 @@
+     # particularly if the orig tar ball contains one which is patched in the
+     # diffs
+     if ($origs[1] eq $origs[2] and defined $diffs[1] and defined $diffs[2]
+-	and scalar(@excludes) == 0 and $use_interdiff and !$wdiff_source_control) {
++	and scalar(@excludes) == 0 and $use_interdiff and !$wdiff_source_control
++	and $dscformats[1] ne '3.0 (quilt)' and $dscformats[2] ne '3.0 (quilt)') {
+ 	# same orig tar ball, interdiff exists and not wdiffing
+ 
+ 	my $tmpdir = tempdir(CLEANUP => 1);
+@@ -588,7 +592,7 @@
+ 	warn "Warning: You do not seem to have interdiff (in the patchutils package)\ninstalled; this program would use it if it were available.\n";
+     }
+     # possibly different orig tarballs, or no interdiff installed,
+-    # or wdiffing debian/control
++    # or source format 3.0 (quilt), or wdiffing debian/control
+     our ($sdir1, $sdir2);
+     mktmpdirs();
+     for my $i (1,2) {
+@@ -596,12 +600,25 @@
+ 	my @opts = ('-x');
+ 	push (@opts, '--skip-patches') if $dscformats[$i] eq '3.0 (quilt)';
+ 	my $diri = ${"dir$i"};
+-	eval {
+-	    spawn(exec => ['dpkg-source', @opts, $dscs[$i]],
+-		  to_file => '/dev/null',
+-		  chdir => $diri,
+-		  wait_child => 1);
+-	};
++	if ($origs[1] eq $origs[2] and $dscformats[$i] eq '3.0 (quilt)') {
++	    eval {
++	       	my $source = $origs[$i];
++	       	$source =~ s/\.orig\.tar\.$compression_re_file_ext//;
++	       	$source =~ s/_/-/;
++	       	mkdir $diri . '/' . $source;
++	       	spawn(exec => ['tar', 'xf', $diffs[$i]],
++		      to_file => '/dev/null',
++		      chdir => $diri . '/' . $source,
++		      wait_child => 1);
++	    };
++	} else {
++	    eval {
++	       	spawn(exec => ['dpkg-source', @opts, $dscs[$i]],
++		      to_file => '/dev/null',
++		      chdir => $diri,
++		      wait_child => 1);
++	    };
++	}
+ 	if ($@) {
+ 	    my $dir = dirname $dscs[1] if $i == 2;
+ 	    $dir = dirname $dscs[2] if $i == 1;

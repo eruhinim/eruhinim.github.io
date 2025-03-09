@@ -1,0 +1,685 @@
+From 89ae667d7dc763d0d4cc5f2368f1ce6aad35943a Mon Sep 17 00:00:00 2001
+From: Michael Hanke <mih@debian.org>
+Date: Fri, 17 Feb 2012 09:56:35 +0100
+Subject: [PATCH] New script backport-dsc to aid backporting of source
+ packages
+
+This is a slightly modified version of the script that is used to
+perform semi-automatic backports for NeuroDebian.
+---
+ README                    |    3 +
+ conf.default.in           |   35 +++++
+ debian/changelog          |    6 +
+ debian/control            |    2 +
+ po4a/devscripts-po4a.conf |    2 +
+ scripts/backport-dsc.1    |  174 +++++++++++++++++++++
+ scripts/backport-dsc.sh   |  372 +++++++++++++++++++++++++++++++++++++++++++++
+ 7 files changed, 594 insertions(+), 0 deletions(-)
+ create mode 100644 scripts/backport-dsc.1
+ create mode 100755 scripts/backport-dsc.sh
+
+diff --git a/README b/README
+index a29ee2f..8393c25 100644
+--- a/README
++++ b/README
+@@ -24,6 +24,9 @@ And now, in mostly alphabetical order, the scripts:
+ - archpath: Prints arch (tla/Bazaar) package names. Also supports
+   calculating the package names for other branches.
+ 
++- backport-dsc: Backport source packages: mangles version, adjusts maintainer,
++  applies release-specific patches, compiles changelog entry
++
+ - bts: A command-line tool for accessing the BTS, both to
+   send mails to control@bts.debian.org and to access the web pages and
+   SOAP interface of the BTS. [www-browser, libauthen-sasl-perl,
+diff --git a/conf.default.in b/conf.default.in
+index 0dbb75c..0218532 100644
+--- a/conf.default.in
++++ b/conf.default.in
+@@ -52,6 +52,41 @@
+ #
+ # No variables currently
+ 
++##### backport-dsc
++#
++# Backport target distribution (see --backport-distribution)
++# BACKPORTDSC_DISTRIBUTION="squeeze-backports"
++#
++# Backport version prefix (see --version-prefix)
++# BACKPORTDSC_VERSION_PREFIX="~"
++#
++# Backport version suffix (see --version-suffix)
++# BACKPORTDSC_VERSION_SUFFIX="bpo60"
++#
++# Name of the backport maintainer (see --maint-name)
++# BACKPORTDSC_MAINTAINER_NAME="Unknown fellow"
++#
++# Email address of backport maintainer (see --maint-email)
++# BACKPORTDSC_MAINTAINER_EMAIL="user@example.net"
++#
++# Whether or not to apply backport patches found in a source package.
++# (see --no-backport-patches)
++# BACKPORTDSC_APPLY_PATCHES=yes
++#
++# Enable or disable colored status output (see --no-color)
++# BACKPORTDSC_COLOR_OUTPUT=yes
++#
++# Enable verbose status output (see --verbose)
++# BACKPORTDSC_VERBOSE=no
++#
++# Sed expressions to modify debian/control, for example to add dependencies
++# (see --mod-control)
++# BACKPORTDSC_MOD_CONTROL="--mod-control 's/^Depends:.*$/&, mypackage/'"
++#
++# Whether or not to replace the original maintainer in the backported source
++# package (see --no-maintainer-update)
++# BACKPORTDSC_UPDATE_MAINTAINER=yes
++
+ ##### bts
+ #
+ # Default bts show/bugs to run in offline mode?
+diff --git a/debian/changelog b/debian/changelog
+index 5de4861..ba949b0 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,7 +1,13 @@
+ devscripts (2.11.5) UNRELEASED; urgency=low
+ 
++  [ Adam D. Barratt ]
+   * 
+ 
++  [ Michael Hanke ]
++  * new script backport-dsc, to aid backporting of source packages (mangles
++    version, adjusts maintainer, applies release-specific patches,
++    compiles changelog entry)
++
+  -- Adam D. Barratt <adam@adam-barratt.org.uk>  Wed, 15 Feb 2012 19:40:58 +0000
+ 
+ devscripts (2.11.4) unstable; urgency=high
+diff --git a/debian/control b/debian/control
+index 3f3d3f7..eabf33b 100644
+--- a/debian/control
++++ b/debian/control
+@@ -92,6 +92,8 @@ Description: scripts to make the life of a Debian Package maintainer easier
+   - annotate-output: run a command and prepend time and stream (O for stdout,
+     E for stderr) for every line of output
+   - archpath: print tla/Bazaar package names [tla | bazaar]
++  - backport-dsc: Backport source packages: mangles version, adjusts maintainer,
++    applies release-specific patches, compiles changelog entry
+   - bts: a command-line tool for manipulating the BTS [www-browser,
+     libauthen-sasl-perl, libnet-smtp-ssl-perl, libsoap-lite-perl, libwww-perl,
+     bsd-mailx | mailx]
+diff --git a/po4a/devscripts-po4a.conf b/po4a/devscripts-po4a.conf
+index c3e13d9..ccd2c93 100644
+--- a/po4a/devscripts-po4a.conf
++++ b/po4a/devscripts-po4a.conf
+@@ -8,6 +8,8 @@
+ 	fr:fr/annotate-output.fr.1 add_fr:add_fr/translator_man.add
+ [type:man] ../scripts/archpath.1 \
+ 	fr:fr/archpath.fr.1 add_fr:add_fr/translator_man.add
++[type:man] ../scripts/backport-dsc.1 \
++	fr:fr/backport-dsc.fr.1 add_fr:add_fr/translator_man.add
+ [type:pod] ../scripts/bts.pl \
+ 	fr:fr/bts.fr.pl add_fr:add_fr/translator_pod.add
+ [type:pod] ../scripts/build-rdeps.pl \
+diff --git a/scripts/backport-dsc.1 b/scripts/backport-dsc.1
+new file mode 100644
+index 0000000..adc2af1
+--- /dev/null
++++ b/scripts/backport-dsc.1
+@@ -0,0 +1,174 @@
++.\" DO NOT MODIFY THIS FILE!  It was generated by help2man 1.40.5.
++.TH BACKPORT-DSC "1" "February 2012" "DEBIAN" "User Commands"
++.SH NAME
++backport-dsc \- backport Debian source packages
++.SH SYNOPSIS
++.B backport-dsc
++[\fIOPTIONS\fR] \fI<dsc-file>\fR
++.SH DESCRIPTION
++Helper to aid backporting a Debian source package to an arbitrary distribution
++release.
++.PP
++backport\-dsc aids backporting by appropriately mangling the source package
++version, adjusting the maintainer of a package and compiling an informative
++changelog entry. Moreover, it supports distribution specific patches (plain, or
++for format 3.0 (quilt) source packages) and allow modification of debian/control
++via arbitrary 'sed' expressions.
++.PP
++Backport relevant patches can be embedded in source packages for use with
++backport\-dsc. The distribution name (see \fB\-\-target\-distribution\fR) serves as an
++identifier to search for patches in the source package that shall be applied
++for a particular distribution. For packages using format the 3.0 (quilt),
++backport\-dsc will look for debian/patches/series\-<distname> and append it to
++the main patch series. Moreover, backport\-dsc will also look for patches
++matching /debian/patches/<distname>\-dsc\-patch* and apply them to the source
++package. The latter patches, unlike the former quilt series, can also be used
++to modify the debian/ directory itself.
++.SH OPTIONS
++
++\fB\-d\fR <distname>, \fB\-\-target\-distribution\fR <distname>
++.IP
++Arbitrary distribution name (e.g. squeeze\-backports). This will be the target
++distribution used for the backport changelog entry. The distribution name
++also serves as an identifier to search for backport patches in the source
++package.
++.PP
++\fB\-h\fR, \fB\-\-help\fR
++.IP
++Print short description, usage summary and option list.
++.PP
++\fB\-\-maint\-email\fR <email>
++.IP
++Specify the backport maintainer's email address. Alternatively, backport\-dsc
++will use the DEBEMAIL environment setting.
++.PP
++\fB\-\-maint\-name\fR <name>
++.IP
++Specify the backport maintainer's real name. Alternatively, backport\-dsc will
++use the DEBFULLNAME environment setting.
++.PP
++\fB\-\-mod\-control\fR <expression>
++.IP
++sed expression to modify debian/control. The option can be given multiple
++times and all expressions will be passed to sed in the order of appearance.
++This can be used to, e.g. change build or runtime dependencies.
++.PP
++\fB\-\-no\-backport\-patches\fR
++.IP
++If set, potentially existing backport patches will not be applied/activated.
++.PP
++\fB\-\-no\-colored\fR
++.IP
++If set, backport\-dsc won't colorize its status and error messages.
++.PP
++\fB\-\-no\-maintainer\-update\fR
++.IP
++If set, the orginal maintainer is preserved in the backported source package.
++This should only be done if original maintainer and backporter are identical.
++Otherwise the porter should take responsibility for the source package
++backport and identify herself as the maintainer.
++.PP
++\fB\-s\fR <string>, \fB\-\-version\-suffix\fR <string>
++.IP
++Version suffix that will be appended to the original source package version,
++ideally indicating the backport target distribution. The resulting package
++version will follow this schema:
++.IP
++<originalversion><prefix><suffix>+<digit>
++.IP
++e.g.: 1.2.3\-4~bpo60+1 with default <prefix>=~
++.PP
++\fB\-p\fR <string>, \fB\-\-version\-prefix\fR <string>
++.IP
++Version prefix that will be prepended to the backport version.
++By default it is ~ but want to be changed (e.g. to +) for forward\-porting to
++next releases.
++.PP
++\fB\-\-verbose\fR
++.IP
++Enable additional status messages.
++.PP
++\fB\-\-verbose\-help\fR
++.IP
++Print all available help.
++.PP
++\fB\-\-version\fR
++.IP
++Print version information and exit.
++.SH ENVIRONMENT
++
++backport\-dsc acknowledges the common environment variables DEBFULLNAME and
++DEBEMAIL to specify the maintainer. Moreover the following variables can be
++used to customize backport\-dsc (each shown with an example):
++.PP
++BACKPORTDSC_DISTRIBUTION="squeeze\-backports"
++.IP
++Backport target distribution (see \fB\-\-backport\-distribution\fR)
++.PP
++BACKPORTDSC_VERSION_PREFIX="~"
++.IP
++Backport version prefix (see \fB\-\-version\-prefix\fR)
++.PP
++BACKPORTDSC_VERSION_SUFFIX="bpo60"
++.IP
++Backport version suffix (see \fB\-\-version\-suffix\fR)
++.PP
++BACKPORTDSC_MAINTAINER_NAME="Unknown fellow"
++.IP
++Name of the backport maintainer (see \fB\-\-maint\-name\fR)
++.PP
++BACKPORTDSC_MAINTAINER_EMAIL="user@example.net"
++.IP
++Email address of backport maintainer (see \fB\-\-maint\-email\fR)
++.PP
++BACKPORTDSC_APPLY_PATCHES=yes
++.IP
++Whether or not to apply backport patches found in a source package.
++(see \fB\-\-no\-backport\-patches\fR)
++.PP
++BACKPORTDSC_COLOR_OUTPUT=yes
++.IP
++Enable or disable colored status output (see \fB\-\-no\-color\fR)
++.PP
++BACKPORTDSC_VERBOSE=no
++.IP
++Enable verbose status output (see \fB\-\-verbose\fR)
++.PP
++BACKPORTDSC_MOD_CONTROL="\-\-mod\-control 's/^Depends:.*$/&, mypackage/'"
++.IP
++Sed expressions to modify debian/control, for example to add dependencies
++(see \fB\-\-mod\-control\fR)
++.PP
++BACKPORTDSC_UPDATE_MAINTAINER=yes
++.IP
++Whether or not to replace the original maintainer in the backported source
++package (see \fB\-\-no\-maintainer\-update\fR)
++.SH FILES
++
++backport\-dsc reads configuration from $HOME/.devscripts. The environment
++section lists variables that can be used to pre\-configure backport\-dsc
++.SH EXAMPLES
++
++backport\-dsc examplepkg_1.2.3\-4.dsc
++.IP
++Create backport suitable for backports.org
++.PP
++backport\-dsc \fB\-d\fR myown\-backports \fB\-v\fR mo2010 examplepkg_1.2.3\-4.dsc
++.IP
++Create backport for some custom distribution with custom version suffix.
++.PP
++backport\-dsc \fB\-d\fR ubuntu\-lucid \fB\-v\fR myppa \fB\-\-mod\-control\fR "\-e 's/iceweasel/firefox/g'" examplepkg_1.2.3\-4.dsc
++.IP
++Create a backport for a fake Ubuntu PPA repository, replacing all occurrences
++of iceweasel in debian/control with firefox.
++.SH AUTHOR
++Written by Michael Hanke for the NeuroDebian project.
++.SH "REPORTING BUGS"
++Report bugs to <michael.hanke@gmail.com>.
++.SH COPYRIGHT
++Copyright \(co 2010\-2012 Michael Hanke <michael.hanke@gmail.com>
++.PP
++Licensed under GNU Public License version 2 or later.
++.br
++This is free software; see the source for copying conditions.  There is NO
++warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+diff --git a/scripts/backport-dsc.sh b/scripts/backport-dsc.sh
+new file mode 100755
+index 0000000..c28ac2e
+--- /dev/null
++++ b/scripts/backport-dsc.sh
+@@ -0,0 +1,372 @@
++#!/bin/bash
++
++# play save
++set -e
++set -u
++
++# version of this script
++backports_dsc_version=###VERSION###
++
++############
++# Defaults #
++############
++
++# source user config files
++if [ -f "$HOME/.devscripts" ]; then
++    . $HOME/.devscripts
++fi
++
++bp_distribution=${BACKPORTDSC_DISTRIBUTION:-squeeze-backports}
++bp_version_prefix=${BACKPORTDSC_VERSION_PREFIX:-\~}
++bp_version_suffix=${BACKPORTDSC_VERSION_SUFFIX:-bpo60}
++bp_maintainer_name=${BACKPORTDSC_MAINTAINER_NAME:-${DEBFULLNAME:-unamed}}
++bp_maintainer_email=${BACKPORTDSC_MAINTAINER_NAME:-${DEBEMAIL:-unknown}}
++bp_update_maintainer=${BACKPORTDSC_UPDATE_MAINTAINER:-yes}
++# whether or not to apply backport patches found in a package
++bp_apply_patches=${BACKPORTDSC_APPLY_PATCHES:-yes}
++# produce fancy colored output
++bp_color_output=${BACKPORTDSC_COLOR_OUTPUT:-yes}
++# enables additional status message if set to true
++bp_verbose=${BACKPORTDSC_VERBOSE:-no}
++# sed expressions to modify debian/control
++bp_mod_control=${BACKPORTDSC_MOD_CONTROL:-}
++
++
++print_version()
++{
++cat << EOT
++backport-dsc $backports_dsc_version
++
++Copyright (C) 2010-2012 Michael Hanke <michael.hanke@gmail.com>
++
++Licensed under GNU Public License version 2 or later.
++This is free software; see the source for copying conditions.  There is NO
++warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++
++Written by Michael Hanke for the NeuroDebian project.
++
++EOT
++}
++
++
++print_short_description()
++{
++cat << EOT
++Helper to aid backporting a Debian source package to an arbitrary distribution
++release.
++
++backport-dsc aids backporting by appropriately mangling the source package
++version, adjusting the maintainer of a package and compiling an informative
++changelog entry. Moreover, it supports distribution specific patches (plain, or
++for format 3.0 (quilt) source packages) and allow modification of debian/control
++via arbitrary 'sed' expressions.
++
++Backport relevant patches can be embedded in source packages for use with
++backport-dsc. The distribution name (see --target-distribution) serves as an
++identifier to search for patches in the source package that shall be applied
++for a particular distribution. For packages using format the 3.0 (quilt),
++backport-dsc will look for debian/patches/series-<distname> and append it to
++the main patch series. Moreover, backport-dsc will also look for patches
++matching /debian/patches/<distname>-dsc-patch* and apply them to the source
++package. The latter patches, unlike the former quilt series, can also be used
++to modify the debian/ directory itself.
++
++EOT
++}
++
++
++print_help()
++{
++cat << EOT
++
++Usage:  backport-dsc [OPTIONS] <dsc-file>
++
++
++Options:
++
++-d <distname>, --target-distribution <distname>
++  Arbitrary distribution name (e.g. squeeze-backports). This will be the target
++  distribution used for the backport changelog entry. The distribution name
++  also serves as an identifier to search for backport patches in the source
++  package.
++
++-h, --help
++  Print short description, usage summary and option list.
++
++--maint-email <email>
++  Specify the backport maintainer's email address. Alternatively, backport-dsc
++  will use the DEBEMAIL environment setting.
++
++--maint-name <name>
++  Specify the backport maintainer's real name. Alternatively, backport-dsc will
++  use the DEBFULLNAME environment setting.
++
++--mod-control <expression>
++  sed expression to modify debian/control. The option can be given multiple
++  times and all expressions will be passed to sed in the order of appearance.
++  This can be used to, e.g. change build or runtime dependencies.
++
++--no-backport-patches
++  If set, potentially existing backport patches will not be applied/activated.
++
++--no-colored
++  If set, backport-dsc won't colorize its status and error messages.
++
++--no-maintainer-update
++  If set, the orginal maintainer is preserved in the backported source package.
++  This should only be done if original maintainer and backporter are identical.
++  Otherwise the porter should take responsibility for the source package
++  backport and identify herself as the maintainer.
++
++-s <string>, --version-suffix <string>
++  Version suffix that will be appended to the original source package version,
++  ideally indicating the backport target distribution. The resulting package
++  version will follow this schema:
++
++  <originalversion><prefix><suffix>+<digit>
++
++  e.g.: 1.2.3-4~bpo60+1 with default <prefix>=~
++
++-p <string>, --version-prefix <string>
++  Version prefix that will be prepended to the backport version.  By default it
++  is ~ but want to be changed (e.g. to +) for forward-porting to next releases.
++
++--verbose
++  Enable additional status messages.
++
++--verbose-help
++  Print all available help.
++
++--version
++  Print version information and exit.
++
++EOT
++}
++
++
++print_additional_description()
++{
++cat << EOT
++
++Examples:
++
++backport-dsc examplepkg_1.2.3-4.dsc
++  Create backport suitable for backports.org
++
++backport-dsc -d myown-backports -v mo2010 examplepkg_1.2.3-4.dsc
++  Create backport for some custom distribution with custom version suffix.
++
++backport-dsc -d ubuntu-lucid -v myppa --mod-control "-e 's/iceweasel/firefox/g'" examplepkg_1.2.3-4.dsc
++  Create a backport for a fake Ubuntu PPA repository, replacing all occurrences
++  of iceweasel in debian/control with firefox.
++
++
++Files:
++
++backport-dsc reads configuration from \$HOME/.devscripts. The environment
++section lists variables that can be used to pre-configure backport-dsc
++
++
++Environment:
++
++backport-dsc acknowledges the common environment variables DEBFULLNAME and
++DEBEMAIL to specify the maintainer. Moreover the following variables can be
++used to customize backport-dsc (each shown with an example):
++
++BACKPORTDSC_DISTRIBUTION="squeeze-backports"
++  Backport target distribution (see --backport-distribution)
++
++BACKPORTDSC_VERSION_PREFIX="~"
++  Backport version prefix (see --version-prefix)
++
++BACKPORTDSC_VERSION_SUFFIX="bpo60"
++  Backport version suffix (see --version-suffix)
++
++BACKPORTDSC_MAINTAINER_NAME="Unknown fellow"
++  Name of the backport maintainer (see --maint-name)
++
++BACKPORTDSC_MAINTAINER_EMAIL="user@example.net"
++  Email address of backport maintainer (see --maint-email)
++
++BACKPORTDSC_APPLY_PATCHES=yes
++  Whether or not to apply backport patches found in a source package.
++  (see --no-backport-patches)
++
++BACKPORTDSC_COLOR_OUTPUT=yes
++  Enable or disable colored status output (see --no-color)
++
++BACKPORTDSC_VERBOSE=no
++  Enable verbose status output (see --verbose)
++
++BACKPORTDSC_MOD_CONTROL="--mod-control 's/^Depends:.*$/&, mypackage/'"
++  Sed expressions to modify debian/control, for example to add dependencies
++  (see --mod-control)
++
++BACKPORTDSC_UPDATE_MAINTAINER=yes
++  Whether or not to replace the original maintainer in the backported source
++  package (see --no-maintainer-update)
++
++
++
++
++Report bugs to <michael.hanke@gmail.com>.
++
++EOT
++}
++
++
++
++################################
++# Commandline options handling #
++################################
++
++# Parse commandline options (taken from the getopt examples from the Debian util-linux package)
++# Note that we use `"$@"' to let each command-line parameter expand to a
++# separate word. The quotes around `$@' are essential!
++# We need CLOPTS as the `eval set --' would nuke the return value of getopt.
++CLOPTS=`getopt -o h,d:,s:,p: --long help,verbose-help,version,target-distribution:,version-suffix:,version-prefix:,maint-name:,maint-email:,no-color,no-backport-patches,verbose,mod-control:,no-maintainer-update, -n 'backport-dsc' -- "$@"`
++
++if [ $? != 0 ] ; then
++  echo "Terminating..." >&2
++  exit 1
++fi
++
++# Note the quotes around `$CLOPTS': they are essential!
++eval set -- "$CLOPTS"
++
++while true ; do
++  case "$1" in
++	  -d|--target-distribution) shift; bp_distribution=$1; shift;;
++	  -s|--version-suffix) shift; bp_version_suffix=$1; shift;;
++	  -p|--version-prefix) shift; bp_version_prefix=$1; shift;;
++	  --maint-name) shift; bp_maintainer_name=$1; shift;;
++	  --maint-email) shift; bp_maintainer_email=$1; shift;;
++	  --no-maintainer-update) bp_update_maintainer="no"; shift;;
++	  --no-backport-patches) apply_patches="no"; shift;;
++	  --no-color) bp_color_output="no"; shift;;
++	  --verbose) bp_verbose="yes"; shift;;
++	  --mod-control) shift; bp_mod_control="$bp_mod_control -e '$1'"; shift;;
++	  -h|--help) print_short_description; print_help; exit 0;;
++	  --verbose-help) print_short_description; print_help; print_additional_description; exit 0;;
++	  --version) print_version; exit 0;;
++	  --) shift ; break ;;
++	  *) echo "Internal error! ($1)"; exit 1;;
++  esac
++done
++
++# colorful output requested?
++if [ "$bp_color_output" = "yes" ]; then
++  black='\e[0;30m'; Black='\e[1;30m'
++  red='\e[0;31m'; Red='\e[1;31m'
++  green='\e[0;32m'; Green='\e[1;32m'
++  yellow='\e[0;33m'; Yellow='\e[1;33m'
++  blue='\e[0;34m'; Blue='\e[1;34m'
++  cyan='\e[0;36m'; Cyan='\e[1;36m'
++  white='\e[0;37m'; White='\e[1;37m'
++  NC='\e[0m' #no color
++else
++  black=''; Black=''
++  red=''; Red=''
++  green=''; Green=''
++  yellow=''; Yellow=''
++  blue=''; Blue=''
++  cyan=''; Cyan=''
++  white=''; White=''
++  NC='' #no color
++fi
++
++
++if [ $# -ne 1 ]; then
++  printf "${Red}Error: This command needs exactly one positional argument.\n${NC}"
++  exit 1
++fi
++
++# to be processed source package
++dsc_file=$1
++
++if [ ! -f "$dsc_file" ]; then
++  printf "${Red}Error: Cannot find DSC file at '$dsc_file'.\n${NC}"
++  exit 1
++fi
++
++# determine basic DSC properties
++src_name=$(basename "${dsc_file%%_*}")
++src_version=${dsc_file#*_}
++src_version=${src_version%%.dsc}
++
++wdir=$(mktemp -d -t backport-dsc.XXXXXX)
++sdir=$wdir/${src_name}-${src_version}
++
++bp_version="${bp_version_prefix}${bp_version_suffix}+"
++
++
++# setup environment for dpkg
++DEBEMAIL="$bp_maintainer_email"
++DEBFULLNAME="$bp_maintainer_name"
++export DEBEMAIL DEBFULLNAME
++
++if [ "$bp_verbose" = "yes" ]; then
++  printf "${green}DSC name: '$src_name'\nDSC version: '$src_version'\n${NC}"
++  printf "${green}Backporting to '$bp_distribution', version suffix '$bp_version'\n${NC}"
++  printf "${green}Extracting source package to '$sdir'\n${NC}"
++fi
++
++# common debchange call
++bp_dch_cmd="dch --noconf --force-distribution --force-bad-version -c $sdir/debian/changelog"
++
++# extract the original source package
++dpkg-source -x $dsc_file $sdir
++# note backport in changelog
++$bp_dch_cmd -D ${bp_distribution} -l "${bp_version}" "Backported for ${bp_distribution}."
++
++if [ "$bp_update_maintainer" = "yes" ]; then
++  if [ "$bp_verbose" = "yes" ]; then
++    printf "${green}Set backport maintainer to: '$bp_maintainer_name <$bp_maintainer_email>'\n${NC}"
++  fi
++  bp_mod_control="$bp_mod_control -e 's/^Maintainer:.*$/Maintainer: $bp_maintainer_name <$bp_maintainer_email>\nX-Original-&/'"
++fi
++
++# handle patches if desired
++if [ "$bp_apply_patches" = "yes" ]; then
++  dsc_format=$(dpkg-source --print-format $sdir)
++  # per each supported source package format
++  if [ "$dsc_format" = "3.0 (quilt)" -a -f "$sdir/debian/patches/series-$bp_distribution" ]; then
++    if [ "$bp_verbose" = "yes" ]; then
++      printf "${green}Enabling additional quilt patch series for $bp_distribution.\n${NC}"
++    fi
++    cat $sdir/debian/patches/series-$bp_distribution >> $sdir/debian/patches/series
++    $bp_dch_cmd "Added 'series-$bp_distribution' in quilt patch series."
++  fi
++  # look for backport patches
++  for p in $(ls -1 $sdir/debian/patches/$bp_distribution-dsc-patch* 2> /dev/null || true); do
++    if [ "$bp_verbose" = "yes" ]; then
++      printf "${green}Applying additional patch $(basename "$p").\n${NC}"
++    fi
++    patch -p1 --directory=$sdir < "$p"
++    $bp_dch_cmd "Applied additional patch from debian/patches/$(basename "$p")."
++  done
++fi
++
++# modify control file
++if [ -n "$bp_mod_control" ]; then
++  if [ "$bp_verbose" = "yes" ]; then
++    printf "${green}Modifying debian/control with given instructions.\n${NC}"
++  fi
++  bash -c "sed -i $bp_mod_control $sdir/debian/control"
++  $bp_dch_cmd "Used following sed expression to modify debian/control:$bp_mod_control."
++fi
++
++# extract final version
++final_version=$(dpkg-parsechangelog -l$sdir/debian/changelog | egrep '^Version: ' | cut -d ' ' -f 2,2)
++# build backported source package
++bash -c "cd $wdir && dpkg-source -b $sdir"
++# remove extracted source tree
++rm -rf $sdir
++# move generated source package into working dir
++mv $wdir/* .
++# cleanup
++rm -rf $wdir
++
++if [ "$bp_verbose" = "yes" ]; then
++  printf "${green}Backported source package is at '${src_name}_$final_version.dsc'\n${NC}"
++fi
+-- 
+1.7.9
+

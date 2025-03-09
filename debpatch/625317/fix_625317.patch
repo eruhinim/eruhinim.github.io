@@ -1,0 +1,114 @@
+diff --git a/debian/changelog b/debian/changelog
+index b19ea14..2b3cfc8 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -3,8 +3,10 @@ cdebconf (0.156) UNRELEASED; urgency=low
+   [ Regis Boudin ]
+   * Add cdebconf versions of debconf-escape, debconf-get-selections, and
+     debconf-show. (Initial debconf-escape code by Colin Watson.)
++  * Fix FTBFS with the future GCC 4.6.1 (Closes: #625317).
++  * Implement handling of multiple flags in the rfc822db backend.
+ 
+- -- Joey Hess <joeyh@debian.org>  Sun, 24 Apr 2011 13:15:05 -0400
++ -- Joey Hess <joeyh@debian.org>  Thu, 05 May 2011 19:22:07 +0100
+ 
+ cdebconf (0.155) unstable; urgency=low
+ 
+diff --git a/src/modules/db/rfc822db/rfc822db.c b/src/modules/db/rfc822db/rfc822db.c
+index b2183fa..70da04d 100644
+--- a/src/modules/db/rfc822db/rfc822db.c
++++ b/src/modules/db/rfc822db/rfc822db.c
+@@ -22,6 +22,14 @@
+ 
+ FILE *outf = NULL;
+ 
++static const struct {
++    const char *name;
++    unsigned int value;
++} debconf_qflags[] = {
++    { "seen", DC_QFLAG_SEEN },
++    { 0, 0 }
++};
++
+ static struct template *rfc822db_template_get(struct template_db *db,
+     const char *ltag);
+ 
+@@ -116,15 +124,42 @@ static void parse_owners(struct question *q, char *string)
+     free(owc);
+ }
+ 
+-static int parse_flags(char *string)
++static unsigned int parse_flags(char *string)
+ {
+-    int ret = 0;
+-    if (string == NULL)
+-        return ret;
+-    if (strstr(string, "seen") != NULL)
++    unsigned int ret = 0;
++    char *wc, *owc;
++   
++    if (!string)
++	    return;
++
++    owc = wc = strdup(string);
++
++    while (wc != NULL)
+     {
+-        ret |= DC_QFLAG_SEEN;
++        char *delim = wc;
++        int i, finished = 0;
++        while (*delim != ' ' && *delim != '\t' && *delim != '\0')
++            delim++;
++        if (*delim == '\0')
++            finished = 1;
++        *delim = '\0';
++        for (i = 0; debconf_qflags[i].name; i++)
++        {
++            if (0 == strcmp(wc, debconf_qflags[i].name))
++            {
++                ret |= debconf_qflags[i].value;
++            }
++        }
++        if (finished != 0)
++            break;
++        wc = delim;
++        while (*wc == ' ' || *wc == '\t' || *wc == '\0')
++        {
++            wc++;
++        }        
+     }
++
++    free(owc);
+     return ret;
+ }
+ 
+@@ -587,7 +622,6 @@ void rfc822db_question_dump(const void *node, const VISIT which, const int depth
+ {
+   struct questionowner *owner;
+   struct questionvariable *var;
+-  char tmp[1024];
+ 
+   const struct question *q = (*(struct question **) node);
+   switch (which) {
+@@ -618,12 +652,16 @@ void rfc822db_question_dump(const void *node, const VISIT which, const int depth
+ 
+         if ((q)->flags)
+         {
+-            tmp[0] = 0;
+-            fprintf(outf, "Flags: ");
++            int i;
++            fprintf(outf, "Flags:");
+ 
+-            /* TODO: handle multiple flags */
+-            if ((q)->flags & DC_QFLAG_SEEN)
+-                fprintf(outf, "seen");
++            for (i = 0; debconf_qflags[i].name; i++)
++            {
++                if ((q)->flags & debconf_qflags[i].value)
++                {
++                    fprintf(outf, " %s", debconf_qflags[i].name);
++                }
++            }
+ 
+             fprintf(outf, "\n");
+         }

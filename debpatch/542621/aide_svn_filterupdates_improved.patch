@@ -1,0 +1,202 @@
+Index: debian/cron.daily/aide
+===================================================================
+--- debian/cron.daily/aide	(revision 763)
++++ debian/cron.daily/aide	(working copy)
+@@ -74,8 +74,16 @@
+ COMMAND="${COMMAND:-check}"
+ COPYNEWDB="${COPYNEWDB:-no}"
+ QUIETREPORTS="${QUIETREPORTS:-no}"
++FILTERUPDATES="${FILTERUPDATES:-no}"
++FILTERINSTALLATIONS="${FILTERINSTALLATIONS:-no}"
+ ONEXIT=""
+ 
++# Get the database's date
++DATABASEDATE=""
++if [ -f $DATABASE ]; then
++  DATABASEDATE="$(stat -c %y $DATABASE | sed -e "s/\..*//")"
++fi
++
+ # functions
+ 
+ mytempfile() {
+@@ -272,14 +280,128 @@
+ 	printf >> "$LOGFILE" "AIDE produced no errors.\n"
+     fi
+ 
++    MAILTMP=$ARUNLOG
++
++    if [ -n "${MAILTMP:-}" ] && [ -s "$MAILTMP" ]; then
++        
++        # Filter software updates
++
++        # Figure out where the dpkg log file is
++        DPKGLOG="$(< /etc/dpkg/dpkg.cfg grep "^log" | head -n 1 | cut -d ' ' -f 2)"
++
++        if ( [ "$FILTERUPDATES" = "yes" ] || [ "$FILTERINSTALLATIONS" = "yes" ] ) && [ -s "$DPKGLOG" ]; then
++
++            # Create a list of files modified by system updates
++            declare -a PACKAGES
++            if [ "$FILTERUPDATES" = "yes" ] && [ "$FILTERINSTALLATIONS" = "yes" ] ; then
++                FILTER="install|upgrade"
++            elif [ "$FILTERUPDATES" = "yes" ]; then
++                FILTER="upgrade"
++            else
++                FILTER="install"
++            fi
++            REGEX="^([^ ]+ [^ ]+) ("$FILTER") ([^ ]+) [^ ]+ [^ ]+$"
++            pkgs=""
++            while read line; do
++                if [[ $line =~ $REGEX ]] && [[ "$DATABASEDATE" < ${BASH_REMATCH[1]} ]]; then
++                    pkgs+="${BASH_REMATCH[3]} (${BASH_REMATCH[2]})\n"
++                    PACKAGES[${#PACKAGES[@]}]="${BASH_REMATCH[3]}"
++                fi  
++            done < "$DPKGLOG"
++
++            if [ "${#PACKAGES[@]}" -ne 0 ]; then
++                FILTEREDMAIL="$(mytempfile filteredmail)"
++                DETAILED_LOG="$(mytempfile detailed_log)"
++                UNFILTERED_ADDED="$(mytempfile unfiltered_added)"
++                UNFILTERED_REMOVED="$(mytempfile unfiltered_removed)"
++                UNFILTERED_CHANGED="$(mytempfile unfiltered_changed)"
++                PKG_FILE_LIST="$(mytempfile pkg_file_list)"
++                FILTERLOG=$FILTEREDMAIL
++                REGEX="^(changed|removed|added): (.*)"
++                REGEX2="^(File|Directory): (.*)"
++                REGEX3="^  (Added|Removed|Changed) files:\s*([0-9]+)"
++                REGEX4="^Detailed information about changes:$"
++
++                dpkg-query -L ${PACKAGES[@]} | sed -e "/^$/d" -e "/\/\./d" >> "$PKG_FILE_LIST"
++                FILTERED_ADDED=0
++                FILTERED_REMOVED=0
++                FILTERED_CHANGED=0
++                FILTERING_DETAILED_LOG=false
++                IFS="" # set bash's internal field separator to ''
++                while read -r line; do
++                    if $FILTERING_DETAILED_LOG; then
++                        [[ -z "$line" ]] && FILTERING_DETAILED_LOG=false || continue
++                    elif [[ $line =~ $REGEX4 ]] ; then
++                        FILTERLOG=$DETAILED_LOG 
++                    elif [[ $line =~ $REGEX2 ]]; then
++                        if [ -z "$(grep "^${BASH_REMATCH[2]}$" "$PKG_FILE_LIST")" ]; then
++                            echo "$line" >> "$FILTERLOG"
++                        else
++                            FILTERING_DETAILED_LOG=true
++                            continue
++                        fi  
++                    elif [[ $line =~ $REGEX3 ]]; then
++                        case "${BASH_REMATCH[1]}" in
++                            Added) ADDED=${BASH_REMATCH[2]} ;;
++                            Removed) REMOVED=${BASH_REMATCH[2]} ;;
++                            Changed) CHANGED=${BASH_REMATCH[2]} ;;
++                        esac
++                        FILTERLOG=/dev/null
++                    elif [[ $line =~ $REGEX ]]; then
++                        if [ -z "$(grep "^${BASH_REMATCH[2]}$" "$PKG_FILE_LIST")" ]; then
++                            case "${BASH_REMATCH[1]}" in
++                                added) echo "$line" >> "$UNFILTERED_ADDED";;
++                                removed) echo "$line" >> "$UNFILTERED_REMOVED";;
++                                changed) echo "$line" >> "$UNFILTERED_CHANGED";;
++                            esac
++                        else
++                            case "${BASH_REMATCH[1]}" in
++                                added) ((FILTERED_ADDED++)) ;;
++                                removed) ((FILTERED_REMOVED++)) ;;
++                                changed) ((FILTERED_CHANGED++)) ;;
++                            esac
++                        fi
++                    else
++                        echo "$line" >> "$FILTERLOG"
++                    fi
++                done < "$ARUNLOG"
++                NEW_ADDED=$((ADDED - FILTERED_ADDED))
++                NEW_REMOVED=$((REMOVED - FILTERED_REMOVED))
++                NEW_CHANGED=$((CHANGED - FILTERED_CHANGED))
++                printf >> "$FILTEREDMAIL" "  Added files:\t\t\t$NEW_ADDED\t(filtered: $FILTERED_ADDED)\n"
++                printf >> "$FILTEREDMAIL" "  Removed files:\t\t$NEW_REMOVED\t(filtered: $FILTERED_REMOVED)\n"
++                printf >> "$FILTEREDMAIL" "  Changed files:\t\t$NEW_CHANGED\t(filtered: $FILTERED_CHANGED)\n"
++                printf >> "$FILTEREDMAIL" "\nThe following package changes were detected and were filtered (added: $FILTERED_ADDED | removed: $FILTERED_REMOVED | changed: $FILTERED_CHANGED) from this mail:\n"
++                printf >> "$FILTEREDMAIL" "$pkgs"
++                printf >> "$FILTEREDMAIL" "The full output can be found in %s.\n" "$LOGFILE"
++                if [[ $NEW_ADDED -eq 0 && $NEW_REMOVED -eq 0 && $NEW_CHANGED -eq 0 ]] ; then
++                    printf >> "$FILTEREDMAIL" "\nAIDE detected no changes after filtering package changes.\n\n"
++                else
++                    if [[ $NEW_ADDED -gt 0 ]]; then
++                        printf >> "$FILTEREDMAIL" -- "\n---------------------------------------------------\nAdded files (filtered: $FILTERED_ADDED):\n---------------------------------------------------\n\n"
++                        < "$UNFILTERED_ADDED" cat >> "$FILTEREDMAIL" 
++                    fi
++                    if [[ $NEW_REMOVED -gt 0 ]]; then
++                        printf >> "$FILTEREDMAIL" -- "\n---------------------------------------------------\nRemoved files (filtered: $FILTERED_REMOVED):\n---------------------------------------------------\n\n"
++                        < "$UNFILTERED_REMOVED" cat >> "$FILTEREDMAIL" 
++                    fi
++                    if [[ $NEW_CHANGED -gt 0 ]]; then
++                        printf >> "$FILTEREDMAIL" -- "\n---------------------------------------------------\nChanged files (filtered: $FILTERED_CHANGED):\n---------------------------------------------------\n\n"
++                        < "$UNFILTERED_CHANGED" cat >> "$FILTEREDMAIL" 
++                        printf >> "$FILTEREDMAIL" -- "\n--------------------------------------------------\nDetailed information about changes (filtered: $FILTERED_CHANGED):\n"
++                        < "$DETAILED_LOG" cat >> "$FILTEREDMAIL"
++                    fi
++                fi
++                MAILTMP=$FILTEREDMAIL
++            fi
++        fi
++
+     # include de-noised log into mail
+ 
+-    if [ -n "${ARUNLOG:-}" ] && [ -s "$ARUNLOG" ]; then
+-
+       if [ -n "${NOISE:-}" ]; then
+ 	NOISETMP="$(mytempfile aidenoise1)"
+ 	NOISETMP2="$(mytempfile aidenoise2)"
+-	< "$ARUNLOG" sed -n '1,/^Detailed information about changes:/p' | \
++	< "$MAILTMP" sed -n '1,/^Detailed information about changes:/p' | \
+ 	grep '^\(changed\|removed\|added\):' | \
+ 	grep -v "^added: THERE WERE ALSO [0-9]\+ FILES ADDED UNDER THIS DIRECTORY" >> "$NOISETMP2"
+ 	
+@@ -310,21 +432,21 @@
+ 
+       # include non-de-noised log into mail
+ 
+-      if [ -n "${ARUNLOG:-}" ] && [ -s "$ARUNLOG" ]; then
+-	loglines="$(wc -l "$ARUNLOG" | awk '{ print $1 }')"
++      if [ -n "${MAILTMP:-}" ] && [ -s "$MAILTMP" ]; then
++	loglines="$(wc -l "$MAILTMP" | awk '{ print $1 }')"
+ 	if [ "${loglines:=0}" -gt "$LINES" ]; then
+ 		printf "AIDE has returned long output which has been truncated in this mail\n" | \
+ 		  frame >> "$MAILFILE"
+ 		printf >> "$MAILFILE" \
+ 		  "Output is %d lines, truncated to %d.\n" "$loglines" "$LINES"
+-		< "$ARUNLOG" head -n "$LINES" >> "$MAILFILE"
++		< "$MAILTMP" head -n "$LINES" >> "$MAILFILE"
+ 		printf >> "$MAILFILE" "\nEnd of truncated AIDE output. The full output can be found in %s.\n\n" "$LOGFILE"
+ 	else
+ 		printf >> "$MAILFILE" "Output of the daily AIDE run (%d lines):\n" "$loglines"
+-		< "$ARUNLOG" cat >> "$MAILFILE"
++		< "$MAILTMP" cat >> "$MAILFILE"
+ 	        printf >> "$MAILFILE" "\nEnd of AIDE output.\n\n"
+ 	fi
+-	printf >> "$LOGFILE" "AIDE output (%d lines):\n" "$loglines"
++	printf >> "$LOGFILE" "AIDE output (%d lines):\n" "$(wc -l "$ARUNLOG" | awk '{ print $1 }')"
+ 	< "$ARUNLOG" cat >> "$LOGFILE"
+         printf >> "$LOGFILE" "End of AIDE output.\n\n"
+       else
+Index: debian/default/aide
+===================================================================
+--- debian/default/aide	(revision 763)
++++ debian/default/aide	(working copy)
+@@ -40,6 +40,17 @@
+ #   been reported. This is needed for ANF/ARF to work reliably.
+ COPYNEWDB=no
+ 
++# Set this to yes to suppress file changes by package updates and security
++# updates from appearing in the e-mail report. Filtered file changes will 
++# still be listed in the log file. This option parses the /var/log/dpkg.log
++# file.
++FILTERUPDATES=no
++
++# Set this to yes to suppress file changes by package installation
++# from appearing in the e-mail report. Filtered file changes will still
++# be listed in the log file. This option parses the /var/log/dpkg.log file.
++FILTERINSTALLATIONS=no
++
+ # This parameter defines how many lines to return per e-mail. Output longer
+ # than this value will be truncated in the e-mail sent out.
+ LINES=1000

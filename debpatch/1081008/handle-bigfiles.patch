@@ -1,0 +1,213 @@
+diff -urN dump-0.4b47.orig/compat/include/bsdcompat.h dump-0.4b47/compat/include/bsdcompat.h
+--- dump-0.4b47.orig/compat/include/bsdcompat.h	2021-01-01 16:28:57.000000000 +0000
++++ dump-0.4b47/compat/include/bsdcompat.h	2021-01-01 16:28:57.000000000 +0000
+@@ -115,32 +115,58 @@
+ #endif /* sunos */
+ 
+ struct dinode {
+-	__u16	di_mode;
++/*00*/	__u16	di_mode;
+ 	__u16	di_uid;
+ 	__u32	di_size;
+ 	__u32	di_atime;
+ 	__u32	di_ctime;
+-	__u32	di_mtime;
++/*10*/	__u32	di_mtime;
+ 	__u32	di_dtime;
+ 	__u16	di_gid;
+ 	__u16	di_nlink;
+ 	__u32	di_blocks;
+-	__u32	di_flags;
+-	__u32	di_reserved1;
+-	__u32	di_db[NDADDR];
++/*20*/	__u32	di_flags;
++	union {
++		struct {
++			__u32	l_di_version;		/* linux was di_reserved1 */
++		} linux1;
++		struct {
++			__u32	h_di_translator;	/* hurd */
++		} hurd1;
++	} osd1; /* was di_reserved1 */
++/*28*/	__u32	di_db[NDADDR];
+ 	__u32	di_ib[NIADDR];
+-	__u32	di_gen;
++/*64*/	__u32	di_gen;
+ 	__u32	di_file_acl;
+ 	__u32	di_dir_acl;
+-	__u32	di_faddr;
+-	__u8	di_frag;
+-	__u8	di_fsize;
+-	__u16	di_pad1;
+-	__u16	di_uidhigh;
+-	__u16	di_gidhigh;
+-	__u32	di_spare;
+-	__u16	di_extraisize;
+-	__u16	di_pad2;
++/*70*/	__u32	di_faddr;
++	union {
++		struct {
++			__u16	l_i_blocks_hi;
++			__u16	l_i_file_acl_high;
++			__u16	l_i_uid_high;
++			__u16	l_i_gid_high;
++			__u16	l_i_checksum_lo;
++			__u16	l_i_reserved;
++		} linux2;
++		struct {
++			__u8	di_frag;
++			__u8	di_fsize;
++			__u16	di_mode_high; /* was di_pad1 */
++			__u16	di_uidhigh;
++			__u16	di_gidhigh;
++			__u32	di_spare;
++		} hurd2;
++	} osd2;
++/*80*/	__u16	di_extraisize;
++	__u16	i_checksum_hi;	/* crc32c(uuid+inum+inode) */ /* was di_pad2 */
++	__u32	i_ctime_extra;	/* extra Change time (nsec << 2 | epoch) */
++	__u32	i_mtime_extra;	/* extra Modification time (nsec << 2 | epoch) */
++	__u32	i_atime_extra;	/* extra Access time (nsec << 2 | epoch) */
++/*90*/	__u32	i_crtime;	/* File creation time */
++	__u32	i_crtime_extra;	/* extra File creation time (nsec << 2 | epoch)*/
++	__u32	i_version_hi;	/* high 32 bits for 64-bit version */
++/*9c*/	__u32	i_projid;       /* Project ID */
+ };
+ 
+ #define di_rdev		di_db[0]
+diff -urN dump-0.4b47.orig/dump/dump.h dump-0.4b47/dump/dump.h
+--- dump-0.4b47.orig/dump/dump.h	2022-05-03 10:02:27.000000000 +0000
++++ dump-0.4b47/dump/dump.h	2022-05-03 10:02:27.000000000 +0000
+@@ -140,8 +140,8 @@
+ int	mapdirs (dump_ino_t maxino, long long *tapesize);
+ 
+ /* file dumping routines */
+-void	blksout (blk_t *blkp, int frags, dump_ino_t ino);
+-void	bread (ext2_loff_t blkno, char *buf, int size);
++void	blksout (blk64_t *blkp, int frags, dump_ino_t ino);
++void	bread (ext2_loff_t blkno, char *buf, size_t size);
+ void	dumpino (struct dinode *dp, dump_ino_t ino, int metaonly);
+ #ifdef	__linux__
+ void	dumpdirino (struct dinode *dp, dump_ino_t ino);
+@@ -153,7 +153,7 @@
+ /* tape writing routines */
+ int	alloctape (void);
+ void	close_rewind (void);
+-void	dumpblock (blk_t blkno, int size);
++void	dumpblock (blk64_t blkno, int size);
+ void	startnewtape (int top);
+ time_t	trewind (void);
+ void	writerec (const void *dp, int isspcl);
+diff -urN dump-0.4b47.orig/dump/tape.c dump-0.4b47/dump/tape.c
+--- dump-0.4b47.orig/dump/tape.c	2022-05-03 10:02:27.000000000 +0000
++++ dump-0.4b47/dump/tape.c	2022-05-03 10:02:27.000000000 +0000
+@@ -254,7 +254,7 @@
+ }
+ 
+ void
+-dumpblock(blk_t blkno, int size)
++dumpblock(blk64_t blkno, int size)
+ {
+ 	int avail, tpblks;
+ 	ext2_loff_t dblkno;
+diff -urN dump-0.4b47.orig/dump/traverse.c dump-0.4b47/dump/traverse.c
+--- dump-0.4b47.orig/dump/traverse.c	2021-01-01 16:28:57.000000000 +0000
++++ dump-0.4b47/dump/traverse.c	2021-01-01 16:28:57.000000000 +0000
+@@ -748,7 +748,7 @@
+ 
+ struct block_context {
+ 	ext2_ino_t ino;
+-	blk_t	*buf;
++	blk64_t	*buf;
+ 	int	cnt;
+ 	int	max;
+ 	int	next_block;
+@@ -758,8 +758,8 @@
+  * Dump a block to the tape
+  */
+ static int
+-dumponeblock(UNUSED(ext2_filsys fs), blk_t *blocknr, e2_blkcnt_t blockcnt,
+-	     UNUSED(blk_t ref_block), UNUSED(int ref_offset), void * private)
++dumponeblock(UNUSED(ext2_filsys fs), blk64_t *blocknr, e2_blkcnt_t blockcnt,
++	     UNUSED(blk64_t ref_block), UNUSED(int ref_offset), void * private)
+ {
+ 	struct block_context *p;
+ 	e2_blkcnt_t i;
+@@ -831,7 +831,7 @@
+ #endif
+ 	}
+ 
+-	if (dp->di_file_acl) {
++	if (dp->di_file_acl || dp->osd2.linux2.l_i_file_acl_high) {
+ 
+ 		if (vflag)
+ 			msg("dumping EA (block) in inode #%ld\n", (long)ino);
+@@ -840,7 +840,9 @@
+ 		spcl.c_dinode.di_size = sblock->fs_bsize;
+ 		spcl.c_flags |= DR_EXTATTRIBUTES;
+ 		spcl.c_extattributes = EXT_XATTR;
+-		blksout(&dp->di_file_acl, EXT2_FRAGS_PER_BLOCK(fs->super), ino);
++		// debugfs.c does something special for HURD that this might break?
++		blk64_t acl = dp->di_file_acl | ((long long)dp->osd2.linux2.l_i_file_acl_high<<32);
++		blksout(&acl, EXT2_FRAGS_PER_BLOCK(fs->super), ino);
+ 		spcl.c_flags &= ~DR_EXTATTRIBUTES;
+ 		spcl.c_extattributes = 0;
+ 	}
+@@ -891,8 +893,8 @@
+ 	nbi.di_flags = dp->di_flags;
+ 	nbi.di_blocks = dp->di_blocks;
+ 	nbi.di_gen = dp->di_gen;
+-	nbi.di_uid = (((int32_t)dp->di_uidhigh) << 16) | dp->di_uid;
+-	nbi.di_gid = (((int32_t)dp->di_gidhigh) << 16) | dp->di_gid;
++	nbi.di_uid = (((int32_t)dp->osd2.hurd2.di_uidhigh) << 16) | dp->di_uid;
++	nbi.di_gid = (((int32_t)dp->osd2.hurd2.di_gidhigh) << 16) | dp->di_gid;
+ 	memmove(&spcl.c_dinode, &nbi, sizeof(nbi));
+ #else	/* __linux__ */
+ 	spcl.c_dinode = *dp;
+@@ -978,12 +980,12 @@
+ 	}
+ #ifdef	__linux__
+ 	bc.max = NINDIR(sblock) * EXT2_FRAGS_PER_BLOCK(fs->super);
+-	bc.buf = malloc (bc.max * sizeof (int));
++	bc.buf = malloc (bc.max * sizeof (blk64_t));
+ 	bc.cnt = 0;
+ 	bc.ino = ino;
+ 	bc.next_block = 0;
+ 
+-	ext2fs_block_iterate2(fs, (ext2_ino_t)ino, BLOCK_FLAG_DATA_ONLY, NULL, dumponeblock, (void *)&bc);
++	ext2fs_block_iterate3(fs, (ext2_ino_t)ino, BLOCK_FLAG_DATA_ONLY, NULL, dumponeblock, (void *)&bc);
+ 	/* deal with holes at the end of the inode */
+ 	if (i_size > ((uint64_t)bc.next_block) * sblock->fs_fsize) {
+ 		remaining = i_size - ((uint64_t)bc.next_block) * sblock->fs_fsize;
+@@ -1157,8 +1159,8 @@
+ 	nbi.di_flags = dp->di_flags;
+ 	nbi.di_blocks = dp->di_blocks;
+ 	nbi.di_gen = dp->di_gen;
+-	nbi.di_uid = (((int32_t)dp->di_uidhigh) << 16) | dp->di_uid;
+-	nbi.di_gid = (((int32_t)dp->di_gidhigh) << 16) | dp->di_gid;
++	nbi.di_uid = (((int32_t)dp->osd2.hurd2.di_uidhigh) << 16) | dp->di_uid;
++	nbi.di_gid = (((int32_t)dp->osd2.hurd2.di_gidhigh) << 16) | dp->di_gid;
+ 	memmove(&spcl.c_dinode, &nbi, sizeof(nbi));
+ #else	/* __linux__ */
+ 	spcl.c_dinode = *dp;
+@@ -1261,9 +1263,9 @@
+  * Collect up the data into tape record sized buffers and output them.
+  */
+ void
+-blksout(blk_t *blkp, int frags, dump_ino_t ino)
++blksout(blk64_t *blkp, int frags, dump_ino_t ino)
+ {
+-	blk_t *bp;
++	blk64_t *bp;
+ 	int i, j, count, blks, tbperdb;
+ 
+ 	blks = howmany(frags * sblock->fs_fsize, TP_BSIZE);
+@@ -1394,7 +1396,7 @@
+ int	breaderrors = 0;
+ 
+ void
+-bread(ext2_loff_t blkno, char *buf, int size)
++bread(ext2_loff_t blkno, char *buf, size_t size)
+ {
+ 	int cnt, i;
+ 

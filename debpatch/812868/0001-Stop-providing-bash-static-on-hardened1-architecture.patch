@@ -1,0 +1,125 @@
+From 225f6c4d3ec0477a185a124b85baa533f1768967 Mon Sep 17 00:00:00 2001
+From: Balint Reczey <balint@balintreczey.hu>
+Date: Sun, 17 Jan 2016 01:05:00 +0100
+Subject: [PATCH] Stop providing bash-static on hardened1-* architectures
+
+---
+ debian/patches/drop-static-package.diff | 26 ++++++++++++++++++++++++++
+ debian/rules                            | 25 ++++++++++++++++++++++++-
+ 2 files changed, 50 insertions(+), 1 deletion(-)
+ create mode 100644 debian/patches/drop-static-package.diff
+
+diff --git a/debian/patches/drop-static-package.diff b/debian/patches/drop-static-package.diff
+new file mode 100644
+index 0000000..bbe7de0
+--- /dev/null
++++ b/debian/patches/drop-static-package.diff
+@@ -0,0 +1,26 @@
++diff --git a/debian/control b/debian/control
++index b16a1c0..f23152c 100644
++--- a/debian/control
+++++ b/debian/control
++@@ -34,21 +34,6 @@ Description: GNU Bourne Again SHell
++  The Programmable Completion Code, by Ian Macdonald, is now found in
++  the bash-completion package.
++ 
++-Package: bash-static
++-Architecture: any
++-Multi-Arch: foreign
++-Depends: passwd (>= 1:4.0.3-10), ${misc:Depends}
++-Suggests: bash-doc
++-Section: shells
++-Priority: optional
++-Built-Using: ${glibc:Source}
++-Description: GNU Bourne Again SHell (static version)
++- Bash is an sh-compatible command language interpreter that executes
++- commands read from the standard input or from a file.  Bash also
++- incorporates useful features from the Korn and C shells (ksh and csh).
++- .
++- Statically linked.
++-
++ Package: bash-builtins
++ Architecture: any
++ Depends: bash (= ${binary:Version}), ${misc:Depends}
+diff --git a/debian/rules b/debian/rules
+index 201eddf..621d7e0 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -89,11 +89,20 @@ static_conf_args := $(conf_args) \
+ 	--without-bash-malloc \
+ 
+ #build: bash-build static-build preinst-build check
++ifneq (,$(findstring hardened1,$(DEB_HOST_ARCH)))
++build: before-build bash-build preinst-build check
++else
+ build: before-build bash-build static-build preinst-build check
++endif
+ build-arch: build
+ build-indep: build
+ 
+ before-build:
++ifneq (,$(findstring hardened1,$(DEB_HOST_ARCH)))
++	# don't build static bash on hardened1-linux* until ASAN does not
++	# support static builds
++	! grep bash-static debian/control || patch debian/control < debian/patches/drop-static-package.diff
++endif
+ 	mkdir -p stamps
+ 	: # see #327477, needed to have HAVE_DEV_STDIN defined
+ 	(test -d /dev/fd && test -r /dev/stdin < /dev/null) \
+@@ -120,6 +129,7 @@ bash-configure:
+ # ---------------------------------------------------------------------------
+ # build static bash
+ 
++ifeq (,$(findstring hardened1,$(DEB_HOST_ARCH)))
+ static-build:
+ 	$(MAKE) -f debian/rules do-build-static \
+ 	    bash_src=. \
+@@ -130,7 +140,7 @@ static-configure:
+ 	    bash_src=. \
+ 	    build=static \
+ 	    configure_args="$(static_conf_args)"
+-
++endif
+ # ---------------------------------------------------------------------------
+ 
+ bash-doc-build: stamps/stamp-build-bash-doc
+@@ -168,6 +178,11 @@ clean:
+ 	rm -rf locales
+ 	rm -f clear_console
+ 	rm -rf .pc
++ifneq (,$(findstring hardened1,$(DEB_HOST_ARCH)))
++	# don't build static bash on hardened1-linux* until ASAN does not
++	# support static builds
++	grep bash-static debian/rules || patch -R debian/control < debian/patches/drop-static-package.diff
++endif
+ 	dh_clean
+ 
+ preinst-build: debian/bash.preinst
+@@ -333,6 +348,7 @@ binary-builtins: bash-install
+ 	dh_md5sums -p$(p_bins)
+ 	dh_builddeb -p$(p_bins)
+ 
++ifeq (,$(findstring hardened1,$(DEB_HOST_ARCH)))
+ binary-static: static-build
+ 	dh_testdir
+ 	dh_testroot
+@@ -354,9 +370,16 @@ binary-static: static-build
+ 		'-Vglibc:Source=$(shell dpkg-query -f '$${source:Package} (= $${source:Version}), ' -W libc-bin)'
+ 	dh_md5sums -p$(p_stat)
+ 	dh_builddeb -p$(p_stat)
++endif
+ 
+ binary-indep: binary-doc
++
++ifneq (,$(findstring hardened1,$(DEB_HOST_ARCH)))
++binary-arch: binary-bash binary-builtins
++else
+ binary-arch: binary-bash binary-builtins binary-static
++endif
++
+ binary:	binary-indep binary-arch
+ 
+ # ---------------------------------------------------------------------------
+-- 
+2.1.4
+

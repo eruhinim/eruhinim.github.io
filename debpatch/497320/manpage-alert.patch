@@ -1,0 +1,161 @@
+diff -ur scripts.orig/manpage-alert.1 scripts/manpage-alert.1
+--- scripts.orig/manpage-alert.1	2009-08-02 20:00:43.000000000 +0200
++++ scripts/manpage-alert.1	2009-08-02 20:17:15.000000000 +0200
+@@ -2,9 +2,9 @@
+ .SH NAME
+ manpage-alert \- check for binaries without corresponding manpages
+ .SH SYNOPSIS
+-\fBmanpage-alert\fR \fI[path list]\fR
++\fBmanpage-alert\fR [-p\ |\ -P\ |\ -L] [\fIpaths\fR]
+ .br
+-\fBmanpage-alert \-\-help|\-\-version\fR
++\fBmanpage-alert \-h\ |\ \-v\fR
+ .SH DESCRIPTION
+ \fBmanpage-alert\fR searches the given list of paths for binaries without 
+ corresponding manpages.
+@@ -12,10 +12,20 @@
+ If no paths are specified on the command line, the path list
+ \fI/bin /sbin /usr/bin /usr/sbin /usr/games\fR will be assumed.
+ .SH OPTIONS
+-.BR \-\-help ", " \-h
++.TP
++.BR \-p
++Show to which package executables belong to.
++.TP
++.BR \-P
++Show to which package executables belong to, but don't show the statistics.
++.TP
++.BR \-L 
++List the executables but don't show the statistics.
++.TP
++.BR \-h
+ Show a summary of options.
+ .TP
+-.BR \-\-version ", " \-v
++.BR \-v
+ Show version and copyright information.
+ .SH AUTHOR
+ \fBmanpage-alert\fR was written by Branden Robinson and modified by
+diff -ur scripts.orig/manpage-alert.sh scripts/manpage-alert.sh
+--- scripts.orig/manpage-alert.sh	2009-08-02 20:00:43.000000000 +0200
++++ scripts/manpage-alert.sh	2009-08-02 20:18:44.000000000 +0200
+@@ -19,13 +19,19 @@
+ 
+ usage() {
+     cat <<EOF
+-Usage: manpage-alert [options | paths]
++Usage: manpage-alert [-p | -P | -L] [paths]
+   Options:
+-    -h, --help          This usage screen.
+-    -V, --version       Display the version and copyright information
+-
+-  This script will locate executables in the given paths for which no
+-  manpage is available.
++    -p   Show to which package executables belong to.
++    -P   Show to which package executables belong to, 
++         but don't show the statistics.
++    -L   List the executables but don't show the statistics.
++    -h   This usage screen.
++    -v   Display the version and copyright information
++
++  If you don't specify an option, this script will locate executables in 
++  the given paths for which no manpage is available. -P or -L is probably
++  what you want if you wish to pipe the output of manpage-alert to 
++  another program.
+ 
+   If no paths are specified on the command line, "/bin /sbin /usr/bin
+   /usr/sbin /usr/games" will be used by default.
+@@ -34,7 +40,7 @@
+ 
+ version() {
+     cat <<EOF
+-This is manpage-alert, from the Debian devscripts package, version ###VERSION###
++This is manpage-alert, from the Debian devscripts package, version ###VERSION###.
+ This code is (C) 2005 by Branden Robinson, all rights reserved.
+ This program comes with ABSOLUTELY NO WARRANTY.
+ You are free to redistribute this code under the terms of the
+@@ -42,10 +48,38 @@
+ EOF
+ }
+ 
+-case "$1" in
+-    --help|-h) usage; exit 0;;
+-    --version|-V) version; exit 0;;
++SHOWPACKAGE=FALSE
++DUMP=FALSE
++showpackage() {
++	# fix diversions, see dpkg-query manpage.
++	PKGNAME="$( LANG=C dpkg-query -S "$1" 2> /dev/null | sed -e 's/.\+diversion by.\+$//g' )" 
++	[ -n "$PKGNAME"  ] && echo "$PKGNAME"
++}
++
++# 0=waiting for parameters / 1=already one exclusive parameter entered
++CONF=0 
++while getopts 'pPLhv' opt 
++do	
++case $opt in
++    p) 
++		[ $CONF -eq 0 ] && CONF=1 && SHOWPACKAGE=TRUE && DUMP=FALSE && continue
++		[ $CONF -eq 1 ] && echo "Too many parameters given." && usage && exit 0
++		;;
++	P) 	
++		[ $CONF -eq 0 ] && CONF=1 && SHOWPACKAGE=TRUE && DUMP=TRUE && continue
++		[ $CONF -eq 1 ] && echo "Too many parameters given." && usage && exit 0
++		;;
++	L) 
++		[ $CONF -eq 0 ] && CONF=1 && SHOWPACKAGE=FALSE && DUMP=TRUE && continue
++		[ $CONF -eq 1 ] && echo "Too many parameters given." && usage && exit 0
++		;;
++	h) usage; exit 0;;
++    v) version; exit 0;;
+ esac
++done
++if [ "$OPTERR" != 0 ]; then 
++	shift $(( $OPTIND-1))
++fi
+ 
+ if [ $# -lt 1 ]; then
+     set -- /bin /sbin /usr/bin /usr/sbin /usr/games
+@@ -59,24 +93,35 @@
+     for F in "$DIR"/*; do
+         # Skip as it's a symlink to /usr/bin
+         if [ "$F" = "/usr/bin/X11" ]; then continue; fi
+-
+-        NUM_EXECUTABLES=$(( $NUM_EXECUTABLES + 1 ))
++			if [ $DUMP = "FALSE" ]; then
++        		NUM_EXECUTABLES=$(( $NUM_EXECUTABLES + 1 ))
++			fi
+ 
+         OUT=$(man -w -S 1:8:6 "${F##*/}" 2>&1 >/dev/null)
+         RET=$?
+         if [ $RET = "0" ]; then
+-            NUM_MANPAGES_FOUND=$(( $NUM_MANPAGES_FOUND + 1 ))
++            if [ $DUMP = "FALSE" ]; then
++				NUM_MANPAGES_FOUND=$(( $NUM_MANPAGES_FOUND + 1 ))
++			fi
+         else
+-            echo "$OUT" | sed -e "/^.*'man 7 undocumented'.*$/ d" \
+-              -e "s,\(.\)\b${F##*/}(\b|$),\1$F," -e 's,//,/,'
+-            NUM_MANPAGES_MISSING=$(( $NUM_MANPAGES_MISSING + 1 ))
++            if [ $SHOWPACKAGE = "TRUE" ]; then 
++				showpackage "$F"
++			else 
++				echo "$OUT" | sed -e "/^.*'man 7 undocumented'.*$/ d" \
++				  -e "s,\(.\)\b${F##*/}(\b|$),\1$F," -e 's,//,/,'
++			fi
++			if [ $DUMP = "FALSE" ]; then
++				NUM_MANPAGES_MISSING=$(( $NUM_MANPAGES_MISSING + 1 ))
++			fi
++
+         fi
+     done
+ done
+ 
++if [ $DUMP != "TRUE" ]; then 
+ printf "Of %d commands, found manpages for %d (%d missing).\n" \
+     $NUM_EXECUTABLES \
+     $NUM_MANPAGES_FOUND \
+     $NUM_MANPAGES_MISSING
+-
++fi 
+ # vim:set ai et sw=4 ts=4 tw=80:

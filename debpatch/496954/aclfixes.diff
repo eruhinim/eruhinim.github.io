@@ -1,0 +1,437 @@
+Index: lib/dns/acl.c
+===================================================================
+RCS file: /proj/cvs/prod/bind9/lib/dns/acl.c,v
+retrieving revision 1.37.2.7
+diff -u -u -r1.37.2.7 acl.c
+--- lib/dns/acl.c	29 Apr 2008 01:04:14 -0000	1.37.2.7
++++ lib/dns/acl.c	28 Oct 2008 00:25:02 -0000
+@@ -148,7 +148,10 @@
+ 		return (ISC_FALSE);
+ 
+ 	if (acl->iptable->radix->head->prefix->bitlen == 0 &&
+-	    *(isc_boolean_t *) (acl->iptable->radix->head->data[0]) == pos)
++  	    acl->iptable->radix->head->data[0] != NULL &&
++	    acl->iptable->radix->head->data[0] ==
++	    acl->iptable->radix->head->data[1] &&
++  	    *(isc_boolean_t *) (acl->iptable->radix->head->data[0]) == pos)
+ 		return (ISC_TRUE);
+ 
+ 	return (ISC_FALSE); /* All others */
+@@ -220,8 +223,6 @@
+ 
+ 	/* Found a match. */
+ 	if (result == ISC_R_SUCCESS && node != NULL) {
+-		if (node->bit == 0)
+-			family = AF_INET;
+ 		match_num = node->node_num[ISC_IS6(family)];
+ 		if (*(isc_boolean_t *) node->data[ISC_IS6(family)] == ISC_TRUE)
+ 			*match = match_num;
+@@ -491,9 +492,8 @@
+ 	isc_boolean_t secure;
+ 	int bitlen, family;
+ 
+-	/* Bitlen 0 means "any" or "none", which is always treated as IPv4 */
+ 	bitlen = prefix->bitlen;
+-	family = bitlen ? prefix->family : AF_INET;
++	family = prefix->family;
+ 
+ 	/* Negated entries are always secure. */
+ 	secure = * (isc_boolean_t *)data[ISC_IS6(family)];
+Index: lib/dns/iptable.c
+===================================================================
+RCS file: /proj/cvs/prod/bind9/lib/dns/iptable.c,v
+retrieving revision 1.5.46.3
+diff -u -u -r1.5.46.3 iptable.c
+--- lib/dns/iptable.c	21 Jan 2008 21:02:24 -0000	1.5.46.3
++++ lib/dns/iptable.c	28 Oct 2008 00:25:02 -0000
+@@ -70,22 +70,39 @@
+ 
+ 	NETADDR_TO_PREFIX_T(addr, pfx, bitlen);
+ 
+-	/* Bitlen 0 means "any" or "none", which is always treated as IPv4 */
+-	family = bitlen ? pfx.family : AF_INET;
+-
+ 	result = isc_radix_insert(tab->radix, &node, NULL, &pfx);
+-
+-	if (result != ISC_R_SUCCESS)
++	if (result != ISC_R_SUCCESS) {
++		isc_refcount_destroy(&pfx.refcount);
+ 		return(result);
++	}
+ 
+-	/* If the node already contains data, don't overwrite it */
+-	if (node->data[ISC_IS6(family)] == NULL) {
+-		if (pos)
+-			node->data[ISC_IS6(family)] = &dns_iptable_pos;
+-		else
+-			node->data[ISC_IS6(family)] = &dns_iptable_neg;
++	/* If a node already contains data, don't overwrite it */
++	family = pfx.family;
++	if (family == AF_UNSPEC) {
++ 		/* "any" or "none" */
++ 		INSIST(pfx.bitlen == 0);
++ 		if (pos) {
++ 			if (node->data[0] == NULL)
++ 				node->data[0] = &dns_iptable_pos;
++ 			if (node->data[1] == NULL)
++ 				node->data[1] = &dns_iptable_pos;
++ 		} else {
++ 			if (node->data[0] == NULL)
++ 				node->data[0] = &dns_iptable_neg;
++ 			if (node->data[1] == NULL)
++ 				node->data[1] = &dns_iptable_neg;
++ 		}
++ 	} else {
++ 		/* any other prefix */
++ 		if (node->data[ISC_IS6(family)] == NULL) {
++ 			if (pos)
++ 				node->data[ISC_IS6(family)] = &dns_iptable_pos;
++ 			else
++ 				node->data[ISC_IS6(family)] = &dns_iptable_neg;
++ 		}
+ 	}
+ 
++	isc_refcount_destroy(&pfx.refcount);
+ 	return (ISC_R_SUCCESS);
+ }
+ 
+Index: lib/isc/radix.c
+===================================================================
+RCS file: /proj/cvs/prod/bind9/lib/isc/radix.c,v
+retrieving revision 1.9.6.5.2.1
+diff -u -u -r1.9.6.5.2.1 radix.c
+--- lib/isc/radix.c	24 Jul 2008 02:03:22 -0000	1.9.6.5.2.1
++++ lib/isc/radix.c	28 Oct 2008 00:25:03 -0000
+@@ -53,7 +53,7 @@
+ 
+ 	REQUIRE(target != NULL);
+ 
+-	if (family != AF_INET6 && family != AF_INET)
++	if (family != AF_INET6 && family != AF_INET && family != AF_UNSPEC)
+ 		return (ISC_R_NOTIMPLEMENTED);
+ 
+ 	prefix = isc_mem_get(mctx, sizeof(isc_prefix_t));
+@@ -64,6 +64,7 @@
+ 		prefix->bitlen = (bitlen >= 0) ? bitlen : 128;
+ 		memcpy(&prefix->add.sin6, dest, 16);
+ 	} else {
++		/* AF_UNSPEC is "any" or "none"--treat it as AF_INET */
+ 		prefix->bitlen = (bitlen >= 0) ? bitlen : 32;
+ 		memcpy(&prefix->add.sin, dest, 4);
+ 	}
+@@ -95,7 +96,8 @@
+ _ref_prefix(isc_mem_t *mctx, isc_prefix_t **target, isc_prefix_t *prefix) {
+ 	INSIST(prefix != NULL);
+ 	INSIST((prefix->family == AF_INET && prefix->bitlen <= 32) ||
+-	       (prefix->family == AF_INET6 && prefix->bitlen <= 128));
++	       (prefix->family == AF_INET6 && prefix->bitlen <= 128) ||
++	       (prefix->family == AF_UNSPEC && prefix->bitlen == 0));
+ 	REQUIRE(target != NULL);
+ 
+ 	/* If this prefix is a static allocation, copy it into new memory */
+@@ -236,7 +238,7 @@
+ 	isc_radix_node_t *stack[RADIX_MAXBITS + 1];
+ 	u_char *addr;
+ 	isc_uint32_t bitlen;
+-	int family, tfamily = -1;
++	int tfamily = -1;
+ 	int cnt = 0;
+ 
+ 	REQUIRE(radix != NULL);
+@@ -276,16 +278,12 @@
+ 		if (_comp_with_mask(isc_prefix_tochar(node->prefix),
+ 				    isc_prefix_tochar(prefix),
+ 				    node->prefix->bitlen)) {
+-			/* Bitlen 0 means "any" or "none",
+-			   which is always treated as IPv4 */
+-			family = node->prefix->bitlen ?
+-				 prefix->family : AF_INET;
+-			if (node->node_num[ISC_IS6(family)] != -1 &&
++			if (node->node_num[ISC_IS6(prefix->family)] != -1 &&
+ 				 ((*target == NULL) ||
+ 				  (*target)->node_num[ISC_IS6(tfamily)] >
+-				   node->node_num[ISC_IS6(family)])) {
++				   node->node_num[ISC_IS6(prefix->family)])) {
+ 				*target = node;
+-				tfamily = family;
++				tfamily = prefix->family;
+ 			}
+ 		}
+ 	}
+@@ -303,7 +301,7 @@
+ {
+ 	isc_radix_node_t *node, *new_node, *parent, *glue = NULL;
+ 	u_char *addr, *test_addr;
+-	isc_uint32_t bitlen, family, check_bit, differ_bit;
++	isc_uint32_t bitlen, fam, check_bit, differ_bit;
+ 	isc_uint32_t i, j, r;
+ 	isc_result_t result;
+ 
+@@ -317,9 +315,7 @@
+ 	INSIST(prefix != NULL);
+ 
+ 	bitlen = prefix->bitlen;
+-
+-	/* Bitlen 0 means "any" or "none", which is always treated as IPv4 */
+-	family = bitlen ? prefix->family : AF_INET;
++	fam = prefix->family;
+ 
+ 	if (radix->head == NULL) {
+ 		node = isc_mem_get(radix->mctx, sizeof(isc_radix_node_t));
+@@ -353,8 +349,14 @@
+ 			node->data[0] = source->data[0];
+ 			node->data[1] = source->data[1];
+ 		} else {
+-			node->node_num[ISC_IS6(family)] =
+-				++radix->num_added_node;
++			if (fam == AF_UNSPEC) {
++				/* "any" or "none" */
++				node->node_num[0] = node->node_num[1] =
++					++radix->num_added_node;
++			} else {
++				node->node_num[ISC_IS6(fam)] =
++					++radix->num_added_node;
++			}
+ 			node->data[0] = NULL;
+ 			node->data[1] = NULL;
+ 		}
+@@ -417,25 +419,71 @@
+ 	if (differ_bit == bitlen && node->bit == bitlen) {
+ 		if (node->prefix != NULL) {
+ 			/* Set node_num only if it hasn't been set before */
+-			if (node->node_num[ISC_IS6(family)] == -1)
+-				node->node_num[ISC_IS6(family)] =
+-					 ++radix->num_added_node;
++			if (source != NULL) {
++				/* Merging node */
++				if (node->node_num[0] == -1 &&
++				    source->node_num[0] != -1) {
++					node->node_num[0] =
++						radix->num_added_node +
++						source->node_num[0];
++					node->data[0] = source->data[0];
++				}
++				if (node->node_num[1] == -1 &&
++				    source->node_num[0] != -1) {
++					node->node_num[1] =
++						radix->num_added_node +
++						source->node_num[1];
++					node->data[1] = source->data[1];
++				}
++			} else {
++				if (fam == AF_UNSPEC) {
++ 					/* "any" or "none" */
++ 					int next = radix->num_added_node + 1;
++ 					if (node->node_num[0] == -1) {
++ 						node->node_num[0] = next;
++ 						radix->num_added_node = next;
++ 					}
++ 					if (node->node_num[1] == -1) {
++ 						node->node_num[1] = next;
++ 						radix->num_added_node = next;
++ 					}
++ 				} else {
++ 					if (node->node_num[ISC_IS6(fam)] == -1)
++ 						node->node_num[ISC_IS6(fam)]
++ 						   = ++radix->num_added_node;
++ 				}
++			}
+ 			*target = node;
+ 			return (ISC_R_SUCCESS);
++		} else {
++			result =
++				_ref_prefix(radix->mctx, &node->prefix, prefix);
++			if (result != ISC_R_SUCCESS)
++				return (result);
+ 		}
+-		result = _ref_prefix(radix->mctx, &node->prefix, prefix);
+-		if (result != ISC_R_SUCCESS)
+-			return (result);
+ 		INSIST(node->data[0] == NULL && node->node_num[0] == -1 &&
+ 		       node->data[1] == NULL && node->node_num[1] == -1);
+ 		if (source != NULL) {
+ 			/* Merging node */
+-			node->node_num[ISC_IS6(family)] =
+-				radix->num_added_node +
+-				source->node_num[ISC_IS6(family)];
++			if (source->node_num[0] != -1) {
++				node->node_num[0] = radix->num_added_node +
++						    source->node_num[0];
++				node->data[0] = source->data[0];
++			}
++			if (source->node_num[1] != -1) {
++				node->node_num[1] = radix->num_added_node +
++						    source->node_num[1];
++				node->data[1] = source->data[1];
++			}
+ 		} else {
+-			node->node_num[ISC_IS6(family)] =
+-				++radix->num_added_node;
++			if (fam == AF_UNSPEC) {
++				/* "any" or "none" */
++				node->node_num[0] = node->node_num[1] =
++					++radix->num_added_node;
++			} else {
++				node->node_num[ISC_IS6(fam)] =
++					++radix->num_added_node;
++			}
+ 		}
+ 		*target = node;
+ 		return (ISC_R_SUCCESS);
+@@ -477,7 +525,14 @@
+ 		new_node->data[0] = source->data[0];
+ 		new_node->data[1] = source->data[1];
+ 	} else {
+-		new_node->node_num[ISC_IS6(family)] = ++radix->num_added_node;
++		if (fam == AF_UNSPEC) {
++			/* "any" or "none" */
++			new_node->node_num[0] = new_node->node_num[1] =
++				++radix->num_added_node;
++		} else {
++			new_node->node_num[ISC_IS6(fam)] =
++				++radix->num_added_node;
++		}
+ 		new_node->data[0] = NULL;
+ 		new_node->data[1] = NULL;
+ 	}
+@@ -525,7 +580,7 @@
+ 		glue->node_num[0] = glue->node_num[1] = -1;
+ 		radix->num_active_node++;
+ 		if (differ_bit < radix->maxbits &&
+-		    BIT_TEST(addr[differ_bit >> 3], 0x80 >> (differ_bit & 0x07))) {
++		    BIT_TEST(addr[differ_bit>>3], 0x80 >> (differ_bit & 07))) {
+ 			glue->r = new_node;
+ 			glue->l = node;
+ 		} else {
+Index: lib/isc/include/isc/radix.h
+===================================================================
+RCS file: /proj/cvs/prod/bind9/lib/isc/include/isc/radix.h,v
+retrieving revision 1.5.46.4
+diff -u -u -r1.5.46.4 radix.h
+--- lib/isc/include/isc/radix.h	21 Jan 2008 23:46:23 -0000	1.5.46.4
++++ lib/isc/include/isc/radix.h	28 Oct 2008 00:25:03 -0000
+@@ -37,7 +37,7 @@
+ #define NETADDR_TO_PREFIX_T(na,pt,bits) \
+ 	do { \
+ 		memset(&(pt), 0, sizeof(pt)); \
+-		if((bits) && (na) != NULL) { \
++		if((na) != NULL) { \
+ 			(pt).family = (na)->family; \
+ 			(pt).bitlen = (bits); \
+ 			if ((pt).family == AF_INET6) { \
+@@ -46,14 +46,16 @@
+ 			} else \
+ 				memcpy(&(pt).add.sin, &(na)->type.in, \
+ 				       ((bits)+7)/8); \
+-		} else \
+-			(pt).family = AF_INET; \
++		} else { \
++			(pt).family = AF_UNSPEC; \
++			(pt).bitlen = 0; \
++		} \
+ 		isc_refcount_init(&(pt).refcount, 0); \
+ 	} while(0)
+ 
+ typedef struct isc_prefix {
+-    unsigned int family;	/* AF_INET | AF_INET6 */
+-    unsigned int bitlen;
++    unsigned int family;	/* AF_INET | AF_INET6, or AF_UNSPEC for "any" */
++    unsigned int bitlen;	/* 0 for "any" */
+     isc_refcount_t refcount;
+     union {
+ 		struct in_addr sin;
+Index: lib/isccfg/aclconf.c
+===================================================================
+RCS file: /proj/cvs/prod/bind9/lib/isccfg/aclconf.c,v
+retrieving revision 1.17.100.2
+diff -u -u -r1.17.100.2 aclconf.c
+--- lib/isccfg/aclconf.c	24 Jul 2008 23:48:39 -0000	1.17.100.2
++++ lib/isccfg/aclconf.c	28 Oct 2008 00:25:03 -0000
+@@ -160,6 +160,51 @@
+ 	return (dns_name_dup(dns_fixedname_name(&fixname), mctx, dnsname));
+ }
+ 
++/*
++ * Recursively pre-parse an ACL definition to find the total number
++ * of non-IP-prefix elements (localhost, localnets, key) in all nested
++ * ACLs, so that the parent will have enough space allocated for the
++ * elements table after all the nested ACLs have been merged in to the
++ * parent.
++ */
++static int
++count_acl_elements(const cfg_obj_t *caml, const cfg_obj_t *cctx)
++{
++	const cfg_listelt_t *elt;
++	const cfg_obj_t *cacl = NULL;
++	isc_result_t result;
++	int n = 0;
++
++	for (elt = cfg_list_first(caml);
++	     elt != NULL;
++	     elt = cfg_list_next(elt)) {
++		const cfg_obj_t *ce = cfg_listelt_value(elt);
++
++		/* negated element; just get the value. */
++		if (cfg_obj_istuple(ce))
++			ce = cfg_tuple_get(ce, "value");
++
++		if (cfg_obj_istype(ce, &cfg_type_keyref)) {
++			n++;
++		} else if (cfg_obj_islist(ce)) {
++			n += count_acl_elements(ce, cctx);
++		} else if (cfg_obj_isstring(ce)) {
++			const char *name = cfg_obj_asstring(ce);
++			if (strcasecmp(name, "localhost") == 0 ||
++			    strcasecmp(name, "localnets") == 0) {
++				n++;
++			} else if (strcasecmp(name, "any") != 0 &&
++				   strcasecmp(name, "none") != 0) {
++				result = get_acl_def(cctx, name, &cacl);
++				if (result == ISC_R_SUCCESS)
++					n += count_acl_elements(cacl, cctx) + 1;
++			}
++		}
++	}
++
++	return n;
++}
++
+ isc_result_t
+ cfg_acl_fromconfig(const cfg_obj_t *caml,
+ 		   const cfg_obj_t *cctx,
+@@ -194,14 +239,18 @@
+ 	} else {
+ 		/*
+ 		 * Need to allocate a new ACL structure.  Count the items
+-		 * in the ACL definition and allocate space for that many
+-		 * elements (even though some or all of them may end up in
+-		 * the iptable instead of the element array).
++		 * in the ACL definition that will require space in the
++		 * elemnts table.  (Note that if nest_level is nonzero,
++		 * *everything* goes in the elements table.)
+ 		 */
+-		isc_boolean_t recurse = ISC_TF(nest_level == 0);
+-		result = dns_acl_create(mctx,
+-					cfg_list_length(caml, recurse),
+-					&dacl);
++		int nelem;
++
++		if (nest_level == 0)
++			nelem = count_acl_elements(caml, cctx);
++		else
++			nelem = cfg_list_length(caml, ISC_FALSE);
++
++		result = dns_acl_create(mctx, nelem, &dacl);
+ 		if (result != ISC_R_SUCCESS)
+ 			return (result);
+ 	}
+@@ -209,8 +258,7 @@
+ 	de = dacl->elements;
+ 	for (elt = cfg_list_first(caml);
+ 	     elt != NULL;
+-	     elt = cfg_list_next(elt))
+-	{
++	     elt = cfg_list_next(elt)) {
+ 		const cfg_obj_t *ce = cfg_listelt_value(elt);
+ 		isc_boolean_t	neg;
+ 

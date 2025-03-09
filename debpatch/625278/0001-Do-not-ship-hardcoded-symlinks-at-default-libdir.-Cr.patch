@@ -1,0 +1,127 @@
+From dd201f50a2fa2b3cb3c6160ce4f0c1ec1133a97c Mon Sep 17 00:00:00 2001
+From: Agustin Martin Domingo <agmartin@debian.org>
+Date: Tue, 14 Jun 2011 12:46:44 +0200
+Subject: [PATCH] Do not ship hardcoded symlinks at default libdir. Create and
+ remove them as needed (#625278).
+
+We need to check that everything is done under dpkg control. Otherwise
+"/usr" or even "/" may have been mounted read-only tns this would fail.
+
+If dpkg is being run, they must be writable.
+---
+ debian/dictionaries-common.links |  3 ---
+ debian/dictionaries-common.prerm | 13 +++++++++++--
+ scripts/system/update-default.in | 40 ++++++++++++++++++++++++++++++++++++----
+ 3 files changed, 47 insertions(+), 9 deletions(-)
+
+diff --git a/debian/dictionaries-common.links b/debian/dictionaries-common.links
+index 26bc839..87c2c9b 100644
+--- a/debian/dictionaries-common.links
++++ b/debian/dictionaries-common.links
+@@ -1,5 +1,2 @@
+-/etc/dictionaries-common/default.aff  /usr/lib/ispell/default.aff
+-/etc/dictionaries-common/default.hash /usr/lib/ispell/default.hash
+-/etc/dictionaries-common/words        /usr/share/dict/words
+ /usr/sbin/update-dictcommon-aspell    /usr/sbin/update-default-aspell
+ /usr/share/man/man8/update-dictcommon-aspell.8.gz        /usr/share/man/man8/update-default-aspell.8.gz
+diff --git a/debian/dictionaries-common.prerm b/debian/dictionaries-common.prerm
+index ec4bcdc..9dd3418 100644
+--- a/debian/dictionaries-common.prerm
++++ b/debian/dictionaries-common.prerm
+@@ -7,10 +7,19 @@ set -e
+ 
+ case "$1" in
+   remove|deconfigure)
+-    rm -f /etc/dictionaries-common/default.aff \
++    for i in /etc/dictionaries-common/default.aff \
+       /etc/dictionaries-common/default.hash \
+       /etc/dictionaries-common/words \
+-      /etc/dictionaries-common/ispell-default
++      /etc/dictionaries-common/ispell-default \
++      /usr/lib/ispell/default.aff \
++      /usr/lib/ispell/default.hash \
++      /usr/share/dict/words; do
++      if [ -L "$i" ]; then
++	rm -f "$i"
++      elif [ -e "$i" ]; then
++	echo "dictionaries-common.prerm: leaving behind non-symlink \"$i\"" >&2
++      fi
++    done
+     rm -f /var/cache/dictionaries-common/*
+     if [ -L /usr/dict ]; then
+       rm /usr/dict
+diff --git a/scripts/system/update-default.in b/scripts/system/update-default.in
+index 890a196..3bb8a16 100644
+--- a/scripts/system/update-default.in
++++ b/scripts/system/update-default.in
+@@ -9,6 +9,7 @@ dico_checkroot ();
+ my $triggered;
+ my $skip_symlinks_setting;
+ my $class  = "[I:ispell:][W:wordlist:]";
++my $debug  = 1 if defined $ENV{'DICT_COMMON_DEBUG'};
+ 
+ # Parse options
+ foreach my $option ( @ARGV ){
+@@ -28,6 +29,41 @@ foreach my $option ( @ARGV ){
+ 
+ version ('2.0');
+ 
++updatedb ($class);
++my $dictionaries = loaddb ($class);
++
++# Process default symlinks. Do nothing if we are outside
++# dpkg control, "/usr" or "/" could be mounted read-only
++if ( defined $ENV{'DPKG_RUNNING_VERSION'} ){
++  my $linkdir = "/etc/dictionaries-common";
++  my $libdir  = { 'ispell'   => "/usr/lib/ispell",
++		  'wordlist' => "/usr/share/dict"};
++  my $links   = {'ispell'    => ["default.hash", "default.aff"],
++		 'wordlist'  => ["words"]};
++
++  if ( %{$dictionaries} ){
++    foreach my $link ( @{$links->{$class}} ){
++      my $link_from = "$libdir->{$class}/$link";
++      unless ( -e "$link_from" ){
++	print STDERR "Symlinking $link_from to $linkdir/$link\n"
++	  if $debug;
++	symlink "$linkdir/$link","$link_from";
++      }
++    }
++  } else {
++    foreach my $link ( @{$links->{$class}} ){
++      my $link_from = "$libdir->{$class}/$link";
++      if ( -l "$link_from" ){
++	print STDERR "No $class elements. Remove $link_from.\n"
++	  if $debug;
++	unlink "$link_from"
++      } else {
++	print STDERR "Leaving non symlink \"$link_from\" behind.\n"
++      }
++    }
++  }
++}
++
+ # Enable trigger if needed
+ unless ( $triggered ){
+   exit if dico_activate_trigger("update-default-$class");
+@@ -37,7 +73,6 @@ my $manual;
+ my $question  = "dictionaries-common/default-$class";
+ my $iquestion = "dictionaries-common/invalid_debconf_value";
+ my $program   = "update-default-$class";
+-my $debug     = 1 if defined $ENV{'DICT_COMMON_DEBUG'};
+ my $newflag   = "/var/cache/dictionaries-common/flag-$class-new";
+ 
+ # This flag is intended for remove-default-$class. If we are here we do not
+@@ -48,9 +83,6 @@ if ( -f $newflag ){
+     or print STDERR " $program: Warning: could not remove $newflag\n";
+ }
+ 
+-updatedb ($class);
+-my $dictionaries = loaddb ($class);
+-
+ my ($ret, $value)  = get ($question);
+ if ( $ret == 0 && $value ){
+   # Question has a value
+-- 
+1.9.0
+

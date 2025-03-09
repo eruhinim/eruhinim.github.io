@@ -1,0 +1,178 @@
+diff -ru at-3.1.10.2.bak/Makefile.in at-3.1.10.2/Makefile.in
+--- at-3.1.10.2.bak/Makefile.in	2005-08-29 18:08:28.000000000 +1000
++++ at-3.1.10.2/Makefile.in	2009-01-02 16:16:05.000000000 +1100
+@@ -27,6 +27,7 @@
+ YACC		= @YACC@
+ LEX		= @LEX@
+ LEXLIB		= @LEXLIB@
++SELINUXLIB	= @SELINUXLIB@
+ 
+ CC 		= @CC@
+ CFLAGS 		= @CFLAGS@
+@@ -73,7 +74,7 @@
+ 	$(LN_S) -f at atrm
+ 
+ atd: $(RUNOBJECTS)
+-	$(CC) $(CFLAGS) -o atd $(RUNOBJECTS) $(LIBS) $(PAMLIB)
++	$(CC) $(CFLAGS) -o atd $(RUNOBJECTS) $(LIBS) $(PAMLIB) $(SELINUXLIB)
+ 
+ y.tab.c y.tab.h: parsetime.y
+ 	$(YACC) -d parsetime.y
+diff -ru at-3.1.10.2.bak/atd.c at-3.1.10.2/atd.c
+--- at-3.1.10.2.bak/atd.c	2005-08-31 09:42:56.000000000 +1000
++++ at-3.1.10.2/atd.c	2009-01-02 16:46:01.000000000 +1100
+@@ -74,6 +74,14 @@
+ #include <syslog.h>
+ #endif
+ 
++#ifdef WITH_SELINUX
++#include <selinux/selinux.h>
++#include <selinux/get_context_list.h>
++int selinux_enabled=0;
++#include <selinux/flask.h>
++#include <selinux/av_permissions.h>
++#endif
++
+ /* Local headers */
+ 
+ #include "privs.h"
+@@ -438,6 +446,76 @@
+ 
+ 	    chdir("/");
+ 
++#ifdef WITH_SELINUX
++	    if (selinux_enabled>0) {
++	      security_context_t  file_context=NULL;
++	      security_context_t *context_list=NULL;
++	      security_context_t current_con=NULL;
++	      int retval=0, list_count=0, i;
++	      struct av_decision avd;
++	      char *seuser=NULL, *level=NULL;
++
++	      if (getseuserbyname(pentry->pw_name, &seuser, &level))
++		perr("getseuserbyname FAILED for %s\n", pentry->pw_name);
++
++	      if(getcon(&current_con)) {
++	        free(seuser);
++	        free(level);
++	        perr("Can't get current context");
++	      }
++	      list_count = get_ordered_context_list_with_level(seuser, level, current_con, &context_list);
++	      freecon(current_con);
++	      free(seuser);
++	      free(level);
++	      if (list_count == -1) {
++		if (security_getenforce() > 0)
++		  perr("Couldn't get security context for user %s\n", pentry->pw_name); 
++		else
++		  syslog(LOG_WARNING, "Couldn't get security context for user %s, but in permissive mode", pentry->pw_name);
++	      }
++
++	      /*
++	       * Since crontab files are not directly executed,
++	       * crond must ensure that the crontab file has
++	       * a context that is appropriate for the context of
++	       * the user cron job.  It performs an entrypoint
++	       * permission check for this purpose.
++	       */
++	      if (list_count != -1) {
++		if (fgetfilecon(STDIN_FILENO, &file_context) < 0) {
++		  if (security_getenforce() > 0)
++		    perr("fgetfilecon FAILED for user %s", pentry->pw_name);
++	        }
++
++		for(i = 0; i < list_count; i++) {
++		  retval = security_compute_av(context_list[i],
++					   file_context,
++					   SECCLASS_FILE,
++					   FILE__ENTRYPOINT,
++					   &avd);
++	          if (!retval && ((FILE__ENTRYPOINT & avd.allowed) == FILE__ENTRYPOINT))
++		    break;
++		}
++	      }
++	      freecon(file_context);
++	      if (list_count != -1 && (retval || ((FILE__ENTRYPOINT & avd.allowed) != FILE__ENTRYPOINT))) {
++		if (security_getenforce()==1) 
++		  perr("Not allowed to set exec context for user %s\n", pentry->pw_name); 
++		else
++		  syslog(LOG_WARNING, "Not allowed to set exec context for user %s, but in permissive mode", pentry->pw_name); 
++	      }
++
++	      if ((list_count != -1 || retval) && setexeccon(context_list[i]) < 0) {
++		if (security_getenforce()==1) {
++		  perr("Could not set exec context to %s for user %s\n", context_list[i], pentry->pw_name); 
++		} else {
++		  syslog(LOG_ERR, "Could not set exec context to %s for user %s\n", context_list[i], pentry->pw_name); 
++		}
++	      }
++	      freeconary(context_list);
++	    }
++#endif	
++
+ 	    if (execle("/bin/sh", "sh", (char *) NULL, nenvp) != 0)
+ 		perr("Exec failed for /bin/sh");
+ 
+@@ -696,6 +774,9 @@
+     struct passwd *pwe;
+     struct group *ge;
+ 
++#ifdef WITH_SELINUX
++    selinux_enabled=is_selinux_enabled();
++#endif	
+ /* We don't need root privileges all the time; running under uid and gid
+  * daemon is fine.
+  */
+diff -ru at-3.1.10.2.bak/config.h.in at-3.1.10.2/config.h.in
+--- at-3.1.10.2.bak/config.h.in	2005-08-05 13:16:02.000000000 +1000
++++ at-3.1.10.2/config.h.in	2009-01-02 16:15:28.000000000 +1100
+@@ -82,6 +82,9 @@
+ 
+ #undef HAVE_ATTRIBUTE_NORETURN
+ 
++/* Define if you are building with_selinux  */
++#undef WITH_SELINUX
++
+ /* Define if you have the getcwd function.  */
+ #undef HAVE_GETCWD
+ 
+diff -ru at-3.1.10.2.bak/configure.in at-3.1.10.2/configure.in
+--- at-3.1.10.2.bak/configure.in	2005-08-05 13:16:02.000000000 +1000
++++ at-3.1.10.2/configure.in	2009-01-02 16:15:01.000000000 +1100
+@@ -316,4 +316,12 @@
+ )
+ AC_SUBST(DAEMON_GROUPNAME)
+ 
++AC_ARG_WITH(selinux,
++[ --with-selinux       Define to run with selinux],
++AC_DEFINE(WITH_SELINUX),
++)
++AC_CHECK_LIB(selinux, is_selinux_enabled, SELINUXLIB=-lselinux)
++AC_SUBST(SELINUXLIB)
++AC_SUBST(WITH_SELINUX)
++
+ AC_OUTPUT(Makefile atrun atd.8 atrun.8 at.1 batch)
+diff -ru at-3.1.10.2.bak/debian/control at-3.1.10.2/debian/control
+--- at-3.1.10.2.bak/debian/control	2008-09-23 22:22:41.000000000 +1000
++++ at-3.1.10.2/debian/control	2009-01-02 16:19:35.000000000 +1100
+@@ -3,7 +3,7 @@
+ Priority: important
+ Maintainer: Ryan Murray <rmurray@debian.org>
+ Standards-Version: 3.6.2
+-Build-Depends: bison, flex, libpam0g-dev, ssmtp | mail-transport-agent
++Build-Depends: bison, flex, libpam0g-dev, ssmtp | mail-transport-agent, libselinux1-dev
+ 
+ Package: at
+ Architecture: any
+diff -ru at-3.1.10.2.bak/debian/rules at-3.1.10.2/debian/rules
+--- at-3.1.10.2.bak/debian/rules	2006-01-03 18:12:56.000000000 +1100
++++ at-3.1.10.2/debian/rules	2009-01-02 16:17:52.000000000 +1100
+@@ -30,7 +30,7 @@
+ 	-test -f config.cache || PATH=/usr/sbin:$${PATH} ./configure --prefix=/usr \
+ 		--with-loadavg_mx=1.5 \
+ 		--with-jobdir=/var/spool/cron/atjobs \
+-		--with-atspool=/var/spool/cron/atspool
++		--with-atspool=/var/spool/cron/atspool --with-selinux
+ 	sed 's,/usr/lib/sendmail,/usr/sbin/sendmail,g' \
+ 		< config.h > config.h.new
+ 	mv -f config.h.new config.h

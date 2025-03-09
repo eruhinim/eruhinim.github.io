@@ -1,0 +1,144 @@
+diff --git a/debian/control b/debian/control
+index 8051198..a097ab8 100644
+--- a/debian/control
++++ b/debian/control
+@@ -26,3 +26,4 @@ Description: DEP-8 test control file generator
+   - R packages
+   - Emacs Lisp ELPA packages
+   - Go packages
++  - Octave-Forge packages
+diff --git a/examples.in b/examples.in
+index d0eb1b5..21f7e35 100644
+--- a/examples.in
++++ b/examples.in
+@@ -4,6 +4,7 @@ dkms    kpatch
+ elpa    flycheck
+ go      prometheus
+ nodejs  node-tar
++octave  octave-signal
+ perl    libtest-most-perl
+ python  python-flaky
+ r       r-cran-evaluate
+diff --git a/examples.md b/examples.md
+index 685b8b9..653ea4e 100644
+--- a/examples.md
++++ b/examples.md
+@@ -14,14 +14,20 @@
+ ## go (prometheus)
+ 
+     Test-Command: /usr/bin/dh_golang_autopkgtest
+-    Depends: @builddeps@, dh-golang
+-    Restrictions: rw-build-tree, allow-stderr
++    Depends: @, @builddeps@, dh-golang
++    Restrictions: allow-stderr
+ 
+ ## nodejs (node-tar)
+ 
+     Test-Command: cd $ADTTMP && nodejs -e "require('"'"'tar'"'"');"
+     Depends: @
+ 
++## octave (octave-signal)
++
++    Test-Command: /usr/share/octave-pkg-dev/check-pkg
++    Depends: @, octave-autopkgtest
++    Restrictions: allow-stderr
++
+ ## perl (libtest-most-perl)
+ 
+     Test-Command: /usr/share/pkg-perl-autopkgtest/runner build-deps
+@@ -36,11 +42,11 @@
+ 
+ ## python (python-flaky)
+ 
+-    Test-Command: cd "$ADTTMP" ; python -c "import flaky; print flaky"
+-    Depends: python-flaky
++    Test-Command: set -e ; for py in $(pyversions -r 2>/dev/null) ; do cd "$ADTTMP" ; echo "Testing with $py:" ; $py -c "import flaky; print flaky" ; done
++    Depends: python-all, python-flaky
+     
+-    Test-Command: cd "$ADTTMP" ; python3 -c "import flaky; print(flaky)"
+-    Depends: python3-flaky
++    Test-Command: set -e ; for py in $(py3versions -r 2>/dev/null) ; do cd "$ADTTMP" ; echo "Testing with $py:" ; $py -c "import flaky; print(flaky)" ; done
++    Depends: python3-all, python3-flaky
+     
+     Test-Command: cd "$ADTTMP" ; pypy -c "import flaky; print flaky"
+     Depends: pypy-flaky
+diff --git a/support/octave/detect b/support/octave/detect
+new file mode 100755
+index 0000000..78ce8a2
+--- /dev/null
++++ b/support/octave/detect
+@@ -0,0 +1,10 @@
++#!/bin/sh
++
++### Select only the packages from Octave-Forge.  The detection is based on
++### the existence of an inst/ directory (which contains the *.m to be
++### tested) and a DESCRIPTION file, besides the name of the source package,
++### which must start with ""octave-"".
++
++test -d inst								\
++    && test -f DESCRIPTION						\
++    && grep-dctrl --quiet -F Source -r '^octave-.*$' debian/control
+diff --git a/support/octave/generate b/support/octave/generate
+new file mode 100755
+index 0000000..1191fe8
+--- /dev/null
++++ b/support/octave/generate
+@@ -0,0 +1,7 @@
++#!/bin/sh
++
++cat <<EOF
++Test-Command: /usr/share/octave-pkg-dev/check-pkg
++Depends: @, octave-autopkgtest
++Restrictions: allow-stderr
++EOF
+diff --git a/test/octave_test.sh b/test/octave_test.sh
+new file mode 100644
+index 0000000..51d8d3c
+--- /dev/null
++++ b/test/octave_test.sh
+@@ -0,0 +1,45 @@
++. $(dirname $0)/helper.sh
++
++test_Testsuite_autopkgtest_pkg_octave() {
++  has debian/control 'Testsuite: autopkgtest-pkg-octave'
++  check_run autodep8
++}
++
++test_XS_Testsuite_autopkgtest_pkg_octave() {
++  has debian/control 'XS-Testsuite: autopkgtest-pkg-octave'
++  check_run autodep8
++}
++
++test_support_octave_detect() {
++  has_dir inst
++  has debian/control 'Source: octave-foo'
++  has DESCRIPTION 'Name: Foo'
++  check_run autodep8
++}
++
++test_no_description_file() {
++  has_dir inst
++  has debian/control 'Source: octave-foo'
++  run autodep8
++  assertEquals 1 "$exitstatus"
++  assertEquals "" "$(cat stdout stderr)"
++}
++
++test_no_octave_prefix_in_source_name() {
++  has_dir inst
++  has debian/control 'Source: foo'
++  has DESCRIPTION 'Name: Foo'
++  run autodep8
++  assertEquals 1 "$exitstatus"
++  assertEquals "" "$(cat stdout stderr)"
++}
++
++test_no_inst_directory() {
++  has debian/control 'Source: octave-foo'
++  has DESCRIPTION 'Name: Foo'
++  run autodep8
++  assertEquals 1 "$exitstatus"
++  assertEquals "" "$(cat stdout stderr)"
++}
++
++. shunit2

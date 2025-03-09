@@ -1,0 +1,208 @@
+--- col.0.c	2006-08-15 02:03:30.000000000 -0400
++++ col.c	2009-03-09 16:49:36.000000000 -0400
+@@ -42,6 +42,7 @@
+ 
+ #include <ctype.h>
+ #include <err.h>
++#include <errno.h>
+ #include <string.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -71,7 +72,7 @@
+ #define	CS_ALTERNATE	2
+ 	short		c_column;	/* column character is in */
+ 	CSET		c_set;		/* character set (currently only 2) */
+-	char		c_char;		/* character in question */
++	int		c_char;		/* character in question */
+ } CHAR;
+ 
+ typedef struct line_str LINE;
+@@ -102,11 +103,89 @@
+ int	no_backspaces;		/* if not to output any backspaces */
+ int	pass_unknown_seqs;	/* pass unknown control sequences */
+ 
+-#define	PUTC(ch) \
+-	do {					\
+-		if (putchar(ch) == EOF)		\
+-			errx(1, "write error");	\
+-	} while (0)
++int (* get_locale_char) (void);
++void (* put_locale_char) (int);
++
++int get_utf8_char (void) {
++  int c, build;
++   c = getchar ();
++   if (c == EOF)
++      return EOF;
++   if (c >= 0 && c <= 0x7f)
++      return c;
++   if (c >= 0xc0 && c <= 0xdf) {
++      build = (c & 0x1f) << 6;
++     LEAST:
++      c = getchar ();
++      if (c == EOF)
++         return EOF;
++      if (c >= 0x80 && c <= 0xbf)
++         return build | (c & 0x3f);
++      ungetc (c, stdin);
++   } else if (c >= 0xe0 && c <= 0xef) {
++      build = (c & 0x0f) << 12;
++     LESSER:
++      c = getchar ();
++      if (c == EOF)
++         return EOF;
++      if (c >= 0x80 && c <= 0xbf) {
++         build |= (c & 0x3f) << 6;
++         goto LEAST;
++      }
++      ungetc (c, stdin);
++   } else if (c >= 0xf0 && c <= 0xf7) {
++      build = (c & 0x07) << 18;
++      c = getchar ();
++      if (c == EOF)
++         return EOF;
++      if (c >= 0x80 && c <= 0xbf) {
++         build |= (c & 0x3f) << 12;
++         goto LESSER;
++      }
++      ungetc (c, stdin);
++   }
++   return '?';
++}
++
++void put_ascii_char (int c) {
++   if (putchar (c) == EOF) {
++      fprintf (stderr, "Output error: %s.\n", strerror (errno));
++      exit (1);
++   }
++}
++
++void put_utf8_char (int c) {
++   if (c < 0 || c > 0x10ffff) {
++      fprintf (stderr, "Invalid UTF-8 in output.\n");
++      exit (1);
++   }
++   if (c <= 0x7f)
++      put_ascii_char (c);
++   else if (c <= 0x7ff) {
++      put_ascii_char (0xc0 | (c >> 6));
++      put_ascii_char (0x80 | (c & 0x3f));
++   } else if (c <= 0xffff) {
++      put_ascii_char (0xe0 | (c >> 12));
++      put_ascii_char (0x80 | ((c >> 6) & 0x3f));
++      put_ascii_char (0x80 | (c & 0x3f));
++   } else {
++      put_ascii_char (0xf0 | (c >> 18));
++      put_ascii_char (0x80 | ((c >> 12) & 0x3f));
++      put_ascii_char (0x80 | ((c >> 6) & 0x3f));
++      put_ascii_char (0x80 | (c & 0x3f));
++   }
++}
++
++void init_locale_sys (void) {
++  char * locale = setlocale (LC_ALL, "");
++   if (strstr (locale, "UTF-8")) {
++      get_locale_char = get_utf8_char;
++      put_locale_char = put_utf8_char;
++   } else {
++      get_locale_char = getchar;
++      put_locale_char = put_ascii_char;
++   }
++}
+ 
+ int
+ main(int argc, char **argv)
+@@ -123,7 +202,7 @@
+ 	int nflushd_lines;		/* number of lines that were flushed */
+ 	int adjust, opt, warned;
+ 
+-	(void)setlocale(LC_CTYPE, "");
++	init_locale_sys ();
+ 
+ 	max_bufd_lines = 128;
+ 	compress_spaces = 1;		/* compress spaces into tabs */
+@@ -164,7 +243,7 @@
+ 	cur_set = last_set = CS_NORMAL;
+ 	lines = l = alloc_line();
+ 
+-	while ((ch = getchar()) != EOF) {
++	while ((ch = get_locale_char ()) != EOF) {
+ 		if (!isgraph(ch)) {
+ 			switch (ch) {
+ 			case BS:		/* can't go back further */
+@@ -176,7 +255,7 @@
+ 				cur_col = 0;
+ 				continue;
+ 			case ESC:		/* just ignore EOF */
+-				switch(getchar()) {
++				switch (get_locale_char ()) {
+ 				case RLF:
+ 					cur_line -= 2;
+ 					break;
+@@ -305,7 +384,7 @@
+ 
+ 	/* make sure we leave things in a sane state */
+ 	if (last_set != CS_NORMAL)
+-		PUTC('\017');
++		put_locale_char ('\017');
+ 
+ 	/* flush out the last few blank lines */
+ 	nblank_lines = max_line - this_line;
+@@ -359,12 +438,12 @@
+ 	}
+ 	nb /= 2;
+ 	for (i = nb; --i >= 0;)
+-		PUTC('\n');
++		put_locale_char ('\n');
+ 	if (half) {
+-		PUTC('\033');
+-		PUTC('9');
++		put_locale_char ('\033');
++		put_locale_char ('9');
+ 		if (!nb)
+-			PUTC('\r');
++			put_locale_char ('\r');
+ 	}
+ 	nblank_lines = 0;
+ }
+@@ -444,15 +523,15 @@
+ 						break;
+ 					tab_size = tab_col - last_col;
+ 					if (tab_size == 1)
+-						PUTC(' ');
++						put_locale_char (' ');
+ 					else
+-						PUTC('\t');
++						put_locale_char ('\t');
+ 					nspace -= tab_size;
+ 					last_col = tab_col;
+ 				}
+ 			}
+ 			while (--nspace >= 0)
+-				PUTC(' ');
++				put_locale_char (' ');
+ 			last_col = this_col;
+ 		}
+ 		last_col++;
+@@ -461,17 +540,17 @@
+ 			if (c->c_set != last_set) {
+ 				switch (c->c_set) {
+ 				case CS_NORMAL:
+-					PUTC('\017');
++					put_locale_char ('\017');
+ 					break;
+ 				case CS_ALTERNATE:
+-					PUTC('\016');
++					put_locale_char ('\016');
+ 				}
+ 				last_set = c->c_set;
+ 			}
+-			PUTC(c->c_char);
++			put_locale_char (c->c_char);
+ 			if (++c >= endc)
+ 				break;
+-			PUTC('\b');
++			put_locale_char ('\b');
+ 		}
+ 	}
+ }

@@ -1,0 +1,223 @@
+From 6dcbfb6a4df3e20102b6f3ff3fa977e031db2d1f Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Sun, 9 Dec 2018 23:06:29 +0100
+Subject: [PATCH] Dpkg::Changelog::Debian: Preserve modelines at EOF
+
+We should keep these and considere them as pseudo-EOF markers, and stop
+processsing once seen.
+
+[lamby@debian.org:
+ - Partial test cases for dpkg-mergechangelogs functional tests. ]
+
+Closes: #916056
+---
+ man/deb-changelog.man                         | 10 +++++-----
+ man/dpkg-mergechangelogs.man                  |  4 ++--
+ scripts/Dpkg/Changelog/Debian.pm              |  8 ++++++--
+ scripts/Makefile.am                           |  1 +
+ scripts/t/Dpkg_Changelog.t                    |  8 ++++++--
+ scripts/t/Dpkg_Changelog/stop-modeline        | 13 +++++++++++++
+ scripts/t/merge_changelogs/ch-a               |  2 ++
+ scripts/t/merge_changelogs/ch-b               |  2 ++
+ scripts/t/merge_changelogs/ch-merged          |  2 ++
+ scripts/t/merge_changelogs/ch-merged-basic    |  2 ++
+ scripts/t/merge_changelogs/ch-merged-pr       |  2 ++
+ scripts/t/merge_changelogs/ch-merged-pr-basic |  2 ++
+ scripts/t/merge_changelogs/ch-old             |  2 ++
+ 13 files changed, 47 insertions(+), 11 deletions(-)
+ create mode 100644 scripts/t/Dpkg_Changelog/stop-modeline
+
+diff --git a/man/deb-changelog.man b/man/deb-changelog.man
+index 6aaa5d2cf..93dffbed1 100644
+--- a/man/deb-changelog.man
++++ b/man/deb-changelog.man
+@@ -142,12 +142,12 @@ The maintainer details and the date must be separated by exactly two
+ spaces.
+ .PP
+ Any line that consists entirely (i.e., no leading whitespace) of \fB#\fP
+-or \fB/* */\fP style comments, RCS keywords, Vim modelines or Emacs local
+-variables should be ignored.
++or \fB/* */\fP style comments, RCS keywords.
+ .PP
+-Ancient changelog entries with other formats at the end of the file should
+-be accepted and preserved on output, but their contents might be otherwise
+-ignored and parsing stopped at that point.
++Vim modelines or Emacs local variables, and ancient changelog entries with
++other formats at the end of the file should be accepted and preserved on
++output, but their contents might be otherwise ignored and parsing stopped
++at that point.
+ .PP
+ The entire changelog must be encoded in UTF-8.
+ .SH FILES
+diff --git a/man/dpkg-mergechangelogs.man b/man/dpkg-mergechangelogs.man
+index 9cda23ef0..4d6159c02 100644
+--- a/man/dpkg-mergechangelogs.man
++++ b/man/dpkg-mergechangelogs.man
+@@ -75,8 +75,8 @@ The accepted values are: \fB0\fP and \fB1\fP (default).
+ .SH LIMITATIONS
+ .P
+ Anything that is not parsed by Dpkg::Changelog is lost during the merge.
+-This might include stuff like Vim modelines, Emacs variables, comments
+-which were not supposed to be there, etc.
++This might include stuff like comments which were not supposed to be
++there, etc.
+ .
+ .SH INTEGRATION WITH GIT
+ .P
+diff --git a/scripts/Dpkg/Changelog/Debian.pm b/scripts/Dpkg/Changelog/Debian.pm
+index a44ac666c..937acb5e0 100644
+--- a/scripts/Dpkg/Changelog/Debian.pm
++++ b/scripts/Dpkg/Changelog/Debian.pm
+@@ -162,9 +162,13 @@ sub parse {
+ 	    $expect= START_CHANGES;
+ 	    @blanklines = ();
+ 	} elsif (m/^(?:;;\s*)?Local variables:/io) {
+-	    last; # skip Emacs variables at end of file
++            # Save any trailing Emacs variables at end of file.
++            $self->set_unparsed_tail("$_\n" . (file_slurp($fh) // ''));
++            last;
+ 	} elsif (m/^vim:/io) {
+-	    last; # skip Vim modelines at end of file
++            # Save any trailing Vim modelines at end of file.
++            $self->set_unparsed_tail("$_\n" . (file_slurp($fh) // ''));
++            last;
+ 	} elsif (m/^\$\w+:.*\$/o) {
+ 	    next; # skip stuff that look like a RCS keyword
+ 	} elsif (m/^\# /o) {
+diff --git a/scripts/Makefile.am b/scripts/Makefile.am
+index 31df4d8df..65867b6b2 100644
+--- a/scripts/Makefile.am
++++ b/scripts/Makefile.am
+@@ -312,6 +312,7 @@ test_data = \
+ 	t/Dpkg_Changelog/misplaced-tz \
+ 	t/Dpkg_Changelog/regressions \
+ 	t/Dpkg_Changelog/shadow \
++	t/Dpkg_Changelog/stop-modeline \
+ 	t/Dpkg_Changelog/unreleased \
+ 	t/Dpkg_Checksums/empty \
+ 	t/Dpkg_Checksums/data-1 \
+diff --git a/scripts/t/Dpkg_Changelog.t b/scripts/t/Dpkg_Changelog.t
+index 8aa1bfc45..f487ff560 100644
+--- a/scripts/t/Dpkg_Changelog.t
++++ b/scripts/t/Dpkg_Changelog.t
+@@ -16,7 +16,7 @@
+ use strict;
+ use warnings;
+ 
+-use Test::More tests => 96;
++use Test::More tests => 102;
+ use Test::Dpkg qw(:paths);
+ 
+ use File::Basename;
+@@ -36,7 +36,7 @@ my $vendor = get_current_vendor();
+ #########################
+ 
+ foreach my $file ("$datadir/countme", "$datadir/shadow", "$datadir/fields",
+-    "$datadir/regressions", "$datadir/date-format") {
++    "$datadir/regressions", "$datadir/date-format", "$datadir/stop-modeline") {
+ 
+     my $changes = Dpkg::Changelog::Debian->new(verbose => 0);
+     $changes->load($file);
+@@ -346,6 +346,10 @@ Xb-Userfield2: foobar
+         is($data[2]->get_timestamp(), 'Mon, 01 Jan 2000 00:00:00 +0000',
+            'get date w/ DoW, and zero timezone offset');
+     }
++    if ($file eq "$datadir/stop-modeline") {
++        is($changes->get_unparsed_tail(), "vim: et\n",
++           'get unparsed modeline at EOF');
++    }
+     if ($file eq "$datadir/regressions") {
+ 	my $f = ($changes->format_range('dpkg'))[0];
+ 	is("$f->{Version}", '0', 'version 0 correctly parsed');
+diff --git a/scripts/t/Dpkg_Changelog/stop-modeline b/scripts/t/Dpkg_Changelog/stop-modeline
+new file mode 100644
+index 000000000..5b8a7b438
+--- /dev/null
++++ b/scripts/t/Dpkg_Changelog/stop-modeline
+@@ -0,0 +1,13 @@
++modeline (2.0-1) unstable; urgency=low
++
++  * Upload.
++
++ -- Dpkg Developers <debian-dpkg@lists.debian.org>  Tue,  4 Oct 2005 01:49:05 +0200
++
++modeline (1.0-1) unstable; urgency=low
++
++  * Upload.
++
++ -- Dpkg Developers <debian-dpkg@lists.debian.org>  Tue,  4 Oct 2005 01:48:05 +0200
++
++vim: et
+diff --git a/scripts/t/merge_changelogs/ch-a b/scripts/t/merge_changelogs/ch-a
+index 02dad9397..ff5419d8d 100644
+--- a/scripts/t/merge_changelogs/ch-a
++++ b/scripts/t/merge_changelogs/ch-a
+@@ -90,3 +90,5 @@ test (1.0-1) unstable; urgency=low
+   * Initial release. (Closes: #XXXXXX)
+ 
+  -- Raphaël Hertzog <hertzog@debian.org>  Sun, 18 Apr 2010 17:37:46 +0200
++
++vim: et
+diff --git a/scripts/t/merge_changelogs/ch-b b/scripts/t/merge_changelogs/ch-b
+index 9eb78699b..a74145f82 100644
+--- a/scripts/t/merge_changelogs/ch-b
++++ b/scripts/t/merge_changelogs/ch-b
+@@ -85,3 +85,5 @@ test (1.0-1) unstable; urgency=low
+   * Initial release. (Closes: #XXXXXX)
+ 
+  -- Raphaël Hertzog <hertzog@debian.org>  Sun, 18 Apr 2010 17:37:46 +0200
++
++vim: et
+diff --git a/scripts/t/merge_changelogs/ch-merged b/scripts/t/merge_changelogs/ch-merged
+index c995f1cf9..29a985d16 100644
+--- a/scripts/t/merge_changelogs/ch-merged
++++ b/scripts/t/merge_changelogs/ch-merged
+@@ -111,3 +111,5 @@ test (1.0-1) unstable; urgency=low
+   * Initial release. (Closes: #XXXXXX)
+ 
+  -- Raphaël Hertzog <hertzog@debian.org>  Sun, 18 Apr 2010 17:37:46 +0200
++
++vim: et
+diff --git a/scripts/t/merge_changelogs/ch-merged-basic b/scripts/t/merge_changelogs/ch-merged-basic
+index 6b054c353..f89fe1123 100644
+--- a/scripts/t/merge_changelogs/ch-merged-basic
++++ b/scripts/t/merge_changelogs/ch-merged-basic
+@@ -134,3 +134,5 @@ test (1.0-1) unstable; urgency=low
+   * Initial release. (Closes: #XXXXXX)
+ 
+  -- Raphaël Hertzog <hertzog@debian.org>  Sun, 18 Apr 2010 17:37:46 +0200
++
++vim: et
+diff --git a/scripts/t/merge_changelogs/ch-merged-pr b/scripts/t/merge_changelogs/ch-merged-pr
+index 467211c80..a58f09779 100644
+--- a/scripts/t/merge_changelogs/ch-merged-pr
++++ b/scripts/t/merge_changelogs/ch-merged-pr
+@@ -104,3 +104,5 @@ test (1.0-1) unstable; urgency=low
+   * Initial release. (Closes: #XXXXXX)
+ 
+  -- Raphaël Hertzog <hertzog@debian.org>  Sun, 18 Apr 2010 17:37:46 +0200
++
++vim: et
+diff --git a/scripts/t/merge_changelogs/ch-merged-pr-basic b/scripts/t/merge_changelogs/ch-merged-pr-basic
+index 61f46cd69..773361253 100644
+--- a/scripts/t/merge_changelogs/ch-merged-pr-basic
++++ b/scripts/t/merge_changelogs/ch-merged-pr-basic
+@@ -136,3 +136,5 @@ test (1.0-1) unstable; urgency=low
+   * Initial release. (Closes: #XXXXXX)
+ 
+  -- Raphaël Hertzog <hertzog@debian.org>  Sun, 18 Apr 2010 17:37:46 +0200
++
++vim: et
+diff --git a/scripts/t/merge_changelogs/ch-old b/scripts/t/merge_changelogs/ch-old
+index 12ee224c1..5ff7dd366 100644
+--- a/scripts/t/merge_changelogs/ch-old
++++ b/scripts/t/merge_changelogs/ch-old
+@@ -83,3 +83,5 @@ test (1.0-1) unstable; urgency=low
+   * Initial release. (Closes: #XXXXXX)
+ 
+  -- Raphaël Hertzog <hertzog@debian.org>  Sun, 18 Apr 2010 17:37:46 +0200
++
++vim: et
+-- 
+2.20.0.rc2.403.gdbc3b29805
+

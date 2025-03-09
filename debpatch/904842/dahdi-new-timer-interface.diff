@@ -1,0 +1,267 @@
+diff --git a/dahdi/drivers/dahdi/dahdi-base.c b/dahdi/drivers/dahdi/dahdi-base.c
+index 36766e6..7cd0a3d 100644
+--- a/dahdi/drivers/dahdi/dahdi-base.c
++++ b/dahdi/drivers/dahdi/dahdi-base.c
+@@ -10069,7 +10069,11 @@ static inline unsigned long msecs_processed(const struct core_timer *const ct)
+ 	return atomic_read(&ct->count) * DAHDI_MSECS_PER_CHUNK;
+ }
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
++static void coretimer_func(struct timer_list *param)
++#else
+ static void coretimer_func(unsigned long param)
++#endif
+ {
+ 	unsigned long flags;
+ 	unsigned long ms_since_start;
+@@ -10150,8 +10154,12 @@ static void coretimer_func(unsigned long param)
+ 
+ static void coretimer_init(void)
+ {
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
++	timer_setup(&core_timer.timer, coretimer_func, 0);
++#else
+ 	init_timer(&core_timer.timer);
+ 	core_timer.timer.function = coretimer_func;
++#endif
+ 	ktime_get_ts(&core_timer.start_interval);
+ 	atomic_set(&core_timer.count, 0);
+ 	atomic_set(&core_timer.shutdown, 0);
+diff --git a/dahdi/drivers/dahdi/dahdi_dynamic.c b/dahdi/drivers/dahdi/dahdi_dynamic.c
+index 0a37e2a..699c9c9 100644
+--- a/dahdi/drivers/dahdi/dahdi_dynamic.c
++++ b/dahdi/drivers/dahdi/dahdi_dynamic.c
+@@ -831,7 +831,11 @@ EXPORT_SYMBOL(dahdi_dynamic_unregister_driver);
+ 
+ static struct timer_list alarmcheck;
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
++static void check_for_red_alarm(struct timer_list *ignored)
++#else
+ static void check_for_red_alarm(unsigned long ignored)
++#endif
+ {
+ 	int newalarm;
+ 	int alarmchanged = 0;
+@@ -867,10 +871,14 @@ static const struct dahdi_dynamic_ops dahdi_dynamic_ops = {
+ static int dahdi_dynamic_init(void)
+ {
+ 	/* Start process to check for RED ALARM */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
++	timer_setup(&alarmcheck, check_for_red_alarm, 0);
++#else
+ 	init_timer(&alarmcheck);
+ 	alarmcheck.expires = 0;
+ 	alarmcheck.data = 0;
+ 	alarmcheck.function = check_for_red_alarm;
++#endif
+ 	/* Check once per second */
+ 	mod_timer(&alarmcheck, jiffies + 1 * HZ);
+ #ifdef ENABLE_TASKLETS
+diff --git a/dahdi/drivers/dahdi/dahdi_dynamic_ethmf.c b/dahdi/drivers/dahdi/dahdi_dynamic_ethmf.c
+index dec368b..ac59951 100644
+--- a/dahdi/drivers/dahdi/dahdi_dynamic_ethmf.c
++++ b/dahdi/drivers/dahdi/dahdi_dynamic_ethmf.c
+@@ -681,7 +681,11 @@ static int ethmf_delay_dec(void)
+  * Timer callback function to allow all spans to be added, prior to any of
+  * them being used.
+  */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
++static void timer_callback(struct timer_list *param)
++#else
+ static void timer_callback(unsigned long param)
++#endif
+ {
+ 	if (ethmf_delay_dec()) {
+ 		if (!atomic_read(&timer_deleted)) {
+@@ -764,9 +768,13 @@ static const struct file_operations ztdethmf_proc_fops = {
+ 
+ static int __init ztdethmf_init(void)
+ {
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
++	timer_setup(&timer, &timer_callback, 0);
++#else
+ 	init_timer(&timer);
+-	timer.expires = jiffies + HZ;
+ 	timer.function = &timer_callback;
++#endif
++	timer.expires = jiffies + HZ;
+ 	if (!timer_pending(&timer))
+ 		add_timer(&timer);
+ 
+diff --git a/dahdi/drivers/dahdi/wctc4xxp/base.c b/dahdi/drivers/dahdi/wctc4xxp/base.c
+index 0d76d6a..6f0ea19 100644
+--- a/dahdi/drivers/dahdi/wctc4xxp/base.c
++++ b/dahdi/drivers/dahdi/wctc4xxp/base.c
+@@ -3701,9 +3701,15 @@ wctc4xxp_send_commands(struct wcdte *wc, struct list_head *to_send)
+ }
+ 
+ static void
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
++wctc4xxp_watchdog(struct timer_list *data)
++{
++	struct wcdte *wc = from_timer(wc, data, watchdog);
++#else
+ wctc4xxp_watchdog(unsigned long data)
+ {
+ 	struct wcdte *wc = (struct wcdte *)data;
++#endif
+ 	struct tcb *cmd, *temp;
+ 	LIST_HEAD(cmds_to_retry);
+ 	const int MAX_RETRIES = 5;
+@@ -4094,8 +4100,10 @@ wctc4xxp_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
+ 	wc->watchdog.function = wctc4xxp_watchdog;
+ 	wc->watchdog.data = (unsigned long)wc;
+ 	init_timer(&wc->watchdog);
+-#	else
++#	elif LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0)
+ 	setup_timer(&wc->watchdog, wctc4xxp_watchdog, (unsigned long)wc);
++#	else
++	timer_setup(&wc->watchdog, wctc4xxp_watchdog, 0);
+ #	endif
+ 
+ 	/* ------------------------------------------------------------------
+diff --git a/dahdi/drivers/dahdi/wcte12xp/base.c b/dahdi/drivers/dahdi/wcte12xp/base.c
+index c327c5f..e96c499 100644
+--- a/dahdi/drivers/dahdi/wcte12xp/base.c
++++ b/dahdi/drivers/dahdi/wcte12xp/base.c
+@@ -2765,10 +2765,17 @@ static void vpm_check_func(struct work_struct *work)
+ 	return;
+ }
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
++static void te12xp_timer(struct timer_list *data)
++{
++	unsigned long flags;
++	struct t1 *wc = from_timer(wc, data, timer);
++#else
+ static void te12xp_timer(unsigned long data)
+ {
+ 	unsigned long flags;
+ 	struct t1 *wc = (struct t1 *)data;
++#endif
+ 
+ 	if (unlikely(!test_bit(INITIALIZED, &wc->bit_flags)))
+ 		return;
+@@ -2943,7 +2950,11 @@ static int __devinit te12xp_init_one(struct pci_dev *pdev, const struct pci_devi
+ 	spin_lock_init(&wc->reglock);
+ 	INIT_LIST_HEAD(&wc->active_cmds);
+ 	INIT_LIST_HEAD(&wc->pending_cmds);
++#	if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
++	timer_setup(&wc->timer, te12xp_timer, 0);
++#	else
+ 	setup_timer(&wc->timer, te12xp_timer, (unsigned long)wc);
++#	endif
+ 
+ #	if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+ 	INIT_WORK(&wc->timer_work, timer_work_func, wc);
+diff --git a/dahdi/drivers/dahdi/wcte13xp-base.c b/dahdi/drivers/dahdi/wcte13xp-base.c
+index c5ebe9d..b4e3007 100644
+--- a/dahdi/drivers/dahdi/wcte13xp-base.c
++++ b/dahdi/drivers/dahdi/wcte13xp-base.c
+@@ -2381,9 +2381,15 @@ static void te13x_handle_interrupt(struct wcxb *xb, u32 pending)
+ 	}
+ }
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
++static void te13xp_timer(struct timer_list *data)
++{
++	struct t13x *wc = from_timer(wc, data, timer);
++#else
+ static void te13xp_timer(unsigned long data)
+ {
+ 	struct t13x *wc = (struct t13x *)data;
++#endif
+ 
+ 	if (unlikely(!test_bit(INITIALIZED, &wc->bit_flags)))
+ 		return;
+@@ -2582,7 +2588,11 @@ static int __devinit te13xp_init_one(struct pci_dev *pdev,
+ 	wc->ledstate = -1;
+ 	spin_lock_init(&wc->reglock);
+ 	mutex_init(&wc->lock);
++#	if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
++	timer_setup(&wc->timer, te13xp_timer, 0);
++#	else
+ 	setup_timer(&wc->timer, te13xp_timer, (unsigned long)wc);
++#	endif
+ 
+ #	if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+ 	INIT_WORK(&wc->timer_work, timer_work_func, wc);
+diff --git a/dahdi/drivers/dahdi/wcte43x-base.c b/dahdi/drivers/dahdi/wcte43x-base.c
+index 3e6159b..035686d 100644
+--- a/dahdi/drivers/dahdi/wcte43x-base.c
++++ b/dahdi/drivers/dahdi/wcte43x-base.c
+@@ -3203,9 +3203,15 @@ static void t43x_handle_interrupt(struct wcxb *xb, u32 pending)
+ 		wc->intr_span = 0;
+ }
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
++static void t43x_timer(struct timer_list *data)
++{
++	struct t43x *wc = from_timer(wc, data, timer);
++#else
+ static void t43x_timer(unsigned long data)
+ {
+ 	struct t43x *wc = (struct t43x *)data;
++#endif
+ 
+ 	if (!is_initialized(wc))
+ 		return;
+@@ -3431,7 +3437,11 @@ static int __devinit t43x_init_one(struct pci_dev *pdev,
+ 		goto fail_exit;
+ 
+ 	mutex_init(&wc->lock);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
++	timer_setup(&wc->timer, t43x_timer, 0);
++#else
+ 	setup_timer(&wc->timer, t43x_timer, (unsigned long)wc);
++#endif
+ 
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+ 	INIT_WORK(&wc->timer_work, timer_work_func, wc);
+diff --git a/dahdi/drivers/dahdi/xpp/xbus-core.c b/dahdi/drivers/dahdi/xpp/xbus-core.c
+index 4281f1c..900ba06 100644
+--- a/dahdi/drivers/dahdi/xpp/xbus-core.c
++++ b/dahdi/drivers/dahdi/xpp/xbus-core.c
+@@ -1612,7 +1612,11 @@ xbus_t *xbus_new(struct xbus_ops *ops, ushort max_send_size,
+ 	transport_init(xbus, ops, max_send_size, transport_device, priv);
+ 	spin_lock_init(&xbus->lock);
+ 	init_waitqueue_head(&xbus->command_queue_empty);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
++	timer_setup(&xbus->command_timer, NULL, 0);
++#else
+ 	init_timer(&xbus->command_timer);
++#endif
+ 	atomic_set(&xbus->pcm_rx_counter, 0);
+ 	xbus->min_tx_sync = INT_MAX;
+ 	xbus->min_rx_sync = INT_MAX;
+diff --git a/dahdi/drivers/dahdi/xpp/xbus-pcm.c b/dahdi/drivers/dahdi/xpp/xbus-pcm.c
+index 32f04fa..001458b 100644
+--- a/dahdi/drivers/dahdi/xpp/xbus-pcm.c
++++ b/dahdi/drivers/dahdi/xpp/xbus-pcm.c
+@@ -353,9 +353,15 @@ static void xpp_set_syncer(xbus_t *xbus, bool on)
+ 			 (syncer) ? syncer->busname : "NO-SYNC");
+ }
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
++static void xbus_command_timer(struct timer_list *param)
++{
++	xbus_t *xbus = from_timer(xbus, param, command_timer);
++#else
+ static void xbus_command_timer(unsigned long param)
+ {
+ 	xbus_t *xbus = (xbus_t *)param;
++#endif
+ 	struct timeval now;
+ 
+ 	BUG_ON(!xbus);
+@@ -372,7 +378,9 @@ void xbus_set_command_timer(xbus_t *xbus, bool on)
+ 		if (!timer_pending(&xbus->command_timer)) {
+ 			XBUS_DBG(SYNC, xbus, "add_timer\n");
+ 			xbus->command_timer.function = xbus_command_timer;
++#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0)
+ 			xbus->command_timer.data = (unsigned long)xbus;
++#endif
+ 			xbus->command_timer.expires = jiffies + 1;
+ 			add_timer(&xbus->command_timer);
+ 		}

@@ -1,0 +1,124 @@
+diff -Nru coturn-4.5.1.1/debian/changelog coturn-4.5.1.1/debian/changelog
+--- coturn-4.5.1.1/debian/changelog	2019-05-26 16:11:04.000000000 +0200
++++ coturn-4.5.1.1/debian/changelog	2020-04-13 18:49:12.000000000 +0200
+@@ -1,3 +1,12 @@
++coturn (4.5.1.1-1.2) unstable; urgency=medium
++
++  * Non-maintainer upload.
++  * Update Uploaders. (Closes: #953466)
++  * Fix "CVE-2020-6061 CVE-2020-6062" by applying upstream patch.
++    (Closes: #951876)
++
++ -- Tobias Frost <tobi@debian.org>  Mon, 13 Apr 2020 18:49:12 +0200
++
+ coturn (4.5.1.1-1.1) unstable; urgency=medium
+ 
+   * Non-maintainer upload.
+diff -Nru coturn-4.5.1.1/debian/control coturn-4.5.1.1/debian/control
+--- coturn-4.5.1.1/debian/control	2019-05-26 16:11:04.000000000 +0200
++++ coturn-4.5.1.1/debian/control	2020-04-13 18:23:33.000000000 +0200
+@@ -2,8 +2,7 @@
+ Section: net
+ Priority: optional
+ Maintainer: Debian VoIP Team <pkg-voip-maintainers@lists.alioth.debian.org>
+-Uploaders: Daniel Pocock <daniel@pocock.pro>,
+-           Oleg Moskalenko <mom040267@gmail.com>,
++Uploaders: Oleg Moskalenko <mom040267@gmail.com>,
+            Mészáros Mihály <misi@majd.eu>
+ Build-Depends: debhelper (>=11.0.0),
+                default-libmysqlclient-dev,
+diff -Nru coturn-4.5.1.1/debian/patches/CVE-2020-6061+6062.patch coturn-4.5.1.1/debian/patches/CVE-2020-6061+6062.patch
+--- coturn-4.5.1.1/debian/patches/CVE-2020-6061+6062.patch	1970-01-01 01:00:00.000000000 +0100
++++ coturn-4.5.1.1/debian/patches/CVE-2020-6061+6062.patch	2020-04-13 18:47:41.000000000 +0200
+@@ -0,0 +1,85 @@
++Description: Patch for CVE-2020-6020 and 6021
++Origin: https://github.com/coturn/coturn/commit/51a7c2b9bf924890c7a3ff4db9c4976c5a93340a and
++ https://github.com/coturn/coturn/commit/e09bcd9f7af5b32c81b37f51835b384b5a7d03a8
++Bug-Debian: https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=951876
++Forwarded: not needed
++Applied-Upstream: yes, see above
++Last-Update: 2020-04-13
++---
++This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
++--- a/src/apps/relay/http_server.c
+++++ b/src/apps/relay/http_server.c
++@@ -103,36 +103,45 @@
++ 
++ static struct headers_list * post_parse(char *data, size_t data_len)
++ {
++-	while((*data=='\r')||(*data=='\n')) ++data;
++-	char *post_data = (char*)calloc(data_len + 1, sizeof(char));
++-	memcpy(post_data, data, data_len);
++-	char *fmarker = NULL;
++-	char *fsplit = strtok_r(post_data, "&", &fmarker);
++-	struct headers_list *list = (struct headers_list*)malloc(sizeof(struct headers_list));
++-	ns_bzero(list,sizeof(struct headers_list));
++-	while (fsplit != NULL) {
++-		char *vmarker = NULL;
++-		char *key = strtok_r(fsplit, "=", &vmarker);
++-		char *value = strtok_r(NULL, "=", &vmarker);
++-		char empty[1];
++-		empty[0]=0;
++-		value = value ? value : empty;
++-		value = evhttp_decode_uri(value);
++-		char *p = value;
++-		while (*p) {
++-			if (*p == '+')
++-				*p = ' ';
++-			p++;
+++	while((*data=='\r')||(*data=='\n')) { ++data; --data_len; }
+++	if (data_len) {
+++		char *post_data = (char*)calloc(data_len + 1, sizeof(char));
+++		if (post_data != NULL) {
+++			memcpy(post_data, data, data_len);
+++			char *fmarker = NULL;
+++			char *fsplit = strtok_r(post_data, "&", &fmarker);
+++			struct headers_list *list = (struct headers_list*)malloc(sizeof(struct headers_list));
+++			bzero(list,sizeof(struct headers_list));
+++			while (fsplit != NULL) {
+++				char *vmarker = NULL;
+++				char *key = strtok_r(fsplit, "=", &vmarker);
+++				if (key == NULL)
+++					break;
+++				else {
+++					char *value = strtok_r(NULL, "=", &vmarker);
+++					char empty[1];
+++					empty[0]=0;
+++					value = value ? value : empty;
+++					value = evhttp_decode_uri(value);
+++					char *p = value;
+++					while (*p) {
+++						if (*p == '+')
+++							*p = ' ';
+++						p++;
+++					}
+++					list->keys = (char**)realloc(list->keys,sizeof(char*)*(list->n+1));
+++					list->keys[list->n] = strdup(key);
+++					list->values = (char**)realloc(list->values,sizeof(char*)*(list->n+1));
+++					list->values[list->n] = value;
+++					++(list->n);
+++					fsplit = strtok_r(NULL, "&", &fmarker);
+++				}
+++			}
+++			free(post_data);
+++			return list;
++ 		}
++-		list->keys = (char**)realloc(list->keys,sizeof(char*)*(list->n+1));
++-		list->keys[list->n] = strdup(key);
++-		list->values = (char**)realloc(list->values,sizeof(char*)*(list->n+1));
++-		list->values[list->n] = value;
++-		++(list->n);
++-		fsplit = strtok_r(NULL, "&", &fmarker);
++ 	}
++-	free(post_data);
++-	return list;
+++	return NULL;
++ }
++ 
++ static struct http_request* parse_http_request_1(struct http_request* ret, char* request, int parse_post)
+diff -Nru coturn-4.5.1.1/debian/patches/series coturn-4.5.1.1/debian/patches/series
+--- coturn-4.5.1.1/debian/patches/series	2019-03-03 00:07:47.000000000 +0100
++++ coturn-4.5.1.1/debian/patches/series	2020-04-13 18:38:54.000000000 +0200
+@@ -1 +1,2 @@
+ Set-logging-to-syslog.patch
++CVE-2020-6061+6062.patch

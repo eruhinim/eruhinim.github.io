@@ -1,0 +1,171 @@
+diff --git a/debian/changelog b/debian/changelog
+index da14b8f..0e1751a 100644
+diff --git a/dpkg/common b/dpkg/common
+index c00cc49..2c42f23 100644
+--- a/dpkg/common
++++ b/dpkg/common
+@@ -105,6 +105,7 @@ dbc_set_dbtype_defaults(){
+ 		dbc_default_dbuser=`echo $dbc_package | tr -d +. | cut -c -16`;
+ 		dbc_dbvendor="MySQL"
+ 		dbc_dbpackage="mysql-server"
++		dbc_dbclientpackage="mysql-client"
+ 	;;
+ 	pgsql)
+ 		. /usr/share/dbconfig-common/internal/pgsql
+@@ -122,6 +123,7 @@ dbc_set_dbtype_defaults(){
+ 		dbc_use_dbuser="false"
+ 		dbc_dbvendor="PostgreSQL"
+ 		dbc_dbpackage="postgresql"
++		dbc_dbclientpackage="postgresql-client"
+ 	;;
+ 	sqlite|sqlite3)
+ 		. /usr/share/dbconfig-common/internal/sqlite
+@@ -141,6 +143,7 @@ dbc_set_dbtype_defaults(){
+ 		dbc_dbvendor="SQLite"
+ 		dbc_sqlite_cmd="/usr/bin/$dbc_dbtype"
+ 		dbc_dbpackage="$dbc_dbtype"
++		dbc_dbclientpackage="$dbc_dbtype"
+ 	;;
+ 	*)
+ 		dbc_register_templates="$dbc_standard_templates $dbc_mysql_templates $dbc_pgsql_templates $dbc_sqlite_templates"
+@@ -549,7 +552,7 @@ dbc_missing_db_package_error(){
+ 	echo "warning: database package not installed?" >&2
+ 	question="$dbc_package/missing-db-package-error"
+ 	db_fset $question seen false
+-	db_subst $question dbpackage $dbc_dbpackage
++	db_subst $question dbpackage $1
+ 	db_input critical $question || true
+ 	db_go || true
+ 	db_get $question
+@@ -856,26 +859,8 @@ dbc_detect_supported_dbtype(){
+ ## determine whether a db is installed on the system
+ ##
+ dbc_detect_installed_dbtype(){
+-	local query_dbtype testfile
+ 	_dbc_debug "dbc_detect_installed_dbtype() $@"
+-	query_dbtype=$1
+-
+-	# see if the dbtype is already installed.  this is not 100% accurate
+-	case $query_dbtype in 
+-	"mysql") testfile='/usr/bin/mysql'
+-	;;
+-	"pgsql") testfile='/usr/bin/psql'
+-	;;
+-	"sqlite") testfile='/usr/bin/sqlite'
+-	;;
+-	"sqlite3") testfile='/usr/bin/sqlite3'
+-	;;
+-	"")
+-	;;
+-	esac
+-
+-	[ "$testfile" ] && test -f $testfile && return 0
+-	return 1
++	_dbc_detect_installed_dbtype $@
+ }
+ 
+ ###
+diff --git a/dpkg/postinst b/dpkg/postinst
+index 6a1b7fe..d566ec3 100644
+--- a/dpkg/postinst
++++ b/dpkg/postinst
+@@ -62,13 +62,23 @@ dbc_go(){
+ 		# don't perform the following block of code during upgrades
+ 		if [ ! "$upgrading" ]; then
+ 			###
+-			### first things first, see if the database package is installed,
++			### first things first, see if the database client package is installed,
+ 			### and in case of failure provide a more sensible error message.
+ 			###
+-			$dbc_db_installed_cmd || dbc_missing_db_package_error
++			dbc_detect_installed_dbtype $dbc_dbtype || dbc_missing_db_package_error $dbc_dbclientpackage
+ 			[ "$dbc_tried_again" ] && return 0
+ 
+ 			###
++			### next, if we're connecting to a local database,
++			### see if the database server package is installed,
++			### and in case of failure provide a more sensible error message.
++			###
++			if [ "$dbc_method" = "unix socket" ]; then
++				$dbc_db_installed_cmd || dbc_missing_db_package_error $dbc_dbpackage
++				[ "$dbc_tried_again" ] && return 0
++			fi
++
++			###
+ 			### now, create the app user account
+ 			###
+ 			$dbc_createuser_cmd || dbc_install_error "creating user"
+diff --git a/internal/common b/internal/common
+index 3ad872d..40d04e6 100644
+--- a/internal/common
++++ b/internal/common
+@@ -31,6 +31,39 @@ _dbc_debug(){
+ }
+ 
+ ##
++## internal check for an installed db client package
++##
++_dbc_detect_installed_dbtype(){
++	_dbc_debug "_dbc_detect_installed_dbtype() $@"
++	# see if the dbtype is already installed.  this is still not 100% accurate
++	case "$1" in
++	mysql)
++		if ! which mysql >/dev/null; then
++			return 1
++		fi
++	;;
++	pgsql|psql)
++		# if postgresql-client-common is installed without postgresql-client-8.x,
++		# psql --version will exit with an error
++		if ! which psql >/dev/null 2>&1 || \
++		   ! psql --version >/dev/null 2>&1; then
++			return 1
++		fi
++	;;
++	"sqlite"|"sqlite3")
++		if ! which $1 >/dev/null 2>&1; then
++			return 1
++		fi
++	;;
++	*)
++		dbc_logline "_dbc_detect_installed_dbtype() called for unknown dbtype $@"
++		return 1
++	;;
++	esac
++	return 0
++}
++
++##
+ ## internal sanity check for certain important variables
+ ##
+ _dbc_sanity_check(){
+@@ -97,26 +130,10 @@ _dbc_sanity_check(){
+ 				return 1
+ 				fi
+ 				;;
+-		"mysql")
+-			if ! which mysql >/dev/null; then
+-				dbc_error="No mysql client to execute.  (have
+-					you installed mysql-client?"
+-				dbc_logline "sanity check failed for mysql"
+-				return 1
+-			fi
+-		;;
+-		"psql")
+-			if ! which psql >/dev/null; then
+-				dbc_error="No psql client to execute.  (have
+-				       you installed postgresql-client?"
+-				dbc_logline "sanity check failed for psql"
+-				return 1
+-			fi
+-		;;
+-		"sqlite"|"sqlite3")
+-			if ! which $1 >/dev/null; then
++		"mysql"|"psql"|"sqlite"|"sqlite3")
++			if ! _dbc_detect_installed_dbtype $1; then
+ 				dbc_error="No $1 client to execute.  (have
+-				       you installed the $1 package?"
++				       you installed the ${dbc_dbclientpackage:-$1} package?"
+ 				dbc_logline "sanity check failed for $1"
+ 				return 1
+ 			fi

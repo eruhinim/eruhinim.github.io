@@ -1,0 +1,136 @@
+diff --git a/gas/config/tc-aarch64.c b/gas/config/tc-aarch64.c
+index a9dbd54..3dc6cee 100644
+--- a/gas/config/tc-aarch64.c
++++ b/gas/config/tc-aarch64.c
+@@ -62,12 +62,20 @@ static symbolS *GOT_symbol;
+ /* Which ABI to use.  */
+ enum aarch64_abi_type
+ {
+-  AARCH64_ABI_LP64 = 0,
+-  AARCH64_ABI_ILP32 = 1
++  AARCH64_ABI_NONE = 0,
++  AARCH64_ABI_LP64 = 1,
++  AARCH64_ABI_ILP32 = 2
+ };
+ 
++#ifndef DEFAULT_ARCH
++#define DEFAULT_ARCH "aarch64"
++#endif
++
++/* DEFAULT_ARCH is initialized in gas/configure.tgt.  */
++static const char *default_arch = DEFAULT_ARCH;
++
+ /* AArch64 ABI for the output file.  */
+-static enum aarch64_abi_type aarch64_abi = AARCH64_ABI_LP64;
++static enum aarch64_abi_type aarch64_abi = AARCH64_ABI_NONE;
+ 
+ /* When non-zero, program to a 32-bit model, in which the C data types
+    int, long and all pointer types are 32-bit objects (ILP32); or to a
+@@ -7975,6 +7983,21 @@ aarch64_force_relocation (struct fix *fixp)
+ 
+ #ifdef OBJ_ELF
+ 
++/* Implement md_after_parse_args.  This is the earliest time we need to decide
++   ABI.  If no -mabi specified, the ABI will be decided by target triplet.  */
++
++void
++aarch64_after_parse_args (void)
++{
++  if (aarch64_abi != AARCH64_ABI_NONE)
++    return;
++
++  if (default_arch[7] == '\0')
++    aarch64_abi = AARCH64_ABI_LP64;
++  else
++    aarch64_abi = AARCH64_ABI_ILP32;
++}
++
+ const char *
+ elf64_aarch64_target_format (void)
+ {
+diff --git a/gas/config/tc-aarch64.h b/gas/config/tc-aarch64.h
+index d5bcce2..e7a8464 100644
+--- a/gas/config/tc-aarch64.h
++++ b/gas/config/tc-aarch64.h
+@@ -193,6 +193,9 @@ struct aarch64_segment_info_type
+ #define tc_regname_to_dw2regnum            tc_aarch64_regname_to_dw2regnum
+ #define tc_cfi_frame_initial_instructions  tc_aarch64_frame_initial_instructions
+ 
++extern void aarch64_after_parse_args (void);
++#define md_after_parse_args() aarch64_after_parse_args ()
++
+ #else /* Not OBJ_ELF.  */
+ #define GLOBAL_OFFSET_TABLE_NAME "__GLOBAL_OFFSET_TABLE_"
+ #endif
+diff --git a/gas/configure b/gas/configure
+index d3ae96e..96fa7cb 100755
+--- a/gas/configure
++++ b/gas/configure
+@@ -12583,7 +12583,7 @@ $as_echo "#define NDS32_DEFAULT_AUDIO_EXT 1" >>confdefs.h
+ $as_echo "$enable_audio_ext" >&6; }
+ 	;;
+ 
+-      i386 | riscv | s390 | sparc)
++      aarch64 | i386 | riscv | s390 | sparc)
+ 	if test $this_target = $target ; then
+ 
+ cat >>confdefs.h <<_ACEOF
+diff --git a/gas/configure.ac b/gas/configure.ac
+index cc70aa7..da161b7 100644
+--- a/gas/configure.ac
++++ b/gas/configure.ac
+@@ -511,7 +511,7 @@ changequote([,])dnl
+ 	AC_MSG_RESULT($enable_audio_ext)
+ 	;;
+ 
+-      i386 | riscv | s390 | sparc)
++      aarch64 | i386 | riscv | s390 | sparc)
+ 	if test $this_target = $target ; then
+ 	  AC_DEFINE_UNQUOTED(DEFAULT_ARCH, "${arch}", [Default architecture.])
+ 	fi
+diff --git a/gas/configure.tgt b/gas/configure.tgt
+index ca58b69..9d5e781 100644
+--- a/gas/configure.tgt
++++ b/gas/configure.tgt
+@@ -46,8 +46,8 @@ eval `echo $targ | sed 's/^\([^-]*\)-\([^-]*\)-\(.*\)$/cpu=\1 vendor=\2 os=\3/'`
+ # endian and arch.
+ # Note: This table is alpha-sorted, please try to keep it that way.
+ case ${cpu} in
+-  aarch64)		cpu_type=aarch64 endian=little ;;
+-  aarch64_be)		cpu_type=aarch64 endian=big ;;
++  aarch64)		cpu_type=aarch64 endian=little arch=aarch64;;
++  aarch64_be)		cpu_type=aarch64 endian=big arch=aarch64;;
+   alpha*)		cpu_type=alpha ;;
+   am33_2.0)		cpu_type=mn10300 endian=little ;;
+   arc*eb)		cpu_type=arc endian=big ;;
+@@ -126,7 +126,10 @@ generic_target=${cpu_type}-$vendor-$os
+ case ${generic_target} in
+   aarch64*-*-elf*)			fmt=elf;;
+   aarch64*-*-fuchsia*)			fmt=elf;;
+-  aarch64*-*-linux*)			fmt=elf em=linux ;;
++  aarch64*-*-linux*)			fmt=elf em=linux
++    case ${cpu}-${os} in
++      aarch64*-linux-gnu_ilp32)		arch=aarch64:32 ;;
++    esac ;;
+ 
+   alpha-*-*vms*)			fmt=evax ;;
+   alpha-*-osf*)				fmt=ecoff ;;
+diff --git a/ld/configure.tgt b/ld/configure.tgt
+index 895f0fb..1b981d4 100644
+--- a/ld/configure.tgt
++++ b/ld/configure.tgt
+@@ -56,6 +56,14 @@ aarch64-*-freebsd*)	targ_emul=aarch64fbsd
+ 			targ_extra_emuls="aarch64fbsdb aarch64elf" ;;
+ aarch64-*-fuchsia*)	targ_emul=aarch64elf
+ 			targ_extra_emuls="aarch64elfb armelf armelfb" ;;
++aarch64_be-*-linux-gnu_ilp32)
++			targ_emul=aarch64linux32b
++			targ_extra_libpath="aarch64linuxb aarch64linux aarch64linux32 armelfb_linux_eabi armelf_linux_eabi"
++			targ_extra_emuls="aarch64elfb aarch64elf aarch64elf32 aarch64elf32b armelfb armelf $targ_extra_libpath" ;;
++aarch64-*-linux-gnu_ilp32)
++			targ_emul=aarch64linux32
++			targ_extra_libpath="aarch64linux aarch64linuxb aarch64linux32b armelfb_linux_eabi armelf_linux_eabi"
++			targ_extra_emuls="aarch64elf aarch64elf32 aarch64elf32b aarch64elfb armelf armelfb $targ_extra_libpath" ;;
+ aarch64_be-*-linux*)	targ_emul=aarch64linuxb
+ 			targ_extra_libpath="aarch64linux aarch64linux32 aarch64linux32b armelfb_linux_eabi armelf_linux_eabi"
+ 			targ_extra_emuls="aarch64elfb aarch64elf aarch64elf32 aarch64elf32b armelfb armelf $targ_extra_libpath" ;;

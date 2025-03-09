@@ -1,0 +1,1236 @@
+diff -Nru debsums-2.0.33/debian/changelog debsums-2.0.34/debian/changelog
+--- debsums-2.0.33/debian/changelog	2007-09-17 08:47:53.000000000 +0900
++++ debsums-2.0.34/debian/changelog	2007-09-22 12:41:00.000000000 +0900
+@@ -1,3 +1,10 @@
++debsums (2.0.34) unstable; urgency=low
++
++  * Provided debsum_init to initialize missing md5sums files from the 
++    binary packages.
++
++ -- Osamu Aoki <osamu@debian.org>  Sat, 22 Sep 2007 12:39:55 +0900
++
+ debsums (2.0.33) unstable; urgency=low
+ 
+   * Apply patch from Nicolas François to generate Swedish manual pages
+diff -Nru debsums-2.0.33/debian/rules debsums-2.0.34/debian/rules
+--- debsums-2.0.33/debian/rules	2005-11-19 15:14:49.000000000 +0900
++++ debsums-2.0.34/debian/rules	2007-09-22 14:55:41.000000000 +0900
+@@ -25,13 +25,16 @@
+ 
+ 	mkdir -p $(tmp)/usr/bin $(tmp)/usr/sbin
+ 	sed 's/#VERSION#/$(version)/' debsums.in >$(tmp)/usr/bin/debsums
+-	cp debsums_gen $(tmp)/usr/sbin
+-	chmod 755 $(tmp)/usr/bin/debsums $(tmp)/usr/sbin/debsums_gen
++	cp debsums_gen  $(tmp)/usr/sbin
++	cp debsums_init $(tmp)/usr/sbin
++	chmod 755 $(tmp)/usr/bin/debsums
++	chmod 755 $(tmp)/usr/sbin/debsums_gen
++	chmod 755 $(tmp)/usr/sbin/debsums_init
+ 
+ 	dh_installdocs README
+ 	cd man; po4a -q po4a.cfg
+ 	dh_installman man/debsums*.1 man/debsums_gen*.8 man/*/debsums*.1 \
+-	    man/*/debsums_gen*.8
++	    man/*/debsums_gen*.8 man/debsums_init*.8
+ 
+ 	dh_installchangelogs
+ 	dh_installdebconf
+diff -Nru debsums-2.0.33/debsums_init debsums-2.0.34/debsums_init
+--- debsums-2.0.33/debsums_init	1970-01-01 09:00:00.000000000 +0900
++++ debsums-2.0.34/debsums_init	2007-09-22 12:38:45.000000000 +0900
+@@ -0,0 +1,15 @@
++#!/bin/sh -e
++# Copyright (C) 2007 Osamu Aoki <osamu@debian.org>, Public Domain
++# Find out missing *.md5sum and add it to the list
++cd /var/lib/dpkg/info
++for package in $(debsums --list-missing); do
++  echo "checking $package"
++  if [ ! -e $package.md5sums ]; then
++    echo "******* $package.md5sums missing *******"
++    apt-get --download-only --reinstall --yes install $package || true
++    debsums --generate=nocheck -p /var/cache/apt/archives $package || true
++  fi
++done
++echo "Finished generating md5sums!"
++echo "Checking still missing md5files..."
++debsums --list-missing
+diff -Nru debsums-2.0.33/man/debsums.1 debsums-2.0.34/man/debsums.1
+--- debsums-2.0.33/man/debsums.1	2006-08-27 17:37:33.000000000 +0900
++++ debsums-2.0.34/man/debsums.1	2007-09-22 14:51:00.000000000 +0900
+@@ -151,21 +151,43 @@
+ .TP
+ debsums \-cagp /var/cache/apt/archives
+ As above, using sums from cached debs where available.
+-.LP
+-.PD 0
+-.nf
++
++.SH SEE ALSO
++.BR md5sum (1),
++.BR debsums_init (8), and
++.BR debsums_gen (8).
++
++.SH NOTES
++.PP
++The default installation of
++.B debsums
++package sets the debconf boolean value debsums/apt-autogen to be "true".
++.PP
++This will create 
++.B /etc/apt/apt.conf.d/90debsums 
++as:
++.PP
+ DPkg::Post\-Invoke {
+ .br
+     "debsums \-\-generate=nocheck \-sp /var/cache/apt/archives";
+ .br
+ };
+-.IP
+-.fi
+-.PD
+-/etc/apt/apt.conf fragment to generate missing checksums after
+-upgrade/install.
++.PP
++by the postinst script (>=2.0.7).  Every APT controlled package installation
++processes will execute this code fragment to generate the missing 
++.B md5sums
++files from the binary packages.
++.PP
++In order to create 
++.B md5sums
++files for the already installed packages, you must run
++.B debsums_init
++once after the installation of
++.B debsums
++package.
++.PP
+ .SH ENVIRONMENT
+-.TP
++.PP
+ .B TMPDIR
+ Directory for extracting information and contents from package
+ archives (/tmp by default).
+diff -Nru debsums-2.0.33/man/debsums_init.8 debsums-2.0.34/man/debsums_init.8
+--- debsums-2.0.33/man/debsums_init.8	1970-01-01 09:00:00.000000000 +0900
++++ debsums-2.0.34/man/debsums_init.8	2007-09-22 12:37:33.000000000 +0900
+@@ -0,0 +1,37 @@
++.TH DEBSUMS 8 "Debian Utilities" "DEBIAN" \" -*- nroff -*-
++.SH NAME
++debsums_init \- Initialize md5sums files for packages lacking them
++.SH SYNOPSIS
++.B debsums_init
++.SH DESCRIPTION
++.B debsums_init
++will look for packages that did not install their
++.B md5sums
++files. Then, it will generate those
++.B md5sums
++files from the binary packages downloaded via APT if available.
++.PP
++This initialization process is needed since there are many packages which do not ship 
++.B md5sums
++file in their binary packages.  If you enable 
++.I auto-gen
++option while installing 
++.B debsum
++package, you need to run this 
++.B debsums_init
++command only once after you install the
++.B debsums 
++package.
++.PP
++.B debsums_init
++needs to be invoked as superuser.
++.PP
++You may wish to clear local package cache prior to running
++.B debsums_init
++command to make sure you are creating from the untainted packages 
++by executing:.
++.PP
++	apt-get clean
++.PP
++.SH AUTHOR
++Osamu Aoki <osamu@debian.org>
+diff -Nru debsums-2.0.33/man/po/debsums.pot debsums-2.0.34/man/po/debsums.pot
+--- debsums-2.0.33/man/po/debsums.pot	2007-09-17 08:50:23.000000000 +0900
++++ debsums-2.0.34/man/po/debsums.pot	2007-09-22 14:53:21.000000000 +0900
+@@ -7,7 +7,7 @@
+ msgid ""
+ msgstr ""
+ "Project-Id-Version: PACKAGE VERSION\n"
+-"POT-Creation-Date: 2007-09-17 09:50+1000\n"
++"POT-Creation-Date: 2007-09-22 14:53+0900\n"
+ "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+ "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+ "Language-Team: LANGUAGE <LL@li.org>\n"
+@@ -447,58 +447,87 @@
+ msgid "As above, using sums from cached debs where available."
+ msgstr ""
+ 
+-# type: Plain text
+-#: debsums.1:158
++# type: SH
++#: debsums.1:155
+ #, no-wrap
+-msgid "DPkg::Post-Invoke {\n"
++msgid "SEE ALSO"
+ msgstr ""
+ 
+ # type: Plain text
++#: debsums.1:159
++msgid "B<md5sum>(1), B<debsums_init>(8),B<and> B<debsums_gen>(8)."
++msgstr ""
++
++# type: SH
+ #: debsums.1:160
+ #, no-wrap
+-msgid "    \"debsums --generate=nocheck -sp /var/cache/apt/archives\";\n"
++msgid "NOTES"
++msgstr ""
++
++# type: Plain text
++#: debsums.1:165
++msgid ""
++"The default installation of B<debsums> package sets the debconf boolean "
++"value debsums/apt-autogen to be \"true\"."
++msgstr ""
++
++# type: Plain text
++#: debsums.1:169
++msgid "This will create B</etc/apt/apt.conf.d/90debsums> as:"
++msgstr ""
++
++# type: Plain text
++#: debsums.1:171
++msgid "DPkg::Post-Invoke {"
+ msgstr ""
+ 
+ # type: Plain text
+-#: debsums.1:162
++#: debsums.1:173
+ #, no-wrap
+-msgid "};\n"
++msgid "    \"debsums --generate=nocheck -sp /var/cache/apt/archives\";\n"
++msgstr ""
++
++# type: Plain text
++#: debsums.1:175
++msgid "};"
+ msgstr ""
+ 
+ # type: Plain text
+-#: debsums.1:167
++#: debsums.1:180
+ msgid ""
+-"/etc/apt/apt.conf fragment to generate missing checksums after "
+-"upgrade/install."
++"by the postinst script (E<gt>=2.0.7).  Every APT controlled package "
++"installation processes will execute this code fragment to generate the "
++"missing B<md5sums> files from the binary packages."
+ msgstr ""
+ 
+-# type: SH
+-#: debsums.1:167
+-#, no-wrap
+-msgid "ENVIRONMENT"
++# type: Plain text
++#: debsums.1:188
++msgid ""
++"In order to create B<md5sums> files for the already installed packages, you "
++"must run B<debsums_init> once after the installation of B<debsums> package."
+ msgstr ""
+ 
+-# type: TP
+-#: debsums.1:168
++# type: SH
++#: debsums.1:189
+ #, no-wrap
+-msgid "B<TMPDIR>"
++msgid "ENVIRONMENT"
+ msgstr ""
+ 
+ # type: Plain text
+-#: debsums.1:172
++#: debsums.1:194
+ msgid ""
+-"Directory for extracting information and contents from package archives "
+-"(/tmp by default)."
++"B<TMPDIR> Directory for extracting information and contents from package "
++"archives (/tmp by default)."
+ msgstr ""
+ 
+ # type: SH
+-#: debsums.1:172
++#: debsums.1:194
+ #, no-wrap
+ msgid "CAVEATS"
+ msgstr ""
+ 
+ # type: Plain text
+-#: debsums.1:179
++#: debsums.1:201
+ msgid ""
+ "While in general the program may be run as a normal user, some packages "
+ "contain files which are not globally readable so cannot be checked.  "
+@@ -507,14 +536,14 @@
+ msgstr ""
+ 
+ # type: Plain text
+-#: debsums.1:182
++#: debsums.1:204
+ msgid ""
+ "Files which have been replaced by another package may be erroneously "
+ "reported as changed."
+ msgstr ""
+ 
+ # type: Plain text
+-#: debsums.1:187
++#: debsums.1:209
+ msgid ""
+ "B<debsums> is intended primarily as a way of determining what installed "
+ "files have been locally modified by the administrator or damaged by media "
+@@ -522,7 +551,7 @@
+ msgstr ""
+ 
+ # type: Plain text
+-#: debsums.1:197
++#: debsums.1:219
+ msgid ""
+ "If you are looking for an integrity checker that can run from safe media, do "
+ "integrity checks on checksum databases and can be easily configured to run "
+@@ -531,36 +560,36 @@
+ msgstr ""
+ 
+ # type: SH
+-#: debsums.1:197 debsums_gen.8:51
++#: debsums.1:219 debsums_gen.8:51
+ #, no-wrap
+ msgid "AUTHOR"
+ msgstr ""
+ 
+ # type: Plain text
+-#: debsums.1:199
++#: debsums.1:221
+ msgid "Written by Brendan O'Dea E<lt>bod@debian.orgE<gt>."
+ msgstr ""
+ 
+ # type: Plain text
+-#: debsums.1:202
++#: debsums.1:224
+ msgid ""
+ "Based on a program by Christoph Lameter E<lt>clameter@debian.orgE<gt> and "
+ "Petr Cech E<lt>cech@debian.orgE<gt>."
+ msgstr ""
+ 
+ # type: SH
+-#: debsums.1:202
++#: debsums.1:224
+ #, no-wrap
+ msgid "COPYRIGHT"
+ msgstr ""
+ 
+ # type: Plain text
+-#: debsums.1:204
++#: debsums.1:226
+ msgid "Copyright \\(co 2002 Brendan O'Dea E<lt>bod@debian.orgE<gt>"
+ msgstr ""
+ 
+ # type: Plain text
+-#: debsums.1:207
++#: debsums.1:229
+ msgid ""
+ "This is free software, licensed under the terms of the GNU General Public "
+ "License.  There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR "
+diff -Nru debsums-2.0.33/man/po/fr.po debsums-2.0.34/man/po/fr.po
+--- debsums-2.0.33/man/po/fr.po	2006-11-01 09:30:29.000000000 +0900
++++ debsums-2.0.34/man/po/fr.po	2007-09-22 14:53:21.000000000 +0900
+@@ -6,7 +6,7 @@
+ msgid ""
+ msgstr ""
+ "Project-Id-Version: debsums-2.0.19\n"
+-"POT-Creation-Date: 2006-08-27 18:37+1000\n"
++"POT-Creation-Date: 2007-09-22 14:53+0900\n"
+ "PO-Revision-Date: 2006-09-26 09:58+0200\n"
+ "Last-Translator: Fr�d�ric Bothamy <frederic.bothamy@free.fr>\n"
+ "Language-Team: Debian French Team <debian-l10n-french@lists.debian.org>\n"
+@@ -497,62 +497,92 @@
+ "Comme ci-dessus, en utilisant les sommes de contr�le des fichiers .deb "
+ "archives disponibles en cache."
+ 
++# type: SH
++#: debsums.1:155
++#, no-wrap
++msgid "SEE ALSO"
++msgstr ""
++
+ # type: Plain text
+-#: debsums.1:158
++#: debsums.1:159
++msgid "B<md5sum>(1), B<debsums_init>(8),B<and> B<debsums_gen>(8)."
++msgstr ""
++
++# type: SH
++#: debsums.1:160
+ #, no-wrap
+-msgid "DPkg::Post-Invoke {\n"
++msgid "NOTES"
++msgstr ""
++
++# type: Plain text
++#: debsums.1:165
++msgid ""
++"The default installation of B<debsums> package sets the debconf boolean "
++"value debsums/apt-autogen to be \"true\"."
++msgstr ""
++
++# type: Plain text
++#: debsums.1:169
++msgid "This will create B</etc/apt/apt.conf.d/90debsums> as:"
++msgstr ""
++
++# type: Plain text
++#: debsums.1:171
++#, fuzzy
++msgid "DPkg::Post-Invoke {"
+ msgstr "DPkg::Post-Invoke {\n"
+ 
+ # type: Plain text
+-#: debsums.1:160
++#: debsums.1:173
+ #, no-wrap
+ msgid "    \"debsums --generate=nocheck -sp /var/cache/apt/archives\";\n"
+ msgstr "    \"debsums --generate=nocheck -sp /var/cache/apt/archives\";\n"
+ 
+ # type: Plain text
+-#: debsums.1:162
+-#, no-wrap
+-msgid "};\n"
++#: debsums.1:175
++#, fuzzy
++msgid "};"
+ msgstr "};\n"
+ 
+ # type: Plain text
+-#: debsums.1:167
++#: debsums.1:180
++msgid ""
++"by the postinst script (E<gt>=2.0.7).  Every APT controlled package "
++"installation processes will execute this code fragment to generate the "
++"missing B<md5sums> files from the binary packages."
++msgstr ""
++
++# type: Plain text
++#: debsums.1:188
+ msgid ""
+-"/etc/apt/apt.conf fragment to generate missing checksums after upgrade/"
+-"install."
++"In order to create B<md5sums> files for the already installed packages, you "
++"must run B<debsums_init> once after the installation of B<debsums> package."
+ msgstr ""
+-"partie du fichier /etc/apt/apt.conf utilis�e pour fabriquer les sommes de "
+-"contr�le manquantes apr�s une mise � jour ou apr�s une installation."
+ 
+ # type: SH
+-#: debsums.1:167
++#: debsums.1:189
+ #, no-wrap
+ msgid "ENVIRONMENT"
+ msgstr "VARIABLES D'ENVIRONNEMENT"
+ 
+-# type: TP
+-#: debsums.1:168
+-#, no-wrap
+-msgid "B<TMPDIR>"
+-msgstr "B<TPMDIR>"
+-
+ # type: Plain text
+-#: debsums.1:172
++#: debsums.1:194
++#, fuzzy
+ msgid ""
+-"Directory for extracting information and contents from package archives (/"
+-"tmp by default)."
++"B<TMPDIR> Directory for extracting information and contents from package "
++"archives (/tmp by default)."
+ msgstr ""
+ "R�pertoire d'extraction des informations et du contenu des paquets archiv�s "
+ "(/tmp par d�faut)."
+ 
+ # type: SH
+-#: debsums.1:172
++#: debsums.1:194
+ #, no-wrap
+ msgid "CAVEATS"
+ msgstr "AVERTISSEMENTS"
+ 
+ # type: Plain text
+-#: debsums.1:179
++#: debsums.1:201
+ msgid ""
+ "While in general the program may be run as a normal user, some packages "
+ "contain files which are not globally readable so cannot be checked.  "
+@@ -566,7 +596,7 @@
+ "de contr�le en activant l'option B<keep.>"
+ 
+ # type: Plain text
+-#: debsums.1:182
++#: debsums.1:204
+ msgid ""
+ "Files which have been replaced by another package may be erroneously "
+ "reported as changed."
+@@ -575,7 +605,7 @@
+ "� tort comme ayant �t� modifi�s."
+ 
+ # type: Plain text
+-#: debsums.1:187
++#: debsums.1:209
+ msgid ""
+ "B<debsums> is intended primarily as a way of determining what installed "
+ "files have been locally modified by the administrator or damaged by media "
+@@ -587,7 +617,7 @@
+ "d'une utilit� limit�e en tant qu'outil de s�curit�."
+ 
+ # type: Plain text
+-#: debsums.1:197
++#: debsums.1:219
+ msgid ""
+ "If you are looking for an integrity checker that can run from safe media, do "
+ "integrity checks on checksum databases and can be easily configured to run "
+@@ -602,18 +632,18 @@
+ "ou B<tripwire>."
+ 
+ # type: SH
+-#: debsums.1:197 debsums_gen.8:51
++#: debsums.1:219 debsums_gen.8:51
+ #, no-wrap
+ msgid "AUTHOR"
+ msgstr "AUTEUR"
+ 
+ # type: Plain text
+-#: debsums.1:199
++#: debsums.1:221
+ msgid "Written by Brendan O'Dea E<lt>bod@debian.orgE<gt>."
+ msgstr "�crit par Brendan O'Dea E<lt>bod@debian.orgE<gt>."
+ 
+ # type: Plain text
+-#: debsums.1:202
++#: debsums.1:224
+ msgid ""
+ "Based on a program by Christoph Lameter E<lt>clameter@debian.orgE<gt> and "
+ "Petr Cech E<lt>cech@debian.orgE<gt>."
+@@ -622,18 +652,18 @@
+ "Petr Cech E<lt>cech@debian.orgE<gt>."
+ 
+ # type: SH
+-#: debsums.1:202
++#: debsums.1:224
+ #, no-wrap
+ msgid "COPYRIGHT"
+ msgstr "COPYRIGHT"
+ 
+ # type: Plain text
+-#: debsums.1:204
++#: debsums.1:226
+ msgid "Copyright \\(co 2002 Brendan O'Dea E<lt>bod@debian.orgE<gt>"
+ msgstr "Copyright \\(co 2002 Brendan O'Dea E<lt>bod@debian.orgE<gt>"
+ 
+ # type: Plain text
+-#: debsums.1:207
++#: debsums.1:229
+ msgid ""
+ "This is free software, licensed under the terms of the GNU General Public "
+ "License.  There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR "
+@@ -758,3 +788,15 @@
+ #: debsums_gen.8:52
+ msgid "Christoph Lameter E<lt>clameter@debian.orgE<gt>"
+ msgstr "Christoph Lameter E<lt>clameter@debian.orgE<gt>"
++
++# type: Plain text
++#~ msgid ""
++#~ "/etc/apt/apt.conf fragment to generate missing checksums after upgrade/"
++#~ "install."
++#~ msgstr ""
++#~ "partie du fichier /etc/apt/apt.conf utilis�e pour fabriquer les sommes de "
++#~ "contr�le manquantes apr�s une mise � jour ou apr�s une installation."
++
++# type: TP
++#~ msgid "B<TMPDIR>"
++#~ msgstr "B<TPMDIR>"
+diff -Nru debsums-2.0.33/man/po/pt_BR.po debsums-2.0.34/man/po/pt_BR.po
+--- debsums-2.0.33/man/po/pt_BR.po	2006-08-27 17:38:24.000000000 +0900
++++ debsums-2.0.34/man/po/pt_BR.po	2007-09-22 14:53:21.000000000 +0900
+@@ -6,7 +6,7 @@
+ msgid ""
+ msgstr ""
+ "Project-Id-Version: PACKAGE VERSION\n"
+-"POT-Creation-Date: 2006-08-27 18:37+1000\n"
++"POT-Creation-Date: 2007-09-22 14:53+0900\n"
+ "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+ "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+ "Language-Team: LANGUAGE <LL@li.org>\n"
+@@ -498,64 +498,92 @@
+ msgid "As above, using sums from cached debs where available."
+ msgstr "Como acima, usando sums dos deb em cache quando dispon�veis."
+ 
++# type: SH
++#: debsums.1:155
++#, no-wrap
++msgid "SEE ALSO"
++msgstr ""
++
+ # type: Plain text
+-#: debsums.1:158
+-#, fuzzy, no-wrap
+-msgid "DPkg::Post-Invoke {\n"
++#: debsums.1:159
++msgid "B<md5sum>(1), B<debsums_init>(8),B<and> B<debsums_gen>(8)."
++msgstr ""
++
++# type: SH
++#: debsums.1:160
++#, no-wrap
++msgid "NOTES"
++msgstr ""
++
++# type: Plain text
++#: debsums.1:165
++msgid ""
++"The default installation of B<debsums> package sets the debconf boolean "
++"value debsums/apt-autogen to be \"true\"."
++msgstr ""
++
++# type: Plain text
++#: debsums.1:169
++msgid "This will create B</etc/apt/apt.conf.d/90debsums> as:"
++msgstr ""
++
++# type: Plain text
++#: debsums.1:171
++#, fuzzy
++msgid "DPkg::Post-Invoke {"
+ msgstr "DPkg::Post-Invoke {\n"
+ 
+ # type: Plain text
+-#: debsums.1:160
++#: debsums.1:173
+ #, fuzzy, no-wrap
+ msgid "    \"debsums --generate=nocheck -sp /var/cache/apt/archives\";\n"
+ msgstr "    \"debsums --generate=nocheck -sp /var/cache/apt/archives\";\n"
+ 
+ # type: Plain text
+-#: debsums.1:162
+-#, fuzzy, no-wrap
+-msgid "};\n"
++#: debsums.1:175
++#, fuzzy
++msgid "};"
+ msgstr "};\n"
+ 
+ # type: Plain text
+-#: debsums.1:167
+-#, fuzzy
++#: debsums.1:180
+ msgid ""
+-"/etc/apt/apt.conf fragment to generate missing checksums after upgrade/"
+-"install."
++"by the postinst script (E<gt>=2.0.7).  Every APT controlled package "
++"installation processes will execute this code fragment to generate the "
++"missing B<md5sums> files from the binary packages."
++msgstr ""
++
++# type: Plain text
++#: debsums.1:188
++msgid ""
++"In order to create B<md5sums> files for the already installed packages, you "
++"must run B<debsums_init> once after the installation of B<debsums> package."
+ msgstr ""
+-"fragmento de /etc/apt/apt.conf para gerar checksums que faltam ap�s um "
+-"upgrade/instala��o."
+ 
+ # type: SH
+-#: debsums.1:167
++#: debsums.1:189
+ #, fuzzy, no-wrap
+ msgid "ENVIRONMENT"
+ msgstr "AMBIENTE"
+ 
+-# type: TP
+-#: debsums.1:168
+-#, fuzzy, no-wrap
+-msgid "B<TMPDIR>"
+-msgstr "B<TMPDIR>"
+-
+ # type: Plain text
+-#: debsums.1:172
++#: debsums.1:194
+ #, fuzzy
+ msgid ""
+-"Directory for extracting information and contents from package archives (/"
+-"tmp by default)."
++"B<TMPDIR> Directory for extracting information and contents from package "
++"archives (/tmp by default)."
+ msgstr ""
+ "Diret�rio para extrair informa��o e conte�do de arquivos de pacotes (/tmp "
+ "por padr�o)."
+ 
+ # type: SH
+-#: debsums.1:172
++#: debsums.1:194
+ #, fuzzy, no-wrap
+ msgid "CAVEATS"
+ msgstr "PROBELMAS"
+ 
+ # type: Plain text
+-#: debsums.1:179
++#: debsums.1:201
+ #, fuzzy
+ msgid ""
+ "While in general the program may be run as a normal user, some packages "
+@@ -569,7 +597,7 @@
+ "gerando sums com a op��o B<keep> definida."
+ 
+ # type: Plain text
+-#: debsums.1:182
++#: debsums.1:204
+ #, fuzzy
+ msgid ""
+ "Files which have been replaced by another package may be erroneously "
+@@ -579,7 +607,7 @@
+ "reportados como modificados."
+ 
+ # type: Plain text
+-#: debsums.1:187
++#: debsums.1:209
+ msgid ""
+ "B<debsums> is intended primarily as a way of determining what installed "
+ "files have been locally modified by the administrator or damaged by media "
+@@ -587,7 +615,7 @@
+ msgstr ""
+ 
+ # type: Plain text
+-#: debsums.1:197
++#: debsums.1:219
+ msgid ""
+ "If you are looking for an integrity checker that can run from safe media, do "
+ "integrity checks on checksum databases and can be easily configured to run "
+@@ -596,19 +624,19 @@
+ msgstr ""
+ 
+ # type: SH
+-#: debsums.1:197 debsums_gen.8:51
++#: debsums.1:219 debsums_gen.8:51
+ #, fuzzy, no-wrap
+ msgid "AUTHOR"
+ msgstr "AUTOR"
+ 
+ # type: Plain text
+-#: debsums.1:199
++#: debsums.1:221
+ #, fuzzy
+ msgid "Written by Brendan O'Dea E<lt>bod@debian.orgE<gt>."
+ msgstr "Escrito por Brendan O'Dea E<lt>bod@debian.orgE<gt>."
+ 
+ # type: Plain text
+-#: debsums.1:202
++#: debsums.1:224
+ #, fuzzy
+ msgid ""
+ "Based on a program by Christoph Lameter E<lt>clameter@debian.orgE<gt> and "
+@@ -618,19 +646,19 @@
+ "orgE<gt> e Petr Cech E<lt>cech@debian.orgE<gt>."
+ 
+ # type: SH
+-#: debsums.1:202
++#: debsums.1:224
+ #, fuzzy, no-wrap
+ msgid "COPYRIGHT"
+ msgstr "COPYRIGHT"
+ 
+ # type: Plain text
+-#: debsums.1:204
++#: debsums.1:226
+ #, fuzzy
+ msgid "Copyright \\(co 2002 Brendan O'Dea E<lt>bod@debian.orgE<gt>"
+ msgstr "Copyright \\(co 2002 Brendan O'Dea E<lt>bod@debian.orgE<gt>"
+ 
+ # type: Plain text
+-#: debsums.1:207
++#: debsums.1:229
+ #, fuzzy
+ msgid ""
+ "This is free software, licensed under the terms of the GNU General Public "
+@@ -739,6 +767,20 @@
+ # type: Plain text
+ #, fuzzy
+ #~ msgid ""
++#~ "/etc/apt/apt.conf fragment to generate missing checksums after upgrade/"
++#~ "install."
++#~ msgstr ""
++#~ "fragmento de /etc/apt/apt.conf para gerar checksums que faltam ap�s um "
++#~ "upgrade/instala��o."
++
++# type: TP
++#, fuzzy
++#~ msgid "B<TMPDIR>"
++#~ msgstr "B<TMPDIR>"
++
++# type: Plain text
++#, fuzzy
++#~ msgid ""
+ #~ "B<debsums> is of limited use as a security tool unless the program and "
+ #~ "all required infrastructure (dpkg, perl, Digest::MD5, etc.) are executed "
+ #~ "from known safe media (such as a bootable rescue CD, see the --root "
+diff -Nru debsums-2.0.33/man/po/ru.po debsums-2.0.34/man/po/ru.po
+--- debsums-2.0.33/man/po/ru.po	2006-11-01 09:30:29.000000000 +0900
++++ debsums-2.0.34/man/po/ru.po	2007-09-22 14:53:21.000000000 +0900
+@@ -6,7 +6,7 @@
+ msgid ""
+ msgstr ""
+ "Project-Id-Version: debsums\n"
+-"POT-Creation-Date: 2006-08-27 18:37+1000\n"
++"POT-Creation-Date: 2007-09-22 14:53+0900\n"
+ "PO-Revision-Date: 2006-09-26 09:58+0200\n"
+ "Last-Translator: Yuri Kozlov <kozlov.y@gmail.com>\n"
+ "Language-Team: Russian <debian-l10n-russian@lists.debian.org>\n"
+@@ -494,61 +494,91 @@
+ "То же, но используются контрольные суммы из кэшированных deb файлов, если "
+ "они есть."
+ 
++# type: SH
++#: debsums.1:155
++#, no-wrap
++msgid "SEE ALSO"
++msgstr ""
++
+ # type: Plain text
+-#: debsums.1:158
++#: debsums.1:159
++msgid "B<md5sum>(1), B<debsums_init>(8),B<and> B<debsums_gen>(8)."
++msgstr ""
++
++# type: SH
++#: debsums.1:160
+ #, no-wrap
+-msgid "DPkg::Post-Invoke {\n"
++msgid "NOTES"
++msgstr ""
++
++# type: Plain text
++#: debsums.1:165
++msgid ""
++"The default installation of B<debsums> package sets the debconf boolean "
++"value debsums/apt-autogen to be \"true\"."
++msgstr ""
++
++# type: Plain text
++#: debsums.1:169
++msgid "This will create B</etc/apt/apt.conf.d/90debsums> as:"
++msgstr ""
++
++# type: Plain text
++#: debsums.1:171
++#, fuzzy
++msgid "DPkg::Post-Invoke {"
+ msgstr "DPkg::Post-Invoke {\n"
+ 
+ # type: Plain text
+-#: debsums.1:160
++#: debsums.1:173
+ #, no-wrap
+ msgid "    \"debsums --generate=nocheck -sp /var/cache/apt/archives\";\n"
+ msgstr "    \"debsums --generate=nocheck -sp /var/cache/apt/archives\";\n"
+ 
+ # type: Plain text
+-#: debsums.1:162
+-#, no-wrap
+-msgid "};\n"
++#: debsums.1:175
++#, fuzzy
++msgid "};"
+ msgstr "};\n"
+ 
+ # type: Plain text
+-#: debsums.1:167
++#: debsums.1:180
++msgid ""
++"by the postinst script (E<gt>=2.0.7).  Every APT controlled package "
++"installation processes will execute this code fragment to generate the "
++"missing B<md5sums> files from the binary packages."
++msgstr ""
++
++# type: Plain text
++#: debsums.1:188
+ msgid ""
+-"/etc/apt/apt.conf fragment to generate missing checksums after upgrade/"
+-"install."
++"In order to create B<md5sums> files for the already installed packages, you "
++"must run B<debsums_init> once after the installation of B<debsums> package."
+ msgstr ""
+-"Фрагмент /etc/apt/apt.conf для генерации отсутствующих контрольных сумм "
+-"после обновления/установки пакетов."
+ 
+ # type: SH
+-#: debsums.1:167
++#: debsums.1:189
+ #, no-wrap
+ msgid "ENVIRONMENT"
+ msgstr "ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ"
+ 
+-# type: TP
+-#: debsums.1:168
+-#, no-wrap
+-msgid "B<TMPDIR>"
+-msgstr "B<TMPDIR>"
+-
+ # type: Plain text
+-#: debsums.1:172
++#: debsums.1:194
++#, fuzzy
+ msgid ""
+-"Directory for extracting information and contents from package archives (/"
+-"tmp by default)."
++"B<TMPDIR> Directory for extracting information and contents from package "
++"archives (/tmp by default)."
+ msgstr ""
+ "Каталог для распаковки информации и содержимого пакета (по умолчанию /tmp)."
+ 
+ # type: SH
+-#: debsums.1:172
++#: debsums.1:194
+ #, no-wrap
+ msgid "CAVEATS"
+ msgstr "ПРЕДОСТЕРЕЖЕНИЯ"
+ 
+ # type: Plain text
+-#: debsums.1:179
++#: debsums.1:201
+ msgid ""
+ "While in general the program may be run as a normal user, some packages "
+ "contain files which are not globally readable so cannot be checked.  "
+@@ -562,7 +592,7 @@
+ "доступ."
+ 
+ # type: Plain text
+-#: debsums.1:182
++#: debsums.1:204
+ msgid ""
+ "Files which have been replaced by another package may be erroneously "
+ "reported as changed."
+@@ -571,7 +601,7 @@
+ "считаться изменёнными."
+ 
+ # type: Plain text
+-#: debsums.1:187
++#: debsums.1:209
+ msgid ""
+ "B<debsums> is intended primarily as a way of determining what installed "
+ "files have been locally modified by the administrator or damaged by media "
+@@ -583,7 +613,7 @@
+ "качестве инструмента обеспечения безопасности."
+ 
+ # type: Plain text
+-#: debsums.1:197
++#: debsums.1:219
+ msgid ""
+ "If you are looking for an integrity checker that can run from safe media, do "
+ "integrity checks on checksum databases and can be easily configured to run "
+@@ -597,18 +627,18 @@
+ "другие программы типа: B<aide>, B<integrit>, B<samhain> или B<tripwire>."
+ 
+ # type: SH
+-#: debsums.1:197 debsums_gen.8:51
++#: debsums.1:219 debsums_gen.8:51
+ #, no-wrap
+ msgid "AUTHOR"
+ msgstr "АВТОР"
+ 
+ # type: Plain text
+-#: debsums.1:199
++#: debsums.1:221
+ msgid "Written by Brendan O'Dea E<lt>bod@debian.orgE<gt>."
+ msgstr "Автором является Brendan O'Dea E<lt>bod@debian.orgE<gt>."
+ 
+ # type: Plain text
+-#: debsums.1:202
++#: debsums.1:224
+ msgid ""
+ "Based on a program by Christoph Lameter E<lt>clameter@debian.orgE<gt> and "
+ "Petr Cech E<lt>cech@debian.orgE<gt>."
+@@ -617,18 +647,18 @@
+ "E<lt>clameter@debian.orgE<gt> и Petr Cech E<lt>cech@debian.orgE<gt>."
+ 
+ # type: SH
+-#: debsums.1:202
++#: debsums.1:224
+ #, no-wrap
+ msgid "COPYRIGHT"
+ msgstr "АВТОРСКОЕ ПРАВО"
+ 
+ # type: Plain text
+-#: debsums.1:204
++#: debsums.1:226
+ msgid "Copyright \\(co 2002 Brendan O'Dea E<lt>bod@debian.orgE<gt>"
+ msgstr "Copyright \\(co 2002 Brendan O'Dea E<lt>bod@debian.orgE<gt>"
+ 
+ # type: Plain text
+-#: debsums.1:207
++#: debsums.1:229
+ msgid ""
+ "This is free software, licensed under the terms of the GNU General Public "
+ "License.  There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR "
+@@ -750,3 +780,15 @@
+ #: debsums_gen.8:52
+ msgid "Christoph Lameter E<lt>clameter@debian.orgE<gt>"
+ msgstr "Christoph Lameter E<lt>clameter@debian.orgE<gt>"
++
++# type: Plain text
++#~ msgid ""
++#~ "/etc/apt/apt.conf fragment to generate missing checksums after upgrade/"
++#~ "install."
++#~ msgstr ""
++#~ "Фрагмент /etc/apt/apt.conf для генерации отсутствующих контрольных сумм "
++#~ "после обновления/установки пакетов."
++
++# type: TP
++#~ msgid "B<TMPDIR>"
++#~ msgstr "B<TMPDIR>"
+diff -Nru debsums-2.0.33/man/po/sv.po debsums-2.0.34/man/po/sv.po
+--- debsums-2.0.33/man/po/sv.po	2006-11-01 09:30:29.000000000 +0900
++++ debsums-2.0.34/man/po/sv.po	2007-09-22 14:53:21.000000000 +0900
+@@ -5,7 +5,7 @@
+ msgid ""
+ msgstr ""
+ "Project-Id-Version: debsums 2.0.26 manpage\n"
+-"POT-Creation-Date: 2006-08-27 18:37+1000\n"
++"POT-Creation-Date: 2007-09-22 14:53+0900\n"
+ "PO-Revision-Date: 2006-09-26 09:59+0200\n"
+ "Last-Translator: Daniel Nylander <po@danielnylander.se>\n"
+ "Language-Team: Swedish <tp-sv@listor.tp-sv.se>\n"
+@@ -485,62 +485,92 @@
+ msgstr ""
+ "Som ovan, använder kontrollsummor från cachade deb-filer om tillgängliga."
+ 
++# type: SH
++#: debsums.1:155
++#, no-wrap
++msgid "SEE ALSO"
++msgstr ""
++
+ # type: Plain text
+-#: debsums.1:158
++#: debsums.1:159
++msgid "B<md5sum>(1), B<debsums_init>(8),B<and> B<debsums_gen>(8)."
++msgstr ""
++
++# type: SH
++#: debsums.1:160
+ #, no-wrap
+-msgid "DPkg::Post-Invoke {\n"
++msgid "NOTES"
++msgstr ""
++
++# type: Plain text
++#: debsums.1:165
++msgid ""
++"The default installation of B<debsums> package sets the debconf boolean "
++"value debsums/apt-autogen to be \"true\"."
++msgstr ""
++
++# type: Plain text
++#: debsums.1:169
++msgid "This will create B</etc/apt/apt.conf.d/90debsums> as:"
++msgstr ""
++
++# type: Plain text
++#: debsums.1:171
++#, fuzzy
++msgid "DPkg::Post-Invoke {"
+ msgstr "DPkg::Post-Invoke {\n"
+ 
+ # type: Plain text
+-#: debsums.1:160
++#: debsums.1:173
+ #, no-wrap
+ msgid "    \"debsums --generate=nocheck -sp /var/cache/apt/archives\";\n"
+ msgstr "    \"debsums --generate=nocheck -sp /var/cache/apt/archives\";\n"
+ 
+ # type: Plain text
+-#: debsums.1:162
+-#, no-wrap
+-msgid "};\n"
++#: debsums.1:175
++#, fuzzy
++msgid "};"
+ msgstr "};\n"
+ 
+ # type: Plain text
+-#: debsums.1:167
++#: debsums.1:180
++msgid ""
++"by the postinst script (E<gt>=2.0.7).  Every APT controlled package "
++"installation processes will execute this code fragment to generate the "
++"missing B<md5sums> files from the binary packages."
++msgstr ""
++
++# type: Plain text
++#: debsums.1:188
+ msgid ""
+-"/etc/apt/apt.conf fragment to generate missing checksums after upgrade/"
+-"install."
++"In order to create B<md5sums> files for the already installed packages, you "
++"must run B<debsums_init> once after the installation of B<debsums> package."
+ msgstr ""
+-"/etc/apt/apt.conf fragment att generera saknade kontrollsummor efter "
+-"uppgradering/installation."
+ 
+ # type: SH
+-#: debsums.1:167
++#: debsums.1:189
+ #, no-wrap
+ msgid "ENVIRONMENT"
+ msgstr "MILJÖ"
+ 
+-# type: TP
+-#: debsums.1:168
+-#, no-wrap
+-msgid "B<TMPDIR>"
+-msgstr "B<TMPDIR>"
+-
+ # type: Plain text
+-#: debsums.1:172
++#: debsums.1:194
++#, fuzzy
+ msgid ""
+-"Directory for extracting information and contents from package archives (/"
+-"tmp by default)."
++"B<TMPDIR> Directory for extracting information and contents from package "
++"archives (/tmp by default)."
+ msgstr ""
+ "Katalog för extrahering av  information och innehåll från paketarkiven (/tmp "
+ "som standard)."
+ 
+ # type: SH
+-#: debsums.1:172
++#: debsums.1:194
+ #, no-wrap
+ msgid "CAVEATS"
+ msgstr "FÄLLOR"
+ 
+ # type: Plain text
+-#: debsums.1:179
++#: debsums.1:201
+ msgid ""
+ "While in general the program may be run as a normal user, some packages "
+ "contain files which are not globally readable so cannot be checked.  "
+@@ -553,7 +583,7 @@
+ "B<keep> inställd."
+ 
+ # type: Plain text
+-#: debsums.1:182
++#: debsums.1:204
+ msgid ""
+ "Files which have been replaced by another package may be erroneously "
+ "reported as changed."
+@@ -561,7 +591,7 @@
+ "Filer som har ersatts av andra paket kan av misstag rapporteras som ändrade."
+ 
+ # type: Plain text
+-#: debsums.1:187
++#: debsums.1:209
+ msgid ""
+ "B<debsums> is intended primarily as a way of determining what installed "
+ "files have been locally modified by the administrator or damaged by media "
+@@ -572,7 +602,7 @@
+ "mediafel och har begränsad användning som ett säkerhetsverktyg."
+ 
+ # type: Plain text
+-#: debsums.1:197
++#: debsums.1:219
+ msgid ""
+ "If you are looking for an integrity checker that can run from safe media, do "
+ "integrity checks on checksum databases and can be easily configured to run "
+@@ -586,18 +616,18 @@
+ "B<tripwire>."
+ 
+ # type: SH
+-#: debsums.1:197 debsums_gen.8:51
++#: debsums.1:219 debsums_gen.8:51
+ #, no-wrap
+ msgid "AUTHOR"
+ msgstr "UPPHOVSMAN"
+ 
+ # type: Plain text
+-#: debsums.1:199
++#: debsums.1:221
+ msgid "Written by Brendan O'Dea E<lt>bod@debian.orgE<gt>."
+ msgstr "Skrivet av Brendan O'Dea E<lt>bod@debian.orgE<gt>."
+ 
+ # type: Plain text
+-#: debsums.1:202
++#: debsums.1:224
+ msgid ""
+ "Based on a program by Christoph Lameter E<lt>clameter@debian.orgE<gt> and "
+ "Petr Cech E<lt>cech@debian.orgE<gt>."
+@@ -606,18 +636,18 @@
+ "och Petr Cech E<lt>cech@debian.orgE<gt>."
+ 
+ # type: SH
+-#: debsums.1:202
++#: debsums.1:224
+ #, no-wrap
+ msgid "COPYRIGHT"
+ msgstr "COPYRIGHT"
+ 
+ # type: Plain text
+-#: debsums.1:204
++#: debsums.1:226
+ msgid "Copyright \\(co 2002 Brendan O'Dea E<lt>bod@debian.orgE<gt>"
+ msgstr "Copyright \\(co 2002 Brendan O'Dea E<lt>bod@debian.orgE<gt>"
+ 
+ # type: Plain text
+-#: debsums.1:207
++#: debsums.1:229
+ msgid ""
+ "This is free software, licensed under the terms of the GNU General Public "
+ "License.  There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR "
+@@ -738,3 +768,15 @@
+ #: debsums_gen.8:52
+ msgid "Christoph Lameter E<lt>clameter@debian.orgE<gt>"
+ msgstr "Christoph Lameter E<lt>clameter@debian.orgE<gt>"
++
++# type: Plain text
++#~ msgid ""
++#~ "/etc/apt/apt.conf fragment to generate missing checksums after upgrade/"
++#~ "install."
++#~ msgstr ""
++#~ "/etc/apt/apt.conf fragment att generera saknade kontrollsummor efter "
++#~ "uppgradering/installation."
++
++# type: TP
++#~ msgid "B<TMPDIR>"
++#~ msgstr "B<TMPDIR>"
+diff -Nru debsums-2.0.33/README debsums-2.0.34/README
+--- debsums-2.0.33/README	2002-01-24 21:09:33.000000000 +0900
++++ debsums-2.0.34/README	2007-09-22 15:16:30.000000000 +0900
+@@ -4,9 +4,20 @@
+ 	or a virus or so? Run this tool to find out if anything happened
+ 	to the files.
+ 
++== For the system administrater ==
++
++In order to have md5sums for all installed packages from the downloaded
++binary packages via APT:
++ 1. Install this debsums package while enabling auto-gen (default).
++ 2. Run debsum_init from root while having consistent /etc/apt/sources.list
++
++Osamu Aoki <osamu@debian.org>
++
++== For the package developer ==
++
+ To generate md5sums in debian/rules from any package:
+ 
+-1. chdir to debian/tmp (or whatever it is called)
++1. chdir to debian/<binary-package-name> (or whatever it is called)
+ 
+ 2. Run the following commands (excerpt from debstd)
+ 

@@ -1,0 +1,100 @@
+From 12ab016704b2b8e775f012c301587b49fe2e0701 Mon Sep 17 00:00:00 2001
+From: Helmut Grohne <helmut@subdivi.de>
+Date: Mon, 9 Nov 2015 22:16:10 +0100
+Subject: [PATCH 2/2] add --force-remote-scripts
+
+Currently, dpkg chroots to the instdir before invoking maintainer
+scripts. The new force flag is supposed to inhibit the chroot call. The
+user is supposed to know that the packages he is operating on do support
+this new mode of operation. Thus the force flag is marked as dangerous.
+---
+ man/dpkg.1   | 4 ++++
+ src/main.c   | 3 +++
+ src/main.h   | 1 +
+ src/script.c | 8 ++++----
+ 4 files changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/man/dpkg.1 b/man/dpkg.1
+index 86b5160..1e8bc8e 100644
+--- a/man/dpkg.1
++++ b/man/dpkg.1
+@@ -611,6 +611,10 @@ Try to (de)install things even when not root.
+ \fBbad\-verify\fP:
+ Install a package even if it fails authenticity check.
+ 
++\fBremote\-scripts\fP:
++Run maintainer scrips without chroot despite the package not declaring
++support for this mode of operation (since dpkg 1.18.5).
++
+ .TP
+ \fB\-\-ignore\-depends\fP=\fIpackage\fP,...
+ Ignore dependency-checking for specified packages (actually, checking is
+diff --git a/src/main.c b/src/main.c
+index 6440e79..025b48b 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -196,6 +196,7 @@ int fc_conff_ask = 0;
+ int fc_unsafe_io = 0;
+ int fc_badverify = 0;
+ int fc_badversion = 0;
++int fc_remote_scripts = 0;
+ 
+ int errabort = 50;
+ static const char *admindir = ADMINDIR;
+@@ -275,6 +276,8 @@ static const struct forceinfo {
+     '!', N_("Remove packages which require installation") },
+   { "remove-essential",    &fc_removeessential,
+     '!', N_("Remove an essential package") },
++  { "remote-scripts",      &fc_remote_scripts,
++    '!', N_("Allow running maintainer scripts remotely") },
+   { NULL }
+ };
+ 
+diff --git a/src/main.h b/src/main.h
+index 021d611..972eb65 100644
+--- a/src/main.h
++++ b/src/main.h
+@@ -142,6 +142,7 @@ extern int fc_conff_ask;
+ extern int fc_badverify;
+ extern int fc_badversion;
+ extern int fc_unsafe_io;
++extern int fc_remote_scripts;
+ 
+ extern bool abort_processing;
+ extern int errabort;
+diff --git a/src/script.c b/src/script.c
+index 6bb121e..1489d92 100644
+--- a/src/script.c
++++ b/src/script.c
+@@ -100,7 +100,7 @@ maintscript_pre_exec(struct command *cmd)
+ 	const char *admindir = dpkg_db_get_dir();
+ 	size_t instdirl = strlen(instdir);
+ 
+-	if (*instdir) {
++	if (*instdir && !fc_remote_scripts) {
+ 		if (strncmp(admindir, instdir, instdirl) != 0)
+ 			ohshit(_("admindir must be inside instdir for dpkg to work properly"));
+ 		if (setenv("DPKG_ADMINDIR", admindir + instdirl, 1) < 0)
+@@ -113,8 +113,8 @@ maintscript_pre_exec(struct command *cmd)
+ 	}
+ 	/* Switch to a known good directory to give the maintainer script
+ 	 * a saner environment, also needed after the chroot(). */
+-	if (chdir("/"))
+-		ohshite(_("failed to chdir to '%.255s'"), "/");
++	if (chdir(fc_remote_scripts ? instdir : "/"))
++		ohshite(_("failed to chdir to '%.255s'"), fc_remote_scripts ? instdir : "/");
+ 	if (debug_has_flag(dbg_scripts)) {
+ 		struct varbuf args = VARBUF_INIT;
+ 		const char **argv = cmd->argv;
+@@ -128,7 +128,7 @@ maintscript_pre_exec(struct command *cmd)
+ 		      args.buf);
+ 		varbuf_destroy(&args);
+ 	}
+-	if (!instdirl)
++	if (fc_remote_scripts || !instdirl)
+ 		return cmd->filename;
+ 
+ 	assert(strlen(cmd->filename) >= instdirl);
+-- 
+2.8.0.rc3
+

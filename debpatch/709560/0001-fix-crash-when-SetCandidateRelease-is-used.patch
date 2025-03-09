@@ -1,0 +1,84 @@
+From 2f5ed336109d11e06d08bedef6b37d6597c4c09c Mon Sep 17 00:00:00 2001
+From: Michael Vogt <mvo@debian.org>
+Date: Fri, 29 Nov 2013 17:10:35 +0100
+Subject: [PATCH] fix crash when SetCandidateRelease is used
+
+---
+ apt-pkg/depcache.cc                                |  2 +-
+ apt-private/private-install.h                      |  3 ++
+ .../test-bug-709560-set-candidate-release          | 36 ++++++++++++++++++++++
+ 3 files changed, 40 insertions(+), 1 deletion(-)
+ create mode 100755 test/integration/test-bug-709560-set-candidate-release
+
+diff --git a/apt-pkg/depcache.cc b/apt-pkg/depcache.cc
+index a06789c..f9c891c 100644
+--- a/apt-pkg/depcache.cc
++++ b/apt-pkg/depcache.cc
+@@ -1522,7 +1522,7 @@ bool pkgDepCache::SetCandidateRelease(pkgCache::VerIterator TargetVer,
+ 	 if (itsFine == false)
+ 	 {
+ 	    // change the candidate
+-	    Changed.push_back(make_pair(oldCand, TargetVer));
++	    Changed.push_back(make_pair(V, TargetVer));
+ 	    if (SetCandidateRelease(V, TargetRel, Changed) == false)
+ 	    {
+ 	       if (stillOr == false)
+diff --git a/apt-private/private-install.h b/apt-private/private-install.h
+index 439c897..2187146 100644
+--- a/apt-private/private-install.h
++++ b/apt-private/private-install.h
+@@ -95,6 +95,9 @@ struct TryToInstall {
+ 	 Cache->GetDepCache()->SetCandidateVersion(s->first);
+ 
+       bool Success = true;
++      // the Changed list contains:
++      //   first: "new version" 
++      //   second: "what-caused the change" 
+       std::list<std::pair<pkgCache::VerIterator, pkgCache::VerIterator> > Changed;
+       for (std::list<std::pair<pkgCache::VerIterator, std::string> >::const_iterator s = start.begin();
+ 		s != start.end(); ++s)
+diff --git a/test/integration/test-bug-709560-set-candidate-release b/test/integration/test-bug-709560-set-candidate-release
+new file mode 100755
+index 0000000..48dc5c3
+--- /dev/null
++++ b/test/integration/test-bug-709560-set-candidate-release
+@@ -0,0 +1,36 @@
++#!/bin/sh
++set -e
++
++TESTDIR=$(readlink -f $(dirname $0))
++. $TESTDIR/framework
++setupenvironment
++configarchitecture 'amd64'
++
++insertpackage 'experimental' 'foo' 'all' '2.0' 'Depends: foo-dep (= 2.1)'
++insertpackage 'experimental' 'foo-dep' 'all' '2.1'
++
++
++(
++cat <<EOF
++Package: *
++Pin: release a=experimental
++Pin-Priority: -10
++EOF
++) > rootdir/etc/apt/preferences
++
++
++setupaptarchive
++
++testequal "Reading package lists...
++Building dependency tree...
++Selected version '2.0' (experimental [all]) for 'foo'
++Selected version '2.1' (experimental [all]) for 'foo-dep' because of 'foo'
++The following extra packages will be installed:
++  foo-dep
++The following NEW packages will be installed:
++  foo foo-dep
++0 upgraded, 2 newly installed, 0 to remove and 0 not upgraded.
++Inst foo-dep (2.1 experimental [all])
++Inst foo (2.0 experimental [all])
++Conf foo-dep (2.1 experimental [all])
++Conf foo (2.0 experimental [all])" aptget install -q0 -s foo/experimental
+-- 
+1.8.3.2
+

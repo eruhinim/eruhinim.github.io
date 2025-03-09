@@ -1,0 +1,362 @@
+From 390a4df33ba9fe637d80ae15ece2b37221a4fc4c Mon Sep 17 00:00:00 2001
+From: Paul Brossier <piem@piem.org>
+Date: Sat, 11 Jan 2014 08:31:48 -0400
+Subject: [PATCH] debian/patches/180_aubio.patch: update to aubio 0.4.0
+ (Closes: #733968)
+
+---
+ debian/control                 |   2 +-
+ debian/patches/180_aubio.patch | 304 +++++++++++++++++++++++++++++++++++++++++
+ debian/patches/series          |   1 +
+ debian/rules                   |   2 +-
+ 4 files changed, 307 insertions(+), 2 deletions(-)
+ create mode 100644 debian/patches/180_aubio.patch
+
+diff --git a/debian/control b/debian/control
+index f6cf8bb..eafbc3b 100644
+--- a/debian/control
++++ b/debian/control
+@@ -34,7 +34,7 @@ Build-Depends: cdbs,
+  ladspa-sdk (>= 1.1-2),
+  libasound2-dev (>= 0.9.4) [linux-any],
+  liboss-salsa-dev [!linux-any],
+- libaubio-dev,
++ libaubio-dev (>= 0.4.0),
+  libjack-dev,
+  liblo-dev,
+  libsuil-dev,
+diff --git a/debian/patches/180_aubio.patch b/debian/patches/180_aubio.patch
+new file mode 100644
+index 0000000..ccd4f54
+--- /dev/null
++++ b/debian/patches/180_aubio.patch
+@@ -0,0 +1,304 @@
++Description: merge latest vamp-aubio-plugins version to use aubio 0.4.0
++ Update libs/vamp-plugins/Onset.{cpp,h} to new aubio.
++ Merge with the latest vamp-aubio-plugins revision 798ef8d.
++ See http://git.aubio.org/?p=vamp-aubio-plugins.git;a=summary.
++Author: Paul Brossier <piem@debian.org>
++Forwarded: not-needed
++Last-Update: 2014-12-29
++
++--- a/SConstruct
+++++ b/SConstruct
++@@ -446,7 +446,7 @@
++ 	'jack'                 : '0.120.0',
++ 	'libgnomecanvas-2.0'   : '2.0',
++ 	'sndfile'              : '1.0.18',
++-        'aubio'                : '0.3.0',
+++        'aubio'                : '0.4.0',
++ 	'liblo'                : '0.24'
++ }
++ 
++--- a/libs/vamp-plugins/Onset.cpp
+++++ b/libs/vamp-plugins/Onset.cpp
++@@ -22,29 +22,32 @@
++ using std::cerr;
++ using std::endl;
++ 
+++const char *getAubioNameForOnsetType(OnsetType t)
+++{
+++    // In the same order as the enum elements in the header
+++    static const char *const names[] = {
+++        "energy", "specdiff", "hfc", "complex", "phase", "kl", "mkl", "specflux"
+++    };
+++    return names[(int)t];
+++}
+++
++ Onset::Onset(float inputSampleRate) :
++     Plugin(inputSampleRate),
++     m_ibuf(0),
++-    m_fftgrain(0),
++     m_onset(0),
++-    m_pv(0),
++-    m_peakpick(0),
++     m_onsetdet(0),
++-    m_onsettype(aubio_onset_complex),
+++    m_onsettype(OnsetComplex),
++     m_threshold(0.3),
++-    m_silence(-90),
++-    m_channelCount(1)
+++    m_silence(-70),
+++    m_minioi(4)
++ {
++ }
++ 
++ Onset::~Onset()
++ {
++-    if (m_onsetdet) aubio_onsetdetection_free(m_onsetdet);
+++    if (m_onsetdet) del_aubio_onset(m_onsetdet);
++     if (m_ibuf) del_fvec(m_ibuf);
++     if (m_onset) del_fvec(m_onset);
++-    if (m_fftgrain) del_cvec(m_fftgrain);
++-    if (m_pv) del_aubio_pvoc(m_pv);
++-    if (m_peakpick) del_aubio_peakpicker(m_peakpick);
++ }
++ 
++ string
++@@ -74,7 +77,7 @@
++ int
++ Onset::getPluginVersion() const
++ {
++-    return 1;
+++    return 2;
++ }
++ 
++ string
++@@ -86,22 +89,18 @@
++ bool
++ Onset::initialise(size_t channels, size_t stepSize, size_t blockSize)
++ {
++-    m_channelCount = channels;
+++    if (channels != 1) {
+++        std::cerr << "Onset::initialise: channels must be 1" << std::endl;
+++        return false;
+++    }
+++
++     m_stepSize = stepSize;
++     m_blockSize = blockSize;
++ 
++-    m_ibuf = new_fvec(stepSize, channels);
++-    m_onset = new_fvec(1, channels);
++-    m_fftgrain = new_cvec(blockSize, channels);
++-    m_pv = new_aubio_pvoc(blockSize, stepSize, channels);
++-    m_peakpick = new_aubio_peakpicker(m_threshold);
++-
++-    m_onsetdet = new_aubio_onsetdetection(m_onsettype, blockSize, channels);
++-    
++-    m_delay = Vamp::RealTime::frame2RealTime(4 * stepSize,
++-                                             lrintf(m_inputSampleRate));
+++    m_ibuf = new_fvec(stepSize);
+++    m_onset = new_fvec(1);
++ 
++-    m_lastOnset = Vamp::RealTime::zeroTime - m_delay - m_delay;
+++    reset();
++ 
++     return true;
++ }
++@@ -109,6 +108,22 @@
++ void
++ Onset::reset()
++ {
+++    if (m_onsetdet) del_aubio_onset(m_onsetdet);
+++
+++    m_onsetdet = new_aubio_onset
+++        (const_cast<char *>(getAubioNameForOnsetType(m_onsettype)),
+++         m_blockSize,
+++         m_stepSize,
+++         lrintf(m_inputSampleRate));
+++    
+++    aubio_onset_set_threshold(m_onsetdet, m_threshold);
+++    aubio_onset_set_silence(m_onsetdet, m_silence);
+++    aubio_onset_set_minioi(m_onsetdet, m_minioi);
+++
+++    m_delay = Vamp::RealTime::frame2RealTime(4 * m_stepSize,
+++                                             lrintf(m_inputSampleRate));
+++
+++    m_lastOnset = Vamp::RealTime::zeroTime - m_delay - m_delay;
++ }
++ 
++ size_t
++@@ -132,8 +147,8 @@
++     desc.identifier = "onsettype";
++     desc.name = "Onset Detection Function Type";
++     desc.minValue = 0;
++-    desc.maxValue = 6;
++-    desc.defaultValue = (int)aubio_onset_complex;
+++    desc.maxValue = 7;
+++    desc.defaultValue = (int)OnsetComplex;
++     desc.isQuantized = true;
++     desc.quantizeStep = 1;
++     desc.valueNames.push_back("Energy Based");
++@@ -143,6 +158,7 @@
++     desc.valueNames.push_back("Phase Deviation");
++     desc.valueNames.push_back("Kullback-Liebler");
++     desc.valueNames.push_back("Modified Kullback-Liebler");
+++    desc.valueNames.push_back("Spectral Flux");
++     list.push_back(desc);
++ 
++     desc = ParameterDescriptor();
++@@ -159,11 +175,22 @@
++     desc.name = "Silence Threshold";
++     desc.minValue = -120;
++     desc.maxValue = 0;
++-    desc.defaultValue = -90;
+++    desc.defaultValue = -70;
++     desc.unit = "dB";
++     desc.isQuantized = false;
++     list.push_back(desc);
++ 
+++    desc = ParameterDescriptor();
+++    desc.identifier = "minioi";
+++    desc.name = "Minimum Inter-Onset Interval";
+++    desc.minValue = 0;
+++    desc.maxValue = 40;
+++    desc.defaultValue = 4;
+++    desc.unit = "ms";
+++    desc.isQuantized = true;
+++    desc.quantizeStep = 1;
+++    list.push_back(desc);
+++
++     return list;
++ }
++ 
++@@ -176,6 +203,8 @@
++         return m_threshold;
++     } else if (param == "silencethreshold") {
++         return m_silence;
+++    } else if (param == "minioi") {
+++        return m_minioi;
++     } else {
++         return 0.0;
++     }
++@@ -186,18 +215,21 @@
++ {
++     if (param == "onsettype") {
++         switch (lrintf(value)) {
++-        case 0: m_onsettype = aubio_onset_energy; break;
++-        case 1: m_onsettype = aubio_onset_specdiff; break;
++-        case 2: m_onsettype = aubio_onset_hfc; break;
++-        case 3: m_onsettype = aubio_onset_complex; break;
++-        case 4: m_onsettype = aubio_onset_phase; break;
++-        case 5: m_onsettype = aubio_onset_kl; break;
++-        case 6: m_onsettype = aubio_onset_mkl; break;
+++        case 0: m_onsettype = OnsetEnergy; break;
+++        case 1: m_onsettype = OnsetSpecDiff; break;
+++        case 2: m_onsettype = OnsetHFC; break;
+++        case 3: m_onsettype = OnsetComplex; break;
+++        case 4: m_onsettype = OnsetPhase; break;
+++        case 5: m_onsettype = OnsetKL; break;
+++        case 6: m_onsettype = OnsetMKL; break;
+++        case 7: m_onsettype = OnsetSpecFlux; break;
++         }
++     } else if (param == "peakpickthreshold") {
++         m_threshold = value;
++     } else if (param == "silencethreshold") {
++         m_silence = value;
+++    } else if (param == "minioi") {
+++        m_minioi = value;
++     }
++ }
++ 
++@@ -216,17 +248,6 @@
++     d.sampleRate = 0;
++     list.push_back(d);
++ 
++-    d = OutputDescriptor();
++-    d.identifier = "detectionfunction";
++-    d.name = "Onset Detection Function";
++-    d.unit = "";
++-    d.hasFixedBinCount = true;
++-    d.binCount = m_channelCount;
++-    d.hasKnownExtents = false;
++-    d.isQuantized = false;
++-    d.sampleType = OutputDescriptor::OneSamplePerStep;
++-    list.push_back(d);
++-
++     return list;
++ }
++ 
++@@ -235,21 +256,12 @@
++                Vamp::RealTime timestamp)
++ {
++     for (size_t i = 0; i < m_stepSize; ++i) {
++-        for (size_t j = 0; j < m_channelCount; ++j) {
++-            fvec_write_sample(m_ibuf, inputBuffers[j][i], j, i);
++-        }
+++        fvec_set_sample(m_ibuf, inputBuffers[0][i], i);
++     }
++ 
++-    aubio_pvoc_do(m_pv, m_ibuf, m_fftgrain);
++-    aubio_onsetdetection(m_onsetdet, m_fftgrain, m_onset);
+++    aubio_onset_do(m_onsetdet, m_ibuf, m_onset);
++ 
++-    bool isonset = aubio_peakpick_pimrt(m_onset, m_peakpick);
++-
++-    if (isonset) {
++-        if (aubio_silence_detection(m_ibuf, m_silence)) {
++-            isonset = false;
++-        }
++-    }
+++    bool isonset = m_onset->data[0];
++ 
++     FeatureSet returnFeatures;
++ 
++@@ -263,11 +275,6 @@
++             m_lastOnset = timestamp;
++         }
++     }
++-    Feature feature;
++-    for (size_t j = 0; j < m_channelCount; ++j) {
++-        feature.values.push_back(m_onset->data[j][0]);
++-    }
++-    returnFeatures[1].push_back(feature);
++ 
++     return returnFeatures;
++ }
++--- a/libs/vamp-plugins/Onset.h
+++++ b/libs/vamp-plugins/Onset.h
++@@ -20,6 +20,17 @@
++ #include <vamp-sdk/Plugin.h>
++ #include <aubio/aubio.h>
++ 
+++enum OnsetType {
+++    OnsetEnergy,
+++    OnsetSpecDiff,
+++    OnsetHFC,
+++    OnsetComplex,
+++    OnsetPhase,
+++    OnsetKL,
+++    OnsetMKL,
+++    OnsetSpecFlux // new in 0.4!
+++};
+++
++ class Onset : public Vamp::Plugin
++ {
++ public:
++@@ -54,17 +65,14 @@
++ 
++ protected:
++     fvec_t *m_ibuf;
++-    cvec_t *m_fftgrain;
++     fvec_t *m_onset;
++-    aubio_pvoc_t *m_pv;
++-    aubio_pickpeak_t *m_peakpick;
++-    aubio_onsetdetection_t *m_onsetdet;
++-    aubio_onsetdetection_type m_onsettype;
+++    aubio_onset_t *m_onsetdet;
+++    OnsetType m_onsettype;
++     float m_threshold;
++     float m_silence;
+++    float m_minioi;
++     size_t m_stepSize;
++     size_t m_blockSize;
++-    size_t m_channelCount;
++     Vamp::RealTime m_delay;
++     Vamp::RealTime m_lastOnset;
++ };
+diff --git a/debian/patches/series b/debian/patches/series
+index 1d75193..6fa4858 100644
+--- a/debian/patches/series
++++ b/debian/patches/series
+@@ -5,3 +5,4 @@
+ 140_enable-ladish.patch
+ 160_kfreebsd.patch
+ 170_template-ftbfs.patch
++180_aubio.patch
+diff --git a/debian/rules b/debian/rules
+index 01bb83e..302e7b7 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -142,7 +142,7 @@ CDBS_BUILD_DEPENDS += , libcairomm-1.0-dev (>= 1.2.4),\
+ CDBS_BUILD_DEPENDS += , ladspa-sdk (>= 1.1-2),\
+ 					  libasound2-dev (>= 0.9.4) [linux-any],\
+ 					  liboss-salsa-dev [!linux-any],\
+-					  libaubio-dev,\
++					  libaubio-dev (>= 0.4.0),\
+ 					  libjack-dev,\
+ 					  liblo-dev,\
+ 					  libsuil-dev,\
+-- 
+1.8.5.2
+

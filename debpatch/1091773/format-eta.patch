@@ -1,0 +1,215 @@
+Author: Davide Manini <davide.manini@posteo.net>
+Last-Update: 2024-12-31
+Description: Format output of (dis)charge
+
+--- a/acpi.1
++++ b/acpi.1
+@@ -14,6 +14,12 @@ or thermal information.
+ show battery information
+ .IP "\fB-a | --ac-adapter\fP " 10
+ show ac adapter information
++.IP "\fB-r | --remaining-time\fP " 10
++show remaining time of (dis)charge
++.IP "\fB-e | --end-time\fP " 10
++show end time of (dis)charge
++.IP "\fB-F | --format-time\fP " 10
++chose the format for the end time of (dis)charge, using the syntax of \fBstrftime\fP(3)
+ .IP "\fB-t |  --thermal\fP " 10
+ show thermal information
+ .IP "\fB-c | --cooling\fP " 10
+--- a/acpi.c
++++ b/acpi.c
+@@ -248,7 +248,7 @@ static int get_unit_value(char *value)
+     return n;
+ }
+ 
+-void print_battery_information(struct list *batteries, int show_empty_slots, int show_capacity)
++void print_battery_information(struct list *batteries, int show_empty_slots, int show_capacity, int show_remaining_time, int show_end_time, char *end_time_format)
+ {
+     struct list *battery = batteries;
+     struct list *fields;
+@@ -266,9 +266,12 @@ void print_battery_information(struct list *batteries, int show_empty_slots, int
+ 	int last_capacity_unit = -1;
+ 	int hours, minutes, seconds;
+ 	int percentage;
+-	char *state = NULL, *poststr;
++	char *state = NULL, *poststr, *prestr;
+ 	int type_battery = TRUE;
+ 	char capacity_unit[4] = "mAh";
++	char stm[BUF_SIZE];
++	time_t end_time;
++	struct tm end_time_tm;
+ 
+ 	fields = battery->data;
+ 	while (fields) {
+@@ -366,6 +369,7 @@ void print_battery_information(struct list *batteries, int show_empty_slots, int
+ 		    if (present_rate > MIN_PRESENT_RATE) {
+ 			seconds = 3600 * (last_capacity - remaining_capacity) / present_rate;
+ 			poststr = " until charged";
++			prestr = " fully charged at";
+ 		    } else {
+ 			poststr = "charging at zero rate - will never fully charge.";
+ 			seconds = -1;
+@@ -374,6 +378,7 @@ void print_battery_information(struct list *batteries, int show_empty_slots, int
+ 		    if (present_rate > MIN_PRESENT_RATE) {
+ 			seconds = 3600 * remaining_capacity / present_rate;
+ 			poststr = " remaining";
++			prestr = " fully discharged at";
+ 		    } else {
+ 			poststr = "discharging at zero rate - will never fully discharge.";
+ 			seconds = -1;
+@@ -384,19 +389,22 @@ void print_battery_information(struct list *batteries, int show_empty_slots, int
+ 		}
+ 
+ 		if (seconds > 0) {
+-		    char stm[128];
+-		    time_t t = time(NULL) + seconds;
+-		    struct tm tm;
+-
+-		    if (!localtime_r(&t, &tm) || !strftime(stm, sizeof(stm),
+-		      " (ca. %FT%T%z)", &tm))
+-			stm[0] = '\0';
+-
+-		    hours = seconds / 3600;
+-		    seconds -= 3600 * hours;
+-		    minutes = seconds / 60;
+-		    seconds -= 60 * minutes;
+-		    printf(", %02d:%02d:%02d%s%s", hours, minutes, seconds, poststr, stm);
++		    if (show_remaining_time) {
++			hours = seconds / 3600;
++			seconds -= 3600 * hours;
++			minutes = seconds / 60;
++			seconds -= 60 * minutes;
++			printf(", %02d:%02d:%02d%s", hours, minutes, seconds, poststr);
++		    }
++
++		    end_time = time(NULL) + seconds;
++		    if (show_end_time && localtime_r(&end_time, &end_time_tm)) {
++			if (end_time_format && strftime(stm, sizeof(stm), end_time_format, &end_time_tm)) {
++			    printf(",%s %s", prestr, stm);
++			} else {
++			    printf(",%s %02i:%02d:%02d", prestr, end_time_tm.tm_hour, end_time_tm.tm_min, end_time_tm.tm_sec);
++			}
++		    }
+ 		} else if (poststr != NULL) {
+ 		    printf(", %s", poststr);
+ 		}
+--- a/acpi.h
++++ b/acpi.h
+@@ -60,7 +60,7 @@ struct list *find_devices(char *acpi_path, int device_nr, int proc_interface);
+ 
+ void free_devices(struct list *devices);
+ 
+-void print_battery_information(struct list *batteries, int show_empty_slots, int show_capacity);
++void print_battery_information(struct list *batteries, int show_empty_slots, int show_capacity, int show_remaining_time, int show_end_time, char *end_time_format);
+ 
+ void print_ac_adapter_information(struct list *batteries, int show_empty_slots);
+ 
+diff --git a/main.c b/main.c
+index c47b3e0..662193a 100644
+--- a/main.c
++++ b/main.c
+@@ -32,12 +32,12 @@ struct device device[4] = {
+ 			{ COOLING_DEV, "fan", "thermal", "cooling_device" }
+ 			  };
+ 
+-static void do_show_batteries(char *acpi_path, int show_empty_slots, int show_details, int proc_interface)
++static void do_show_batteries(char *acpi_path, int show_empty_slots, int show_details, int show_remaining_time, int show_end_time, char *end_time_format, int proc_interface)
+ {
+ 	struct list *batteries;
+ 
+ 	batteries = find_devices(acpi_path, BATTERY, proc_interface);
+-	print_battery_information(batteries, show_empty_slots, show_details);
++	print_battery_information(batteries, show_empty_slots, show_details, show_remaining_time, show_end_time, end_time_format);
+ 	free_devices(batteries);
+ }
+ 
+@@ -90,6 +90,9 @@ static int usage(char *argv[])
+ "                             - battery capacity information\n"
+ "                             - temperature trip points\n"
+ "  -a, --ac-adapter         ac adapter information\n"
++"  -r, --remaining-time     show remaining time for (dis)charge\n"
++"  -e, --end-time           show end time for (dis)charge\n"
++"  -F, --format-time <str>  specify end-time format string\n"
+ "  -t, --thermal            thermal information\n"
+ "  -c, --cooling            cooling information\n"
+ "  -V, --everything         show every device, overrides above options\n"
+@@ -125,6 +128,9 @@ static struct option long_options[] = {
+ 	{ "everything", 0, 0, 'V' }, 
+ 	{ "proc", 0, 0, 'p' }, 
+ 	{ "details", 0, 0, 'i' }, 
++	{ "remaining-time", 0, 0, 'r' },
++	{ "end-time", 0, 0, 'e' },
++	{ "format-time", 1, 0, 'F' },
+ 	{ 0, 0, 0, 0 }, 
+ };
+ 
+@@ -136,17 +142,20 @@ int main(int argc, char *argv[])
+ 	int show_cooling = FALSE;
+ 	int show_empty_slots = FALSE;
+ 	int show_details = FALSE;
++	int show_remaining_time = 2;
++	int show_end_time = FALSE;
+ 	int proc_interface = FALSE;
+ 	int temperature_units = TEMP_CELSIUS;
+ 	int ch, option_index;
+ 	char *acpi_path = strdup(ACPI_PATH_SYS);
++	char *end_time_format = NULL;
+ 
+ 	if (!acpi_path) {
+ 		fprintf(stderr, "Out of memory in main()\n");
+ 		return -1;
+ 	}
+ 
+-	while ((ch = getopt_long(argc, argv, "ipVbtashvfkcd:", long_options, &option_index)) != -1) {
++	while ((ch = getopt_long(argc, argv, "F:eripVbtashvfkcd:", long_options, &option_index)) != -1) {
+ 		switch (ch) {
+ 			case 'V':
+ 				show_batteries = show_ac_adapter = show_thermal = show_cooling = show_details = TRUE;
+@@ -178,6 +187,22 @@ int main(int argc, char *argv[])
+ 			case 'k':
+ 				temperature_units = TEMP_KELVIN;
+ 				break;
++			case 'r':
++				show_remaining_time = TRUE;
++				break;
++			case 'e':
++				show_end_time = TRUE;
++				if (show_remaining_time==2) {
++					show_remaining_time = FALSE;
++				}
++				break;
++			case 'F':
++				end_time_format = strdup(optarg);
++				if (!end_time_format) {
++					fprintf(stderr, "Out of memory in main()\n");
++					return -1;
++					}
++				break;
+ 			case 'p':
+ 				proc_interface = TRUE;
+ 				free(acpi_path);
+@@ -201,12 +226,22 @@ int main(int argc, char *argv[])
+ 		}
+ 	}
+ 
++
++	/* if neither -e nor -r was chosen, show remaining time, for backward compatibility */
++	if (show_remaining_time==2) {
++		show_remaining_time = TRUE;
++	}
++
++	if (end_time_format && !show_end_time) {
++		fprintf(stderr, "Warning: ignoring the time format since option -e is not specfied");
++	}
++
+ 	/* if nothing was chosen, we show the battery information */
+ 	if (!show_batteries && !show_ac_adapter && !show_thermal && !show_cooling)
+ 		show_batteries = TRUE;
+ 
+ 	if (show_batteries) {
+-		do_show_batteries(acpi_path, show_empty_slots, show_details, proc_interface);
++		do_show_batteries(acpi_path, show_empty_slots, show_details, show_remaining_time, show_end_time, end_time_format, proc_interface);
+ 	}
+ 	if (show_ac_adapter) {
+ 		do_show_ac_adapter(acpi_path, show_empty_slots, proc_interface);

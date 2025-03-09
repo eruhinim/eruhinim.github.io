@@ -1,0 +1,95 @@
+diff -Nru dpkg-1.17.5ubuntu5/lib/dpkg/dpkg-db.h dpkg-1.17.5ubuntu6/lib/dpkg/dpkg-db.h
+--- dpkg-1.17.5ubuntu5/lib/dpkg/dpkg-db.h	2013-12-10 07:14:22.000000000 +0100
++++ dpkg-1.17.5ubuntu6/lib/dpkg/dpkg-db.h	2014-03-20 21:35:13.000000000 +0100
+@@ -215,6 +215,7 @@
+     struct deppossi *installed;
+   } depended;
+   int installed_instances;
++  int really_installed_instances;
+ };
+ 
+ /*** from dbdir.c ***/
+diff -Nru dpkg-1.17.5ubuntu5/lib/dpkg/parse.c dpkg-1.17.5ubuntu6/lib/dpkg/parse.c
+--- dpkg-1.17.5ubuntu5/lib/dpkg/parse.c	2014-01-17 00:01:36.000000000 +0100
++++ dpkg-1.17.5ubuntu6/lib/dpkg/parse.c	2014-03-20 22:08:16.000000000 +0100
+@@ -297,6 +297,7 @@
+ struct pkgcount {
+   int single;
+   int multi;
++  int configfiles;
+   int total;
+ };
+ 
+@@ -307,7 +308,9 @@
+   if (pkg->status == stat_notinstalled)
+      return;
+ 
+-  if (pkgbin->multiarch == multiarch_same)
++  if (pkg->status == stat_configfiles)
++    count->configfiles++;
++  else if (pkgbin->multiarch == multiarch_same)
+     count->multi++;
+   else
+     count->single++;
+@@ -326,7 +328,7 @@
+ parse_find_set_slot(struct parsedb_state *ps,
+                     struct pkginfo *new_pkg, struct pkgbin *new_pkgbin)
+ {
+-  struct pkgcount count = { .single = 0, .multi = 0, .total = 0 };
++  struct pkgcount count = { .single = 0, .multi = 0, .configfiles = 0,.total = 0 };
+   struct pkgset *set;
+   struct pkginfo *pkg;
+ 
+@@ -405,7 +407,7 @@
+       selection = true;
+ 
+     /* Verify we don't allow something that will mess up the db. */
+-    if (pkgset_installed_instances(db_set) > 1 &&
++    if (pkgset_really_installed_instances(db_set) > 1 &&
+         !selection && new_pkgbin->multiarch != multiarch_same)
+       ohshit(_("%s %s (Multi-Arch: %s) is not co-installable with "
+                "%s which has multiple installed instances"),
+diff -Nru dpkg-1.17.5ubuntu5/lib/dpkg/pkg.c dpkg-1.17.5ubuntu6/lib/dpkg/pkg.c
+--- dpkg-1.17.5ubuntu5/lib/dpkg/pkg.c	2013-12-10 07:15:02.000000000 +0100
++++ dpkg-1.17.5ubuntu6/lib/dpkg/pkg.c	2014-03-20 21:52:08.000000000 +0100
+@@ -37,13 +37,18 @@
+ {
+ 	if (pkg->status == status)
+ 		return;
+-	else if (pkg->status == stat_notinstalled)
++	if (pkg->status == stat_notinstalled)
+ 		pkg->set->installed_instances++;
+ 	else if (status == stat_notinstalled)
+ 		pkg->set->installed_instances--;
+ 
+ 	assert(pkg->set->installed_instances >= 0);
+ 
++        if((pkg->status == stat_notinstalled || pkg->status == stat_configfiles) && (status != stat_notinstalled && status != stat_configfiles))
++                pkg->set->really_installed_instances++;
++        else if ((pkg->status != stat_notinstalled && pkg->status != stat_configfiles) && (status == stat_notinstalled || status == stat_configfiles))
++                pkg->set->really_installed_instances--;
++
+ 	pkg->status = status;
+ }
+ 
+@@ -145,6 +150,7 @@
+ 	set->depended.installed = NULL;
+ 	pkg_blank(&set->pkg);
+ 	set->installed_instances = 0;
++	set->really_installed_instances = 0;
+ 	set->pkg.set = set;
+ 	set->pkg.arch_next = NULL;
+ }
+@@ -176,6 +182,12 @@
+ 	return set->installed_instances;
+ }
+ 
++int
++pkgset_really_installed_instances(struct pkgset *set)
++{
++	return set->really_installed_instances;
++}
++
+ /**
+  * Check if a pkg is informative.
+  *

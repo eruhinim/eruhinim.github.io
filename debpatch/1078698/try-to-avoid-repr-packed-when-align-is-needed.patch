@@ -1,0 +1,104 @@
+From 199bee441ad0fb81b4b054e0c1e2ffb51f4e4a6d Mon Sep 17 00:00:00 2001
+From: Thomas Bertschinger <tahbertschinger@gmail.com>
+Date: Tue, 23 Jan 2024 21:41:14 -0700
+Subject: [PATCH] try to avoid `#[repr(packed)]` when `align` is needed
+
+Currently rustc forbids compound types from having both a `packed` and
+`align` attribute.
+
+When a source type has both attributes, this may mean it cannot be
+represented with the current rustc. Often, though, one or both of these
+attributes is redundant and can be safely removed from the generated
+Rust code.
+
+Previously, bindgen avoided placing the `align` attribute when it is
+not needed. However, it would always place the `packed` attribute if the
+source type has it, even when it is redundant because the source type is
+"naturally packed".
+
+With this change, bindgen avoids placing `packed` on a type if the
+`packed` is redundant and the type needs an `align` attribute. If the
+type does not have an "align" attribute, then bindgen will still place
+`packed` so as to avoid changing existing working behavior.
+
+This commit also takes out an extraneous `is_packed()` call from
+`StructLayoutTracker::new()` since the value can be passed in from the
+caller; this avoids duplicating work in some cases.
+
+diff --git a/codegen/mod.rs b/bindgen/codegen/mod.rs
+index 11425e02..c90dac9a 100644
+--- a/codegen/mod.rs
++++ b/codegen/mod.rs
+@@ -1970,6 +1970,7 @@ impl CodeGenerator for CompInfo {
+             ty,
+             &canonical_name,
+             visibility,
++            packed,
+         );
+ 
+         if !is_opaque {
+@@ -2189,7 +2190,14 @@ impl CodeGenerator for CompInfo {
+         if let Some(comment) = item.comment(ctx) {
+             attributes.push(attributes::doc(comment));
+         }
+-        if packed && !is_opaque {
++
++        // if a type has both a "packed" attribute and an "align(N)" attribute, then check if the
++        // "packed" attr is redundant, and do not include it if so.
++        if packed &&
++            !is_opaque &&
++            !(explicit_align.is_some() &&
++                self.already_packed(ctx).map_or(false, |t| t))
++        {
+             let n = layout.map_or(1, |l| l.align);
+             assert!(ctx.options().rust_features().repr_packed_n || n == 1);
+             let packed_repr = if n == 1 {
+diff --git a/codegen/struct_layout.rs b/bindgen/codegen/struct_layout.rs
+index 56730603..b38479e4 100644
+--- a/codegen/struct_layout.rs
++++ b/codegen/struct_layout.rs
+@@ -91,9 +91,9 @@ impl<'a> StructLayoutTracker<'a> {
+         ty: &'a Type,
+         name: &'a str,
+         visibility: FieldVisibilityKind,
++        is_packed: bool,
+     ) -> Self {
+         let known_type_layout = ty.layout(ctx);
+-        let is_packed = comp.is_packed(ctx, known_type_layout.as_ref());
+         let (is_rust_union, can_copy_union_fields) =
+             comp.is_rust_union(ctx, known_type_layout.as_ref(), name);
+         StructLayoutTracker {
+diff --git a/ir/comp.rs b/bindgen/ir/comp.rs
+index 89e77e16..ae52dfb2 100644
+--- a/ir/comp.rs
++++ b/ir/comp.rs
+@@ -1641,6 +1641,26 @@ impl CompInfo {
+         false
+     }
+ 
++    /// Return true if a compound type is "naturally packed". This means we can exclude the
++    /// "packed" attribute without changing the layout.
++    /// This is useful for types that need an "align(N)" attribute since rustc won't compile
++    /// structs that have both of those attributes.
++    pub(crate) fn already_packed(&self, ctx: &BindgenContext) -> Option<bool> {
++        let mut total_size: usize = 0;
++
++        for field in self.fields().iter() {
++            let layout = field.layout(ctx)?;
++
++            if layout.align != 0 && total_size % layout.align != 0 {
++                return Some(false);
++            }
++
++            total_size += layout.size;
++        }
++
++        Some(true)
++    }
++
+     /// Returns true if compound type has been forward declared
+     pub(crate) fn is_forward_declaration(&self) -> bool {
+         self.is_forward_declaration
+-- 
+2.43.0
+

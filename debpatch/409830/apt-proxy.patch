@@ -1,0 +1,483 @@
+diff -ru apt-0.6.46.4/apt-pkg/acquire.cc apt-0.6.46.4new/apt-pkg/acquire.cc
+--- apt-0.6.46.4/apt-pkg/acquire.cc	2006-12-04 12:37:34.000000000 -0200
++++ apt-0.6.46.4new/apt-pkg/acquire.cc	2007-02-02 18:20:28.000000000 -0200
+@@ -883,3 +883,13 @@
+    FetchedBytes += Size - Resume;
+ }
+ 									/*}}}*/
++// AcquireStatus::Authenticate - Called to authenticate			/*{{{*/
++// ---------------------------------------------------------------------
++/* This is used to fetch a username and password from the user */
++bool pkgAcquireStatus::Authenticate(string Site,string Desc,string &User,string &Pass)
++{
++   /* The default behavior for all clients is to refuse to authenticate
++      interactively; this preserves backwards compatibility. */
++   return false;
++}
++									/*}}}*/
+diff -ru apt-0.6.46.4/apt-pkg/acquire.h apt-0.6.46.4new/apt-pkg/acquire.h
+--- apt-0.6.46.4/apt-pkg/acquire.h	2006-12-04 12:37:34.000000000 -0200
++++ apt-0.6.46.4new/apt-pkg/acquire.h	2007-02-02 18:21:10.000000000 -0200
+@@ -267,6 +267,9 @@
+    
+    // Called to change media
+    virtual bool MediaChange(string Media,string Drive) = 0;
++
++   // Called to authenticate
++   virtual bool Authenticate(string Site,string Desc,string &User,string &pass);
+    
+    // Each of these is called by the workers when an event occures
+    virtual void IMSHit(pkgAcquire::ItemDesc &/*Itm*/) {};
+diff -ru apt-0.6.46.4/apt-pkg/acquire-method.cc apt-0.6.46.4new/apt-pkg/acquire-method.cc
+--- apt-0.6.46.4/apt-pkg/acquire-method.cc	2006-12-04 12:37:34.000000000 -0200
++++ apt-0.6.46.4new/apt-pkg/acquire-method.cc	2007-02-05 16:52:55.000000000 -0200
+@@ -231,6 +231,61 @@
+       QueueBack = Queue;
+ }
+ 									/*}}}*/
++// AcqMethod::RequestAuth - Request Authentication			/*{{{*/
++// ---------------------------------------------------------------------
++/* This sends a 402 Authenticate message to the APT and waits for it
++   to be ackd */
++bool pkgAcqMethod::RequestAuth(string Site,string Desc,string &User,string &Pass)
++{
++   char S[1024];
++   snprintf(S,sizeof(S),"402 Authenticate\nSite: %s\nDesc: %s\nUsername: %s\n"
++	    "Password: %s\n\n", Site.c_str(), Desc.c_str(), User.c_str(),
++	    Pass.c_str());
++
++   if (write(STDOUT_FILENO,S,strlen(S)) != (signed)strlen(S))
++      exit(100);
++   
++   vector<string> MyMessages;
++   
++   /* Here we read messages until we find a 602, each non 602 message is
++      appended to the main message list for later processing */
++   while (1)
++   {
++      if (WaitFd(STDIN_FILENO) == false)
++	 return false;
++      
++      if (ReadMessages(STDIN_FILENO,MyMessages) == false)
++	 return false;
++
++      string Message = MyMessages.front();
++      MyMessages.erase(MyMessages.begin());
++      
++      // Fetch the message number
++      char *End;
++      int Number = strtol(Message.c_str(),&End,10);
++      if (End == Message.c_str())
++      {	 
++	 cerr << "Malformed message!" << endl;
++	 exit(100);
++      }
++
++      // Change ack
++      if (Number == 602)
++      {
++	 if (StringToBool(LookupTag(Message,"Fail"),false) == false)
++	 {
++	    User = LookupTag(Message,"User");
++	    Pass = LookupTag(Message,"Password");
++	    return true;
++	 }
++	 else
++	    return false;
++      }
++      
++      Messages.push_back(Message);
++   }   
++}
++									/*}}}*/
+ // AcqMethod::MediaFail - Syncronous request for new media		/*{{{*/
+ // ---------------------------------------------------------------------
+ /* This sends a 403 Media Failure message to the APT and waits for it
+diff -ru apt-0.6.46.4/apt-pkg/acquire-method.h apt-0.6.46.4new/apt-pkg/acquire-method.h
+--- apt-0.6.46.4/apt-pkg/acquire-method.h	2006-12-04 12:37:34.000000000 -0200
++++ apt-0.6.46.4new/apt-pkg/acquire-method.h	2007-02-02 18:16:02.000000000 -0200
+@@ -67,6 +67,7 @@
+    void URIStart(FetchResult &Res);
+    void URIDone(FetchResult &Res,FetchResult *Alt = 0);
+    bool MediaFail(string Required,string Drive);
++   bool RequestAuth(string Site,string Description,string &User,string &Pass);
+    virtual void Exit() {};
+ 
+    public:
+diff -ru apt-0.6.46.4/apt-pkg/acquire-worker.cc apt-0.6.46.4new/apt-pkg/acquire-worker.cc
+--- apt-0.6.46.4/apt-pkg/acquire-worker.cc	2006-12-04 12:37:34.000000000 -0200
++++ apt-0.6.46.4new/apt-pkg/acquire-worker.cc	2007-02-02 18:33:04.000000000 -0200
+@@ -320,6 +320,11 @@
+ 	 case 401:
+ 	 _error->Error("Method %s General failure: %s",Access.c_str(),LookupTag(Message,"Message").c_str());
+ 	 break;
++
++	 //402 Authentication Required
++	 case 402:
++	 Authenticate(Message);
++	 break;
+ 	 
+ 	 // 403 Media Change
+ 	 case 403:
+@@ -565,3 +570,26 @@
+    Status = string();
+ }
+ 									/*}}}*/
++// Worker::Authenticate - Request authentication			/*{{{*/
++// ---------------------------------------------------------------------
++/* */
++bool pkgAcquire::Worker::Authenticate(string Message)
++{
++   string Site = LookupTag(Message,"Site");
++   string Desc = LookupTag(Message,"Desc");
++   string User = LookupTag(Message, "Username");
++   string Pass = LookupTag(Message, "Password");
++
++   if (Log != 0)
++      Log->Authenticate(Site,Desc,User,Pass);
++
++   char S[300];
++   snprintf(S,sizeof(S),"602 Authenticated\nUser: %s\nPassword: %s\n\n",
++	    User.c_str(), Pass.c_str());
++   if (Debug == true)
++      clog << " -> " << Access << ':' << QuoteString(S,"\n") << endl;
++   OutQueue += S;
++   OutReady = true;
++   return true;
++}
++									/*}}}*/
+diff -ru apt-0.6.46.4/apt-pkg/acquire-worker.h apt-0.6.46.4new/apt-pkg/acquire-worker.h
+--- apt-0.6.46.4/apt-pkg/acquire-worker.h	2006-12-04 12:37:34.000000000 -0200
++++ apt-0.6.46.4new/apt-pkg/acquire-worker.h	2007-01-25 16:32:48.000000000 -0200
+@@ -62,6 +62,7 @@
+    bool Capabilities(string Message);
+    bool SendConfiguration();
+    bool MediaChange(string Message);
++   bool Authenticate(string Message);
+    
+    bool MethodFailure();
+    void ItemDone();
+diff -ru apt-0.6.46.4/cmdline/acqprogress.cc apt-0.6.46.4new/cmdline/acqprogress.cc
+--- apt-0.6.46.4/cmdline/acqprogress.cc	2006-12-04 12:37:35.000000000 -0200
++++ apt-0.6.46.4new/cmdline/acqprogress.cc	2007-02-02 18:38:38.000000000 -0200
+@@ -18,6 +18,8 @@
+     
+ #include <stdio.h>
+ #include <signal.h>
++#include <termios.h>
++#include <unistd.h>
+ #include <iostream>
+ 									/*}}}*/
+ 
+@@ -27,7 +29,8 @@
+ // ---------------------------------------------------------------------
+ /* */
+ AcqTextStatus::AcqTextStatus(unsigned int &ScreenWidth,unsigned int Quiet) :
+-    ScreenWidth(ScreenWidth), Quiet(Quiet)
++    ScreenWidth(ScreenWidth), Quiet(Quiet), ProxyUser(), ProxyPass(),
++    ProxyRealm()
+ {
+ }
+ 									/*}}}*/
+@@ -287,3 +290,70 @@
+    return bStatus;
+ }
+ 									/*}}}*/
++// AcqTextStatus::Authenticate - Authenticate the user			/*{{{*/
++// ---------------------------------------------------------------------
++/* Prompt for a username and password */
++bool AcqTextStatus::Authenticate(string Site,string Desc,string &User,string &Pass)
++{
++   if (Quiet)
++       return false;
++
++   string Realm = Site + Desc;
++   // Failed with current username and password, ask for them again
++   if (ProxyRealm.empty() ||
++       (User == ProxyUser && Pass == ProxyPass && Realm == ProxyRealm))
++   {
++      ProxyRealm = Realm;
++      cout << '\r' << BlankLine << '\r';
++      ioprintf(cout,_("Enter username and password for proxy %s at %s\n"),
++	       Desc.c_str(),Site.c_str());
++      ioprintf(cout,_("Username: "));
++      cout << flush;
++
++      char S[1024];
++      char C = 0;
++      size_t idx = 0;
++      while (C != '\n' && C != '\r' && idx < (sizeof(S) - 1))
++      {
++	 read(STDIN_FILENO,&C,1);
++	 S[idx++] = C;
++      }
++      S[--idx] = '\0';
++      ProxyUser = S;
++
++      ioprintf(cout,_("Password: "));
++      cout << flush;
++
++      // Turn off echo for entering the password
++      struct termios TermIO;
++      tcgetattr(STDIN_FILENO, &TermIO);
++
++      struct termios TermIO_noecho;
++      TermIO_noecho = TermIO;
++      TermIO_noecho.c_lflag &= !ECHO;
++      tcsetattr(STDIN_FILENO, TCSANOW, &TermIO_noecho);
++
++      C = 0;
++      idx = 0;
++      while (C != '\n' && C != '\r' && idx < (sizeof(S) - 1))
++      {
++	 read(STDIN_FILENO,&C,1);
++	 S[idx++] = C;
++      }
++      S[--idx] = '\0';
++      ProxyPass = S;
++
++      // Turn echo back on
++      tcsetattr(STDIN_FILENO, TCSANOW, &TermIO);
++
++      ioprintf(cout,"\n");
++      cout << flush;
++   }
++
++   User = ProxyUser;
++   Pass = ProxyPass;
++   Update = true;
++   return true;
++}
++									/*}}}*/
++
+diff -ru apt-0.6.46.4/cmdline/acqprogress.h apt-0.6.46.4new/cmdline/acqprogress.h
+--- apt-0.6.46.4/cmdline/acqprogress.h	2006-12-04 12:37:35.000000000 -0200
++++ apt-0.6.46.4new/cmdline/acqprogress.h	2007-02-02 18:37:08.000000000 -0200
+@@ -18,10 +18,14 @@
+    char BlankLine[1024];
+    unsigned long ID;
+    unsigned long Quiet;
++   string ProxyUser;
++   string ProxyPass;
++   string ProxyRealm;
+    
+    public:
+    
+    virtual bool MediaChange(string Media,string Drive);
++   virtual bool Authenticate(string Site,string Desc,string &User,string &Pass);
+    virtual void IMSHit(pkgAcquire::ItemDesc &Itm);
+    virtual void Fetch(pkgAcquire::ItemDesc &Itm);
+    virtual void Done(pkgAcquire::ItemDesc &Itm);
+diff -ru apt-0.6.46.4/methods/http.cc apt-0.6.46.4new/methods/http.cc
+--- apt-0.6.46.4/methods/http.cc	2006-12-04 12:37:36.000000000 -0200
++++ apt-0.6.46.4new/methods/http.cc	2007-02-05 16:25:49.000000000 -0200
+@@ -295,7 +295,7 @@
+ // ServerState::Open - Open a connection to the server			/*{{{*/
+ // ---------------------------------------------------------------------
+ /* This opens a connection to the server. */
+-bool ServerState::Open()
++bool ServerState::Open(bool ReadProxy)
+ {
+    // Use the already open connection if possible.
+    if (ServerFd != -1)
+@@ -306,29 +306,33 @@
+    Out.Reset();
+    Persistent = true;
+    
+-   // Determine the proxy setting
+-   if (getenv("http_proxy") == 0)
++   if (ReadProxy || Proxy.User.empty() || Proxy.Password.empty())
+    {
+-      string DefProxy = _config->Find("Acquire::http::Proxy");
+-      string SpecificProxy = _config->Find("Acquire::http::Proxy::" + ServerName.Host);
+-      if (SpecificProxy.empty() == false)
++      // Determine the proxy setting
++      if (getenv("http_proxy") == 0)
+       {
+-	 if (SpecificProxy == "DIRECT")
+-	    Proxy = "";
+-	 else
+-	    Proxy = SpecificProxy;
+-      }   
++         string DefProxy = _config->Find("Acquire::http::Proxy");
++         string SpecificProxy = _config->Find("Acquire::http::Proxy::" +
++                                              ServerName.Host);
++         if (SpecificProxy.empty() == false)
++         {
++	    if (SpecificProxy == "DIRECT")
++	       Proxy = "";
++	    else
++	       Proxy = SpecificProxy;
++         }   
++         else
++	    Proxy = DefProxy;
++      }
+       else
+-	 Proxy = DefProxy;
+-   }
+-   else
+-      Proxy = getenv("http_proxy");
++         Proxy = getenv("http_proxy");
+    
+-   // Parse no_proxy, a , separated list of domains
+-   if (getenv("no_proxy") != 0)
+-   {
+-      if (CheckDomainList(ServerName.Host,getenv("no_proxy")) == true)
+-	 Proxy = "";
++      // Parse no_proxy, a , separated list of domains
++      if (getenv("no_proxy") != 0)
++      {
++         if (CheckDomainList(ServerName.Host,getenv("no_proxy")) == true)
++	    Proxy = "";
++      }
+    }
+    
+    // Determine what host and port to use based on the proxy settings
+@@ -590,6 +594,17 @@
+       HaveContent = true;
+       return true;
+    }
++
++   if (stringcasecmp(Tag,"Proxy-Authenticate:") == 0)
++   {
++      string::size_type SplitPoint = Val.find(' ');
++      string RealmStr = Val.substr(SplitPoint + 1, 
++				   Val.length() - SplitPoint - 1);
++      AuthType = (Val.substr(0, SplitPoint) == "Basic") ? Basic : Digest;
++      SplitPoint = RealmStr.find('=') + 1;
++      Realm = RealmStr.substr(SplitPoint, RealmStr.length() - SplitPoint);
++      return true;
++   }
+    
+    if (stringcasecmp(Tag,"Content-Range:") == 0)
+    {
+@@ -898,7 +913,8 @@
+      1 - IMS hit
+      3 - Unrecoverable error 
+      4 - Error with error content page
+-     5 - Unrecoverable non-server error (close the connection) */
++     5 - Unrecoverable non-server error (close the connection)
++     6 - Authorization required */
+ int HttpMethod::DealWithHeaders(FetchResult &Res,ServerState *Srv)
+ {
+    // Not Modified
+@@ -909,7 +925,29 @@
+       Res.LastModified = Queue->LastModified;
+       return 1;
+    }
+-   
++
++   // Proxy Authentication
++   if (Srv->Result == 407)
++   {
++      string AuthUser = Proxy.User;
++      string AuthPass = Proxy.Password;
++      string Site;
++      // Strip Proxy from failed username and password.
++      Proxy.User.clear();
++      Proxy.Password.clear();
++      Site = Proxy;
++#ifdef WITH_SSL
++      if (Proxy.Access == "https")
++         Site += string(_(" (secure)"));
++#endif
++      if (RequestAuth(Site, Srv->Realm, AuthUser, AuthPass) == false)
++         exit(100);
++
++      Proxy.User = AuthUser;
++      Proxy.Password = AuthPass;
++      return 6;
++   }
++
+    /* We have a reply we dont handle. This should indicate a perm server
+       failure */
+    if (Srv->Result < 200 || Srv->Result >= 300)
+@@ -1034,11 +1072,20 @@
+    return true;
+ }
+ 									/*}}}*/
++// HttpMethod::Authorization - Handle authorization messages		/*{{{*/
++// ---------------------------------------------------------------------
++bool HttpMethod::Authorization(string Message)
++{
++   return false;
++}
++									/*}}}*/
+ // HttpMethod::Loop - Main loop						/*{{{*/
+ // ---------------------------------------------------------------------
+ /* */
+ int HttpMethod::Loop()
+ {
++   bool ReadProxy = true;
++
+    signal(SIGTERM,SigTerm);
+    signal(SIGINT,SigTerm);
+    
+@@ -1083,7 +1130,7 @@
+ 	 QueueBack = Queue;	 
+ 	 
+       // Connnect to the host
+-      if (Server->Open() == false)
++      if (Server->Open(ReadProxy) == false)
+       {
+ 	 Fail(true);
+ 	 delete Server;
+@@ -1209,13 +1256,18 @@
+ 	    File = 0;
+ 	    break;
+ 	 }
+-	 
++
++	 // Need authorization, wait for answer from the frontend.
++	 case 6:
++	 break;
++
+ 	 default:
+ 	 Fail(_("Internal error"));
+ 	 break;
+       }
+       
+       FailCounter = 0;
++      ReadProxy = false;
+    }
+    
+    return 0;
+diff -ru apt-0.6.46.4/methods/http.h apt-0.6.46.4new/methods/http.h
+--- apt-0.6.46.4/methods/http.h	2006-12-04 12:37:36.000000000 -0200
++++ apt-0.6.46.4new/methods/http.h	2007-02-02 12:51:13.000000000 -0200
+@@ -99,6 +99,8 @@
+    enum {Chunked,Stream,Closes} Encoding;
+    enum {Header, Data} State;
+    bool Persistent;
++   enum {Basic,Digest} AuthType;
++   string Realm;
+    
+    // This is a Persistent attribute of the server itself.
+    bool Pipeline;
+@@ -119,7 +121,7 @@
+    int RunHeaders();
+    bool RunData();
+    
+-   bool Open();
++   bool Open(bool ReadProxy);
+    bool Close();
+    
+    ServerState(URI Srv,HttpMethod *Owner);
+@@ -136,7 +138,9 @@
+ 
+    virtual bool Fetch(FetchItem *);
+    virtual bool Configuration(string Message);
++   virtual bool Authorization(string Message);
+    
++   bool FirstReq;
+    // In the event of a fatal signal this file will be closed and timestamped.
+    static string FailFile;
+    static int FailFd;
+@@ -155,6 +159,7 @@
+    {
+       File = 0;
+       Server = 0;
++      FirstReq = true;
+    };
+ };
+ 

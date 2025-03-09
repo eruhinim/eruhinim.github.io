@@ -1,0 +1,72 @@
+Description: Use fopen(3) instead of open(2) to escape Chromium sandbox
+
+The Chromium sandboxing mechanisms prevent direct access to the file system,
+including /dev/urandom which is used by the random number generator. However,
+it allows fopen(3) to be called on /dev/urandom for NSS's random number
+generator to work. We therefore use the same mechanism for libsrtp.
+
+The call to setvbuf(3) is used to operate in unbuffered mode, otherwise calls
+to fread(3) will return more data than wanted, unnecessarily draining the
+entropy pool, see: https://bugzilla.mozilla.org/show_bug.cgi?id=927230
+
+Author: Jeremy LainÃ© <jeremy.laine@m4x.org>
+Bug-Debian: http://bugs.debian.org/770659
+Last-Update: 2015-07-30
+
+diff --git a/crypto/rng/rand_source.c b/crypto/rng/rand_source.c
+index 1eb6fbb..0174ce0 100644
+--- a/crypto/rng/rand_source.c
++++ b/crypto/rng/rand_source.c
+@@ -45,8 +45,7 @@
+ #include "config.h"
+ 
+ #ifdef DEV_URANDOM
+-# include <fcntl.h>          /* for open()  */
+-# include <unistd.h>         /* for close() */
++# include <stdio.h>
+ #elif defined(HAVE_RAND_S)
+ # define _CRT_RAND_S
+ # include <stdlib.h>         
+@@ -73,6 +72,9 @@
+ #define RAND_SOURCE_READY     (17)
+ 
+ static int dev_random_fdes = RAND_SOURCE_NOT_READY;
++#ifdef DEV_URANDOM
++static FILE* dev_random_file = NULL;
++#endif
+ 
+ 
+ err_status_t
+@@ -83,9 +85,11 @@ rand_source_init(void) {
+   }
+ #ifdef DEV_URANDOM
+   /* open random source for reading */
+-  dev_random_fdes = open(DEV_URANDOM, O_RDONLY);
+-  if (dev_random_fdes < 0)
++  dev_random_file = fopen(DEV_URANDOM, "r");
++  if (dev_random_file == NULL)
+     return err_status_init_fail;
++  setvbuf(dev_random_file, NULL, _IONBF, 0);
++  dev_random_fdes = RAND_SOURCE_READY;
+ #elif defined(HAVE_RAND_S)
+   dev_random_fdes = RAND_SOURCE_READY;
+ #else
+@@ -108,7 +112,7 @@ rand_source_get_octet_string(void *dest, uint32_t len) {
+   uint8_t *dst = (uint8_t *)dest;
+   while (len)
+   {
+-    ssize_t num_read = read(dev_random_fdes, dst, len);
++    ssize_t num_read = fread(dst, len, 1, dev_random_file);
+     if (num_read <= 0 || num_read > len)
+       return err_status_fail;
+     len -= num_read;
+@@ -150,7 +154,8 @@ rand_source_deinit(void) {
+     return err_status_dealloc_fail;  /* well, we haven't really failed, *
+ 				      * but there is something wrong    */
+ #ifdef DEV_URANDOM
+-  close(dev_random_fdes);  
++  fclose(dev_random_file);
++  dev_random_file = NULL;
+ #endif
+   dev_random_fdes = RAND_SOURCE_NOT_READY;
+   

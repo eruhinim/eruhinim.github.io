@@ -1,0 +1,124 @@
+--- /usr/bin/debarchiver	2005-04-13 22:29:44.000000000 +0200
++++ /usr/local/bin/debarchiver2	2005-04-30 13:49:29.374001624 +0200
+@@ -34,6 +34,7 @@ $inputdir = "/var/lib/debarchiver/incomi
+ $destdir = "/var/lib/debarchiver/dists";
+ $cinstall = "installed";
+ $lockfile = "debarchiver.lock";
++$bzip2 = 0;
+ $etcconfigfile = "/etc/debarchiver.conf";
+ $inputconfigfile = "input.conf";
+ $verifysignatures = 0;
+@@ -213,6 +214,8 @@ options:
+ 			 packages are installed.
+  --autoscansources	Automaticly run dpkg-scansources after all new
+ 			 packages are installed.
++ -b | --bzip            Create bzip2 compressed Packages.bz2 and Sources.bz2
++			 files. 
+  -a | --autoscan       	Does both --autoscanpackages and --autoscansources.
+                          Use this *or* --index, not both.
+  --scanall		Scan all distributions, sections, etc.
+@@ -332,6 +335,9 @@ while ($_ = shift @ARGS2) {
+ 	}
+       }
+     }
++    elsif (/^-b$/ || /^--bzip$/) {
++      $bzip = 1;
++    }
+     elsif (/^--distinputcriteria/) {
+       $distinputcriteria = shift @ARGS2;
+     }
+@@ -681,6 +687,11 @@ sub handleScan() {
+ 	cmdaction("gzip $archdest/Sources -c > $archdest/Sources.gz",
+ 		  "Zip it",
+ 		  3);
++			if (defined $bzip) {
++	cmdaction("bzip2 $archdest/Sources -c > $archdest/Sources.bz2",
++          "BZip it",
++          3);
++		}
+       }
+       elsif (defined $autoscanpackages) {
+ 	cmdaction("dpkg-scanpackages $archdest $over/override 2>&1 > $archdest/Packages.gen",
+@@ -711,6 +722,11 @@ sub handleScan() {
+ 	      cmdaction("gzip $over/$d/Packages -c > $over/$d/Packages.gz",
+ 			"Zip it",
+ 			3);
++				if (defined $bzip) {
++				cmdaction("bzip2 $over/$d/Packages -c > $over/$d/Packages.bz2",
++		  "BZip it",
++		  3);
++				}
+ 	    }
+ 	  }
+ 	  closedir DD;
+@@ -729,6 +745,11 @@ sub handleScan() {
+ 	  cmdaction("gzip $archdest/Packages -c > $archdest/Packages.gz",
+ 		    "Zip it",
+ 		    3);
++		if (defined $bzip) {
++				cmdaction("bzip2 $archdest/Packages -c > $archdest/Packages.bz2",
++					  "BZip it",
++					  3);
++		}
+ 	}
+       }
+     }
+@@ -789,6 +810,13 @@ sub generateIndexConfig() {
+   print CONF "  ArchiveDir \"$destcdir\";\n";
+   print CONF "  Cachedir \"$cachedir\";\n";
+   print CONF "};\n\n";
++  print CONF "Default {\n";
++  print CONF "  Packages::Compress \". gzip bzip2\";\n"
++      if defined $bzip;
++  print CONF "  Sources::Compress \". gzip bzip2\";\n"
++      if defined $bzip;
++  print CONF "  Contents::Compress \". gzip\";\n";
++  print CONF "};\n\n";
+   print CONF "TreeDefault {\n";
+   print CONF "  BinCacheDB \"cache.db\";\n";
+   print CONF "  Release::Origin \"$release{origin}\";\n"
+@@ -856,6 +884,24 @@ sub handleIndex() {
+   foreach $d (keys %changedist) {
+     my (@dsections, @darches);
+     &findSectionsArchitectures("$destdir/$d", \@dsections, \@darches);
++    if (-s "$d/Contents-all") {
++      foreach $a (@darches) {
++        next if ($a eq 'source' || $a eq 'all');
++        action(! open(ARCH, ">> $d/Contents-$a"),
++               "Append to $d/Contents-$a",
++               2);
++        action(! open(ALL, "$d/Contents-all"),
++               "Read $d/Contents-all",
++               2);
++        print ARCH <ALL>;
++        close ALL;
++        close ARCH;
++        cmdaction("gzip $d/Contents-$a -c > $d/Contents-$a.gz",
++                  "Compress merged Contents files",
++                  3);
++      }
++    }
++    unlink("$d/Contents-all", "$d/Contents-all.gz");
+     foreach $s (@dsections) {
+       if (-s "$d/$s/binary-all/Packages") {
+         foreach $_ (@darches) {
+@@ -872,11 +918,17 @@ sub handleIndex() {
+           close ALL;
+           close ARCH;
+           cmdaction("gzip $d/$s/$a/Packages -c > $d/$s/$a/Packages.gz",
+-                    "Compress merged Packages file",
++                    "Compress merged Packages file with gzip",
+                     3);
++          if (defined $bzip) {
++          	cmdaction("bzip2 $d/$s/$a/Packages -c > $d/$s/$a/Packages.bz2",
++          	          "Compress merged Packages file with bzip2",
++          	          3);
++          }
+         }
+       }
+-      unlink("$d/$s/binary-all/Packages", "$d/$s/binary-all/Packages.gz");
++      unlink("$d/$s/binary-all/Packages", "$d/$s/binary-all/Packages.gz",
++             "$d/$s/binary-all/Packages.bz2");
+     }
+   }
+ 

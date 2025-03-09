@@ -1,0 +1,128 @@
+From 6d0367c00e0998bf5b5a25358c1f1854555cd03e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?P=C3=A1draig=20Brady?= <P@draigBrady.com>
+Date: Tue, 19 Mar 2024 13:19:16 +0000
+Subject: [PATCH] pinky: disable location canonicalization by default
+
+Behave like who(1) in requiring --lookup to enable this
+often slow feature.  pinky(1) is supposed to be lightweight after all.
+
+* doc/coreutils.texi (who invocation): Adjust the description to no
+longer reference dialup, and be more general about the still significant
+delays.
+(pinky invocation): Reference the same --lookup description.
+* src/pinky.c (main): Accept --lookup to enable DNS lookups.
+* NEWS: Mention the change in behavior.
+Fixes https://bugs.debian.org/628815
+---
+ NEWS               |  3 +++
+ doc/coreutils.texi | 10 +++++++---
+ src/pinky.c        | 19 ++++++++++++++++++-
+ 3 files changed, 28 insertions(+), 4 deletions(-)
+
+diff --git a/NEWS b/NEWS
+index 3a7e2aa57..0f4503cbb 100644
+--- a/NEWS
++++ b/NEWS
+@@ -65,6 +65,9 @@ GNU coreutils NEWS                                    -*- outline -*-
+   numfmt will accept lowercase 'k' to indicate Kilo or Kibi units on input,
+   and uses lowercase 'k' when outputting such units in '--to=si' mode.
+ 
++  pinky no longer tries to canonicalize the user's login location by default,
++  rather requiring the new --lookup option to enable this often slow feature.
++
+   wc no longer ignores encoding errors when counting words.
+   Instead, it treats them as non white space.
+ 
+diff --git a/doc/coreutils.texi b/doc/coreutils.texi
+index 92c9ceefb..41b644ecf 100644
+--- a/doc/coreutils.texi
++++ b/doc/coreutils.texi
+@@ -16238,11 +16238,13 @@ Print a line of column headings.
+ List only the entries that correspond to processes via which the
+ system is waiting for a user to login.  The user name is always @samp{LOGIN}.
+ 
++@macro lookupOption
+ @item --lookup
+ @opindex --lookup
+-Attempt to canonicalize hostnames found in utmp through a DNS lookup.  This
+-is not the default because it can cause significant delays on systems with
+-automatic dial-up internet access.
++Attempt to canonicalize hostnames found in utmp through a DNS lookup.
++This is not the default because of potential delays.
++@end macro
++@lookupOption
+ 
+ @item -m
+ @opindex -m
+@@ -16370,6 +16372,8 @@ format.
+ Omit the user's full name, remote host, and idle time when printing in
+ short format.
+ 
++@lookupOption
++
+ @end table
+ 
+ @exitstatus
+diff --git a/src/pinky.c b/src/pinky.c
+index 0843efd55..77c1c2c01 100644
+--- a/src/pinky.c
++++ b/src/pinky.c
+@@ -61,6 +61,9 @@ static bool include_home_and_shell = true;
+ /* if true, use the "short" output format. */
+ static bool do_short_format = true;
+ 
++/* If true, attempt to canonicalize hostnames via a DNS lookup. */
++static bool do_lookup;
++
+ /* if true, display the ut_host field. */
+ #if HAVE_STRUCT_XTMP_UT_HOST
+ static bool include_where = true;
+@@ -71,8 +74,15 @@ static bool include_where = true;
+ static char const *time_format;
+ static int time_format_width;
+ 
++/* for long options with no corresponding short option, use enum */
++enum
++{
++  LOOKUP_OPTION = CHAR_MAX + 1
++};
++
+ static struct option const longopts[] =
+ {
++  {"lookup", no_argument, nullptr, LOOKUP_OPTION},
+   {GETOPT_HELP_OPTION_DECL},
+   {GETOPT_VERSION_OPTION_DECL},
+   {nullptr, 0, nullptr, 0}
+@@ -279,7 +289,7 @@ print_entry (struct gl_utmp const *utmp_ent)
+       if (display)
+         *display++ = '\0';
+ 
+-      if (*ut_host)
++      if (*ut_host && do_lookup)
+         /* See if we can canonicalize it.  */
+         host = canon_host (ut_host);
+       if ( ! host)
+@@ -499,6 +509,9 @@ usage (int status)
+   -i              omit the user's full name and remote host in short format\n\
+   -q              omit the user's full name, remote host and idle time\n\
+                   in short format\n\
++"), stdout);
++      fputs (_("\
++      --lookup    attempt to canonicalize hostnames via DNS\n\
+ "), stdout);
+       fputs (HELP_OPTION_DESCRIPTION, stdout);
+       fputs (VERSION_OPTION_DESCRIPTION, stdout);
+@@ -574,6 +587,10 @@ main (int argc, char **argv)
+           include_home_and_shell = false;
+           break;
+ 
++        case LOOKUP_OPTION:
++          do_lookup = true;
++          break;
++
+         case_GETOPT_HELP_CHAR;
+ 
+         case_GETOPT_VERSION_CHAR (PROGRAM_NAME, AUTHORS);
+-- 
+2.43.0
+

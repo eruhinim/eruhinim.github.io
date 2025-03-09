@@ -1,0 +1,366 @@
+diff -ruN asterisk.orig/debian/changelog asterisk/debian/changelog
+--- asterisk.orig/debian/changelog	2010-02-07 14:16:28.000000000 +0100
++++ asterisk/debian/changelog	2010-02-26 17:16:52.000000000 +0100
+@@ -1,3 +1,22 @@
++asterisk (1:1.6.2.2-1.0.0jones1) jonas; urgency=low
++
++  * Local build based on Debian Sid packaging.
++  * Build-depend on libsqlite3-dev (not libsqlite-dev missing in Lenny).
++  * Build-depend on libusb-dev, libsdl-image1.2-dev, libresample-dev and
++    libgtk2.0-dev, apparently enabling various additional features.
++  * Add patches to enable video support in console:
++    + Build-depend on libavcodec-dev and libswscale-dev.
++    + Patch source to link against both libraries in distinctive
++      subdirectories (not only libavcodec and not just below main ffmpeg
++      subdirectory)
++    + Patch configure script to query pkg-config for libavcodec and
++      libswscale compile options. Ship source with patch for autoconf.ac
++      too, but commented out in quilt series file to not risk build-time
++      autoreconf'ing due to unreliable DPKG timestamping order.
++    Closes: bug#531728.
++
++ -- Jonas Smedegaard <dr@jones.dk>  Fri, 26 Feb 2010 12:46:53 +0100
++
+ asterisk (1:1.6.2.2-1) unstable; urgency=medium
+ 
+   [ Faidon Liambotis ]
+diff -ruN asterisk.orig/debian/control asterisk/debian/control
+--- asterisk.orig/debian/control	2010-02-07 14:11:15.000000000 +0100
++++ asterisk/debian/control	2010-02-26 17:47:20.000000000 +0100
+@@ -19,7 +19,7 @@
+  dahdi-source,
+  autotools-dev,
+  libnewt-dev,
+- libsqlite-dev,
++ libsqlite3-dev,
+  libspeex-dev,
+  libspeexdsp-dev,
+  graphviz,
+@@ -40,6 +40,12 @@
+  libcap-dev (>= 1:2.16-4) | libcap2-dev,
+  libspandsp-dev,
+  libopenais-dev,
++ libusb-dev,
++ libsdl-image1.2-dev,
++ libresample-dev,
++ libgtk2.0-dev,
++ libavcodec-dev,
++ libswscale-dev,
+  zlib1g-dev
+ Standards-Version: 3.8.4
+ Homepage: http://www.asterisk.org/
+diff -ruN asterisk.orig/debian/patches/ffmpeg-detection asterisk/debian/patches/ffmpeg-detection
+--- asterisk.orig/debian/patches/ffmpeg-detection	1970-01-01 01:00:00.000000000 +0100
++++ asterisk/debian/patches/ffmpeg-detection	2010-02-26 16:52:31.000000000 +0100
+@@ -0,0 +1,40 @@
++Subject: Modernize autotools FFmpeg linking
++ FFmpeg is a _family_ of libraries sharing an optional base subdir. This
++ is not properly reflected in the autoconf detection logic, and makes it
++ impossible to handle Debian location of these libraries.
++ .
++ This patch queries pkg-config, used with recent FFmpeg, for files
++ "libavcodec" and "libswscale", the family members currently used.
++Author: Jonas Smedegaard <dr@jones.dk>
++Last-Update: 2010-02-26
++--- a/configure.ac
+++++ b/configure.ac
++@@ -253,7 +253,7 @@
++ AST_EXT_LIB_SETUP([CURSES], [curses], [curses])
++ AST_EXT_LIB_SETUP([CRYPTO], [OpenSSL Cryptography support], [crypto])
++ AST_EXT_LIB_SETUP([DAHDI], [DAHDI], [dahdi])
++-AST_EXT_LIB_SETUP([FFMPEG], [Ffmpeg and avcodec library], [avcodec])
+++AST_EXT_LIB_SETUP([FFMPEG], [FFmpeg (avcodec and swscale) libraries], [ffmpeg])
++ AST_EXT_LIB_SETUP([GSM], [External GSM library], [gsm], [, use 'internal' GSM otherwise])
++ AST_EXT_LIB_SETUP([GTK], [gtk libraries], [gtk])
++ AST_EXT_LIB_SETUP([GTK2], [gtk2 libraries], [gtk2])
++@@ -1660,7 +1660,18 @@
++ 
++ AST_EXT_TOOL_CHECK([SDL], [sdl])
++ AST_EXT_LIB_CHECK([SDL_IMAGE], [SDL_image], [IMG_Load], [SDL_image.h], [${SDL_LIB}], [${SDL_INCLUDE}])
++-AST_EXT_LIB_CHECK([FFMPEG], [avcodec], [sws_getContext], [ffmpeg/avcodec.h], [-lpthread -lz -lm])
+++
+++PBX_FFMPEG=0
+++AC_CHECK_TOOL(PKGCONFIG, pkg-config, No)
+++if test ! "x${PKGCONFIG}" = xNo; then
+++   FFMPEG_INCLUDE=$(${PKGCONFIG} libavcodec libswscale --cflags 2>/dev/null)
+++   FFMPEG_LIB=$(${PKGCONFIG} libavcodec libswscale --libs)
+++   PBX_FFMPEG=1
+++   AC_DEFINE([HAVE_FFMPEG], 1, [Define if your system has the FFmpeg libraries.])
+++fi
+++AC_SUBST(PBX_FFMPEG)
+++AC_SUBST(FFMPEG_INCLUDE)
+++AC_SUBST(FFMPEG_LIB)
++ 
++ # possible places for video4linux version 1
++ AC_CHECK_HEADER([linux/videodev.h],
+diff -ruN asterisk.orig/debian/patches/ffmpeg-detection-ac asterisk/debian/patches/ffmpeg-detection-ac
+--- asterisk.orig/debian/patches/ffmpeg-detection-ac	1970-01-01 01:00:00.000000000 +0100
++++ asterisk/debian/patches/ffmpeg-detection-ac	2010-02-26 16:52:12.000000000 +0100
+@@ -0,0 +1,232 @@
++Subject: Modernize autotools FFmpeg linking
++ FFmpeg is a _family_ of libraries sharing an optional base subdir. This
++ is not properly reflected in the autoconf detection logic, and makes it
++ impossible to handle Debian location of these libraries.
++ .
++ This patch queries pkg-config, used with recent FFmpeg, for files
++ "libavcodec" and "libswscale", the family members currently used.
++ .
++ This patch was created by applying ffmpeg-detection, autoreconf'ing and
++ manually editing to keep only minimal changes.  Hence only
++ ffmpeg-detection (not this patch) makes sense to pass upstream.
++Author: Jonas Smedegaard <dr@jones.dk>
++Forwarded: not-needed
++Last-Update: 2010-02-26
++--- a/configure
+++++ b/configure
++@@ -1020,7 +1023,7 @@
++ with_curses
++ with_crypto
++ with_dahdi
++-with_avcodec
+++with_ffmpeg
++ with_gsm
++ with_gtk
++ with_gtk2
++@@ -1724,7 +1727,8 @@
++   --with-curses=PATH      use curses files in PATH
++   --with-crypto=PATH      use OpenSSL Cryptography support files in PATH
++   --with-dahdi=PATH       use DAHDI files in PATH
++-  --with-avcodec=PATH     use Ffmpeg and avcodec library files in PATH
+++  --with-ffmpeg=PATH      use FFmpeg (avcodec and swscale) libraries files
+++                          in PATH
++   --with-gsm=PATH         use External GSM library files in PATH , use
++                           'internal' GSM otherwise
++   --with-gtk=PATH         use gtk libraries files in PATH
++@@ -23130,107 +23164,111 @@
++ fi
++ 
++ 
++-if test "x${PBX_FFMPEG}" != "x1" -a "${USE_FFMPEG}" != "no"; then
++-   pbxlibdir=""
++-   # if --with-FFMPEG=DIR has been specified, use it.
++-   if test "x${FFMPEG_DIR}" != "x"; then
++-      if test -d ${FFMPEG_DIR}/lib; then
++-      	 pbxlibdir="-L${FFMPEG_DIR}/lib"
++-      else
++-      	 pbxlibdir="-L${FFMPEG_DIR}"
++-      fi
++-   fi
++-   pbxfuncname="sws_getContext"
++-   if test "x${pbxfuncname}" = "x" ; then   # empty lib, assume only headers
++-      AST_FFMPEG_FOUND=yes
++-   else
++-      as_ac_Lib=`$as_echo "ac_cv_lib_avcodec_${pbxfuncname}" | $as_tr_sh`
++-{ $as_echo "$as_me:${as_lineno-$LINENO}: checking for ${pbxfuncname} in -lavcodec" >&5
++-$as_echo_n "checking for ${pbxfuncname} in -lavcodec... " >&6; }
++-if { as_var=$as_ac_Lib; eval "test \"\${$as_var+set}\" = set"; }; then :
+++PBX_FFMPEG=0
+++if test -n "$ac_tool_prefix"; then
+++  # Extract the first word of "${ac_tool_prefix}pkg-config", so it can be a program name with args.
+++set dummy ${ac_tool_prefix}pkg-config; ac_word=$2
+++{ $as_echo "$as_me:${as_lineno-$LINENO}: checking for $ac_word" >&5
+++$as_echo_n "checking for $ac_word... " >&6; }
+++if test "${ac_cv_prog_PKGCONFIG+set}" = set; then :
++   $as_echo_n "(cached) " >&6
++ else
++-  ac_check_lib_save_LIBS=$LIBS
++-LIBS="-lavcodec ${pbxlibdir} -lpthread -lz -lm $LIBS"
++-cat confdefs.h - <<_ACEOF >conftest.$ac_ext
++-/* end confdefs.h.  */
++-
++-/* Override any GCC internal prototype to avoid an error.
++-   Use char because int might match the return type of a GCC
++-   builtin and then its argument prototype would still apply.  */
++-#ifdef __cplusplus
++-extern "C"
++-#endif
++-char ${pbxfuncname} ();
++-int
++-main ()
++-{
++-return ${pbxfuncname} ();
++-  ;
++-  return 0;
++-}
++-_ACEOF
++-if ac_fn_c_try_link "$LINENO"; then :
++-  eval "$as_ac_Lib=yes"
+++  if test -n "$PKGCONFIG"; then
+++  ac_cv_prog_PKGCONFIG="$PKGCONFIG" # Let the user override the test.
++ else
++-  eval "$as_ac_Lib=no"
+++as_save_IFS=$IFS; IFS=$PATH_SEPARATOR
+++for as_dir in $PATH
+++do
+++  IFS=$as_save_IFS
+++  test -z "$as_dir" && as_dir=.
+++    for ac_exec_ext in '' $ac_executable_extensions; do
+++  if { test -f "$as_dir/$ac_word$ac_exec_ext" && $as_test_x "$as_dir/$ac_word$ac_exec_ext"; }; then
+++    ac_cv_prog_PKGCONFIG="${ac_tool_prefix}pkg-config"
+++    $as_echo "$as_me:${as_lineno-$LINENO}: found $as_dir/$ac_word$ac_exec_ext" >&5
+++    break 2
+++  fi
+++done
+++  done
+++IFS=$as_save_IFS
+++
++ fi
++-rm -f core conftest.err conftest.$ac_objext \
++-    conftest$ac_exeext conftest.$ac_ext
++-LIBS=$ac_check_lib_save_LIBS
++ fi
++-eval ac_res=\$$as_ac_Lib
++-	       { $as_echo "$as_me:${as_lineno-$LINENO}: result: $ac_res" >&5
++-$as_echo "$ac_res" >&6; }
++-eval as_val=\$$as_ac_Lib
++-   if test "x$as_val" = x""yes; then :
++-  AST_FFMPEG_FOUND=yes
+++PKGCONFIG=$ac_cv_prog_PKGCONFIG
+++if test -n "$PKGCONFIG"; then
+++  { $as_echo "$as_me:${as_lineno-$LINENO}: result: $PKGCONFIG" >&5
+++$as_echo "$PKGCONFIG" >&6; }
++ else
++-  AST_FFMPEG_FOUND=no
+++  { $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
+++$as_echo "no" >&6; }
++ fi
++ 
++-   fi
++ 
++-   # now check for the header.
++-   if test "${AST_FFMPEG_FOUND}" = "yes"; then
++-      FFMPEG_LIB="${pbxlibdir} -lavcodec -lpthread -lz -lm"
++-      # if --with-FFMPEG=DIR has been specified, use it.
++-      if test "x${FFMPEG_DIR}" != "x"; then
++-         FFMPEG_INCLUDE="-I${FFMPEG_DIR}/include"
++-      fi
++-      FFMPEG_INCLUDE="${FFMPEG_INCLUDE} "
++-      if test "xffmpeg/avcodec.h" = "x" ; then	# no header, assume found
++-         FFMPEG_HEADER_FOUND="1"
++-      else				# check for the header
++-         saved_cppflags="${CPPFLAGS}"
++-         CPPFLAGS="${CPPFLAGS} ${FFMPEG_INCLUDE}"
++-         ac_fn_c_check_header_mongrel "$LINENO" "ffmpeg/avcodec.h" "ac_cv_header_ffmpeg_avcodec_h" "$ac_includes_default"
++-if test "x$ac_cv_header_ffmpeg_avcodec_h" = x""yes; then :
++-  FFMPEG_HEADER_FOUND=1
+++fi
+++if test -z "$ac_cv_prog_PKGCONFIG"; then
+++  ac_ct_PKGCONFIG=$PKGCONFIG
+++  # Extract the first word of "pkg-config", so it can be a program name with args.
+++set dummy pkg-config; ac_word=$2
+++{ $as_echo "$as_me:${as_lineno-$LINENO}: checking for $ac_word" >&5
+++$as_echo_n "checking for $ac_word... " >&6; }
+++if test "${ac_cv_prog_ac_ct_PKGCONFIG+set}" = set; then :
+++  $as_echo_n "(cached) " >&6
+++else
+++  if test -n "$ac_ct_PKGCONFIG"; then
+++  ac_cv_prog_ac_ct_PKGCONFIG="$ac_ct_PKGCONFIG" # Let the user override the test.
+++else
+++as_save_IFS=$IFS; IFS=$PATH_SEPARATOR
+++for as_dir in $PATH
+++do
+++  IFS=$as_save_IFS
+++  test -z "$as_dir" && as_dir=.
+++    for ac_exec_ext in '' $ac_executable_extensions; do
+++  if { test -f "$as_dir/$ac_word$ac_exec_ext" && $as_test_x "$as_dir/$ac_word$ac_exec_ext"; }; then
+++    ac_cv_prog_ac_ct_PKGCONFIG="pkg-config"
+++    $as_echo "$as_me:${as_lineno-$LINENO}: found $as_dir/$ac_word$ac_exec_ext" >&5
+++    break 2
+++  fi
+++done
+++  done
+++IFS=$as_save_IFS
+++
+++fi
+++fi
+++ac_ct_PKGCONFIG=$ac_cv_prog_ac_ct_PKGCONFIG
+++if test -n "$ac_ct_PKGCONFIG"; then
+++  { $as_echo "$as_me:${as_lineno-$LINENO}: result: $ac_ct_PKGCONFIG" >&5
+++$as_echo "$ac_ct_PKGCONFIG" >&6; }
++ else
++-  FFMPEG_HEADER_FOUND=0
+++  { $as_echo "$as_me:${as_lineno-$LINENO}: result: no" >&5
+++$as_echo "no" >&6; }
++ fi
++ 
+++  if test "x$ac_ct_PKGCONFIG" = x; then
+++    PKGCONFIG="No"
+++  else
+++    case $cross_compiling:$ac_tool_warned in
+++yes:)
+++{ $as_echo "$as_me:${as_lineno-$LINENO}: WARNING: using cross tools not prefixed with host triplet" >&5
+++$as_echo "$as_me: WARNING: using cross tools not prefixed with host triplet" >&2;}
+++ac_tool_warned=yes ;;
+++esac
+++    PKGCONFIG=$ac_ct_PKGCONFIG
+++  fi
+++else
+++  PKGCONFIG="$ac_cv_prog_PKGCONFIG"
+++fi
+++
+++if test ! "x${PKGCONFIG}" = xNo; then
+++   FFMPEG_INCLUDE=$(${PKGCONFIG} libavcodec libswscale --cflags 2>/dev/null)
+++   FFMPEG_LIB=$(${PKGCONFIG} libavcodec libswscale --libs)
+++   PBX_FFMPEG=1
+++
+++$as_echo "#define HAVE_FFMPEG 1" >>confdefs.h
++ 
++-         CPPFLAGS="${saved_cppflags}"
++-      fi
++-      if test "x${FFMPEG_HEADER_FOUND}" = "x0" ; then
++-         FFMPEG_LIB=""
++-         FFMPEG_INCLUDE=""
++-      else
++-         if test "x${pbxfuncname}" = "x" ; then		# only checking headers -> no library
++-            FFMPEG_LIB=""
++-         fi
++-         PBX_FFMPEG=1
++-         cat >>confdefs.h <<_ACEOF
++-#define HAVE_FFMPEG 1
++-#define HAVE_FFMPEG_VERSION
++-_ACEOF
++-      fi
++-   fi
++ fi
++ 
++ 
+++
+++
++ # possible places for video4linux version 1
++ ac_fn_c_check_header_mongrel "$LINENO" "linux/videodev.h" "ac_cv_header_linux_videodev_h" "$ac_includes_default"
++ if test "x$ac_cv_header_linux_videodev_h" = x""yes; then :
+diff -ruN asterisk.orig/debian/patches/ffmpeg-includes asterisk/debian/patches/ffmpeg-includes
+--- asterisk.orig/debian/patches/ffmpeg-includes	1970-01-01 01:00:00.000000000 +0100
++++ asterisk/debian/patches/ffmpeg-includes	2010-02-26 16:54:11.000000000 +0100
+@@ -0,0 +1,20 @@
++Subject: Include subdirs (not main dir) for FFmpeg paths
++ Fix include FFmpeg headers from below /usr/include/ffmpeg/<libname>
++ (this change requires -I/usr/include/ffmpeg).
++Author: Jonas Smedegaard <dr@jones.dk>
++Last-Update: 2010-02-26
++  Jonas Smedegaard <dr@jones.dk>
++--- a/channels/console_video.h
+++++ b/channels/console_video.h
++@@ -28,9 +28,9 @@
++ 		"console {device}"
++ #else
++ 
++-#include <ffmpeg/avcodec.h>
+++#include <libavcodec/avcodec.h>
++ #ifndef OLD_FFMPEG
++-#include <ffmpeg/swscale.h>     /* requires a recent ffmpeg */
+++#include <libswscale/swscale.h>     /* requires a recent ffmpeg */
++ #endif
++ 
++ #define CONSOLE_VIDEO_CMDS			\
+diff -ruN asterisk.orig/debian/patches/series asterisk/debian/patches/series
+--- asterisk.orig/debian/patches/series	2010-02-04 00:20:36.000000000 +0100
++++ asterisk/debian/patches/series	2010-02-26 17:14:13.000000000 +0100
+@@ -17,3 +17,7 @@
+ dahdi_ptmp_nt
+ dahdi_pri_debug_spannums
+ sound_files
++
++#ffmpeg-detection
++ffmpeg-detection-ac
++ffmpeg-includes

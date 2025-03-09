@@ -1,0 +1,84 @@
+diff -Naur a/approx.ml b/approx.ml
+--- a/approx.ml	2007-12-07 23:17:06.000000000 +0000
++++ b/approx.ml	2008-03-05 20:59:10.000000000 +0000
+@@ -37,6 +37,8 @@
+   done;
+   if not !foreground then use_syslog ()
+ 
++let max_redirects = 5
++
+ let stat_file name =
+   try Some (stat name) with Unix_error (ENOENT, "stat", _) -> None
+ 
+@@ -239,6 +241,7 @@
+     mutable status : int;
+     mutable length : int64;
+     mutable last_modified : float;
++    mutable location : string;
+     mutable body_seen : bool }
+ 
+ let initial_response_state =
+@@ -246,6 +249,7 @@
+     status = 0;
+     length = -1L;
+     last_modified = 0.;
++    location = "?";
+     body_seen = false }
+ 
+ let new_response name = { initial_response_state with name = name }
+@@ -276,6 +280,7 @@
+ 	(try resp.last_modified <- Url.time_of_string value
+ 	 with Invalid_argument _ ->
+ 	   error_message "Cannot parse Last-Modified date %s" value)
++    | "location" -> (resp.location <- value)
+     | _ -> ()
+   in
+   if debug then debug_message "  %s" str;
+@@ -306,15 +311,26 @@
+   let headers =
+     if ims > 0. then [ "If-Modified-Since: " ^ Url.string_of_time ims ] else []
+   in
+-  let resp = new_response name in
+-  let header_callback = process_header resp in
+-  let body_callback = process_body resp cgi in
+-  Url.download url ~headers ~header_callback body_callback;
+-  match resp.status with
+-  | 200 -> finish_delivery resp
+-  | 304 -> Not_modified
+-  | 404 -> File_not_found
+-  | n -> error_message "Unexpected status code: %d" n; File_not_found
++  let rec download_redirect redirects url =
++    let resp = new_response name in
++    let header_callback = process_header resp in
++    let body_callback = process_body resp cgi in
++    Url.download url ~headers ~header_callback body_callback;
++    match resp.status with
++    | 200 -> finish_delivery resp
++    | 301 | 302 | 303 | 307 ->
++        if redirects <= max_redirects then
++          download_redirect (redirects+1) resp.location
++        else
++          begin
++            error_message "Too many redirections";
++            File_not_found
++          end
++    | 304 -> Not_modified
++    | 404 -> File_not_found
++    | n -> error_message "Unexpected status code: %d" n; File_not_found
++  in
++  download_redirect 0 url
+ 
+ (* Download a file from an FTP repository *)
+ 
+diff -Naur a/url.ml b/url.ml
+--- a/url.ml	2007-12-07 23:17:06.000000000 +0000
++++ b/url.ml	2008-03-05 20:59:10.000000000 +0000
+@@ -52,7 +52,7 @@
+   | str -> "--limit-rate " ^ str
+ 
+ let curl_command options url =
+-  sprintf "/usr/bin/curl --fail --silent --location %s %s %s"
++  sprintf "/usr/bin/curl --fail --silent %s %s %s"
+     rate_option (String.concat " " options) (quoted_string url)
+ 
+ let head_command = curl_command ["--head"]

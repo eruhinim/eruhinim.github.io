@@ -1,0 +1,96 @@
+From e950969719df3e796cc9b5e9dc5c7bbf4bf26a51 Mon Sep 17 00:00:00 2001
+From: Paul Wise <pabs@debian.org>
+Date: Wed, 13 Mar 2019 14:10:36 +0800
+Subject: [PATCH 01/16] Do not use a world-writable /var/crash with the dumper
+ script
+
+Suggested-by: lintian
+Fixes: https://bugs.debian.org/924397
+See-also: https://bugs.debian.org/515211
+Reported-by: Jakub Wilk <jwilk@jwilk.net>
+Reported-in: <20190312145027.7npetzqs3hwlkhfr@jwilk.net>
+---
+ debian/changelog                    | 8 ++++++++
+ debian/corekeeper.lintian-overrides | 2 +-
+ debian/corekeeper.postinst.linux    | 7 +++++++
+ debian/rules                        | 2 +-
+ debian/sysctl-linux/corekeeper.conf | 5 ++++-
+ 5 files changed, 21 insertions(+), 3 deletions(-)
+
+diff --git a/debian/changelog b/debian/changelog
+index 43ec51f..20d7bb1 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,3 +1,11 @@
++corekeeper (1.7) UNRELEASED; urgency=medium
++
++  * Do not use a world-writable /var/crash with the dumper script
++    and fix the permissions on upgrade as dpkg doesn't do that.
++    (Closes: #924397) (See-also: #515211)
++
++ -- Paul Wise <pabs@debian.org>  Wed, 13 Mar 2019 14:09:50 +0800
++
+ corekeeper (1.6) unstable; urgency=medium
+ 
+   * Prevent installation with other core dump handlers:
+diff --git a/debian/corekeeper.lintian-overrides b/debian/corekeeper.lintian-overrides
+index 1e248d9..955d7e6 100644
+--- a/debian/corekeeper.lintian-overrides
++++ b/debian/corekeeper.lintian-overrides
+@@ -1,6 +1,6 @@
+ # /var/crash is intentionally world-writable to allow for
+ # centralized core dumps.
+-non-standard-dir-perm
++[kfreebsd-any]: non-standard-dir-perm
+ 
+ # The postrm script checks if systemd is running before
+ # using the systemctl command
+diff --git a/debian/corekeeper.postinst.linux b/debian/corekeeper.postinst.linux
+index a345931..2f56a92 100644
+--- a/debian/corekeeper.postinst.linux
++++ b/debian/corekeeper.postinst.linux
+@@ -4,4 +4,11 @@ set -e
+ # Activate the sysctl settings
+ [ $1 != configure ] || sysctl --quiet --load="/etc/sysctl.d/corekeeper.conf"
+ 
++# Set /var/crash to not be world writable
++# to prevent crashes being able to write arbitrary files
++[ "$1" = configure ] &&
++dpkg --compare-versions "$2" le-nl 1.6 &&
++! dpkg-statoverride --list /var/crash &&
++chmod 0755 /var/crash
++
+ #DEBHELPER#
+diff --git a/debian/rules b/debian/rules
+index a44b38b..6d52c95 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -10,7 +10,7 @@ script=debian/corekeeper/usr/lib/corekeeper/dump
+ 
+ override_dh_fixperms:
+ 	dh_fixperms
+-	chmod 1777 debian/corekeeper/var/crash
++	if [ ! -e $(script) ] ; then chmod 1777 debian/corekeeper/var/crash ; fi
+ 	if [ -e $(script) ] ; then chmod 0755 $(script) ; fi
+ 
+ override_dh_installinit:
+diff --git a/debian/sysctl-linux/corekeeper.conf b/debian/sysctl-linux/corekeeper.conf
+index e6fcb90..66bebb4 100644
+--- a/debian/sysctl-linux/corekeeper.conf
++++ b/debian/sysctl-linux/corekeeper.conf
+@@ -4,8 +4,11 @@
+ # Non-root users can see that something crashed, no way to fix that.
+ # It requires Linux 3.7-rc1, see v3.6-6800-g12a2b4b in linux.git for info.
+ # If you use it with an earlier kernel then only root can access core dumps.
+-# If you don't want to use it, comment core_pattern below and uncomment this:
++# If you don't want to use it, comment core_pattern below, dpkg-statoverride
++# /var/crash to mode 1777 and uncomment this alternate core_pattern:
+ #kernel.core_pattern = /var/crash/%p-%u-%g-%s-%t-%h-%E.core
++# When switching back to the default core pattern use mode 0755 for /var/crash
++# as it is unsafe to use the dumper with a world-writable directory.
+ kernel.core_pattern = |/usr/lib/corekeeper/dump %d %u %p-%u-%g-%s-%t-%h-%E.core
+ kernel.core_uses_pid = 1
+ fs.suid_dumpable = 2
+-- 
+2.20.1
+

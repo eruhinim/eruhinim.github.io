@@ -1,0 +1,131 @@
+Index: dpkg-reconfigure
+===================================================================
+--- dpkg-reconfigure	(revision 2265)
++++ dpkg-reconfigure	(working copy)
+@@ -87,6 +87,7 @@
+ use Debconf::Config;
+ use Debconf::AutoSelect qw(:all);
+ use Debconf::Log qw(:all);
++use Debconf::Lock;
+ 
+ # Use low priority unless an option below overrides.
+ Debconf::Config->priority('low');
+@@ -114,6 +115,8 @@
+ 	exit 1;
+ }
+ 
++my $dpkg_lock = acquire_dpkg_lock;
++
+ Debconf::Db->load;
+ 
+ if ($default_priority) {
+@@ -241,6 +244,8 @@
+ 
+ Debconf::Db->save;
+ 
++close $dpkg_lock;
++
+ # Returns a list of all installed packages.
+ sub allpackages {
+ 	my @ret;
+Index: Debconf/Lock.pm
+===================================================================
+--- Debconf/Lock.pm	(revision 0)
++++ Debconf/Lock.pm	(revision 0)
+@@ -0,0 +1,96 @@
++#!/usr/bin/perl -w
++
++=head1 NAME
++
++Debconf::Lock - dpkg lock handling for debconf
++
++=cut
++
++package Debconf::Lock;
++use strict;
++use POSIX;
++use Fcntl qw(:DEFAULT :flock :seek);
++use Debconf::Gettext;
++use Debconf::Log qw(warn);
++use base qw(Exporter);
++our @EXPORT = qw(acquire_dpkg_lock);
++
++# Translated messages throughout this file are deliberately at least similar
++# to dpkg's own (if not always identical), to help out overworked
++# translators.
++
++=head1 DESCRIPTION
++
++This module acquires the dpkg lock, so that certain debconf operations may
++be performed safely.
++
++The acquire_dpkg_lock symbol is exported by default.
++
++=head1 METHODS
++
++=over 4
++
++=cut
++
++sub linux_struct_flock {
++	my $type = shift;
++	my $whence = shift;
++
++	# On Linux, l_start and l_len might be either 4 bytes or 8 bytes
++	# depending on how perl was compiled. Since everything from l_start
++	# onwards will be zero, we just say 8 bytes for both and hope. (In
++	# other words, strictly speaking the pack format should be 's2l2i'.)
++	return pack('s2l4i', $type, $whence, 0, 0, 0, 0, 0);
++}
++
++=item acquire_dpkg_lock
++
++Acquire the dpkg lock. Returns a filehandle open on the lock file; to
++release the lock, either close this filehandle or simply allow the process
++to exit.
++
++On some operating systems, we may not yet know how to construct the lock
++structure to acquire the lock. Since debconf is often rather critical to get
++the system running, we simply warn about this and return undef.
++
++=cut
++
++sub acquire_dpkg_lock {
++	my $struct_flock;
++	if ($^O =~ /linux/) {
++		$struct_flock = \&linux_struct_flock;
++	} else {
++		warn gettext("don't know how to acquire dpkg lock on this system");
++		return undef;
++	}
++
++	my $lockfile = '/var/lib/dpkg/lock';
++
++	my $oldumask = umask;
++	umask($oldumask | 007);
++	open(DPKGLOCK, '+>', $lockfile)
++		or die gettext("unable to open/create status database lockfile")."\n";
++	umask($oldumask);
++	# rely on default $^F for close-on-exec
++
++	my $flock = $struct_flock->(F_WRLCK, SEEK_SET);
++	unless (fcntl(DPKGLOCK, F_SETLK, $flock)) {
++		if ($! == &POSIX::EACCES or $! == &POSIX::EAGAIN) {
++			die sprintf(gettext("status database area is locked by another process"))."\n";
++		} else {
++			die sprintf(gettext("unable to lock dpkg status database"))."\n";
++		}
++	}
++
++	return \*DPKGLOCK;
++}
++
++=back
++
++=head1 AUTHOR
++
++Colin Watson <cjwatson@debian.org>
++
++=cut
++
++1

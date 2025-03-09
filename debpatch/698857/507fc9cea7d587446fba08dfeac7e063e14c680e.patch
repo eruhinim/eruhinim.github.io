@@ -1,0 +1,121 @@
+From 507fc9cea7d587446fba08dfeac7e063e14c680e Mon Sep 17 00:00:00 2001
+From: Tim-Philipp MÃ¼ller <tim.muller@collabora.co.uk>
+Date: Sat, 29 Sep 2012 13:35:58 +0000
+Subject: value: avoid duplicates when intersecting lists
+
+Fixes negotiation taking a ridiculous amount of
+time (multiple 10s of seconds on a core2) when
+there are duplicate entries in lists.
+
+Could have a negative performance impact on other
+scenarios because we now have to iterate the
+dest list to avoid duplicates, but we don't
+have a lot of lists any more these days, and
+they tend to be small anyway. The negatives
+are hopefully countered by the positive effects
+of reducing the list length early on in the
+process. And in any case, it's the right thing
+to do.
+
+Based on patch by Andre Moreira Magalhaes.
+
+https://bugzilla.gnome.org/show_bug.cgi?id=684981
+---
+diff --git a/gst/gstvalue.c b/gst/gstvalue.c
+index 80c59fe..de9fa06 100644
+--- a/gst/gstvalue.c
++++ b/gst/gstvalue.c
+@@ -3498,7 +3498,7 @@ gst_value_intersect_list (GValue * dest, const GValue * value1,
+ 
+         gst_value_init_and_copy (&temp, dest);
+         g_value_unset (dest);
+-        gst_value_list_concat (dest, &temp, &intersection);
++        gst_value_list_merge (dest, &temp, &intersection);
+         g_value_unset (&temp);
+       }
+       g_value_unset (&intersection);
+diff --git a/tests/check/gst/gstcaps.c b/tests/check/gst/gstcaps.c
+index a0090a2..59f4832 100644
+--- a/tests/check/gst/gstcaps.c
++++ b/tests/check/gst/gstcaps.c
+@@ -714,6 +714,70 @@ GST_START_TEST (test_intersect2)
+ 
+ GST_END_TEST;
+ 
++GST_START_TEST (test_intersect_list_duplicate)
++{
++  GstCaps *caps1, *caps2, *icaps;
++
++  /* make sure we don't take too long to intersect these.. */
++  caps1 = gst_caps_from_string ("video/x-raw, format=(string)YV12; "
++      "video/x-raw, format=(string)I420; video/x-raw, format=(string)YUY2; "
++      "video/x-raw, format=(string)UYVY; "
++      "video/x-raw, format=(string){ I420, YV12, YUY2, UYVY, AYUV, RGBx, BGRx,"
++      " xRGB, xBGR, { RGBA, RGBA, { RGBA, RGBA }, "
++      "{ RGBA, RGBA, { RGBA, RGBA } }, { RGBA, RGBA, { RGBA, RGBA }, "
++      "{ RGBA, RGBA, { RGBA, RGBA } } }, { RGBA, RGBA, { RGBA, RGBA }, "
++      "{ RGBA, RGBA, { RGBA, RGBA } }, { RGBA, RGBA, { RGBA, RGBA }, "
++      "{ RGBA, RGBA, { RGBA, RGBA } } } }, { RGBA, RGBA, { RGBA, RGBA }, "
++      "{ RGBA, RGBA, { RGBA, RGBA } }, { RGBA, RGBA, { RGBA, RGBA }, "
++      "{ RGBA, RGBA, { RGBA, RGBA } } }, { RGBA, RGBA, { RGBA, RGBA }, "
++      "{ RGBA, RGBA, { RGBA, RGBA } }, { RGBA, RGBA, { RGBA, RGBA }, "
++      "{ RGBA, RGBA, { RGBA, RGBA } } } } } }, BGRA, ARGB, { ABGR, ABGR, "
++      "{ ABGR, ABGR }, { ABGR, ABGR, { ABGR, ABGR } }, "
++      "{ ABGR, ABGR, { ABGR, ABGR }, { ABGR, ABGR, { ABGR, ABGR } } }, "
++      "{ ABGR, ABGR, { ABGR, ABGR }, { ABGR, ABGR, { ABGR, ABGR } }, "
++      "{ ABGR, ABGR, { ABGR, ABGR }, { ABGR, ABGR, { ABGR, ABGR } } } }, "
++      "{ ABGR, ABGR, { ABGR, ABGR }, { ABGR, ABGR, { ABGR, ABGR } }, "
++      "{ ABGR, ABGR, { ABGR, ABGR }, { ABGR, ABGR, { ABGR, ABGR } } }, "
++      "{ ABGR, ABGR, { ABGR, ABGR }, { ABGR, ABGR, { ABGR, ABGR } }, "
++      "{ ABGR, ABGR, { ABGR, ABGR }, { ABGR, ABGR, { ABGR, ABGR } } } } } }, "
++      "RGB, BGR, Y41B, Y42B, YVYU, Y444 }; "
++      "video/x-raw, format=(string){ I420, YV12, YUY2, UYVY, AYUV, RGBx, BGRx, "
++      "xRGB, xBGR, { RGBA, RGBA, { RGBA, RGBA }, "
++      "{ RGBA, RGBA, { RGBA, RGBA } }, { RGBA, RGBA, { RGBA, RGBA }, "
++      "{ RGBA, RGBA, { RGBA, RGBA } } }, { RGBA, RGBA, { RGBA, RGBA }, "
++      "{ RGBA, RGBA, { RGBA, RGBA } }, { RGBA, RGBA, { RGBA, RGBA }, "
++      "{ RGBA, RGBA, { RGBA, RGBA } } } }, { RGBA, RGBA, { RGBA, RGBA }, "
++      "{ RGBA, RGBA, { RGBA, RGBA } }, { RGBA, RGBA, { RGBA, RGBA }, "
++      "{ RGBA, RGBA, { RGBA, RGBA } } }, { RGBA, RGBA, { RGBA, RGBA }, "
++      "{ RGBA, RGBA, { RGBA, RGBA } }, { RGBA, RGBA, { RGBA, RGBA }, "
++      "{ RGBA, RGBA, { RGBA, RGBA } } } } } }, BGRA, ARGB, "
++      "{ ABGR, ABGR, { ABGR, ABGR }, { ABGR, ABGR, { ABGR, ABGR } }, "
++      "{ ABGR, ABGR, { ABGR, ABGR }, { ABGR, ABGR, { ABGR, ABGR } } }, "
++      "{ ABGR, ABGR, { ABGR, ABGR }, { ABGR, ABGR, { ABGR, ABGR } }, "
++      "{ ABGR, ABGR, { ABGR, ABGR }, { ABGR, ABGR, { ABGR, ABGR } } } }, "
++      "{ ABGR, ABGR, { ABGR, ABGR }, { ABGR, ABGR, { ABGR, ABGR } }, "
++      "{ ABGR, ABGR, { ABGR, ABGR }, { ABGR, ABGR, { ABGR, ABGR } } }, "
++      "{ ABGR, ABGR, { ABGR, ABGR }, { ABGR, ABGR, { ABGR, ABGR } }, "
++      "{ ABGR, ABGR, { ABGR, ABGR }, { ABGR, ABGR, { ABGR, ABGR } } } } } }, "
++      "RGB, BGR, Y41B, Y42B, YVYU, Y444, NV12, NV21 }; "
++      "video/x-raw, format=(string){ I420, YV12, YUY2, UYVY, AYUV, RGBx, "
++      "BGRx, xRGB, xBGR, { RGBA, RGBA, { RGBA, RGBA }, "
++      "{ RGBA, RGBA, { RGBA, RGBA } }, { RGBA, RGBA, { RGBA, RGBA }, "
++      "{ RGBA, RGBA, { RGBA, RGBA } } } }, BGRA, ARGB, "
++      "{ ABGR, ABGR, { ABGR, ABGR }, { ABGR, ABGR, { ABGR, ABGR } }, "
++      "{ ABGR, ABGR, { ABGR, ABGR }, { ABGR, ABGR, { ABGR, ABGR } } } }, "
++      "RGB, BGR, Y41B, Y42B, YVYU, Y444, NV12, NV21 }");
++
++  caps2 = gst_caps_copy (caps1);
++
++  icaps = gst_caps_intersect (caps1, caps2);
++
++  gst_caps_unref (caps1);
++  gst_caps_unref (caps2);
++  gst_caps_unref (icaps);
++}
++
++GST_END_TEST;
+ 
+ GST_START_TEST (test_intersect_zigzag)
+ {
+@@ -919,6 +983,7 @@ gst_caps_suite (void)
+   tcase_add_test (tc_chain, test_merge_subset);
+   tcase_add_test (tc_chain, test_intersect);
+   tcase_add_test (tc_chain, test_intersect2);
++  tcase_add_test (tc_chain, test_intersect_list_duplicate);
+   tcase_add_test (tc_chain, test_intersect_zigzag);
+   tcase_add_test (tc_chain, test_intersect_first);
+   tcase_add_test (tc_chain, test_intersect_first2);
+--
+cgit v0.9.0.2-2-gbebe

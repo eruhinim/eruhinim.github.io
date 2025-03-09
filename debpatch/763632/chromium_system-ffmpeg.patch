@@ -1,0 +1,113 @@
+--- a/debian/chromium.lintian-overrides
++++ b/debian/chromium.lintian-overrides
+@@ -1,8 +1,6 @@
+ # sandbox is intentionally suid
+ setuid-binary usr/lib/chromium/chrome-sandbox 4755 root/root
+ # currently unavoidable embedded libraries
+-embedded-library usr/lib/chromium/chromium: libavcodec
+-embedded-library usr/lib/chromium/chromium: libavutil
+ embedded-library usr/lib/chromium/chromium: sqlite
+ embedded-library usr/lib/chromium/chromium: libpng
+ # temporarily accepting these code copies
+--- a/debian/control
++++ b/debian/control
+@@ -62,6 +62,9 @@ Build-Depends:
+  libpam0g-dev,
+  libsnappy-dev,
+  libgconf2-dev,
++ libavutil-dev,
++ libavcodec-dev,
++ libavformat-dev,
+  libasound2-dev,
+  libjsoncpp-dev,
+  libspeechd-dev,
+--- a/debian/patches/series
++++ b/debian/patches/series
+@@ -11,5 +11,6 @@ ps-print.patch
+ master-preferences.patch
+ chromedriver-revision.patch
+ 
++system/ffmpeg.patch
+ system/nspr.patch
+ system/speex.patch
+--- /dev/null
++++ b/debian/patches/system/ffmpeg.patch
+@@ -0,0 +1,50 @@
++Description: Don't change the FFmpeg ABI in chromium ...
++ ... because it breaks ABI compatibility with the system FFmpeg.
++ And don't use private API, which can change at any time.
++
++Author: Andreas Cadhalpun <Andreas.Cadhalpun@googlemail.com>
++Last-Update: <2015-07-26>
++
++--- a/media/ffmpeg/ffmpeg_common.h
+++++ b/media/ffmpeg/ffmpeg_common.h
++@@ -19,20 +19,13 @@
++ 
++ // Include FFmpeg header files.
++ extern "C" {
++-// Disable deprecated features which result in spammy compile warnings.  This
++-// list of defines must mirror those in the 'defines' section of the ffmpeg.gyp
++-// file or the headers below will generate different structures.
++-#define FF_API_PIX_FMT_DESC 0
++-#define FF_API_OLD_DECODE_AUDIO 0
++-#define FF_API_DESTRUCT_PACKET 0
++-#define FF_API_GET_BUFFER 0
++ 
++ // Temporarily disable possible loss of data warning.
++ // TODO(scherkus): fix and upstream the compiler warnings.
++ MSVC_PUSH_DISABLE_WARNING(4244);
++ #include <libavcodec/avcodec.h>
++ #include <libavformat/avformat.h>
++-#include <libavformat/internal.h>
+++//#include <libavformat/internal.h>
++ #include <libavformat/avio.h>
++ #include <libavutil/avutil.h>
++ #include <libavutil/imgutils.h>
++--- a/media/filters/ffmpeg_demuxer.cc
+++++ b/media/filters/ffmpeg_demuxer.cc
++@@ -834,6 +834,7 @@ void FFmpegDemuxer::OnFindStreamInfoDone(const PipelineStatusCB& status_cb,
++   // If no estimate is found, the stream entry will be kInfiniteDuration().
++   std::vector<base::TimeDelta> start_time_estimates(format_context->nb_streams,
++                                                     kInfiniteDuration());
+++/*
++   const AVFormatInternal* internal = format_context->internal;
++   if (internal && internal->packet_buffer &&
++       format_context->start_time != static_cast<int64>(AV_NOPTS_VALUE)) {
++@@ -852,7 +853,7 @@ void FFmpegDemuxer::OnFindStreamInfoDone(const PipelineStatusCB& status_cb,
++       packet_buffer = packet_buffer->next;
++     }
++   }
++-
+++*/
++   AVStream* audio_stream = NULL;
++   AudioDecoderConfig audio_config;
++ 
+--- a/debian/rules
++++ b/debian/rules
+@@ -54,6 +54,7 @@ defines+=use_system_re2=1 \
+          use_system_expat=1 \
+          use_system_libpng=1 \
+          use_system_libxml=1 \
++         use_system_ffmpeg=1 \
+          use_system_libjpeg=1 \
+          use_system_libwebp=1 \
+          use_system_libxslt=1 \
+@@ -105,6 +106,8 @@ flotpaths=/usr/share/javascript/jquery/*min.js \
+ 
+ override_dh_auto_configure:
+ 	for file in $(flotpaths); do ln -sf $$file third_party/flot; done
++	mv third_party/ffmpeg/ffmpeg.gyp third_party/ffmpeg/ffmpeg.gyp.orig
++	cp build/linux/unbundle/ffmpeg.gyp third_party/ffmpeg
+ 	GYP_DEFINES="$(defines)" ./build/gyp_chromium $(options)
+ 
+ override_dh_auto_build:
+@@ -142,6 +145,8 @@ override_dh_gencontrol:
+ 
+ override_dh_auto_clean:
+ 	rm -rf out
++	rm -rf third_party/ffmpeg/lib*
++	[ ! -f third_party/ffmpeg/ffmpeg.gyp.orig ] || mv third_party/ffmpeg/ffmpeg.gyp.orig third_party/ffmpeg/ffmpeg.gyp
+ 	find . -name \*.pyc -execdir rm -f {} \;
+ 	dh_auto_clean
+ 

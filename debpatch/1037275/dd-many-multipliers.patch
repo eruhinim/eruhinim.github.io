@@ -1,0 +1,83 @@
+From 09186005a77bd24caedc7fa4fc3eb8acf44a4b50 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?P=C3=A1draig=20Brady?= <P@draigBrady.com>
+Date: Sat, 10 Jun 2023 14:18:00 +0100
+Subject: [PATCH] dd: fix parsing of numbers with more than two multipliers
+
+* src/dd.c (parse_integer): Use recursion to support more than two
+multipliers.  Also protect suffix[-1] access to ensure we don't
+inspect before the passed string.
+* tests/dd/bytes.sh: Add test cases.
+* NEWS: Mention the bug fix.
+Fixes https://bugs.debian.org/1037275
+---
+ NEWS              |  4 ++++
+ src/dd.c          |  8 ++++----
+ tests/dd/bytes.sh | 12 ++++++++++++
+ 3 files changed, 20 insertions(+), 4 deletions(-)
+
+diff --git a/NEWS b/NEWS
+index e47701962..7df9ff5b0 100644
+--- a/NEWS
++++ b/NEWS
+@@ -11,6 +11,10 @@ GNU coreutils NEWS                                    -*- outline -*-
+   cksum again diagnoses read errors in its default CRC32 mode.
+   [bug introduced in coreutils-9.0]
+ 
++  dd again supports more than two multipliers for numbers.
++  Previously numbers of the form '1024x1024x32' gave "invalid number" errors.
++  [bug introduced in coreutils-9.1]
++
+   factor, numfmt, and tsort now diagnose read errors on the input.
+   [This bug was present in "the beginning".]
+ 
+diff --git a/src/dd.c b/src/dd.c
+index 665fc831c..c826d09b8 100644
+--- a/src/dd.c
++++ b/src/dd.c
+@@ -1428,7 +1428,7 @@ parse_integer (char const *str, strtol_error *invalid)
+   intmax_t result;
+ 
+   if ((e & ~LONGINT_OVERFLOW) == LONGINT_INVALID_SUFFIX_CHAR
+-      && suffix[-1] != 'B' && *suffix == 'B')
++      && *suffix == 'B' && (suffix > str && suffix[-1] != 'B'))
+     {
+       suffix++;
+       if (!*suffix)
+@@ -1436,10 +1436,10 @@ parse_integer (char const *str, strtol_error *invalid)
+     }
+ 
+   if ((e & ~LONGINT_OVERFLOW) == LONGINT_INVALID_SUFFIX_CHAR
+-      && *suffix == 'x' && ! (suffix[-1] == 'B' && strchr (suffix + 1, 'B')))
++      && *suffix == 'x')
+     {
+-      uintmax_t o;
+-      strtol_error f = xstrtoumax (suffix + 1, &suffix, 10, &o, suffixes);
++      strtol_error f = LONGINT_OK;
++      intmax_t o = parse_integer (suffix + 1, &f);
+       if ((f & ~LONGINT_OVERFLOW) != LONGINT_OK)
+         {
+           e = f;
+diff --git a/tests/dd/bytes.sh b/tests/dd/bytes.sh
+index 01753d6a0..21368ead6 100755
+--- a/tests/dd/bytes.sh
++++ b/tests/dd/bytes.sh
+@@ -60,4 +60,16 @@ for operands in "oseek=8B" "seek=8 oflag=seek_bytes"; do
+   compare expected2 out2 || fail=1
+ done
+ 
++# Check recursive integer parsing
++for oseek in '1x2x4 oflag=seek_bytes' '1Bx2x4' '1Bx8' '2Bx4B' '2x4B'; do
++  # seek bytes
++  echo abcdefghijklm |
++    dd oseek=$oseek bs=5 > out 2> /dev/null || fail=1
++  compare expected out || fail=1
++done
++
++# Negative checks for integer parsing
++for count in B B1 Bx1 KBB BB KBb KBx x1 1xx1; do
++  returns_ 1 dd count=$count </dev/null >/dev/null || fail=1
++done
+ Exit $fail
+-- 
+2.40.1
+

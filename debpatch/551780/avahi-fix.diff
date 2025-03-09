@@ -1,0 +1,72 @@
+diff --git a/CHANGES b/CHANGES
+index 3845158..19a7696 100644
+--- a/CHANGES
++++ b/CHANGES
+@@ -78,6 +78,7 @@ bash-completion (2.x)
+     Make it possible to run tests from any directory.
+   * Add a --debug-xtrace option to test/run using BASH_XTRACEFD from bash-4.1.
+   * Add a --timeout option to test/run to override the default expect timeout.
++  * Timeout when reading avahi-browse output to avoid hangs (Debian #551780).
+ 
+   [ Raphaël Droz ]
+   * Add xsltproc completion (Alioth: #311843).
+diff --git a/bash_completion b/bash_completion
+index 41197ac..f030847 100644
+--- a/bash_completion
++++ b/bash_completion
+@@ -1564,15 +1564,47 @@ _known_hosts_real()
+     fi
+ 
+     # Add hosts reported by avahi-browse, if it's available.
+-    # The original call to avahi-browse also had "-k", to avoid lookups into
+-    # avahi's services DB. We don't need the name of the service, and if it
+-    # contains ";", it may mistify the result. But on Gentoo (at least),
+-    # -k isn't available (even if mentioned in the manpage), so...
+     if type avahi-browse >&/dev/null; then
+-        COMPREPLY=( "${COMPREPLY[@]}" $( \
+-            compgen -P "$prefix$user" -S "$suffix" -W \
+-            "$( avahi-browse -cpr _workstation._tcp 2>/dev/null | \
+-                 awk -F';' '/^=/ { print $7 }' | sort -u )" -- "$cur" ) )
++        # Process substitution is not available when set -o posix.
++        local posix_on=$(set -o | awk '/^posix/ { print $2 }')
++
++        set +o posix
++        # Sometimes avahi can take a long time to respond.
++        # If we don't get a response quickly just kill it and move on.
++        #
++        # The original call to avahi-browse also had "-k", to avoid lookups into
++        # avahi's services DB. We don't need the name of the service, and if it
++        # contains ";", it may mistify the result. But on Gentoo (at least),
++        # -k isn't available (even if mentioned in the manpage), so...
++        local avahi_fd=<(
++            echo $BASHPID
++            avahi-browse -cpr _workstation._tcp 2>/dev/null | \
++                    awk -F';' '/^=/ { print $7 }' | sort -u
++        )
++
++        # Read the pid of the avahi pipe.
++        # The processes will die on their own anyway but we don't want to leak
++        # one process every time the users tabs after "ssh "
++        local avahi_pid
++        read avahi_pid < $avahi_fd
++
++        local -a avahi_reply
++        while true; do
++            # Read with a timeout of 250 miliseconds
++            local read_reply read_ret
++            read -t 0.250 read_reply < $avahi_fd
++            read_ret=$?
++            [[ $read_ret -gt 128 ]] && kill $avahi_pid
++            [[ $read_ret -ne 0 ]] && break
++            #echo "Found avahi host $read_reply"
++            avahi_reply+=("$read_reply")
++        done
++
++        [[ $posix_on = 'on' ]] && set -o posix
++
++        COMPREPLY=( "${COMPREPLY[@]}"
++            $( compgen -P "$prefix$user" -S "$suffix" \
++                -W "${avahi_reply[*]}" -- "$cur" ) )
+     fi
+ 
+     # Add results of normal hostname completion, unless

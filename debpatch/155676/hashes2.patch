@@ -1,0 +1,292 @@
+diff -x configure -x '*.m4' -x Makefile.in -urbN dpkg-1.15.5.6/configure.ac dpkg-1.15.5.6-aj/configure.ac
+--- dpkg-1.15.5.6/configure.ac	2010-01-08 18:00:34.000000000 +1000
++++ dpkg-1.15.5.6-aj/configure.ac	2010-03-07 04:38:32.547372468 +1000
+@@ -51,6 +51,16 @@
+ esac])
+ AC_SUBST(admindir)
+ 
++# Allow alternative default hash function
++hashtype="md5"
++AC_ARG_WITH(hashtype,
++	AS_HELP_STRING([--with-hashtype=HASH],
++	               [hash function to use for .hashes files]),
++[case "$with_hashtype" in
++      "md5"|"none") hashtype="$with_hashtype" ;;
++      *) AC_MSG_ERROR([invalid hashtype specified]) ;;
++esac])
++AC_SUBST(hashtype)
+ 
+ # Checks for programs.
+ AC_PROG_CC
+diff -x configure -x '*.m4' -x Makefile.in -urbN dpkg-1.15.5.6/debian/changelog dpkg-1.15.5.6-aj/debian/changelog
+--- dpkg-1.15.5.6/debian/changelog	2010-01-09 04:02:03.000000000 +1000
++++ dpkg-1.15.5.6-aj/debian/changelog	2010-03-07 04:13:03.171356041 +1000
+@@ -1,3 +1,11 @@
++dpkg (1.15.5.6+aj) unstable; urgency=low
++
++  * Non-maintainer upload.
++  * Automatically create /var/lib/dpkg/info/pkg.hashes containing MD5 hashes
++    for unpacked files.
++
++ -- Anthony Towns <aj@lazuline>  Sun, 07 Mar 2010 04:12:32 +1000
++
+ dpkg (1.15.5.6) unstable; urgency=low
+ 
+   * dpkg-source: with format "3.0 (quilt)" ensure quilt's .pc directory is
+diff -x configure -x '*.m4' -x Makefile.in -urbN dpkg-1.15.5.6/lib/dpkg/buffer.c dpkg-1.15.5.6-aj/lib/dpkg/buffer.c
+--- dpkg-1.15.5.6/lib/dpkg/buffer.c	2010-01-09 03:23:06.000000000 +1000
++++ dpkg-1.15.5.6-aj/lib/dpkg/buffer.c	2010-03-07 15:50:33.379710844 +1000
+@@ -60,6 +60,13 @@
+ 	case BUFFER_WRITE_MD5:
+ 		buffer_md5_init(write_data);
+ 		break;
++	case BUFFER_WRITE_DUP:
++		{
++		  struct buffer_data *bddup = write_data->arg.ptr;
++		  buffer_init(NULL, &bddup[0]);
++		  buffer_init(NULL, &bddup[1]);
++		}
++		break;
+ 	}
+ 	return 0;
+ }
+@@ -90,6 +97,13 @@
+ 	case BUFFER_WRITE_MD5:
+ 		buffer_md5_done(write_data);
+ 		break;
++	case BUFFER_WRITE_DUP:
++		{
++		  struct buffer_data *bddup = write_data->arg.ptr;
++		  buffer_done(NULL, &bddup[0]);
++		  buffer_done(NULL, &bddup[1]);
++		}
++		break;
+ 	}
+ 	return 0;
+ }
+@@ -126,6 +140,14 @@
+ 	case BUFFER_WRITE_MD5:
+ 		MD5Update(&(((struct buffer_write_md5ctx *)data->arg.ptr)->ctx), buf, length);
+ 		break;
++	case BUFFER_WRITE_DUP:
++		{
++		  struct buffer_data *bddup = data->arg.ptr;
++                  ret = buffer_write(&bddup[0], buf, length, desc);
++		  if (ret != length) return ret;
++                  ret = buffer_write(&bddup[1], buf, length, desc);
++		}
++		break;
+ 	default:
+ 		internerr("unknown data type '%i' in buffer_write",
+ 		          data->type);
+diff -x configure -x '*.m4' -x Makefile.in -urbN dpkg-1.15.5.6/lib/dpkg/buffer.h dpkg-1.15.5.6-aj/lib/dpkg/buffer.h
+--- dpkg-1.15.5.6/lib/dpkg/buffer.h	2010-01-08 18:00:34.000000000 +1000
++++ dpkg-1.15.5.6-aj/lib/dpkg/buffer.h	2010-03-07 15:53:23.319707965 +1000
+@@ -36,6 +36,7 @@
+ #define BUFFER_WRITE_NULL		3
+ #define BUFFER_WRITE_STREAM		4
+ #define BUFFER_WRITE_MD5		5
++#define BUFFER_WRITE_DUP		6
+ 
+ #define BUFFER_READ_FD			0
+ #define BUFFER_READ_STREAM		1
+@@ -52,6 +53,14 @@
+ 	buffer_hash(buf, hash, BUFFER_WRITE_MD5, limit)
+ 
+ #if HAVE_C99
++# define fd_fdmd5(fd1, fd2, hash, limit, ...) \
++	do { \
++	    struct buffer_data fdhash[2]; \
++            fdhash[0].arg.i = fd2; fdhash[0].type = BUFFER_WRITE_FD; \
++            fdhash[1].arg.ptr = hash; fdhash[1].type = BUFFER_WRITE_MD5; \
++            buffer_copy_IntPtr(fd1, BUFFER_READ_FD, fdhash, BUFFER_WRITE_DUP, \
++	                       limit, __VA_ARGS__); \
++        } while(0)
+ # define fd_md5(fd, hash, limit, ...) \
+ 	buffer_copy_IntPtr(fd, BUFFER_READ_FD, hash, BUFFER_WRITE_MD5, \
+ 	                   limit, __VA_ARGS__)
+@@ -87,6 +96,14 @@
+ 	buffer_copy_PtrInt(file, BUFFER_READ_STREAM, fd, BUFFER_WRITE_FD, \
+ 	                   limit, __VA_ARGS__)
+ #else /* HAVE_C99 */
++# define fd_fdmd5(fd1, fd2, hash, limit, desc...) \
++	do { \
++	    struct buffer_data fdhash[2];
++            fdhash[0].arg.i = fd2; fdhash[0].type = BUFFER_WRITE_FD;
++            fdhash[1].arg.ptr = hash; fdhash[1].type = BUFFER_WRITE_MD5;
++            buffer_copy_IntPtr(fd1, BUFFER_READ_FD, fdhash, BUFFER_WRITE_DUP, \
++	                       limit, desc...); \
++        } while(0)
+ # define fd_md5(fd, hash, limit, desc...) \
+ 	buffer_copy_IntPtr(fd, BUFFER_READ_FD, hash, BUFFER_WRITE_MD5, \
+ 	                   limit, desc)
+diff -x configure -x '*.m4' -x Makefile.in -urbN dpkg-1.15.5.6/src/Makefile.am dpkg-1.15.5.6-aj/src/Makefile.am
+--- dpkg-1.15.5.6/src/Makefile.am	2010-01-09 03:23:06.000000000 +1000
++++ dpkg-1.15.5.6-aj/src/Makefile.am	2010-03-07 04:28:18.771356095 +1000
+@@ -6,6 +6,7 @@
+ AM_CPPFLAGS = \
+ 	-DLOCALEDIR=\"$(localedir)\" \
+ 	-DADMINDIR=\"$(admindir)\" \
++	-DHASHTYPE=\"$(hashtype)\" \
+ 	-idirafter $(top_srcdir)/lib/compat \
+ 	-I$(top_builddir) \
+ 	-I$(top_srcdir)/lib
+diff -x configure -x '*.m4' -x Makefile.in -urbN dpkg-1.15.5.6/src/archives.c dpkg-1.15.5.6-aj/src/archives.c
+--- dpkg-1.15.5.6/src/archives.c	2010-01-09 03:23:06.000000000 +1000
++++ dpkg-1.15.5.6-aj/src/archives.c	2010-03-07 16:05:25.251696044 +1000
+@@ -629,19 +629,28 @@
+     /* We create the file with mode 0 to make sure nobody can do anything with
+      * it until we apply the proper mode, which might be a statoverride.
+      */
+-    fd= open(fnamenewvb.buf, (O_CREAT|O_EXCL|O_WRONLY), 0);
++    fd= open(fnamenewvb.buf, (O_CREAT|O_EXCL|O_RDWR), 0);
+     if (fd < 0)
+       ohshite(_("unable to create `%.255s' (while processing `%.255s')"), fnamenewvb.buf, ti->Name);
+     push_cleanup(cu_closefd, ehflag_bombout, NULL, 0, 1, &fd);
+     debug(dbg_eachfiledetail,"tarobject NormalFile[01] open size=%lu",
+           (unsigned long)ti->Size);
+-    { char fnamebuf[256];
++    {
++      char fnamebuf[256];
++      if (tc->hashbuf && tc->hashfn) {
++        fd_fdmd5(tc->backendpipe, fd, tc->hashbuf, ti->Size,
++                   _("backend dpkg-deb during `%.255s'"),
++                   path_quote_filename(fnamebuf, ti->Name, 256));
++        tc->hashfn(tc, fnamevb.buf);
++      } else {
+     fd_fd_copy(tc->backendpipe, fd, ti->Size,
+                _("backend dpkg-deb during `%.255s'"),
+                path_quote_filename(fnamebuf, ti->Name, 256));
+     }
++    }
+     r= ti->Size % TARBLKSZ;
+     if (r > 0) r= safe_read(tc->backendpipe,databuf,TARBLKSZ - r);
++
+     if (nifd->namenode->statoverride) 
+       debug(dbg_eachfile, "tarobject ... stat override, uid=%d, gid=%d, mode=%04o",
+ 			  nifd->namenode->statoverride->uid,
+diff -x configure -x '*.m4' -x Makefile.in -urbN dpkg-1.15.5.6/src/archives.h dpkg-1.15.5.6-aj/src/archives.h
+--- dpkg-1.15.5.6/src/archives.h	2010-01-08 18:00:34.000000000 +1000
++++ dpkg-1.15.5.6-aj/src/archives.h	2010-03-07 16:00:43.043696566 +1000
+@@ -27,6 +27,9 @@
+   int backendpipe;
+   struct pkginfo *pkg;
+   struct fileinlist **newfilesp;
++  void (*hashfn)(struct tarcontext *tc, char *fname);
++  char *hashbuf;
++  FILE *hashfile;
+ };
+ 
+ struct pkg_deconf_list {
+diff -x configure -x '*.m4' -x Makefile.in -urbN dpkg-1.15.5.6/src/main.c dpkg-1.15.5.6-aj/src/main.c
+--- dpkg-1.15.5.6/src/main.c	2010-01-09 03:23:06.000000000 +1000
++++ dpkg-1.15.5.6-aj/src/main.c	2010-03-07 04:29:59.271360858 +1000
+@@ -187,6 +187,7 @@
+ const char *admindir= ADMINDIR;
+ const char *instdir= "";
+ struct pkg_list *ignoredependss = NULL;
++const char *hashtype= HASHTYPE;
+ 
+ static const struct forceinfo {
+   const char *name;
+@@ -516,6 +517,7 @@
+   { "admindir",          0,   1, NULL,          &admindir, NULL,          0 },
+   { "instdir",           0,   1, NULL,          &instdir,  NULL,          0 },
+   { "ignore-depends",    0,   1, NULL,          NULL,      ignoredepends, 0 },
++  { "hash",              0,   1, NULL,          &hashtype, NULL,          0 },
+   { "force",             0,   2, NULL,          NULL,      setforce,      1 },
+   { "refuse",            0,   2, NULL,          NULL,      setforce,      0 },
+   { "no-force",          0,   2, NULL,          NULL,      setforce,      0 },
+diff -x configure -x '*.m4' -x Makefile.in -urbN dpkg-1.15.5.6/src/main.h dpkg-1.15.5.6-aj/src/main.h
+--- dpkg-1.15.5.6/src/main.h	2010-01-09 03:23:06.000000000 +1000
++++ dpkg-1.15.5.6-aj/src/main.h	2010-03-07 04:27:39.835358649 +1000
+@@ -127,6 +127,7 @@
+ extern const char *admindir;
+ extern const char *instdir;
+ extern struct pkg_list *ignoredependss;
++extern const char *hashtype;
+ extern const char architecture[];
+ 
+ struct invoke_hook {
+diff -x configure -x '*.m4' -x Makefile.in -urbN dpkg-1.15.5.6/src/processarc.c dpkg-1.15.5.6-aj/src/processarc.c
+--- dpkg-1.15.5.6/src/processarc.c	2010-01-09 03:23:06.000000000 +1000
++++ dpkg-1.15.5.6-aj/src/processarc.c	2010-03-07 16:07:46.095696198 +1000
+@@ -72,6 +72,29 @@
+   return pfilename;
+ }
+ 
++#if 0
++/* no longer used */
++static void 
++nullhashfn(struct tarcontext *tc, char *fname)
++{
++  if (fname[0] == '/') 
++    fname += 1;
++  if (fname[0] == '\0')
++    return;
++  fprintf(tc->hashfile, "-  %s\n", fname);
++}
++#endif
++
++static void 
++md5hashfn(struct tarcontext *tc, char *fname)
++{
++  if (fname[0] == '/') 
++    fname += 1;
++  if (fname[0] == '\0')
++    return;
++  fprintf(tc->hashfile, "MD5:%s  %s\n", tc->hashbuf, fname);
++}
++
+ void process_archive(const char *filename) {
+   static const struct TarFunctions tf = {
+     .Read = tarfileread,
+@@ -101,6 +124,7 @@
+   char *cidir, *cidirrest, *p;
+   char conffilenamebuf[MAXCONFFILENAME];
+   char *psize;
++  char md5hashbuf[MD5HASHLEN+1];
+   const char *pfilename, *newinfofilename;
+   struct fileinlist *newconff, **newconffileslastp;
+   struct fileinlist *cfile;
+@@ -608,6 +632,22 @@
+   tc.pkg= pkg;
+   tc.backendpipe= p1[0];
+ 
++  if (strcmp(hashtype, "md5") == 0) {
++    strcpy(cidirrest, "hashes");
++    tc.hashfile= fopen(cidir, "w");
++    if (tc.hashfile) {
++      push_cleanup(cu_closefile, ehflag_bombout, NULL, 0, 1, (void *)tc.hashfile);
++      tc.hashfn= md5hashfn;
++      tc.hashbuf= md5hashbuf;
++    } else {
++      ohshite(_("error trying to open %.250s"),cidir);
++    }
++  } else {
++    tc.hashfn= NULL;
++    tc.hashbuf= NULL;
++    tc.hashfile= NULL;
++  }
++
+   r= TarExtractor((void*)&tc, &tf);
+   if (r) {
+     if (errno) {
+@@ -616,11 +656,17 @@
+       ohshit(_("corrupted filesystem tarfile - corrupted package archive"));
+     }
+   }
++
+   fd_null_copy(p1[0], -1, _("dpkg-deb: zap possible trailing zeros"));
+   close(p1[0]);
+   p1[0] = -1;
+   subproc_wait_check(c1, BACKEND " --fsys-tarfile", PROCPIPE);
+ 
++  if (tc.hashfile) {
++    pop_cleanup(ehflag_normaltidy); /* tc.hashfile= fopen() */
++    if (fclose(tc.hashfile)) ohshite(_("error closing %.250s"),cidir);
++  }
++
+   if (oldversionstatus == stat_halfinstalled || oldversionstatus == stat_unpacked) {
+     /* Packages that were in `installed' and `postinstfailed' have been reduced
+      * to `unpacked' by now, by the running of the prerm script.

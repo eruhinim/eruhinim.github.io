@@ -1,0 +1,146 @@
+diff --git a/policy/ch-files.rst b/policy/ch-files.rst
+index b34c183..fa3e5be 100644
+--- a/policy/ch-files.rst
++++ b/policy/ch-files.rst
+@@ -722,6 +722,70 @@ The name of the files and directories installed by binary packages
+ outside the system PATH must be encoded in UTF-8 and should be
+ restricted to ASCII when it is possible to do so.
+ 
++.. _s-tmpfiles.d:
++
++Volatile and temporary files (``tmpfiles.d``)
++---------------------------------------------
++
++Some packages require empty directories in ``/var`` or ``/etc``, or
++symlinks or files with trivial content in ``/var``, to implement their
++functionality.  Examples include directories under ``/var/cache`` that are
++writable by the package as cache areas, an initially-empty directory in
++``/etc`` intended for local overrides added by the local system
++administrator, or a file in ``/var`` that should default to a symlink
++elsewhere on the system but may be changed later.
++
++Rather than include these symlinks, files, or directories in the binary
++package or create them in package maintainer scripts, packages should use
++the ``tmpfiles.d`` mechanism to specify the files and directories that
++should be created.  This allows associating these files and directories
++with specific packages (not currently possible when creating them in
++maintainer scripts), and allows local administrators to delete the
++contents of directories such as ``/var/cache`` with the assurance that
++``tmpfiles.d`` can recreate the necessary file structure without
++reinstalling packages or re-running maintainer scripts.
++
++For information on how to specify files and directories that should be
++managed by the ``tmpfiles.d`` mechanism, see :manpage:`tmpfiles.d(5)`.
++
++If the files or directories are only needed by a system service or
++otherwise should only be created when that service is running, packages
++should define those files and directories in the ``systemd`` unit for the
++service (and, for alternative init systems, in the configuration for that
++init system) instead of using the ``tmpfiles.d`` mechanism.  See
++:ref:`s-services-dirs` for more details.
++
++The ``tmpfiles.d`` mechanism may also be used to create and manage files
++and directories under ephemeral file systems such as ``/tmp`` and
++``/run``, although these are more likely to be associated with a running
++service and in those cases should be defined in the ``systemd`` unit for
++the service.
++
++All packages that ship ``tmpfiles.d`` configuration should declare a
++dependency on::
++
++    default-systemd-tmpfiles | systemd-tmpfiles
++
++If the package uses ``tmpfiles.d`` features that are not supported by all
++implementations of the ``systemd-tmpfiles`` virtual package in the stable
++release prior to the release being targeted, instead use::
++
++    default-systemd-tmpfiles (>= v) | systemd-tmpfiles (>= v)
++
++where ``v`` is the version of ``systemd`` in which the features were
++introduced.
++
++All packages that ship ``tmpfiles.d`` configuration should arrange for
++that configuration to be processed during package installation.  This
++should be handled by the packaging helper framework; for example, packages
++using ``debhelper`` should use ``dh_installtmpfiles``, which will add the
++appropriate commands to the package maintainer scripts.
++
++The init system must ensure that ``tmpfiles.d`` configuration is applied
++during boot and that ``tmpfiles.d`` cleanup rules are invoked
++periodically.  See :manpage:`systemd-tmpfiles(8)` for more information on
++how to do this.
++
+ .. [#]
+    If you are using GCC, ``-fPIC`` produces code with relocatable
+    position independent code, which is required for most architectures
+diff --git a/policy/ch-maintainerscripts.rst b/policy/ch-maintainerscripts.rst
+index 724074c..e43340f 100644
+--- a/policy/ch-maintainerscripts.rst
++++ b/policy/ch-maintainerscripts.rst
+@@ -50,6 +50,11 @@ absolute pathname. Maintainer scripts should also not reset the
+ appending package-specific directories. These considerations really
+ apply to all shell scripts.
+ 
++Maintainer scripts should not be used to create empty directories in
++``/var`` or ``/etc``, or symlinks or files with trivial content in
++``/var``.  Instead, use the ``tmpfiles.d`` mechanism to manage those
++directories and files.  See :ref:`s-tmpfiles.d` for more information.
++
+ .. _s-idempotency:
+ 
+ Maintainer scripts idempotency
+diff --git a/policy/ch-opersys.rst b/policy/ch-opersys.rst
+index 64c0ff6..e80e9b4 100644
+--- a/policy/ch-opersys.rst
++++ b/policy/ch-opersys.rst
+@@ -591,14 +591,44 @@ It is easiest for packages not to call ``invoke-rc.d`` directly, but
+ instead use debhelper programs that add the required ``invoke-rc.d``
+ calls automatically. See ``dh_installinit``, ``dh_installsystemd``, etc.
+ 
+-.. _s9.3.4:
++.. _s-services-dirs:
+ 
+-Boot-time initialization
+-~~~~~~~~~~~~~~~~~~~~~~~~
+-
+-This section has been deleted.
++Service Directories
++~~~~~~~~~~~~~~~~~~~
+ 
+-.. _s9.3.5:
++Many services need auxillary directories with appropriate permissions in
++``/run``, ``/var``, or ``/etc``.  Rather than including empty directories
++in the binary package, creating empty directories in maintainer scripts,
++or using the ``tmpfiles.d`` mechanism (see :ref:`s-tmpfiles.d`), services
++should configure such directories in their ``systemd`` unit.  This
++associates the directories with a service, ensures that permissions and
++access control will be managed correctly, and ensures the directories will
++be created when necessary (such as after the local administrator deleted
++directories under ``/var/cache`` or ``/var/log`` to free space).
++
++The relevant ``systemd`` unit settings are:
++
++===========================  ==============
++Setting                      Parent path
++===========================  ==============
++``RuntimeDirectory=``        ``/run``
++``StateDirectory=``          ``/var/lib``
++``CacheDirectory=``          ``/var/cache``
++``LogsDirectory=``           ``/var/log``
++``ConfigurationDirectory=``  ``/etc``
++===========================  ==============
++
++There are other settings for directory permissions and related
++configuration that may be necessary for some services.  For full
++documentation, see :manpage:`systemd.exec(5)`.
++
++Packages that support alternative init systems will need to arrange for
++the same directories to be created when ``systemd`` is not used.  This may
++be done by, for example, adding equivalent configuration for another init
++system, or creating such directories and setting appropriate permissions
++before starting the service in an init script.
++
++.. _s9.3.6:
+ 
+ Example
+ ~~~~~~~

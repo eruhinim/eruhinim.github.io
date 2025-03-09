@@ -1,0 +1,773 @@
+diff --git a/Makefile b/Makefile
+index 6b34f69..47b38c3 100644
+--- a/Makefile
++++ b/Makefile
+@@ -41,4 +41,5 @@ clean_scripts:
+ 	$(MAKE) -C scripts/ clean
+ install_scripts:
+ 	$(MAKE) -C scripts/ install DESTDIR=$(DESTDIR)
+-
++check:
++	$(MAKE) -C scripts/ check
+diff --git a/README b/README
+index 6960853..8659252 100644
+--- a/README
++++ b/README
+@@ -96,6 +96,10 @@ And now, in mostly alphabetical order, the scripts:
+   ability to install the package with a very short command is very
+   useful when troubleshooting packages.
+ 
++- debian-release-info, ubuntu-release-info: Provides information about the
++  distributions' releases. The *-release-info script will e.g. give you the
++  codename for the latest stable release of the corresponding distribution.
++
+ - debpkg: A wrapper for dpkg used by debi to allow convenient testing
+   of packages.  For debpkg to work, it needs to be made setuid root,
+   and this needs to be performed by the sysadmin -- it is not
+@@ -191,6 +195,9 @@ And now, in mostly alphabetical order, the scripts:
+ - pts-subscribe: subscribe to the PTS (Package Tracking System) for a
+   limited period of time. [bsd-mailx | mailx | mailutils, at]
+ 
++- release-info: Point to the distribution's release-info script; for example
++  debian-release-info or ubuntu-release-info.
++
+ - rc-alert: list installed packages which have release-critical bugs [wget]
+ 
+ - rmadison: Remotely query the Debian archive database about packages.
+diff --git a/debian/changelog b/debian/changelog
+index cb1f880..bc3d3e4 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -39,6 +39,10 @@ devscripts (2.10.62) UNRELEASED; urgency=low
+       file actually exists and otherwise print a more meaningful warning.
+       (Closes: #564443)
+ 
++  [ Benjamin Drung ]
++  * debian-release-info, ubuntu-release-info, release-info: New scripts to
++    gather information about the distributions' releases.
++
+  -- Patrick Schoenfeld <schoenfeld@debian.org>  Mon, 11 Jan 2010 15:32:59 +0100
+ 
+ devscripts (2.10.61) unstable; urgency=low
+diff --git a/debian/control b/debian/control
+index edc251f..d3f54f0 100644
+--- a/debian/control
++++ b/debian/control
+@@ -6,14 +6,14 @@ Uploaders: Julian Gilbey <jdg@debian.org>, Joey Hess <joeyh@debian.org>, Mohamme
+ Standards-Version: 3.8.3
+ Build-Depends: perl, debhelper (>= 6.0.0), docbook-xsl, libtimedate-perl,
+  libfile-desktopentry-perl, libterm-size-perl,  liburi-perl, libwww-perl,
+- po4a (>= 0.31), xsltproc
++ po4a (>= 0.31), xsltproc, dpkg-dev (>= 1.15.0), python, python-support
+ Vcs-Browser: http://git.debian.org/?p=devscripts/devscripts.git
+ Vcs-Git: git://git.debian.org/devscripts/devscripts.git
+ 
+ Package: devscripts
+ Architecture: any
+ Conflicts: kdesdk-scripts (<< 4:3.5.6-2)
+-Depends: dpkg-dev, perl, ${shlibs:Depends}, ${misc:Depends}
++Depends: dpkg-dev, perl, ${shlibs:Depends}, ${misc:Depends}, ${python:Depends}
+ Recommends: at, curl | wget, dctrl-tools, debian-keyring, debian-maintainers,
+  dput | dupload, equivs, fakeroot, gnupg, libauthen-sasl-perl,
+  libcrypt-ssleay-perl, libparse-debcontrol-perl, libsoap-lite-perl,
+@@ -67,6 +67,9 @@ Description: scripts to make the life of a Debian Package maintainer easier
+   - debdiff: compare two versions of a Debian package to check for
+     added and removed files [wdiff, patchutils]
+   - debi: install a just-built package
++  - debian-release-info, ubuntu-release-info: Provides information about the
++    distributions' releases. The *-release-info script will e.g. give you the
++    codename for the latest stable release of the corresponding distribution.
+   - debpkg: dpkg wrapper to be able to manage/test packages without su
+   - debrelease: wrapper around dupload or dput [dupload | dput, ssh-client]
+   - debsign, debrsign: sign a .changes/.dsc pair without needing any of
+@@ -109,6 +112,8 @@ Description: scripts to make the life of a Debian Package maintainer easier
+     [libtimedate-perl, gnuplot]
+   - pts-subscribe: subscribe to the PTS for a limited period of time
+     [bsd-mailx | mailx | mailutils, at]
++  - release-info: Point to the distribution's release-info script; for example
++    debian-release-info or ubuntu-release-info.
+   - rc-alert: list installed packages which have release-critical bugs [wget]
+   - rmadison: remotely query the Debian archive database about packages
+     [wget | curl, liburi-perl]
+diff --git a/debian/copyright b/debian/copyright
+index 822b50b..cbd95c6 100644
+--- a/debian/copyright
++++ b/debian/copyright
+@@ -21,7 +21,8 @@ the GPL, version 2 or later.
+ - annotate-output, debdiff and nmudiff are released under version 2 
+   (only) of the GPL.
+ 
+-- debsnap and diff2patches are released under version 3 or later of the GPL
++- debsnap, diff2patches, *-release-info are released under version 3 or later
++  of the GPL
+ 
+ - deb-reversion is under the Artistic License version 2.0.
+ 
+diff --git a/debian/rules b/debian/rules
+index d3573fe..aef01c3 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -27,6 +27,7 @@ build-arch: build-stamp-arch
+ build-stamp-arch: test-stamp
+ 	dh_testdir
+ 	$(MAKE) CFLAGS='-g $(optimize) -Wall'
++	$(MAKE) check
+ 	touch build-stamp-arch
+ 
+ build: build-arch build-indep
+@@ -77,6 +78,7 @@ binary-arch: build-arch install
+ 	dh_fixperms
+ 	dh_installdeb
+ 	dh_perl
++	dh_pysupport
+ 	dh_shlibdeps
+ 	dh_gencontrol
+ 	dh_md5sums
+diff --git a/scripts/Makefile b/scripts/Makefile
+index b1dbea9..8f8a76a 100644
+--- a/scripts/Makefile
++++ b/scripts/Makefile
+@@ -7,9 +7,11 @@ VERSION := $(shell cat $(VERSION_FILE))
+ 
+ PL_FILES := $(wildcard *.pl)
+ SH_FILES = $(wildcard *.sh)
++PY_FILES := $(wildcard *.py)
++DATA_FILES := $(wildcard *.csv)
+ LIBS = libvfork.so.0
+ CWRAPPERS = debpkg-wrapper
+-SCRIPTS = $(patsubst %.pl,%,$(PL_FILES)) $(patsubst %.sh,%,$(SH_FILES))
++SCRIPTS = $(patsubst %.pl,%,$(PL_FILES)) $(patsubst %.sh,%,$(SH_FILES)) $(patsubst %.py,%,$(PY_FILES))
+ COMPL_FILES := $(wildcard *.bash_completion)
+ COMPLETION = $(patsubst %.bash_completion,devscripts.%,$(COMPL_FILES))
+ 
+@@ -21,6 +23,7 @@ GEN_MAN1S = bts.1 build-rdeps.1 chdist.1 dcontrol.1 debcheckout.1 debcommit.1 \
+ BINDIR = /usr/bin
+ LIBDIR = /usr/lib/devscripts
+ BIN_LIBDIR = /usr/lib/devscripts
++DATA_DIR = /usr/share/devscripts
+ 
+ all: $(SCRIPTS) $(GEN_MAN1S) $(LIBS) $(CWRAPPERS) $(COMPLETION)
+ 
+@@ -32,6 +35,8 @@ all: $(SCRIPTS) $(GEN_MAN1S) $(LIBS) $(CWRAPPERS) $(COMPLETION)
+ %.tmp: %.pl $(VERSION_FILE)
+ 	sed -e "s/###VERSION###/$(VERSION)/" $<  > $@
+ 	perl -I.. -c $@
++%.tmp: %.py $(VERSION_FILE)
++	sed -e "s/###VERSION###/$(VERSION)/;s|###DATA_DIR###|$(DATA_DIR)|" $<  > $@
+ %: %.tmp
+ 	cp $< $@
+ 	chmod +x $@
+@@ -61,11 +66,16 @@ clean:
+ 		$(GEN_MAN1S) $(SCRIPT_LIBS) $(CWRAPPERS) \
+ 		libvfork.o libvfork.so.0 $(COMPLETION)
+ 
++check:
++	$(CURDIR)/check-release-info-data
++
+ install: all
+ 	cp $(SCRIPTS) $(DESTDIR)$(BINDIR)
++	cp $(DATA_FILES) $(DESTDIR)$(DATA_DIR)
+ 	cp $(LIBS) $(DESTDIR)$(LIBDIR)
+ 	cp $(COMPLETION) $(DESTDIR)/etc/bash_completion.d
+ 	# Special treatment for debpkg
+ 	mv $(DESTDIR)$(BINDIR)/debpkg $(DESTDIR)$(PERLMOD_DIR)
+ 	cp debpkg-wrapper $(DESTDIR)$(BINDIR)/debpkg
+-
++	# Symlink to system release-info script
++	ln -sf $(shell dpkg-vendor --query Vendor | tr '[:upper:]' '[:lower:]')-release-info $(DESTDIR)$(BINDIR)/release-info
+diff --git a/scripts/check-release-info-data b/scripts/check-release-info-data
+new file mode 100755
+index 0000000..24645f0
+--- /dev/null
++++ b/scripts/check-release-info-data
+@@ -0,0 +1,99 @@
++#!/usr/bin/python
++
++#    check-data - checks, if the data in the cvs files are correct
++#    Copyright 2009-2010  Benjamin Drung <bdrung@ubuntu.com>
++#
++#    This program is free software: you can redistribute it and/or modify
++#    it under the terms of the GNU General Public License as published by
++#    the Free Software Foundation, either version 3 of the License, or
++#    (at your option) any later version.
++#
++#    This program is distributed in the hope that it will be useful,
++#    but WITHOUT ANY WARRANTY; without even the implied warranty of
++#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++#    GNU General Public License for more details.
++#
++#    You should have received a copy of the GNU General Public License
++#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++import csv
++import datetime
++import os
++import sys
++
++def convert_date(s):
++	if s is None or s == "":
++		date = None
++	else:
++		try:
++			(year, month, day) = map(lambda x: int(x), s.split("-"))
++			date = datetime.date(year, month, day)
++		except ValueError:
++			(year, month) = map(int, s.split("-"))
++			if month == 12:
++				date = datetime.date(year, month, 31)
++			else:
++				date = datetime.date(year, month + 1, 1) - datetime.timedelta(1)
++	return date
++
++def error_message(filename, line, message):
++	sys.stderr.write(filename + ": line" + str(line) + ": " + message + "\n")
++	sys.exit(1)
++
++def check_version(filename, line, version):
++	if not type(version) == str:
++		error_message(filename, line, "version is not an string")
++
++def check_strings(filename, line, row, columns):
++	for column in columns:
++		if not type(row[column]) == str or len(row[column]) == 0:
++			error_message(filename, line, "column " + column + " contains no valid string")
++
++def check_dates(filename, line, row, columns):
++	for column in columns:
++		if not row[column] is None and type(row[column]) != datetime.date:
++			error_message(filename, line, "column " + column + " is no valid date")
++
++def read_debian_file(filename):
++	csvfile = open(filename)
++	csv_reader = csv.DictReader(csvfile)
++	rows = []
++
++	for row in csv_reader:
++		for column in ("release","eol"):
++			row[column] = convert_date(row[column])
++		rows.append(row)
++
++	return rows
++
++def check_debian(filename):
++	data = read_debian_file(filename)
++	for i in xrange(len(data)):
++		row = data[i]
++		check_version(filename, i + 1, row["version"])
++		check_strings(filename, i + 1, row, ("codename", "series"))
++		check_dates(filename, i + 1, row, ("release","eol"))
++
++def read_ubuntu_file(filename):
++	csvfile = open(filename)
++	csv_reader = csv.DictReader(csvfile)
++	rows = []
++
++	for row in csv_reader:
++		for column in ("release","eol","eol-server"):
++			row[column] = convert_date(row[column])
++		rows.append(row)
++
++	return rows
++
++def check_ubuntu(filename):
++	data = read_ubuntu_file(filename)
++	for i in xrange(len(data)):
++		row = data[i]
++		check_version(filename, i + 1, row["version"])
++		check_strings(filename, i + 1, row, ("codename", "series"))
++		check_dates(filename, i + 1, row, ("release","eol","eol-server"))
++
++if __name__ == "__main__":
++	check_debian("debian.csv")
++	check_ubuntu("ubuntu.csv")
+diff --git a/scripts/debian-release-info.1 b/scripts/debian-release-info.1
+new file mode 100644
+index 0000000..2c7a540
+--- /dev/null
++++ b/scripts/debian-release-info.1
+@@ -0,0 +1,38 @@
++.TH DEBIAN-RELEASE-INFO "1" "December 2009" "debian-release-info" "User Commands"
++.SH NAME
++debian-release-info \- provides information about Debian's releases
++.SH SYNOPSIS
++.B debian-release-info
++[\fIOPTIONS\fR] \fIVERSION\fR
++.SH OPTIONS
++.TP
++\fB\-\-date\fR
++date for calculating the version (default: today)
++.TP
++\fB\-h\fR, \fB\-\-help\fR
++display this help and exit
++.SH "VERSION"
++.TP
++\fB\-a\fR, \fB\-\-all\fR
++list all known versions
++.TP
++\fB\-d\fR, \fB\-\-devel\fR
++latest development version
++.TP
++\fB\-o\fR, \fB\-\-old\fR
++latest old (stable) version
++.TP
++\fB\-s\fR, \fB\-\-stable\fR
++latest stable version
++.TP
++\fB\-\-supported\fR
++list of all supported stable versions
++.TP
++\fB\-t\fR, \fB\-\-testing\fR
++latest testing version
++.TP
++\fB\-\-unsupported\fR
++list of all unsupported stable versions
++.SH AUTHOR
++The script and this manual page was written by
++Benjamin Drung <bdrung@ubuntu.com>.
+diff --git a/scripts/debian-release-info.py b/scripts/debian-release-info.py
+new file mode 100755
+index 0000000..4958ee4
+--- /dev/null
++++ b/scripts/debian-release-info.py
+@@ -0,0 +1,157 @@
++#!/usr/bin/python
++
++#    debian-release-info - provides information about Debian's releases
++#    Copyright 2009-2010  Benjamin Drung <bdrung@ubuntu.com>
++#
++#    This program is free software: you can redistribute it and/or modify
++#    it under the terms of the GNU General Public License as published by
++#    the Free Software Foundation, either version 3 of the License, or
++#    (at your option) any later version.
++#
++#    This program is distributed in the hope that it will be useful,
++#    but WITHOUT ANY WARRANTY; without even the implied warranty of
++#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++#    GNU General Public License for more details.
++#
++#    You should have received a copy of the GNU General Public License
++#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++import csv
++import datetime
++import getopt
++import os
++import sys
++
++# error codes
++COMMAND_LINE_SYNTAX_ERROR = 1
++DISTRIBUTION_DATA_OUTDATED = 2
++
++def convert_date(s):
++	if s is None or s == "":
++		date = None
++	else:
++		try:
++			(year, month, day) = map(lambda x: int(x), s.split("-"))
++			date = datetime.date(year, month, day)
++		except ValueError:
++			(year, month) = map(int, s.split("-"))
++			if month == 12:
++				date = datetime.date(year, month, 31)
++			else:
++				date = datetime.date(year, month + 1, 1) - datetime.timedelta(1)
++	return date
++
++def read_file(filename):
++	csvfile = open(filename)
++	csv_reader = csv.DictReader(csvfile)
++	rows = []
++
++	for row in csv_reader:
++		for column in ("release","eol"):
++			row[column] = convert_date(row[column])
++		rows.append(row)
++
++	return rows
++
++def get_data_dir():
++	data_dir = os.path.dirname(sys.argv[0])
++	if data_dir == "/usr/bin":
++		data_dir = "###DATA_DIR###"
++	return data_dir
++
++def main(date, selected):
++	lines = read_file(os.path.join(get_data_dir(), "debian.csv"))
++
++	releases = None
++	if selected == "all":
++		releases = lines
++	elif selected == "devel":
++		releases = filter(lambda x: x["release"] is None or (date < x["release"] and (x["eol"] is None or date <= x["eol"])), lines)
++		del releases[0:-1]
++	elif selected == "old":
++		releases = filter(lambda x: x["release"] is not None and date >= x["release"] and (x["eol"] is None or date <= x["eol"]), lines)
++		del releases[-1]
++		del releases[0:-1]
++	elif selected == "stable":
++		releases = filter(lambda x: x["release"] is not None and date >= x["release"] and (x["eol"] is None or date <= x["eol"]), lines)
++		del releases[0:-1]
++	elif selected == "supported":
++		releases = filter(lambda x: x["eol"] is None or date <= x["eol"], lines)
++	elif selected == "testing":
++		releases = filter(lambda x: x["release"] is None or (date < x["release"] and (x["eol"] is None or date <= x["eol"])), lines)
++		del releases[-1]
++		del releases[0:-1]
++	elif selected == "unsupported":
++		releases = filter(lambda x: x["eol"] is not None and date > x["eol"], lines)
++
++	if len(releases) == 0:
++		sys.stderr.write("E: Distribution data outdated.\n")
++		sys.exit(DISTRIBUTION_DATA_OUTDATED)
++
++	for release in map(lambda x: x["series"], releases):
++		print release
++
++
++def usage(output_target):
++	print >> output_target, """Usage: %s [OPTIONS] VERSION
++
++Options:
++      --date         date for calculating the version (default: today)
++  -h, --help         display this help and exit
++
++Version:
++  -a, --all          list all known versions
++  -d, --devel        latest development version
++  -o, --old          latest old (stable) version
++  -s, --stable       latest stable version
++      --supported    list of all supported stable versions
++  -t, --testing      current testing version
++      --unsupported  list of all unsupported stable versions""" % (sys.argv[0])
++
++
++if __name__ == "__main__":
++	try:
++		long_opts = ["all", "date=", "devel", "help", "oldstable", "stable",
++				"supported", "testing", "unsupported"]
++		opts, args = getopt.gnu_getopt(sys.argv[1:], "adhost", long_opts)
++	except getopt.GetoptError, e:
++		# print help information and exit:
++		print str(e) # will print something like "option -a not recognized"
++		sys.exit(COMMAND_LINE_SYNTAX_ERROR)
++
++	date = datetime.date.today()
++	release = set()
++
++	for o, a in opts:
++		if o in ("-a", "--all"):
++			release.add("all")
++		elif o == "--date":
++			try:
++				date = convert_date(a)
++			except ValueError:
++				print "Option " + o + " needs to be an date in ISO 8601 format."
++				sys.exit(COMMAND_LINE_SYNTAX_ERROR)
++		elif o in ("-d", "--devel"):
++			release.add("devel")
++		elif o in ("-h", "--help"):
++			usage(sys.stdout)
++			sys.exit()
++		elif o in ("-o", "--old"):
++			release.add("old")
++		elif o in ("-s", "--stable"):
++			release.add("stable")
++		elif o == "--supported":
++			release.add("supported")
++		elif o in ("-t", "--testing"):
++			release.add("testing")
++		elif o == "--unsupported":
++			release.add("unsupported")
++		else:
++			assert False, "unhandled option"
++
++	if len(release) != 1:
++		sys.stderr.write("You have to select exactly one of --all, --devel, --old, --stable, --supported, --testing, --unsupported.\n")
++		sys.exit(COMMAND_LINE_SYNTAX_ERROR)
++
++	main(date, release.pop())
++	sys.exit(0)
+diff --git a/scripts/debian.csv b/scripts/debian.csv
+new file mode 100644
+index 0000000..ac4e1d7
+--- /dev/null
++++ b/scripts/debian.csv
+@@ -0,0 +1,13 @@
++version,codename,series,release,eol
++1.1,Buzz,buzz,1996-06-17,1997-06-05
++1.2,Rex,rex,1996-12-12,1998-06-05
++1.3,Bo,bo,1997-06-05,1999-03-09
++2.0,Hamm,hamm,1998-07-24,2000-03-09
++2.1,Slink,slink,1999-03-09,2000-10-30
++2.2,Potato,potato,2000-08-15,2003-07-30
++3.0,Woody,woody,2002-07-19,2006-06-30
++3.1,Sarge,sarge,2005-06-06,2008-03-30
++4.0,Etch,etch,2007-04-08,2009-02-14
++5.0,Lenny,lenny,2009-02-14
++6.0,Squeeze,squeeze
++,Sid,sid
+diff --git a/scripts/release-info.1 b/scripts/release-info.1
+new file mode 100644
+index 0000000..f33691d
+--- /dev/null
++++ b/scripts/release-info.1
+@@ -0,0 +1,44 @@
++.TH RELEASE-INFO "1" "December 2009" "release-info" "User Commands"
++.SH NAME
++release-info \- provides information about the distributions' releases
++.SH SYNOPSIS
++.B release-info
++[\fIOPTIONS\fR] \fIVERSION\fR
++.SH DESCRIPTION
++.B release-info
++is a symlink to the release-info command of your distribution. On Debian it links to
++.B debian-release-info
++and on Ubuntu it links to
++.B ubuntu-release-info.
++All options, which are described in this manual page, are available in all
++.B release-info
++commands. All other options, which are not described here, are distribution
++specific.
++.SH OPTIONS
++.TP
++\fB\-\-date\fR
++date for calculating the version (default: today)
++.TP
++\fB\-h\fR, \fB\-\-help\fR
++display this help and exit
++.SH "VERSION"
++.TP
++\fB\-a\fR, \fB\-\-all\fR
++list all known versions
++.TP
++\fB\-d\fR, \fB\-\-devel\fR
++latest development version
++.TP
++\fB\-s\fR, \fB\-\-stable\fR
++latest stable version
++.TP
++\fB\-\-supported\fR
++list of all supported stable versions
++.TP
++\fB\-\-unsupported\fR
++list of all unsupported stable versions
++.SH SEE ALSO
++debian-release-info(1), ubuntu-release-info(1)
++.SH AUTHOR
++The script and this manual page was written by
++Benjamin Drung <bdrung@ubuntu.com>.
+diff --git a/scripts/ubuntu-release-info.1 b/scripts/ubuntu-release-info.1
+new file mode 100644
+index 0000000..8dceb42
+--- /dev/null
++++ b/scripts/ubuntu-release-info.1
+@@ -0,0 +1,35 @@
++.TH UBUNTU-RELEASE-INFO "1" "December 2009" "ubuntu-release-info" "User Commands"
++.SH NAME
++ubuntu-release-info \- provides information about Ubuntu's releases
++.SH SYNOPSIS
++.B ubuntu-release-info
++[\fIOPTIONS\fR] \fIVERSION\fR
++.SH OPTIONS
++.TP
++\fB\-\-date\fR
++date for calculating the version (default: today)
++.TP
++\fB\-h\fR, \fB\-\-help\fR
++display this help and exit
++.SH "VERSION"
++.TP
++\fB\-a\fR, \fB\-\-all\fR
++list all known versions
++.TP
++\fB\-d\fR, \fB\-\-devel\fR
++latest development version
++.TP
++\fB\-\-lts\fR
++latest long term support (LTS) version
++.TP
++\fB\-s\fR, \fB\-\-stable\fR
++latest stable version
++.TP
++\fB\-\-supported\fR
++list of all supported stable versions
++.TP
++\fB\-\-unsupported\fR
++list of all unsupported stable versions
++.SH AUTHOR
++The script and this manual page was written by
++Benjamin Drung <bdrung@ubuntu.com>.
+diff --git a/scripts/ubuntu-release-info.py b/scripts/ubuntu-release-info.py
+new file mode 100755
+index 0000000..1d8a995
+--- /dev/null
++++ b/scripts/ubuntu-release-info.py
+@@ -0,0 +1,149 @@
++#!/usr/bin/python
++
++#    ubuntu-release-info - provides information about Ubuntu's releases
++#    Copyright 2009-2010  Benjamin Drung <bdrung@ubuntu.com>
++#
++#    This program is free software: you can redistribute it and/or modify
++#    it under the terms of the GNU General Public License as published by
++#    the Free Software Foundation, either version 3 of the License, or
++#    (at your option) any later version.
++#
++#    This program is distributed in the hope that it will be useful,
++#    but WITHOUT ANY WARRANTY; without even the implied warranty of
++#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++#    GNU General Public License for more details.
++#
++#    You should have received a copy of the GNU General Public License
++#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++import csv
++import datetime
++import getopt
++import os
++import sys
++
++# error codes
++COMMAND_LINE_SYNTAX_ERROR = 1
++DISTRIBUTION_DATA_OUTDATED = 2
++
++def convert_date(s):
++	if s is None or s == "":
++		date = None
++	else:
++		try:
++			(year, month, day) = map(lambda x: int(x), s.split("-"))
++			date = datetime.date(year, month, day)
++		except ValueError:
++			(year, month) = map(int, s.split("-"))
++			if month == 12:
++				date = datetime.date(year, month, 31)
++			else:
++				date = datetime.date(year, month + 1, 1) - datetime.timedelta(1)
++	return date
++
++def read_file(filename):
++	csvfile = open(filename)
++	csv_reader = csv.DictReader(csvfile)
++	rows = []
++
++	for row in csv_reader:
++		for column in ("release","eol","eol-server"):
++			row[column] = convert_date(row[column])
++		rows.append(row)
++
++	return rows
++
++def get_data_dir():
++	data_dir = os.path.dirname(sys.argv[0])
++	if data_dir == "/usr/bin":
++		data_dir = "###DATA_DIR###"
++	return data_dir
++
++def main(date, selected):
++	lines = read_file(os.path.join(get_data_dir(), "ubuntu.csv"))
++
++	releases = None
++	if selected == "all":
++		releases = lines
++	if selected == "devel":
++		releases = filter(lambda x: date < x["release"] and date <= x["eol"], lines)
++		del releases[1:]
++	elif selected == "lts":
++		releases = filter(lambda x: x["version"].find("LTS") >= 0 and date >= x["release"] and date <= x["eol"], lines)
++		del releases[0:-1]
++	elif selected == "stable":
++		releases = filter(lambda x: date >= x["release"] and date <= x["eol"], lines)
++		del releases[0:-1]
++	elif selected == "supported":
++		releases = filter(lambda x: date <= x["eol"] or (x["eol-server"] is not None and date <= x["eol-server"]), lines)
++	elif selected == "unsupported":
++		releases = filter(lambda x: date > x["eol"], lines)
++
++	if len(releases) == 0:
++		sys.stderr.write("E: Distribution data outdated.\n")
++		sys.exit(DISTRIBUTION_DATA_OUTDATED)
++
++	for release in map(lambda x: x["series"], releases):
++		print release
++
++
++def usage(output_target):
++	print >> output_target, """Usage: %s [OPTIONS] VERSION
++
++Options:
++      --date         date for calculating the version (default: today)
++  -h, --help         display this help and exit
++
++Version:
++  -a, --all          list all known versions
++  -d, --devel        latest development version
++      --lts          latest long term support (LTS) version
++  -s, --stable       latest stable version
++      --supported    list of all supported stable versions
++      --unsupported  list of all unsupported stable versions""" % (sys.argv[0])
++
++
++if __name__ == "__main__":
++	try:
++		long_opts = ["all", "date=", "devel", "lts", "help", "stable",
++				"supported", "unsupported"]
++		opts, args = getopt.gnu_getopt(sys.argv[1:], "adhs", long_opts)
++	except getopt.GetoptError, e:
++		# print help information and exit:
++		print str(e) # will print something like "option -a not recognized"
++		sys.exit(COMMAND_LINE_SYNTAX_ERROR)
++
++	date = datetime.date.today()
++	release = set()
++
++	for o, a in opts:
++		if o in ("-a", "--all"):
++			release.add("all")
++		elif o == "--date":
++			try:
++				date = convert_date(a)
++			except ValueError:
++				print "Option " + o + " needs to be an date in ISO 8601 format."
++				sys.exit(COMMAND_LINE_SYNTAX_ERROR)
++		elif o in ("-d", "--devel"):
++			release.add("devel")
++		elif o in ("-h", "--help"):
++			usage(sys.stdout)
++			sys.exit()
++		elif o == "--lts":
++			release.add("lts")
++		elif o in ("-s", "--stable"):
++			release.add("stable")
++		elif o == "--supported":
++			release.add("supported")
++		elif o == "--unsupported":
++			release.add("unsupported")
++		else:
++			assert False, "unhandled option"
++
++	if len(release) != 1:
++		sys.stderr.write("You have to select exactly one of --all, --devel, --lts, --stable, --supported, --unsupported.\n")
++		sys.exit(COMMAND_LINE_SYNTAX_ERROR)
++
++	main(date, release.pop())
++	sys.exit(0)
+diff --git a/scripts/ubuntu.csv b/scripts/ubuntu.csv
+new file mode 100644
+index 0000000..c95fc53
+--- /dev/null
++++ b/scripts/ubuntu.csv
+@@ -0,0 +1,13 @@
++version,codename,series,release,eol,eol-server
++4.10,Warty Warthog,warty,2004-10-20,2006-04-30
++5.04,Hoary Hedgehog,hoary,2005-04-08,2006-10-31
++5.10,Breezy Badger,breezy,2005-10-13,2007-04-13
++6.06 LTS,Dapper Drake,dapper,2006-06-01,2009-07-14,2011-06-01
++6.10,Edgy Eft,edgy,2006-10-26,2008-04-25
++7.04,Feisty Fawn,feisty,2007-04-19,2008-10-19
++7.10,Gutsy Gibbon,gutsy,2007-10-18,2009-04-18
++8.04 LTS,Hardy Heron,hardy,2008-04-24,2011-04,2013-04
++8.10,Intrepid Ibex,intrepid,2008-10-30,2010-04
++9.04,Jaunty Jackalope,jaunty,2009-04-23,2010-10
++9.10,Karmic Koala,karmic,2009-10-29,2011-04
++10.04 LTS,Lucid Lynx,lucid,2010-04-29,2013-04,2015-04

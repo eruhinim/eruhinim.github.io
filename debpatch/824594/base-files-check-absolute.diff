@@ -1,0 +1,172 @@
+--- a/debian/postinst.in
++++ b/debian/postinst.in
+@@ -1,52 +1,103 @@
+ #!/bin/sh
+ set -e
+ 
+-install_local_dir() {
+-  if [ ! -d $1 ]; then
+-    mkdir -p $1
++: "${DPKG_ROOT:=}"
++
++change_owner() {
++  if [ "${2#/}" = "$2" ]; then
++    echo "argument 2 to change_owner() must be an absolute path" >&2
++    exit 1
++  fi
++  local owner group
++  owner=${1%:*}
++  group=${1#*:}
++  owner=$(sed -n "s/^$owner:[^:]*:\\([0-9]*\\):.*/\\1/p" "$DPKG_ROOT/etc/passwd")
++  group=$(sed -n "s/^$group:[^:]*:\\([0-9]*\\):.*/\\1/p" "$DPKG_ROOT/etc/group")
++  chown "$owner:$group" "$DPKG_ROOT$2"
++}
++
++change_mode() {
++  if [ "${2#/}" = "$2" ]; then
++    echo "argument 2 to change_mode() must be an absolute path" >&2
++    exit 1
+   fi
+-  if [ -f /etc/staff-group-for-usr-local ]; then
+-    chown root:staff $1 2> /dev/null || true
+-    chmod 2775 $1 2> /dev/null || true
++  chmod "$1" "$DPKG_ROOT$2"
++}
++
++ensure_file_owner_mode() {
++  if [ "${1#/}" = "$1" ]; then
++    echo "argument 1 to ensure_file_owner_mode() must be an absolute path" >&2
++    exit 1
++  fi
++  if [ ! -f "$DPKG_ROOT$1" ]; then
++    : > "$DPKG_ROOT$1"
++  fi
++  change_owner "$2" "$1"
++  change_mode "$3" "$1"
++}
++
++install_local_dir() {
++  if [ "${1#/}" = "$1" ]; then
++    echo "argument 1 to install_local_dir() must be an absolute path" >&2
++    exit 1
++  fi
++  if [ ! -d "$DPKG_ROOT$1" ]; then
++    mkdir -p "$DPKG_ROOT$1"
++  fi
++  if [ -f "$DPKG_ROOT/etc/staff-group-for-usr-local" ]; then
++    change_owner root:staff "$1" 2>/dev/null || true
++    change_mode 2775 "$1" 2> /dev/null || true
+   fi
+ }
+ 
+ install_from_default() {
+-  if [ ! -f $2 ]; then
+-    cp -p /usr/share/base-files/$1 $2
++  if [ "${2#/}" = "$2" ]; then
++    echo "argument 2 to install_from_default() must be an absolute path" >&2
++    exit 1
++  fi
++  if [ ! -f "$DPKG_ROOT$2" ]; then
++    cp -p "$DPKG_ROOT/usr/share/base-files/$1" "$DPKG_ROOT$2"
+   fi
+ }
+ 
+ install_directory() {
+-  if [ ! -d /$1 ]; then
+-    mkdir /$1
+-    chown root:$3 /$1
+-    chmod $2 /$1
++  if [ ! -d "$DPKG_ROOT/$1" ]; then
++    mkdir "$DPKG_ROOT/$1"
++    change_owner "root:$3" "/$1"
++    change_mode "$2" "/$1"
+   fi
+ }
+ 
+ migrate_directory() {
+-  if [ ! -L $1 ]; then
+-    rmdir $1
+-    ln -s $2 $1
++  if [ "${1#/}" = "$1" ]; then
++    echo "argument 1 to migrate_directory() must be an absolute path" >&2
++    exit 1
++  fi
++  if [ ! -L "$DPKG_ROOT$1" ]; then
++    rmdir "$DPKG_ROOT$1"
++    ln -s "$2" "$DPKG_ROOT$1"
+   fi
+ }
+ 
+ update_to_current_default() {
+-  if [ -f $2 ]; then
+-    md5=`md5sum $2 | cut -f 1 -d " "`
+-    if grep -q "$md5" /usr/share/base-files/$1.md5sums; then
+-      if ! cmp -s /usr/share/base-files/$1 $2; then
+-        cp -p /usr/share/base-files/$1 $2
++  if [ "${2#/}" = "$2" ]; then
++    echo "argument 2 to update_to_current_default() must be an absolute path" >&2
++    exit 1
++  fi
++  if [ -f "$DPKG_ROOT$2" ]; then
++    md5=`md5sum "$DPKG_ROOT$2" | cut -f 1 -d " "`
++    if grep -q "$md5" "$DPKG_ROOT/usr/share/base-files/$1.md5sums"; then
++      if ! cmp -s "$DPKG_ROOT/usr/share/base-files/$1" "$DPKG_ROOT$2"; then
++        cp -p "$DPKG_ROOT/usr/share/base-files/$1" "$DPKG_ROOT$2"
+         echo Updating $2 to current default.
+       fi
+     fi
+   fi
+ }
+ 
+-if [ ! -e /etc/dpkg/origins/default ]; then
+-  if [ -e /etc/dpkg/origins/#VENDORFILE# ]; then
+-    ln -sf #VENDORFILE# /etc/dpkg/origins/default
++if [ ! -e "$DPKG_ROOT/etc/dpkg/origins/default" ]; then
++  if [ -e "$DPKG_ROOT/etc/dpkg/origins/#VENDORFILE#" ]; then
++    ln -sf #VENDORFILE# "$DPKG_ROOT/etc/dpkg/origins/default"
+   fi
+ fi
+ 
+@@ -62,8 +113,8 @@
+   install_directory var/opt   755 root
+   install_directory media     755 root
+   install_directory var/mail 2775 mail
+-  if [ ! -L /var/spool/mail ]; then
+-    ln -s ../mail /var/spool/mail
++  if [ ! -L "$DPKG_ROOT/var/spool/mail" ]; then
++    ln -s ../mail "$DPKG_ROOT/var/spool/mail"
+   fi
+   install_directory run/lock 1777 root
+   migrate_directory /var/run /run
+@@ -79,25 +130,16 @@
+   install_local_dir /usr/local/sbin
+   install_local_dir /usr/local/src
+   install_local_dir /usr/local/etc
+-  ln -sf share/man /usr/local/man
++  ln -sf share/man "$DPKG_ROOT/usr/local/man"
+ 
+-  if [ ! -f /var/log/wtmp ]; then
+-    echo -n>/var/log/wtmp
+-  fi
+-  if [ ! -f /var/log/btmp ]; then
+-    echo -n>/var/log/btmp
+-  fi
+-  if [ ! -f /var/log/lastlog ]; then
+-    echo -n>/var/log/lastlog
+-  fi
+-  chown root:utmp /var/log/wtmp /var/log/btmp /var/log/lastlog
+-  chmod 664 /var/log/wtmp /var/log/lastlog
+-  chmod 660 /var/log/btmp
++  ensure_file_owner_mode /var/log/wtmp root:utmp 664
++  ensure_file_owner_mode /var/log/btmp root:utmp 660
++  ensure_file_owner_mode /var/log/lastlog root:utmp 664
+ fi
+ 
+-if [ -d /usr/share/info ] && [ ! -f /usr/info/dir ] && [ ! -f /usr/share/info/dir ]; then
++if [ -d "$DPKG_ROOT/usr/share/info" ] && [ ! -f "$DPKG_ROOT/usr/info/dir" ] && [ ! -f "$DPKG_ROOT/usr/share/info/dir" ]; then
+   install_from_default info.dir /usr/share/info/dir
+-  chmod 644 /usr/share/info/dir
++  change_mode 644 /usr/share/info/dir
+ fi
+ 
+ if [ "$1" = "configure" ] && [ "$2" != "" ]; then

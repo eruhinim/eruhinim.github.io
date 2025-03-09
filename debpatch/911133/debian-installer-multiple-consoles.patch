@@ -1,0 +1,166 @@
+diff --git a/src/etc/inittab-linux b/src/etc/inittab-linux
+index a7b8a23..437e208 100644
+--- a/src/etc/inittab-linux
++++ b/src/etc/inittab-linux
+@@ -5,7 +5,7 @@
+ ::sysinit:/sbin/reopen-console /sbin/debian-installer-startup
+ 
+ # main setup program
+-::respawn:/sbin/reopen-console /sbin/debian-installer
++::respawn:/sbin/reopen-console --all-consoles /sbin/debian-installer
+ 
+ # convenience shells
+ tty2::askfirst:-/bin/sh
+diff --git a/src/sbin/reopen-console-linux b/src/sbin/reopen-console-linux
+index 3287dd0..e13bfa3 100755
+--- a/src/sbin/reopen-console-linux
++++ b/src/sbin/reopen-console-linux
+@@ -1,74 +1,68 @@
+ #!/bin/sh
+ 
+ # In order to give proper access to the tty, we need to locate the device
+-# corresponding to the console we are actually using.
++# corresponding to each console we are actually using.
++
++# This script is run twice, once at sysinit to run the debian-installer-startup
++# rc scripts, and once to start the installer itself.
++# The first time it parses the consoles used, the second time they are read from files
++# The startup scripts need to be run just once (on one console) (not idempotent)
++# The installer is run on all the enabled consoles (using the --all-consoles option)
++
+ 
+ NL="
+ "
+ 
+-console=
+-if ! [ -f /var/run/console-device ]; then
+-	# If the kernel emitted a "handover" message, then it's the one
+-	case $(uname -r) in
+-	    2.6.2*|2.6.3[01]*)
+-		console="$(dmesg -s 262143 |
+-			sed -n -r -e 's/(.*\])? *console handover: boot \[.*\] -> real \[(.*)\]$/\2/p')"
+-		;;
+-	    2.6.3[234567]*)
+-		console="$(dmesg -s 262143 |
+-			sed -n -r -e 's/(.*\])? *console \[(.*)\] enabled, bootconsole disabled$/\2/p')"
+-		;;
+-	    *) # >= 2.6.38
+-		console_major_minor="$(get-real-console-linux)"
+-		console_raw="$(readlink "/sys/dev/char/${console_major_minor}")"
+-		console="${console_raw##*/}"
+-		;;
+-	esac
+-
+-	# Except if it is the wrong type...
+-	if [ "$console" ] && [ "$(console-type)" = serial ] && \
+-	   expr "$console" : "tty[0-9]" >/dev/null; then
+-		console=
+-	fi
++if ! [ -f /var/run/console-devices ]; then
+ 
+ 	consoles=
+-	if [ -z "$console" ]; then
+-		# Retrieve all enabled consoles from boot log; ignore those
+-		# for which no device file exists
+-		for cons in $(dmesg -s 262143 |
+-			sed -n -r -e 's/(.*\])? *console \[(.*)\] enabled/\2/p')
+-		do
+-			if [ -e "/dev/$cons" ]; then
+-				consoles="${consoles:+$consoles$NL}$cons"
+-			fi
+-		done
+-		# Only one console? Then we are good.
+-		if [ $(echo "$consoles" | wc -l) -eq 1 ]; then
+-			console="$consoles"
++	preferred=
++	# Retrieve all enabled consoles from kernel; ignore those
++	# for which no device file exists
++
++	kernelconsoles="$(cat /proc/consoles)"
++	for cons in $(echo "$kernelconsoles" | sed -n -r -e 's/(^.*)  .*\((.*)\).*$/\1/p' )
++	do
++		status=$(echo "$kernelconsoles" | grep $cons | sed -n -r -e 's/(^.*) *.*\((.*)\).*$/\2/p' )
++		if [ -e "/dev/$cons" ] && [ $(echo "$status" | grep -o 'E') ]; then
++			consoles="${consoles:+$consoles$NL}$cons"
+ 		fi
+-	fi
++		# 'C' console is 'most prefered'.
++		if [ $(echo "$status" | grep -o 'C') ]; then
++			preferred="$cons"
++		fi
++	done
+ 
+-	if [ -z "$console" ]; then
+-		# Locate the last enabled console present on the command line
+-		for arg in $(cat /proc/cmdline); do
+-			case $arg in
+-			    console=*)
+-				arg=${arg#console=}
+-				cons=${arg%%,*}
+-				if echo "$consoles" | grep -q "^$cons$"; then
+-					console=$cons
+-				fi
+-				;;
+-			esac
+-		done
++	if [ -z "$consoles" ]; then
++		# Nothing found? Default to /dev/console.
++		consoles=console
+ 	fi
+-
+-	if [ -z "$console" ]; then
+-		# Still nothing? Default to /dev/console.
+-		console=console
++	if [ -z "$preferred" ]; then
++		#None marked preferred? Use the first one
++		preferred=$(echo "$consoles" | head -n 1) 
+ 	fi
+-	echo /dev/$console > /var/run/console-device
++	
++	for cons in $consoles
++	do
++		echo "/dev/$cons " >> /var/run/console-devices
++	done
++	echo "/dev/$preferred " > /var/run/console-preferred
+ fi
+ 
+-# Some other session may have it as ctty. Steal it from them
+-exec /sbin/steal-ctty $(cat /var/run/console-device) "$@"
++# run startup scripts on one console, D-I itself on all consoles
++if [ "$1"x = "--all-consoles"x ]; then
++	shift
++	# Start d-i on each console.
++	for cons in $(cat /var/run/console-devices)
++	do
++		/sbin/steal-ctty $cons "$@" &
++	done
++	#Don't respawn in init if running installer on multiple consoles
++	sleep 2147483647  #'infinity' not supported in D-I busybox; 68 years will have to do
++else
++	cons=$(cat /var/run/console-preferred)
++	# Some other session may have console as ctty. Steal it from them
++	exec /sbin/steal-ctty $cons "$@"
++fi
++
++
+diff --git a/src/sbin/steal-ctty.c b/src/sbin/steal-ctty.c
+index 0f3b14f..b99c1bb 100644
+--- a/src/sbin/steal-ctty.c
++++ b/src/sbin/steal-ctty.c
+@@ -28,8 +28,14 @@ int main(int argc, char ** argv)
+     while (fd > 2) {
+         close(fd--);
+     }
+-    ioctl(0, TIOCSCTTY, (char *) 1);
+-    execvp(argv[2], &argv[2]);
++    /* make controlling tty if possible - can't be done if D-I is 
++       run on multiple consoles so just quietly move on */
++    if (-1 == ioctl(0, TIOCSCTTY, (char *) 1)) {
++      }
++    if (-1 == execvp(argv[2], &argv[2])) {
++        perror("execvp");
++        return 1;
++    }
+     /* never reached. */
+     return 0;
+ }

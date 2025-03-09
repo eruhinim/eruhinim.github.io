@@ -1,0 +1,245 @@
+From 532cacd4cb085b39544fccdc43fca764d804763b Mon Sep 17 00:00:00 2001
+From: efkin <efkin@riseup.net>
+Date: Wed, 14 Dec 2016 18:45:09 +0100
+Subject: [PATCH] Create basic API list/detail endpoint for ActionItem model
+ instances
+
+Reported-by: Paul Wise <pabs@debian.org>
+---
+ distro_tracker/api/paginators.py   |  7 +++
+ distro_tracker/api/serializers.py  | 27 +++++++++++
+ distro_tracker/api/tests.py        | 95 +++++++++++++++++++++++++++++++++++++-
+ distro_tracker/api/tracker_urls.py | 18 ++++++++
+ distro_tracker/api/views.py        | 47 ++++++++++++++++++-
+ 5 files changed, 190 insertions(+), 4 deletions(-)
+ create mode 100644 distro_tracker/api/paginators.py
+ create mode 100644 distro_tracker/api/serializers.py
+ create mode 100644 distro_tracker/api/tracker_urls.py
+
+diff --git a/distro_tracker/api/paginators.py b/distro_tracker/api/paginators.py
+new file mode 100644
+index 0000000..7b4f52f
+--- /dev/null
++++ b/distro_tracker/api/paginators.py
+@@ -0,0 +1,7 @@
++from rest_framework.pagination import LimitOffsetPagination
++
++
++class StandardResultsSetPaignation(LimitOffsetPagination):
++    default_limit = 100
++    max_limit = 500
++    
+diff --git a/distro_tracker/api/serializers.py b/distro_tracker/api/serializers.py
+new file mode 100644
+index 0000000..1f1d098
+--- /dev/null
++++ b/distro_tracker/api/serializers.py
+@@ -0,0 +1,27 @@
++from rest_framework import serializers
++
++from distro_tracker.core.models import ActionItem
++from distro_tracker.core.models import PackageName
++
++
++class ActionItemSerializer(serializers.ModelSerializer):
++
++    package_name = serializers.ReadOnlyField(source="package.name")
++    item_type_name = serializers.ReadOnlyField(source="item_type.type_name")
++    
++    class Meta:
++        model = ActionItem
++        fields = (
++            'id',
++            'package_name',
++            'item_type_name',
++            'short_description',
++            'severity',
++            'created_timestamp',
++            'last_updated_timestamp',
++            'extra_data',
++        )
++
++
++
++
+diff --git a/distro_tracker/api/tests.py b/distro_tracker/api/tests.py
+index 7ce503c..7c53110 100644
+--- a/distro_tracker/api/tests.py
++++ b/distro_tracker/api/tests.py
+@@ -1,3 +1,94 @@
+-from django.test import TestCase
++from django.core.urlresolvers import reverse
+ 
+-# Create your tests here.
++from rest_framework import status
++from rest_framework.test import APITestCase
++
++from distro_tracker.core.models import ActionItem
++from distro_tracker.core.models import ActionItemType
++from distro_tracker.core.models import SourcePackageName
++
++
++class ActionItemListAPIViewTest(APITestCase):
++    """
++    Test for the :class:`distro_tracker.api.views.ActionItemListAPIView`.
++    """
++
++    def setUp(self):
++        self.url = reverse('dtracker-api-v1-action-items')
++        
++    def test_empty_list(self):
++        """
++        Test when the queryset is empty.
++        """
++        response = self.client.get(self.url)
++        self.assertEqual(response.status_code, status.HTTP_200_OK)
++        self.assertEqual(
++            0,
++            response.data['count'],
++        )
++
++    def test_account_item(self):
++        """
++        Test with actual content.
++        """
++        package = SourcePackageName.objects.create(name='dummy-package')
++        action_type = ActionItemType.objects.create(
++            type_name='test',
++            full_description_template='action-item-test.html',
++        )
++        action_item = ActionItem.objects.create(
++            package=package,
++            item_type=action_type,
++            short_description="Short description of item",
++        )
++        response = self.client.get(self.url)
++        self.assertEqual(response.status_code, status.HTTP_200_OK)
++        self.assertEqual(
++            1,
++            response.data['count'],
++        )
++        result = response.data['results'][0]
++        self.assertEqual(
++            'dummy-package',
++            result['package_name'],
++        )
++
++        
++class ActionItemDetailAPIViewTest(APITestCase):
++    """
++    Test for the :class:`distro_tracker.api.views.ActionItemDetailAPIView`.
++    """
++
++    def setUp(self):
++        self.url = reverse('dtracker-api-v1-action-items', kwargs={'pk':1})
++
++    def test_404_on_non_existing_pk(self):
++        """
++        Test when the pk does not return any instance.
++        """
++        response = self.client.get(self.url)
++
++        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
++        
++    def test_existing_instance(self):
++        """
++        Test when the pk does return an actual instance.
++        """
++        package = SourcePackageName.objects.create(name='dummy-package')
++        action_type = ActionItemType.objects.create(
++            type_name='test',
++            full_description_template='action-item-test.html',
++        )
++        action_item = ActionItem.objects.create(
++            package=package,
++            item_type=action_type,
++            short_description="Short description of item",
++        )
++        response = self.client.get(self.url)
++        self.assertEqual(response.status_code, status.HTTP_200_OK)
++        self.assertEqual(
++            'dummy-package',
++            response.data['package_name'],
++        )
++
++        
+diff --git a/distro_tracker/api/tracker_urls.py b/distro_tracker/api/tracker_urls.py
+new file mode 100644
+index 0000000..3febcac
+--- /dev/null
++++ b/distro_tracker/api/tracker_urls.py
+@@ -0,0 +1,18 @@
++from django.conf.urls import url, include
++
++from .views import ActionItemView
++
++
++v1_patterns = [
++    url(r'^action-items/?$',
++        ActionItemView.as_view(),
++        name='dtracker-api-v1-action-item-list'),
++    url(r'^action-items/(?P<pk>[0-9]+)/?$',
++        ActionItemView.as_view(),
++        name='dtracker-api-v1-action-item-detail'),
++]
++
++
++urlpatterns = [
++    url(r'^api/v1/', include(v1_patterns, namespace='v1')),
++]
+diff --git a/distro_tracker/api/views.py b/distro_tracker/api/views.py
+index 91ea44a..7c791b6 100644
+--- a/distro_tracker/api/views.py
++++ b/distro_tracker/api/views.py
+@@ -1,3 +1,46 @@
+-from django.shortcuts import render
++from django.http import Http404
+ 
+-# Create your views here.
++from rest_framework import status
++from rest_framework import generics
++from rest_framework.mixins import ListModelMixin
++from rest_framework.mixins import RetrieveModelMixin
++from rest_framework.response import Response
++
++from distro_tracker.api.serializers import ActionItemSerializer
++from distro_tracker.api.paginators import StandardResultsSetPaignation
++from distro_tracker.core.models import ActionItem
++
++
++class ActionItemView(RetrieveModelMixin,
++                     ListModelMixin,
++                     generics.GenericAPIView):
++    """
++    This is a readonly endpoint. It retrieves the list of the
++    `ActionItem` instances or a single instance if the `pk` is
++    provided in the URL in the form `/api/v1/action-items/<pk>/`.
++
++    Eventually it accepts also the following query parameters:
++
++    * `package`: a string containing the name of the package
++    * `limit`: an integer indicating the max number of items per query
++    * `offset`: an integer indicating the starting position of the query 
++    in relation to the complete set of unpaginated items.
++    
++    """
++
++    serializer_class = ActionItemSerializer
++    pagination_class = StandardResultsSetPaignation
++    
++    def get_queryset(self):
++        queryset = ActionItem.objects.all()
++        package_name = self.request.query_params.get('package', None)
++        if package_name is not None:
++            queryset = queryset.filter(package__name=package_name)
++        return queryset
++
++    def get(self, request, *args, **kwargs):
++        if 'pk' in kwargs:
++            return self.retrieve(request, *args, **kwargs)
++        else:
++            return self.list(request, *args, **kwargs)
++        
+-- 
+2.1.4
+

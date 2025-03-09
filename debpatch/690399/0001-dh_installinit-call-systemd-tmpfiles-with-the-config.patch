@@ -1,0 +1,69 @@
+From 063a29e793dfd639bb450b4035125e0a85cf54ef Mon Sep 17 00:00:00 2001
+From: Michael Stapelberg <michael@stapelberg.de>
+Date: Sat, 4 May 2013 18:49:28 +0200
+Subject: [PATCH] dh_installinit: call systemd-tmpfiles with the config file
+ names
+
+This makes the invocation more specific and thus less likely to have any
+unwanted side effects.
+
+The invocation before was:
+
+    systemd-tmpfiles --create >/dev/null || true
+
+With this commit, it becomes:
+
+    systemd-tmpfiles --create bacula.conf >/dev/null || true
+
+(for bacula-fd shipping /etc/tmpfiles.d/bacula.conf)
+---
+ autoscripts/postinst-init-tmpfiles |    2 +-
+ dh_installinit                     |   12 ++++++------
+ 2 files changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/autoscripts/postinst-init-tmpfiles b/autoscripts/postinst-init-tmpfiles
+index e6cb785..fd613bc 100644
+--- a/autoscripts/postinst-init-tmpfiles
++++ b/autoscripts/postinst-init-tmpfiles
+@@ -1,5 +1,5 @@
+ # In case this system is running systemd, we need to ensure that all
+ # necessary tmpfiles (if any) are created before starting.
+ if [ -d /run/systemd/system ] ; then
+-	systemd-tmpfiles --create >/dev/null || true
++	systemd-tmpfiles --create #TMPFILES# >/dev/null || true
+ fi
+diff --git a/dh_installinit b/dh_installinit
+index 2daad63..29937c5 100755
+--- a/dh_installinit
++++ b/dh_installinit
+@@ -254,21 +254,21 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 		if (! $dh{NOSCRIPTS}) {
+ 			# Include postinst-init-tmpfiles if the package ships any files
+ 			# in /usr/lib/tmpfiles.d or /etc/tmpfiles.d
+-			my $got_tmpfile = undef;
+ 			my $tmpdir = tmpdir($package);
++			my @tmpfiles;
+ 			find({
+ 				wanted => sub {
+ 					return unless -f $File::Find::name;
+-					if (!$got_tmpfile &&
+-						$File::Find::name =~ m,^$tmpdir/usr/lib/tmpfiles\.d/, ||
++					if ($File::Find::name =~ m,^$tmpdir/usr/lib/tmpfiles\.d/, ||
+ 						$File::Find::name =~ m,^$tmpdir/etc/tmpfiles\.d/,) {
+-						$got_tmpfile = 1;
++						push @tmpfiles, $File::Find::name;
+ 					}
+ 				},
+ 				no_chdir => 1,
+ 			}, $tmpdir);
+-			if ($got_tmpfile) {
+-				autoscript($package,"postinst", "postinst-init-tmpfiles", "");
++			if (@tmpfiles > 0) {
++				autoscript($package,"postinst", "postinst-init-tmpfiles",
++					"s/#TMPFILES#/" . join(" ", map { basename($_) } @tmpfiles)."/");
+ 			}
+ 
+ 			if (! $dh{NO_START}) {
+-- 
+1.7.10.4
+

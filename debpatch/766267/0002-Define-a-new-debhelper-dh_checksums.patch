@@ -1,0 +1,164 @@
+>From d8be569b21899a9be817aba7fd04410ac28cdd3b Mon Sep 17 00:00:00 2001
+From: Mimi Zohar <zohar@linux.vnet.ibm.com>
+Date: Thu, 7 Aug 2014 08:55:29 -0400
+Subject: [PATCH 2/3] Define a new debhelper dh_checksums
+
+The new dh_checksums debhelper extends the existing dh_md5sums to
+support larger file digests (eg. sha256, sha512).  The resulting
+checksums are stored in an algorithm specific filename
+DEBIAN/<algo sums>.
+
+This patch defines a new option "--algo=" to specify the hash
+algorithm.  The default hash algorithm is sha256.
+
+Changelog v2:
+- dh_md5sums is called manually from numerous packages.  Do not remove it.
+
+Changelog v1:
+- Based on the mailing list discussion, replace the existing dh_md5sums
+script with a single debhelper script that supports larger hashes.
+---
+ dh           |   1 +
+ dh_checksums | 118 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 119 insertions(+)
+ create mode 100755 dh_checksums
+
+diff --git a/dh b/dh
+index 4f80f75..f3da70d 100755
+--- a/dh
++++ b/dh
+@@ -409,6 +409,7 @@ my @b=qw{
+ 	dh_installdeb
+ 	dh_gencontrol
+ 	dh_md5sums
++	dh_checksums
+ 	dh_builddeb
+ };
+ $sequences{clean} = [qw{
+diff --git a/dh_checksums b/dh_checksums
+new file mode 100755
+index 0000000..8908ebc
+--- /dev/null
++++ b/dh_checksums
+@@ -0,0 +1,118 @@
++#!/usr/bin/perl -w
++
++=head1 NAME
++
++dh_checksums - generate the DEBIAN/<algo sums> file
++
++=cut
++
++use strict;
++use Cwd;
++use Debian::Debhelper::Dh_Lib;
++
++=head1 SYNOPSIS
++
++B<dh_checksums> [S<I<debhelper options>>] [B<-x>] [B<-X>I<item>] [B<--include-conffiles>] [B<--alg=>I<algorithm>]
++
++=head1 DESCRIPTION
++
++B<dh_checksums> is a debhelper program that is responsible for generating
++a checksums file, which lists the hashes of each file in the package.
++These files are used by the B<debsums> package.
++
++All files in F<DEBIAN/> are omitted from the F<checksums> file, as are all
++conffiles (unless you use the B<--include-conffiles> switch).
++
++The checksums file is installed with proper permissions and ownerships.
++
++=head1 OPTIONS
++
++=over 4
++
++=item B<-x>, B<--include-conffiles>
++
++Include conffiles in the checksums list. Note that this information is
++redundant since it is included elsewhere in Debian packages.
++
++=item B<-X>I<item>, B<--exclude=>I<item>
++
++Exclude files that contain I<item> anywhere in their filename from
++being listed in the checksums file.
++
++=item B<--alg=>I<algorithm>
++
++Used to override the default hash algorithm (sha256).  The current set
++of valid hash algorithms are: b<md5>, b<sha256>, b<sha512>
++
++=back
++
++=cut
++
++init(options => {
++	"x" => \$dh{INCLUDE_CONFFILES}, # is -x for some unknown historical reason..
++	"include-conffiles" => \$dh{INCLUDE_CONFFILES},
++	"alg=s" => \$dh{ALG},
++});
++
++if (defined $dh{ALG}) {
++	my @algorithms = <md5 sha256 sha512>;
++	use List::MoreUtils 'any';
++	$dh{ALG}="sha256" unless any { /$dh{ALG}/ } @algorithms;
++} else {
++	$dh{ALG}="sha256";
++}
++my $HASHCMD = $dh{ALG}."sum";
++my $hashsums = $dh{ALG}."sums";
++
++foreach my $package (@{$dh{DOPACKAGES}}) {
++	next if is_udeb($package);
++
++	my $tmp=tmpdir($package);
++
++	if (! -d "$tmp/DEBIAN") {
++		doit("install","-d","$tmp/DEBIAN");
++	}
++
++	# Check if we should exclude conffiles.
++	my $exclude="";
++	if (! $dh{INCLUDE_CONFFILES} && -r "$tmp/DEBIAN/conffiles") {
++		# Generate exclude regexp.
++		open (CONFF,"$tmp/DEBIAN/conffiles");
++		while (<CONFF>) {
++			chomp;
++			s/^\///;
++			$exclude.="! -path \"./$_\" ";
++		}
++		close CONFF;
++	}
++
++	# See if we should exclude other files.
++	if (defined($dh{EXCLUDE_FIND}) && $dh{EXCLUDE_FIND} ne '') {
++		$exclude.="! \\( $dh{EXCLUDE_FIND} \\) ";
++	}
++
++	my $find="find . -type f $exclude ! -regex './DEBIAN/.*' -printf '%P\\0'";
++	complex_doit("(cd $tmp >/dev/null ; $find | LC_ALL=C sort -z | xargs -r0 $HASHCMD > DEBIAN/$hashsums) >/dev/null");
++	# If the file's empty, no reason to waste inodes on it.
++	if (-z "$tmp/DEBIAN/$hashsums") {
++		doit("rm","-f","$tmp/DEBIAN/$hashsums");
++	}
++	else {
++		doit("chmod",644,"$tmp/DEBIAN/$hashsums");
++		doit("chown","0:0","$tmp/DEBIAN/$hashsums");
++	}
++}
++
++=head1 SEE ALSO
++
++L<debhelper(7)>
++
++This program is a part of debhelper.
++
++=head1 AUTHOR
++
++Joey Hess <joeyh@debian.org>
++
++(Modified by Mimi Zohar <zohar@linux.vnet.ibm.com> to support other digests)
++
++=cut
+-- 
+1.9.1
+

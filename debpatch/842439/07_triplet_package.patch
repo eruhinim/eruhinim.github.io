@@ -1,0 +1,285 @@
+Move triplet-prefixed tools from binutils to binutils-$nativetriplet.
+
+The architecture variables are moved to improve clarity as the definition of
+p_nat now depends on them. The move is otherwise unnecessary.
+
+Manual pages are moved accordingly.
+
+Index: debian/rules
+===================================================================
+--- debian.orig/rules
++++ debian/rules
+@@ -13,8 +13,36 @@
+ 
+ ###############################################################################
+ 
++vafilt = $(subst $(2)=,,$(filter $(2)=%,$(1)))
++DPKG_VARS := $(shell dpkg-architecture)
++DEB_BUILD_GNU_TYPE	?= $(call vafilt,$(DPKG_VARS),DEB_BUILD_GNU_TYPE)
++DEB_HOST_ARCH		?= $(call vafilt,$(DPKG_VARS),DEB_HOST_ARCH)
++DEB_HOST_GNU_CPU	?= $(call vafilt,$(DPKG_VARS),DEB_HOST_GNU_CPU)
++DEB_HOST_GNU_TYPE	?= $(call vafilt,$(DPKG_VARS),DEB_HOST_GNU_TYPE)
++DEB_HOST_MULTIARCH	?= $(call vafilt,$(DPKG_VARS),DEB_HOST_MULTIARCH)
++
++ifeq (,$(filter $(distrelease),lenny etch squeeze wheezy jessie))
++  ifeq ($(DEB_HOST_GNU_TYPE),i586-linux-gnu)
++    DEB_BUILD_GNU_TYPE	= i686-linux-gnu
++    DEB_HOST_GNU_CPU	= i686
++    DEB_HOST_GNU_TYPE	= i686-linux-gnu
++    TRIPLET_SYMLINK	= i586-linux-gnu
++  else ifeq ($(DEB_HOST_GNU_TYPE),i586-kfreebsd-gnu)
++    DEB_BUILD_GNU_TYPE	= i686-kfreebsd-gnu
++    DEB_HOST_GNU_CPU	= i686
++    DEB_HOST_GNU_TYPE	= i686-kfreebsd-gnu
++    TRIPLET_SYMLINK	= i586-kfreebsd-gnu
++  else ifeq ($(DEB_HOST_GNU_TYPE),i586-gnu)
++    DEB_BUILD_GNU_TYPE	= i686-gnu
++    DEB_HOST_GNU_CPU	= i686
++    DEB_HOST_GNU_TYPE	= i686-gnu
++    TRIPLET_SYMLINK	= i586-gnu
++  endif
++endif
++
+ p_bin = binutils
+ p_lib = lib$(p_bin)
++p_nat = $(p_bin)-$(subst _,-,$(DEB_HOST_GNU_TYPE))
+ p_dev = $(p_bin)-dev
+ p_mul = $(p_bin)-multiarch
+ p_mdev = $(p_mul)-dev
+@@ -41,6 +69,7 @@
+ d     = debian/tmp
+ d_bin = $(d)
+ d_lib = debian/$(p_lib)
++d_nat = debian/$(p_nat)
+ d_dev = debian/$(p_dev)
+ d_mul = debian/$(p_mul)
+ d_mdev = debian/$(p_mdev)
+@@ -54,33 +83,6 @@
+ install_script = install -m 755
+ install_binary = install -m 755 -s
+ 
+-vafilt = $(subst $(2)=,,$(filter $(2)=%,$(1)))
+-DPKG_VARS := $(shell dpkg-architecture)
+-DEB_BUILD_GNU_TYPE	?= $(call vafilt,$(DPKG_VARS),DEB_BUILD_GNU_TYPE)
+-DEB_HOST_ARCH		?= $(call vafilt,$(DPKG_VARS),DEB_HOST_ARCH)
+-DEB_HOST_GNU_CPU	?= $(call vafilt,$(DPKG_VARS),DEB_HOST_GNU_CPU)
+-DEB_HOST_GNU_TYPE	?= $(call vafilt,$(DPKG_VARS),DEB_HOST_GNU_TYPE)
+-DEB_HOST_MULTIARCH	?= $(call vafilt,$(DPKG_VARS),DEB_HOST_MULTIARCH)
+-
+-ifeq (,$(filter $(distrelease),lenny etch squeeze wheezy jessie))
+-  ifeq ($(DEB_HOST_GNU_TYPE),i586-linux-gnu)
+-    DEB_BUILD_GNU_TYPE	= i686-linux-gnu
+-    DEB_HOST_GNU_CPU	= i686
+-    DEB_HOST_GNU_TYPE	= i686-linux-gnu
+-    TRIPLET_SYMLINK	= i586-linux-gnu
+-  else ifeq ($(DEB_HOST_GNU_TYPE),i586-kfreebsd-gnu)
+-    DEB_BUILD_GNU_TYPE	= i686-kfreebsd-gnu
+-    DEB_HOST_GNU_CPU	= i686
+-    DEB_HOST_GNU_TYPE	= i686-kfreebsd-gnu
+-    TRIPLET_SYMLINK	= i586-kfreebsd-gnu
+-  else ifeq ($(DEB_HOST_GNU_TYPE),i586-gnu)
+-    DEB_BUILD_GNU_TYPE	= i686-gnu
+-    DEB_HOST_GNU_CPU	= i686
+-    DEB_HOST_GNU_TYPE	= i686-gnu
+-    TRIPLET_SYMLINK	= i586-gnu
+-  endif
+-endif
+-
+ NATIVE_ARCHS ?= alpha amd64 arm64 armel armhf hppa hurd-i386 i386 ia64 \
+ 		kfreebsd-amd64 kfreebsd-i386 m68k \
+ 		mips mipsel mipsn32 mipsn32el \
+@@ -519,7 +521,7 @@
+ 	rm -rf stamps
+ 	find . -name \*.gmo -o -name \*~ -o -name \*.info ! -name sysroff.info | xargs -r rm -f
+ 	rm -f $(pwd)/test-summary*
+-	rm -rf $(d_bin) $(d_lib) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_hppa64) $(d_src) $(d_com)
++	rm -rf $(d_bin) $(d_lib) $(d_nat) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_hppa64) $(d_src) $(d_com)
+ 	$(foreach ca,$(CROSS_ARCHS), rm -rf debian/binutils-$(shell echo $(call _gnu_type,$(ca)) | sed 's/_/-/g;s/i586/i686/'); )
+ 	rm -rf debian/patched debian/tmp debian/files* debian/substvars
+ 	rm -f debian/*.orig debian/*.rej
+@@ -545,18 +547,17 @@
+ 		< debian/control.cross.in >> debian/control
+ else
+ 	sed -e 's/@dpkg_dev@/$(DPKG_DEV)/' \
++		-e 's/@binutils_native@/$(p_nat)/' \
+ 		debian/control.in > debian/control
+-  ifeq ($(with_cross),yes)
+-	$(foreach ca,$(CROSS_ARCHS), \
++	$(foreach ca,$(NATIVE_ARCHS), \
+ 	  sed \
+-	    -e 's/@host_archs@/$(HOST_ARCHS_$(ca))/g' \
++	    -e 's/@host_archs@/$(ca)$(if $(and $(filter yes,$(with_cross)),$(filter $(ca),$(CROSS_ARCHS))), $(HOST_ARCHS_$(ca)))/g' \
+ 	    -e 's/@target@/$(shell dpkg-architecture -a$(ca) -qDEB_HOST_GNU_TYPE 2>/dev/null | sed 's/_/-/g;s/i586/i686/')/g' \
+ 	    -e 's/@binutils_alt_triplet@/$(if $(findstring i386,$(ca)),binutils-$(shell dpkg-architecture -a$(ca) -qDEB_HOST_GNU_TYPE 2>/dev/null | sed 's/i686/i586/g'))/g' \
+ 	    debian/control.cross.in \
+ 	    | $(if $(filter yes,$(same_source)), grep -v '^Built-Using', cat) \
+ 	    >> debian/control; \
+ 	)
+-  endif
+ endif
+ 	@mkdir -p stamps
+ 	touch $@
+@@ -934,8 +935,8 @@
+ stamps/install: checkroot stamps/build $(install_stamps) $(if $(CROSS),debian/strip.cross)
+ 	$(checkdir)
+ 
+-	rm -fr $(d_bin) $(d_lib) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_src) $(d_com)
+-	$(install_dir) $(d_bin) $(d_lib) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_src) $(d_com)
++	rm -fr $(d_bin) $(d_lib) $(d_nat) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_src) $(d_com)
++	$(install_dir) $(d_bin) $(d_lib) $(d_nat) $(d_dev) $(d_mul) $(d_mdev) $(d_doc) $(d_src) $(d_com)
+ 
+ 	: # install binutils and -dev stuff
+ 	env MAKE="$(MAKE) VERSION=$(SINGLE_VERSION)" \
+@@ -1160,13 +1161,14 @@
+ 
+ 	: # Rename non-prefixed binaries to $(DEB_HOST_GNU_TYPE)- prefixed binaries
+ 	: # and provide symlinks to the prefixed binaries.
++	$(install_dir) $(d_nat)/$(PF)/bin $(d_nat)/$(PF)/share/man/man1
+ 	for i in $(programs); do \
+-	  mv $(d_bin)/$(PF)/bin/$$i $(d_bin)/$(PF)/bin/$(DEB_HOST_GNU_TYPE)-$$i; \
++	  mv $(d_bin)/$(PF)/bin/$$i $(d_nat)/$(PF)/bin/$(DEB_HOST_GNU_TYPE)-$$i; \
+ 	  ln -sf $(DEB_HOST_GNU_TYPE)-$$i $(d_bin)/$(PF)/bin/$$i; \
+ 	  if test -L $(d_bin)/$(PF)/share/man/man1/$$i.1.gz; then \
+-	    mv $(d_bin)/$(PF)/share/man/man1/$$i.1.gz $(d_bin)/$(PF)/share/man/man1/$(DEB_HOST_GNU_TYPE)-$$i.1.gz; \
++	    mv $(d_bin)/$(PF)/share/man/man1/$$i.1.gz $(d_nat)/$(PF)/share/man/man1/$(DEB_HOST_GNU_TYPE)-$$i.1.gz; \
+ 	  else \
+-	    mv $(d_bin)/$(PF)/share/man/man1/$$i.1 $(d_bin)/$(PF)/share/man/man1/$(DEB_HOST_GNU_TYPE)-$$i.1; \
++	    mv $(d_bin)/$(PF)/share/man/man1/$$i.1 $(d_nat)/$(PF)/share/man/man1/$(DEB_HOST_GNU_TYPE)-$$i.1; \
+ 	  fi; \
+ 	  ln -sf $(DEB_HOST_GNU_TYPE)-$$i.1.gz $(d_bin)/$(PF)/share/man/man1/$$i.1.gz; \
+ 	done
+@@ -1185,24 +1187,24 @@
+ # temporary i586-* symlinks for stretch/sid
+   ifneq (,$(TRIPLET_SYMLINK))
+ 	for i in $(programs); do \
+-	  ln -sf $(DEB_HOST_GNU_TYPE)-$$i $(d_bin)/$(PF)/bin/$(TRIPLET_SYMLINK)-$$i; \
+-	  ln -sf $(DEB_HOST_GNU_TYPE)-$$i.1.gz $(d_bin)/$(PF)/share/man/man1/$(TRIPLET_SYMLINK)-$$i.1.gz; \
++	  ln -sf $(DEB_HOST_GNU_TYPE)-$$i $(d_nat)/$(PF)/bin/$(TRIPLET_SYMLINK)-$$i; \
++	  ln -sf $(DEB_HOST_GNU_TYPE)-$$i.1.gz $(d_nat)/$(PF)/share/man/man1/$(TRIPLET_SYMLINK)-$$i.1.gz; \
+ 	done
+   endif
+ # temporary i486-* symlinks for jessie/sid
+   ifeq ($(DEB_HOST_GNU_CPU),i586)
+ 	gnutype=$(subst i586,i486,$(DEB_HOST_GNU_TYPE)); \
+ 	for i in $(programs); do \
+-	  ln -sf $$i $(d_bin)/$(PF)/bin/$$gnutype-$$i; \
+-	  ln -sf $$i.1.gz $(d_bin)/$(PF)/share/man/man1/$$gnutype-$$i.1.gz; \
++	  ln -sf $(DEB_HOST_GNU_TYPE)-$$i $(d_nat)/$(PF)/bin/$$gnutype-$$i; \
++	  ln -sf $(DEB_HOST_GNU_TYPE)-$$i.1.gz $(d_nat)/$(PF)/share/man/man1/$$gnutype-$$i.1.gz; \
+ 	done
+   endif
+ # for backports to wheezy and squeeze
+   ifeq ($(DEB_HOST_GNU_CPU),i486)
+ 	gnutype=$(subst i486,i586,$(DEB_HOST_GNU_TYPE)); \
+ 	for i in $(programs); do \
+-	  ln -sf $(DEB_HOST_GNU_TYPE)-$$i $(d_bin)/$(PF)/bin/$$gnutype-$$i; \
+-	  ln -sf $(DEB_HOST_GNU_TYPE)-$$i.1.gz $(d_bin)/$(PF)/share/man/man1/$$gnutype-$$i.1.gz; \
++	  ln -sf $(DEB_HOST_GNU_TYPE)-$$i $(d_nat)/$(PF)/bin/$$gnutype-$$i; \
++	  ln -sf $(DEB_HOST_GNU_TYPE)-$$i.1.gz $(d_nat)/$(PF)/share/man/man1/$$gnutype-$$i.1.gz; \
+ 	done
+   endif
+ endif
+@@ -1494,10 +1496,10 @@
+ endif
+ 
+ 	: # make lintian happy
+-	$(install_file) -D debian/$(p_bin).overrides \
+-		$(d_bin)/$(PF)/share/lintian/overrides/$(p_bin)
+ 	$(install_file) -D debian/$(p_lib).lintian-overrides \
+ 		$(d_lib)/$(PF)/share/lintian/overrides/$(p_lib)
++	$(install_file) -D debian/binutils.overrides \
++		$(d_nat)/$(PF)/share/lintian/overrides/$(p_nat)
+ ifeq ($(with_multiarch),yes)
+ 	$(install_file) -D debian/$(p_mul).overrides \
+ 		$(d_mul)/$(PF)/share/lintian/overrides/$(p_mul)
+@@ -1516,6 +1518,8 @@
+ 	$(install_file) debian/binutils.triggers $(d_lib)/DEBIAN/triggers
+ 	$(install_file) debian/libbinutils.shlibs $(d_lib)/DEBIAN/shlibs
+ 
++	$(install_dir) $(d_nat)/DEBIAN
++
+ 	$(install_dir) $(d_dev)/DEBIAN
+ 
+ ifeq ($(with_multiarch),yes)
+@@ -1543,6 +1547,9 @@
+ 	$(install_file)	debian/changelog $(d_lib)/$(PF)/share/doc/$(p_lib)/changelog.Debian
+ 	$(install_file)	debian/copyright $(d_lib)/$(PF)/share/doc/$(p_lib)/
+ 
++	$(install_dir) $(d_nat)/$(PF)/share/doc/
++	ln -sf $(p_lib) $(d_nat)/$(PF)/share/doc/$(p_nat)
++
+ 	$(install_dir) $(d_dev)/$(PF)/share/doc/
+ 	ln -sf $(p_bin) $(d_dev)/$(PF)/share/doc/$(p_dev)
+ ifeq ($(with_multiarch),yes)
+@@ -1565,7 +1572,8 @@
+ endif
+ 
+ 	: # Compress stuff that needs it
+-	gzip -9n $(d_bin)/$(PF)/share/man/man1/*.1 $(d_bin)/$(PF)/share/doc/$(p_bin)/changelog.Debian
++	gzip -9n $(d_bin)/$(PF)/share/doc/$(p_bin)/changelog.Debian
++	gzip -9n $(d_nat)/$(PF)/share/man/man1/*.1
+ 	gzip -9n $(d_lib)/$(PF)/share/doc/$(p_lib)/changelog.Debian
+ 
+ 	: # Finish it all up
+@@ -1577,6 +1585,11 @@
+ 	cd $(d_lib) && find -type f  ! -regex './DEBIAN/.*' -printf '%P\n' | LC_ALL=C sort | xargs md5sum > DEBIAN/md5sums
+ 
+ 	rm -f debian/substvars
++	find $(d_nat) -type f | xargs file | grep ELF | cut -d: -f 1 | xargs dpkg-shlibdeps
++	dpkg-gencontrol -P$(d_nat) -p$(p_nat) -VextraDepends='libbinutils (= $${binary:Version})'
++	cd $(d_nat) && find -type f  ! -regex './DEBIAN/.*' -printf '%P\n' | LC_ALL=C sort | xargs md5sum > DEBIAN/md5sums
++
++	rm -f debian/substvars
+ 	dpkg-gencontrol -P$(d_dev) -p$(p_dev)
+ 	cd $(d_dev) && find -type f  ! -regex './DEBIAN/.*' -printf '%P\n' | LC_ALL=C sort | xargs md5sum > DEBIAN/md5sums
+ 
+@@ -1599,14 +1612,17 @@
+ 	cd $(d_hppa64) && find -type f  ! -regex './DEBIAN/.*' -printf '%P\n' | LC_ALL=C sort | xargs md5sum > DEBIAN/md5sums
+ endif
+ 
+-	chown -R root:root $(d_bin) $(d_lib) $(d_dev)
+-	chmod -R go=rX  $(d_bin) $(d_lib) $(d_dev)
++	chown -R root:root $(d_bin) $(d_lib) $(d_nat) $(d_dev)
++	chmod -R go=rX  $(d_bin) $(d_lib) $(d_nat) $(d_dev)
+ 	find $(d_bin) -depth -newermt '$(BUILD_DATE)' -print0 | \
+ 		xargs -0r touch --no-dereference --date='$(BUILD_DATE)'
+ 	dpkg --build $(d_bin) ..
+ 	find $(d_lib) -depth -newermt '$(BUILD_DATE)' -print0 | \
+ 		xargs -0r touch --no-dereference --date='$(BUILD_DATE)'
+ 	dpkg --build $(d_lib) ..
++	find $(d_nat) -depth -newermt '$(BUILD_DATE)' -print0 | \
++		xargs -0r touch --no-dereference --date='$(BUILD_DATE)'
++	dpkg --build $(d_nat) ..
+ 	find $(d_dev) -depth -newermt '$(BUILD_DATE)' -print0 | \
+ 		xargs -0r touch --no-dereference --date='$(BUILD_DATE)'
+ 	dpkg --build $(d_dev) ..
+Index: debian/control.in
+===================================================================
+--- debian.orig/control.in
++++ debian/control.in
+@@ -14,7 +14,7 @@
+ Package: binutils
+ Architecture: any
+ Depends: ${shlibs:Depends}, binutils-common (= ${source:Version}),
+-  libbinutils (= ${binary:Version})
++  libbinutils (= ${binary:Version}), @binutils_native@ (= ${binary:Version})
+ Conflicts: gas, elf-binutils, modutils (<< 2.4.19-1), ${extraConflicts},
+   binutils-gold	(<< 2.20.51.20100415),
+   binutils-multiarch (<< 2.27-8)
+Index: debian/control.cross.in
+===================================================================
+--- debian.orig/control.cross.in
++++ debian/control.cross.in
+@@ -2,9 +2,11 @@
+ Package: binutils-@target@
+ Architecture: @host_archs@
+ Depends: binutils (= ${binary:Version}), binutils-common (= ${source:Version}),
+-  ${shlibs:Depends}
++  ${shlibs:Depends}, ${extraDepends}
+ Suggests: binutils-doc (= ${source:Version})
+ Provides: @binutils_alt_triplet@
++Breaks: binutils (<< 2.27-8.1)
++Replaces: binutils (<< 2.27-8.1)
+ Priority: extra
+ Built-Using: ${Built-Using}
+ Multi-Arch: foreign

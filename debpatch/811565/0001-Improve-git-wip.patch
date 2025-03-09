@@ -1,0 +1,403 @@
+From a635d170bfc8b09218c778ea1f7d3866b0776531 Mon Sep 17 00:00:00 2001
+From: Osamu Aoki <osamu@debian.org>
+Date: Sat, 13 Jan 2018 21:24:34 +0900
+Subject: [PATCH] Improve git (wip)
+
+Now git and git-dumb exists
+
+Need to clean up temporary directory etc.
+
+Signed-off-by: Osamu Aoki <osamu@debian.org>
+---
+ scripts/uscan.pl | 214 +++++++++++++++++++++++++++++++++++++++++--------------
+ 1 file changed, 160 insertions(+), 54 deletions(-)
+
+diff --git a/scripts/uscan.pl b/scripts/uscan.pl
+index 1b47da63..208115cc 100755
+--- a/scripts/uscan.pl
++++ b/scripts/uscan.pl
+@@ -357,14 +357,42 @@ either B<http> or B<ftp> by URL.
+ =item B<git>
+ 
+ This mode accesses the upstream git archive directly with the B<git> command
+-and packs the source tree with the specified tag into
++and packs the source tree with the specified tag via I<matching-pattern> into
+ I<spkg-version>B<.tar.xz>.
+ 
+ If the upstream publishes the released tarball via its web interface, please
+ use it instead of using this mode.  This mode is the last resort method.
+ 
++If I<matching-pattern> is set to B<HEAD>, the pertinent I<version> is
++automatically generated with the date and hush of the B<HEAD> of the git
++repository.
++
++=item B<git-dumb>
++
++B<This is currently not yet implemented>.
++
++When the upstream git archive is a dumb HTTP server which doesn't allow shallow
++checkout, this B<git-dumb> mode should be used instead.
++
++Other than the fact that this mode makes full clone of the upstream repository
++as needed, this mode behaves exactly the same as the B<git> mode.
++
+ =back
+ 
++=item B<pretty=>I<rule>
++
++Set the upstream version string to an arbitrary format as an optional B<opts>
++argument when the I<matching-pattern> is B<HEAD> for B<git> and B<git-dumb>
++modes.  For the exact syntax, see the B<get-log> manpage under B<tformat>.  The
++default is B<pretty=0.0~git%cd.%h>.
++
++=item B<date=>I<rule>
++
++Set the date string used by the B<pretty> option to an arbitrary format as an
++optional B<opts> argument when the I<matching-pattern> is B<HEAD> for B<git>
++and B<git-dumb> modes.  For the exact syntax, see the B<strftime> manpage.  The
++default is B<date=%Y%m%d>.
++
+ =item B<pgpmode=>I<mode>
+ 
+ Set the PGP/GPG signature verification I<mode>.
+@@ -1121,19 +1149,43 @@ watch file for this site without using the redirector.
+ Sites which used to be hosted on the Google Code service should have migrated
+ to elsewhere (github?).  Please look for the newer upstream site.
+ 
+-=head2 direct access to the git repository
++=head2 direct access to the git repository (tags)
+ 
+-If the upstream only publishes its code via the git repository and it has no web
+-interface to obtain the release tarball, you can use uscan with the tags of
+-the git repository.
++If the upstream only publishes its code via the git repository and its code has
++no web interface to obtain the release tarball, you can use B<uscan> with the
++tags of the git repository to track and package the new upstream release.
+ 
+   version=4
+-  opts="mode=git, pgpmode=none" \
++  opts="mode=git-dumb, pgpmode=none" \
+   http://git.ao2.it/tweeper.git \
+   refs/tags/v([\d\.]+) debian uupdate
+ 
+-Please note "B<git ls-remote>" is used to obtain references for tags.  If a tag
+-B<v20.5> is the newest tag, the above example downloads I<spkg>B<-20.5.tar.xz>.
++Please note "B<git ls-remote>" is used to obtain references for tags.
++
++If a tag B<v20.5> is the newest tag, the above example downloads
++I<spkg>B<-20.5.tar.xz> after making a full clone of the git repository
++published via dumb HTTP server.
++
++=head2 direct access to the git repository (HEAD)
++
++If the upstream only publishes its code via the git repository and its code has
++no web interface nor the tags to obtain the released tarball, you can use
++B<uscan> with the HEAD of the git repository to track and package the new
++upstream release with an automatically generated version string.
++
++  version=4
++  opts="mode=git, pgpmode=none" \
++  https://github.com/Debian/dh-make-golang \
++  HEAD debian uupdate
++
++Please note that a local shallow copy of the git repository is made with
++"B<git clone --bare --depth=1> ..." normally in the F<../uscan.tmp>
++directory.  B<uscan> generates the new upstream version with "B<git log
++--date=%Y%m%d --pretty=0.0~git%cd.%h>" on this local copy of repository as its
++default behavior.
++
++The generation of the upstream version string may the adjusted to your taste by
++adding B<pretty> and B<date> options to the B<opts> arguments.
+ 
+ =head1 COPYRIGHT FILE EXAMPLES
+ 
+@@ -2576,8 +2628,19 @@ sub process_watchfile ($$$$)
+ #
+ # For http sites:
+ #   http://site.name/dir/path/pattern-(.+)\.tar\.gz [version [action]]
++#
++# watch_version=3 and 4: See details in POD.
++#
++# For ftp sites:
++#   ftp://site.name/dir/path pattern-(.+)\.tar\.gz [version [action]]
++#
++# For http sites:
++#   http://site.name/dir/path pattern-(.+)\.tar\.gz [version [action]]
++#
++# For git sites:
++#   http://site.name/dir/path/project.git refs/tags/v([\d\.]+) [version [action]]
+ # or
+-#   http://site.name/dir/path/base pattern-(.+)\.tar\.gz [version [action]]
++#   http://site.name/dir/path/project.git HEAD [version [action]]
+ #
+ # watch_version=3 and 4: See POD for details.
+ #
+@@ -2609,7 +2672,9 @@ sub process_watchline ($$$$$$)
+ 	'mode' => 'LWP',
+ 	'pgpmode' => 'default',
+ 	'decompress' => 0,
+-	'versionmode' => 'newer'
++	'versionmode' => 'newer',
++	'pretty' => '0.0~git%cd.%h',
++	'date' => '%Y%m%d',
+ 	); # non-persistent variables
+     my ($request, $response);
+     my ($newfile, $newversion);
+@@ -2704,6 +2769,10 @@ sub process_watchline ($$$$$$)
+ 			$options{'component'} = $1;
+ 		} elsif ($opt =~ /^\s*mode\s*=\s*(.+?)\s*$/) {
+ 			$options{'mode'} = $1;
++		} elsif ($opt =~ /^\s*pretty\s*=\s*(.+?)\s*$/) {
++			$options{'pretty'} = $1;
++		} elsif ($opt =~ /^\s*date\s*=\s*(.+?)\s*$/) {
++			$options{'date'} = $1;
+ 		} elsif ($opt =~ /^\s*pgpmode\s*=\s*(.+?)\s*$/) {
+ 			$options{'pgpmode'} = $1;
+ 		} elsif ($opt =~ /^\s*decompress\s*$/) {
+@@ -2805,7 +2874,14 @@ sub process_watchline ($$$$$$)
+ 	}
+ 
+ 	# Check $filepattern is OK
+-	if ( $filepattern !~ /\([^?].*\)/) {
++	if ($options{'mode'} eq 'git' or $options{'mode'} eq 'git-dumb') {
++	    if ($filepattern eq 'HEAD') {
++		$versionless = 1;
++	    } elsif ( $filepattern !~ /\([^?].*\)/) {
++		uscan_warn "Tag pattern missing version delimiters () for mode=git\n  in $watchfile, skipping:\n  $line\n";
++		return 1;
++	    }
++	} elsif ( $filepattern !~ /\([^?].*\)/) {
+ 	    if (exists $options{'filenamemangle'}) {
+ 		$versionless = 1;
+ 	    } else {
+@@ -3029,17 +3105,42 @@ sub process_watchline ($$$$$$)
+ #######################################################################
+ 
+ #######################################################################
+-# {{{ code 3.1: search $newversion, $newfile in $content
++# {{{ code 3.1: search $newversion in $content
++#######################################################################
++    if ($options{'mode'} eq 'git' and $versionless) {
++#######################################################################
++# {{{ code 3.1.1: search $newversion (git mode/versionless)
++#######################################################################
++	# TODO: sanitize $base used as "git clone $base"
++	my $gitrepodir = "$pkg-ls.$$.git";
++	uscan_verbose "Execute: git clone --depth=1 $base\n";
++	system('git', 'clone', '--bare', '--depth=1', $base, "$destdir/$gitrepodir");
++	$newversion=`git --git-dir=$destdir/$gitrepodir log -1 --date=format:$options{'date'} --pretty="$options{'pretty'}"`;
++	chomp($newversion);
++#######################################################################
++# }}} code 3.1.1: search $newversion (git mode/versionless)
++#######################################################################
++    } elsif ($options{'mode'} eq 'git-dumb' and $versionless) { # Track HEAD
++#######################################################################
++# {{{ code 3.1.2: search $newversion (git-dumb mode/versionless)
+ #######################################################################
+-    if ($options{'mode'} eq 'git') {
++	# TODO: sanitize $base used as "git clone $base"
++	my $gitrepodir = "$pkg-ls.$$.git";
++	uscan_verbose "Execute: git clone $base\n";
++	system('git', 'clone', '--bare', $base, "$destdir/$gitrepodir");
++	$newversion=`git --git-dir=$destdir/$gitrepodir log -1 --date=format:$options{'date'} --pretty="$options{'pretty'}"`;
++	chomp($newversion);
+ #######################################################################
+-# {{{ code 3.1.1: search $newversion, $newfile (git mode)
++# }}} code 3.1.2: search $newversion (git-dumb mode/versionless)
+ #######################################################################
+-	# TODO: sanitize $base
++    } elsif ($options{'mode'} eq 'git' or $options{'mode'} eq 'git-dumb') {
++#######################################################################
++# {{{ code 3.1.3: search $newversion (git/git-dumb mode/tag)
++#######################################################################
++	# TODO: sanitize $base used as "git ls-remote $base"
+ 	uscan_verbose "Execute: git ls-remote $base\n";
+-	open(REFS, "-|", 'git', 'ls-remote', $base) ||
+-	    uscan_die "$progname: you must have the git package installed\n"
+-	      . "to use git URLs\n";
++ 	open(REFS, "-|", 'git', 'ls-remote', $base) ||
++ 	    uscan_die "$progname: you must have the git package installed\n";
+ 	my @refs;
+ 	my $ref;
+ 	my $version;
+@@ -3094,11 +3195,11 @@ sub process_watchline ($$$$$$)
+ 		 return 1;
+ 	}
+ #######################################################################
+-# }}} code 3.1.1: search $newversion, $newfile (git mode)
++# }}} code 3.1.3: search $newversion (git/git-dumb mode/tag)
+ #######################################################################
+     } elsif ($options{'mode'} eq 'http') {
+ #######################################################################
+-# {{{ code 3.1.2: search $newversion, $newfile (http mode)
++# {{{ code 3.1.4: search $newversion (http mode)
+ #######################################################################
+ 	# HTTP site
+ 	if (defined($1) and !$haveSSL) {
+@@ -3269,11 +3370,11 @@ sub process_watchline ($$$$$$)
+ 	    }
+ 	}
+ #######################################################################
+-# }}} code 3.1.2: search $newversion, $newfile (http mode)
++# }}} code 3.1.4: search $newversion (http mode)
+ #######################################################################
+     } elsif ($options{'mode'} eq 'ftp') {
+ #######################################################################
+-# {{{ code 3.1.3: search $newversion, $newfile (ftp mode)
++# {{{ code 3.1.5: search $newversion (ftp mode)
+ #######################################################################
+ 	# FTP site
+ 	if (exists $options{'pasv'}) {
+@@ -3391,21 +3492,22 @@ sub process_watchline ($$$$$$)
+ 	    }
+ 	}
+ #######################################################################
+-# }}} code 3.1.3: search $newversion, $newfile (ftp mode)
++# }}} code 3.1.5: search $newversion (ftp mode)
+ #######################################################################
+     } else {
+ #######################################################################
+-# {{{ code 3.1.4: search $newversion, $newfile (non-existing mode)
++# {{{ code 3.1.6: search $newversion (non-existing mode)
+ #######################################################################
+ 	uscan_warn "Unknown mode=$options{'mode'} set in $watchfile\n";
+ 	return 1;
+ #######################################################################
+-# }}} code 3.1.4: search $newversion, $newfile (non-existing mode)
++# }}} code 3.1.6: search $newversion (non-existing mode)
+ #######################################################################
+     }
++    uscan_debug "found \$newversion = $newversion\n";
+     # End Checking $site and look for $filepattern which is newer than $lastversion
+ #######################################################################
+-# }}} code 3.1: search $newversion, $newfile in $content
++# }}} code 3.1: search $newversion in $content
+ #######################################################################
+ 
+ #######################################################################
+@@ -3441,13 +3543,17 @@ EOF
+     # Determine download URL for tarball or signature
+     my $upstream_url;
+     # Upstream URL?  Copying code from below - ugh.
+-    if ($options{'mode'} eq 'git') {
++    if ($options{'mode'} eq 'git' or $options{'mode'} eq 'git-dumb') {
+ #######################################################################
+-# {{{ code 3.3.1: determine $upstream_url (git mode)
++# {{{ code 3.3.1: determine $upstream_url (git/git-dumb mode)
+ #######################################################################
+-	$upstream_url = "$base $newfile";
++	if ($versionless) {
++	    $upstream_url = "$base HEAD";
++	} else {
++	    $upstream_url = "$base $newversion";
++	}
+ #######################################################################
+-# }}} code 3.3.1: determine $upstream_url (git mode)
++# }}} code 3.3.1: determine $upstream_url (git/git-dumb mode)
+ #######################################################################
+     } elsif ($site =~ m%^https?://%) {
+ #######################################################################
+@@ -3543,7 +3649,12 @@ EOF
+     uscan_verbose "Newest upstream tarball version selected for download (uversionmangled): $newversion\n" if $newversion;
+ 
+     my $newfile_base;
+-    if (exists $options{'filenamemangle'}) {
++    if ($options{'mode'} eq 'git' or $options{'mode'} eq 'git-dumb') {
++	# git tarball name
++	my $zsuffix = get_suffix($compression);
++	$newfile_base = "$pkg-$newversion.tar.$zsuffix";
++    } elsif (exists $options{'filenamemangle'}) {
++	# HTTP or FTP site (with filenamemangle)
+ 	if ($versionless) {
+ 	    $newfile_base = $upstream_url;
+ 	} else {
+@@ -3572,22 +3683,17 @@ EOF
+ 	    uscan_verbose "Newest upstream tarball version from the filenamemangled filename: $newversion\n";
+ 	}
+     } else {
+-	if ($options{'mode'} eq 'http' or $options{'mode'} eq 'ftp') {
+-	    $newfile_base = basename($newfile);
+-	    if ($options{'mode'} eq 'http') {
+-		# Remove HTTP header trash
+-		$newfile_base =~ s/[\?#].*$//; # PiPy
+-		# just in case this leaves us with nothing
+-		if ($newfile_base eq '') {
+-		    uscan_warn "No good upstream filename found after removing tailing ?... and #....\n   Use filenamemangle to fix this.\n";
+-		    return 1;
+-		}
++	# HTTP or FTP site (without filenamemangle)
++	$newfile_base = basename($newfile);
++	if ($options{'mode'} eq 'http') {
++	    # Remove HTTP header trash
++	    $newfile_base =~ s/[\?#].*$//; # PiPy
++	    # just in case this leaves us with nothing
++	    if ($newfile_base eq '') {
++		uscan_warn "No good upstream filename found after removing tailing ?... and #....\n   Use filenamemangle to fix this.\n";
++		return 1;
+ 	    }
+-	} else { # options{'mode'} eq 'git' or options{'mode'} eq 'git-dumb'
+-	    # git tarball name
+-	    my $zsuffix = get_suffix($compression);
+-	    $newfile_base = "$pkg-$newversion.tar.$zsuffix";
+-	}
++        }
+     }
+     uscan_verbose "Download filename (filenamemangled): $newfile_base\n";
+ #######################################################################
+@@ -3680,8 +3786,8 @@ EOF
+ #######################################################################
+ # {{{ code 3.6: download tarball
+ #######################################################################
+-    my $download_available;
+-    my $signature_available;
++    my $download_available = 0;
++    my $signature_available = 0;
+     my $sigfile;
+     my $sigfile_base = $newfile_base;
+     if ($options{'pgpmode'} ne 'previous') {
+@@ -4238,7 +4344,7 @@ sub downloader ($$$$$)
+ {
+ 	my ($url, $fname, $optref, $base, $pkg_dir) = @_;
+ 	my ($request, $response);
+-	if ($$optref{'mode'} eq 'git') {
++	if ($$optref{'mode'} eq 'git' or $$optref{'mode'} eq 'git-dumb') {
+ 	    my $curdir = cwd();
+ 	    $fname =~ m%(.*)/([^/]*)-([^_/-]*)\.tar\.(gz|xz|bz2|lzma)%;
+ 	    my $dst = $1;
+@@ -4246,12 +4352,12 @@ sub downloader ($$$$$)
+ 	    my $ver = $3;
+ 	    my $suffix = $4;
+ 	    my ($gitrepo, $gitref) = split /[[:space:]]+/, $url, 2;
+-	    my $gitrepodir = "$pkg.$$.git";
++	    my $gitrepodir = "$pkg-archive.$$.git";
+ 	    uscan_verbose "Execute: git clone --bare $gitrepo $dst/$gitrepodir\n";
+ 	    system('git', 'clone', '--bare', $gitrepo, "$dst/$gitrepodir") == 0 or uscan_die("git clone failed\n");
+ 	    chdir "$dst/$gitrepodir" or uscan_die("Unable to chdir(\"$dst/$gitrepodir\"): $!\n");
+-	    uscan_verbose "Execute: git archive --format=tar --prefix=$pkg-$ver/ --output=$curdir/$dst/$pkg-$ver.tar $gitref\n";
+-	    system('git', 'archive', '--format=tar', "--prefix=$pkg-$ver/", "--output=$curdir/$dst/$pkg-$ver.tar", $gitref) == 0 or uscan_die("git archive failed\n");;
++	    uscan_verbose "Execute: git --git-dir=$destdir/$gitrepodir archive --format=tar --prefix=$pkg-$ver/ --output=$curdir/$dst/$pkg-$ver.tar $gitref\n";
++	    system('git', "--git-dir=$destdir/$gitrepodir", 'archive', '--format=tar', "--prefix=$pkg-$ver/", "--output=$curdir/$dst/$pkg-$ver.tar", $gitref) == 0 or uscan_die("git archive failed\n");;
+ 	    chdir "$curdir/$dst" or uscan_die("Unable to chdir($curdir/$dst): $!\n");
+ 	    if ($suffix eq 'gz') {
+ 		uscan_verbose "Execute: gzip -n -9 $pkg-$ver.tar\n";
+@@ -4270,7 +4376,7 @@ sub downloader ($$$$$)
+ 		exit 1;
+ 	    }
+ 	    chdir "$curdir" or uscan_die("Unable to chdir($curdir): $!\n");
+-	} elsif ($url =~ m%^http(s)?://%) {
++	} elsif ($$optref{'mode'} eq 'http') {
+ 	    if (defined($1) and !$haveSSL) {
+ 		uscan_die "$progname: you must have the liblwp-protocol-https-perl package installed\nto use https URLs\n";
+ 	    }
+@@ -4823,7 +4929,7 @@ sub safe_replace($$)
+ 	$replacement =~ s/\\\Q$sep\E/$sep/g;
+ 	# If bracketing quotes were used, also unescape the
+ 	# closing version
+-	# {{ dummy for editor
++	### {{ ### (FOOL EDITOR for non-quoted kets)
+ 	$replacement =~ s/\\\Q}\E/}/g if $sep eq '{';
+ 	$replacement =~ s/\\\Q]\E/]/g if $sep eq '[';
+ 	$replacement =~ s/\\\Q)\E/)/g if $sep eq '(';
+-- 
+2.15.1
+

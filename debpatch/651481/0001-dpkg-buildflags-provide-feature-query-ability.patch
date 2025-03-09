@@ -1,0 +1,305 @@
+From cd183a3e7e360d3e1a82b330fb430622848b68e1 Mon Sep 17 00:00:00 2001
+From: Kees Cook <kees@outflux.net>
+Date: Thu, 8 Dec 2011 15:53:14 -0800
+Subject: [PATCH] dpkg-buildflags: provide feature query ability
+
+Since the logic for having a hardening flag enabled or disabled depends
+on the architecture, and since the flags may change over time for each
+hardening feature, there needs to be a way to externally query the state
+of the hardening features. Specifically, lintian needs this to be able
+to figure out if a binary package is missing expected hardening features.
+Instead of maintaining multiple hard-coded lists of expected hardening
+features, this makes dpkg-buildflags the canonical location of the
+information, which can be queried by externally. (See bug 650536.)
+
+Signed-off-by: Kees Cook <kees@debian.org>
+---
+ man/dpkg-buildflags.1         |   21 ++++++++++++-
+ scripts/Dpkg/BuildFlags.pm    |   40 ++++++++++++++++++++++++-
+ scripts/Dpkg/Vendor/Debian.pm |   66 ++++++++++++++++++++++++++++------------
+ scripts/dpkg-buildflags.pl    |   17 ++++++++++-
+ 4 files changed, 120 insertions(+), 24 deletions(-)
+
+diff --git a/man/dpkg-buildflags.1 b/man/dpkg-buildflags.1
+index a018edb..8b6f16e 100644
+--- a/man/dpkg-buildflags.1
++++ b/man/dpkg-buildflags.1
+@@ -87,6 +87,22 @@ the flag is set/modified by a user-specific configuration;
+ the flag is set/modified by an environment-specific configuration.
+ .RE
+ .TP
++.BI \-\-query\-features " area"
++Print the features enabled for a given area. The only currently recognized
++area is \fBhardening\fP. Exits with 0 if the area is known otherwise exits
++with 1.
++.br
++
++The output format is RFC822 header-style, with one section per feature.
++For example:
++.br
++
++  Feature: pie
++  Enabled: no
++
++  Feature: stackprotector
++  Enabled: yes
++.TP
+ .B \-\-help
+ Show the usage message and exit.
+ .TP
+@@ -231,7 +247,8 @@ This setting (enabled by default) adds
+ to \fBLDFLAGS\fP.  During program load, several ELF memory sections need
+ to be written to by the linker. This flags the loader to turn these
+ sections read-only before turning over control to the program. Most
+-notably this prevents GOT overwrite attacks.
++notably this prevents GOT overwrite attacks. If this option is disabled,
++\fBbindnow\fP will become disabled as well.
+ .
+ .TP
+ .B bindnow
+@@ -239,7 +256,7 @@ This setting (disabled by default) adds
+ .B \-Wl,\-z,now
+ to \fBLDFLAGS\fP. During program load, all dynamic symbols are resolved,
+ allowing for the entire PLT to be marked read-only (due to \fBrelro\fP
+-above).
++above). The option cannot become enabled if \fBrelro\fP is not enabled.
+ .
+ .TP
+ .B pie
+diff --git a/scripts/Dpkg/BuildFlags.pm b/scripts/Dpkg/BuildFlags.pm
+index 6112a9f..e832b39 100644
+--- a/scripts/Dpkg/BuildFlags.pm
++++ b/scripts/Dpkg/BuildFlags.pm
+@@ -18,7 +18,7 @@ package Dpkg::BuildFlags;
+ use strict;
+ use warnings;
+ 
+-our $VERSION = "1.01";
++our $VERSION = "1.02";
+ 
+ use Dpkg::Gettext;
+ use Dpkg::BuildOptions;
+@@ -68,6 +68,7 @@ sub load_vendor_defaults {
+     my ($self) = @_;
+     $self->{'options'} = {};
+     $self->{'source'} = {};
++    $self->{'features'} = {};
+     my $build_opts = Dpkg::BuildOptions->new();
+     my $default_flags = $build_opts->has("noopt") ? "-g -O0" : "-g -O2";
+     $self->{flags} = {
+@@ -202,6 +203,19 @@ sub set {
+     $self->{origin}->{$flag} = $src if defined $src;
+ }
+ 
++=item $bf->set_feature($area, $feature, $enabled)
++
++Update the boolean state of whether a specific feature within a known
++feature area has been enabled. The only currently known feature area is
++"hardening".
++
++=cut
++
++sub set_feature {
++    my ($self, $area, $feature, $enabled) = @_;
++    $self->{features}->{$area}->{$feature} = !!$enabled;
++}
++
+ =item $bf->strip($flag, $value, $source)
+ 
+ Update the build flag $flag by stripping the flags listed in $value and
+@@ -306,6 +320,18 @@ sub get {
+     return $self->{'flags'}{$key};
+ }
+ 
++=item $bf->get_features($area)
++
++Return, for the given area, a hash with keys as feature names, and values
++as booleans indicating whether the feature is enabled or not.
++
++=cut
++
++sub get_features {
++    my ($self, $area) = @_;
++    return %{$self->{'features'}{$area}};
++}
++
+ =item $bf->get_origin($flag)
+ 
+ Return the origin associated to the flag. It might be undef if the
+@@ -318,6 +344,18 @@ sub get_origin {
+     return $self->{'origin'}{$key};
+ }
+ 
++=item $bf->has_features($area)
++
++Returns true if the given area of features is known, and false otherwise.
++The only currently recognized area is "hardening".
++
++=cut
++
++sub has_features {
++    my ($self, $area) = @_;
++    return exists $self->{'features'}{$area};
++}
++
+ =item $bf->has($option)
+ 
+ Returns a boolean indicating whether the flags exists in the object.
+diff --git a/scripts/Dpkg/Vendor/Debian.pm b/scripts/Dpkg/Vendor/Debian.pm
+index e824d0e..07935d9 100644
+--- a/scripts/Dpkg/Vendor/Debian.pm
++++ b/scripts/Dpkg/Vendor/Debian.pm
+@@ -83,7 +83,7 @@ sub add_hardening_flags {
+     my $arch = get_host_arch();
+     my ($abi, $os, $cpu) = debarch_to_debtriplet($arch);
+ 
+-    # Decide what's enabled
++    # Features enabled by default for all builds.
+     my %use_feature = (
+ 	"pie" => 0,
+ 	"stackprotector" => 1,
+@@ -92,6 +92,8 @@ sub add_hardening_flags {
+ 	"relro" => 1,
+ 	"bindnow" => 0
+     );
++
++    # Adjust features based on Maintainer's desires.
+     my $opts = Dpkg::BuildOptions->new(envvar => "DEB_BUILD_MAINT_OPTIONS");
+     foreach my $feature (split(",", $opts->get("hardening") // "")) {
+ 	$feature = lc($feature);
+@@ -112,47 +114,71 @@ sub add_hardening_flags {
+ 	}
+     }
+ 
+-    # PIE
+-    if ($use_feature{"pie"} and
+-	$os =~ /^(linux|knetbsd|hurd)$/ and
+-	$cpu !~ /^(hppa|m68k|mips|mipsel|avr32)$/) {
+-	# Only on linux/knetbsd/hurd (see #430455 and #586215)
++    # Mask features that are not available on certain architectures.
++    if ($os !~ /^(linux|knetbsd|hurd)$/ or
++	$cpu =~ /^(hppa|m68k|mips|mipsel|avr32)$/) {
++	# Disabled on non-linux/knetbsd/hurd (see #430455 and #586215).
+ 	# Disabled on hppa, m68k (#451192), mips/mipsel (#532821), avr32
+-	# (#574716)
+-	$flags->append("CFLAGS", "-fPIE");
+-	$flags->append("CXXFLAGS", "-fPIE");
+-	$flags->append("LDFLAGS", "-fPIE -pie");
++	#  (#574716).
++	$use_feature{"pie"} = 0;
+     }
+-    # Stack protector
+-    if ($use_feature{"stackprotector"} and
+-	$cpu !~ /^(ia64|alpha|mips|mipsel|hppa)$/ and $arch ne "arm") {
++    if ($cpu =~ /^(ia64|alpha|mips|mipsel|hppa)$/ or $arch eq "arm") {
+ 	# Stack protector disabled on ia64, alpha, mips, mipsel, hppa.
+ 	#   "warning: -fstack-protector not supported for this target"
+ 	# Stack protector disabled on arm (ok on armel).
+ 	#   compiler supports it incorrectly (leads to SEGV)
++	$use_feature{"stackprotector"} = 0;
++    }
++    if ($cpu =~ /^(ia64|hppa|avr32)$/) {
++	# relro not implemented on ia64, hppa, avr32.
++	$use_feature{"relro"} = 0;
++    }
++
++    # Handle logical feature interactions.
++    if ($use_feature{"relro"} == 0) {
++	# Disable bindnow if relro is not enabled, since it has no
++	# hardening ability without relro and may incur load penalties.
++	$use_feature{"bindnow"} = 0;
++    }
++
++    # PIE
++    if ($use_feature{"pie"}) {
++	$flags->append("CFLAGS", "-fPIE");
++	$flags->append("CXXFLAGS", "-fPIE");
++	$flags->append("LDFLAGS", "-fPIE -pie");
++    }
++
++    # Stack protector
++    if ($use_feature{"stackprotector"}) {
+ 	$flags->append("CFLAGS", "-fstack-protector --param=ssp-buffer-size=4");
+ 	$flags->append("CXXFLAGS", "-fstack-protector --param=ssp-buffer-size=4");
+     }
+-    # Fortify
++
++    # Fortify Source
+     if ($use_feature{"fortify"}) {
+ 	$flags->append("CPPFLAGS", "-D_FORTIFY_SOURCE=2");
+     }
+-    # Format
++
++    # Format Security
+     if ($use_feature{"format"}) {
+ 	$flags->append("CFLAGS", "-Wformat -Wformat-security -Werror=format-security");
+ 	$flags->append("CXXFLAGS", "-Wformat -Wformat-security -Werror=format-security");
+     }
+-    # Relro
+-    if ($use_feature{"relro"} and $cpu !~ /^(ia64|hppa|avr32)$/) {
++
++    # Read-only Relocations
++    if ($use_feature{"relro"}) {
+ 	$flags->append("LDFLAGS", "-Wl,-z,relro");
+-    } else {
+-	# Disable full relro if relro is not enabled.
+-	$use_feature{"bindnow"} = 0;
+     }
++
+     # Bindnow
+     if ($use_feature{"bindnow"}) {
+ 	$flags->append("LDFLAGS", "-Wl,-z,now");
+     }
++
++    # Store the feature usage.
++    for (keys %use_feature) {
++	$flags->set_feature("hardening", $_, $use_feature{$_})
++    }
+ }
+ 
+ 1;
+diff --git a/scripts/dpkg-buildflags.pl b/scripts/dpkg-buildflags.pl
+index ee33961..1254cf8 100755
+--- a/scripts/dpkg-buildflags.pl
++++ b/scripts/dpkg-buildflags.pl
+@@ -47,6 +47,9 @@ Actions:
+   --get <flag>       output the requested flag to stdout.
+   --origin <flag>    output the origin of the flag to stdout:
+                      value is one of vendor, system, user, env.
++  --query-features <area>
++                     output the list of features for the given area,
++                     along with their enablement status, in RFC822 style.
+   --list             output a list of the flags supported by the current vendor.
+   --export=(sh|make|configure)
+                      output something convenient to import the
+@@ -62,7 +65,7 @@ my ($param, $action);
+ 
+ while (@ARGV) {
+     $_ = shift(@ARGV);
+-    if (m/^--(get|origin)$/) {
++    if (m/^--(get|origin|query-features)$/) {
+         usageerr(_g("two commands specified: --%s and --%s"), $1, $action)
+             if defined($action);
+         $action = $1;
+@@ -115,6 +118,18 @@ if ($action eq "get") {
+ 	print $build_flags->get_origin($param) . "\n";
+ 	exit(0);
+     }
++} elsif ($action eq "query-features") {
++    if ($build_flags->has_features($param)) {
++	my %features = $build_flags->get_features($param);
++	my @report;
++	foreach my $feature (sort keys %features) {
++	    my $item = "Feature: $feature\nEnabled: ";
++	    $item .= $features{$feature} ? "yes\n" : "no\n";
++	    push(@report, $item);
++	}
++	print join("\n", @report);
++	exit(0);
++    }
+ } elsif ($action =~ m/^export-(.*)$/) {
+     my $export_type = $1;
+     foreach my $flag ($build_flags->list()) {
+-- 
+1.7.5.4
+

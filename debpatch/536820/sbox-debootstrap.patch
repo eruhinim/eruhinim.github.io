@@ -1,0 +1,120 @@
+diff -urN debootstrap-1.0.13/debian/changelog debootstrap-1.0.14~0.1/debian/changelog
+--- debootstrap-1.0.13/debian/changelog	2009-04-24 22:08:27.000000000 +0300
++++ debootstrap-1.0.14~0.1/debian/changelog	2009-07-15 18:16:04.000000000 +0300
+@@ -1,3 +1,9 @@
++debootstrap (1.0.14~0.1) karmic; urgency=low
++
++  * sb2 support
++
++ -- Riku Voipio <riku.voipio@iki.fi>  Mon, 13 Jul 2009 15:43:54 +0300
++
+ debootstrap (1.0.13) unstable; urgency=low
+ 
+   [ Otavio Salvador ]
+diff -urN debootstrap-1.0.13/debootstrap debootstrap-1.0.14~0.1/debootstrap
+--- debootstrap-1.0.13/debootstrap	2009-03-24 16:08:43.000000000 +0200
++++ debootstrap-1.0.14~0.1/debootstrap	2009-07-15 22:45:57.000000000 +0300
+@@ -79,7 +79,8 @@
+       --components=A,B,C     use packages from the listed components of the
+                              archive
+       --variant=X            use variant X of the bootstrap scripts
+-                             (currently supported variants: buildd, fakechroot)
++                             (currently supported variants: buildd, fakechroot,
++                              scratchbox)
+       --keyring=K            check Release files against keyring K
+       --no-resolve-deps      don't try to resolve dependencies automatically
+ 
+@@ -346,7 +347,23 @@
+ 	error 1 WHATARCH "Couldn't work out current architecture"
+ fi
+ 
+-export ARCH SUITE TARGET
++if [ "$TARGET" = "/" ]; then
++	CHROOT_CMD=""
++elif doing_variant scratchbox; then
++	for config in ~/.scratchbox2/*/sb2.config;
++	do
++		export `grep ^SBOX_TARGET_ROOT= $config`
++		if [ "x$SBOX_TARGET_ROOT" = "x$TARGET" ]; then
++			SB2_TARGET=$(basename $(dirname $config))
++		fi
++	done
++	[ "x$SB2_TARGET" != "x" ] || error 1 SBOXTARGETREQ "No scratchbox target configured for $TARGET"
++	CHROOT_CMD="sb2 -eR -t $SB2_TARGET"
++else
++	CHROOT_CMD="chroot $TARGET"
++fi
++
++export ARCH SUITE TARGET CHROOT_CMD
+ 
+ if am_doing_phase first_stage second_stage; then
+ 	if [ -x /usr/bin/id ] && [ `id -u` -ne 0 ]; then
+diff -urN debootstrap-1.0.13/functions debootstrap-1.0.14~0.1/functions
+--- debootstrap-1.0.13/functions	2009-03-24 16:08:43.000000000 +0200
++++ debootstrap-1.0.14~0.1/functions	2009-07-15 23:49:39.000000000 +0300
+@@ -730,7 +730,7 @@
+ ); }
+ 
+ in_target_nofail () {
+-	if ! chroot "$TARGET" "$@" 2>/dev/null; then
++	if ! $CHROOT_CMD "$@" 2>/dev/null; then
+ 		true
+ 	fi
+ 	return 0
+@@ -741,7 +741,7 @@
+ 	local msg="$2"
+ 	local arg="$3"
+ 	shift; shift; shift
+-	if ! chroot "$TARGET" "$@"; then
++	if ! $CHROOT_CMD "$@"; then
+ 		warning "$code" "$msg" "$arg"
+ 		return 1
+ 	fi
+@@ -749,7 +749,7 @@
+ }
+ 
+ in_target () {
+-	in_target_failmsg IN_TARGET_FAIL "Failure trying to run: %s" "chroot $TARGET $*" "$@"
++	in_target_failmsg IN_TARGET_FAIL "Failure trying to run: %s" "$CHROOT_CMD $*" "$@"
+ }
+ 
+ ###################################################### standard setup stuff
+diff -urN debootstrap-1.0.13/scripts/debian/sid debootstrap-1.0.14~0.1/scripts/debian/sid
+--- debootstrap-1.0.13/scripts/debian/sid	2009-03-16 14:10:48.000000000 +0200
++++ debootstrap-1.0.14~0.1/scripts/debian/sid	2009-07-15 23:49:47.000000000 +0300
+@@ -1,7 +1,7 @@
+ mirror_style release
+ download_style apt
+ finddebs_style from-indices
+-variants - buildd fakechroot minbase
++variants - buildd fakechroot minbase scratchbox
+ 
+ if doing_variant fakechroot; then
+     test "$FAKECHROOT" = "true" || error 1 FAKECHROOTREQ "This variant requires fakechroot environment to be started"
+@@ -21,7 +21,7 @@
+       #required="$required $(get_debs Priority: important)"
+       #  ^^ should be getting debconf here somehow maybe
+       base="$(get_debs Priority: important)"
+-    elif doing_variant buildd; then
++    elif doing_variant buildd||doing_variant scratchbox; then
+       base="$(get_debs Build-Essential: yes)"
+     elif doing_variant minbase; then
+       base="apt"
+@@ -52,6 +52,8 @@
+ 
+     if doing_variant fakechroot; then 
+         setup_devices_fakechroot
++    elif doing_variant schratchbox; then
++        true
+     else
+         setup_devices
+     fi
+@@ -89,6 +91,8 @@
+ 
+     if doing_variant fakechroot; then 
+ 	setup_proc_fakechroot
++    elif doing_variant scratchbox; then
++    true
+     else
+ 	setup_proc
+ 	in_target /sbin/ldconfig

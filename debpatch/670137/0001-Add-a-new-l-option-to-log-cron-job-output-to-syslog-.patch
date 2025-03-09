@@ -1,0 +1,234 @@
+From c02d20411ef7d8b8aa9133e1022e40d213e0b2ae Mon Sep 17 00:00:00 2001
+From: Josh Triplett <josh@joshtriplett.org>
+Date: Mon, 23 Apr 2012 00:35:40 -0700
+Subject: [PATCH 1/2] Add a new -l option to log cron job output to syslog
+ when not mailing that output.
+
+---
+ anacron.8        |    5 +++-
+ debian/changelog |    8 ++++++
+ global.h         |    2 +-
+ main.c           |   13 +++++++---
+ runjob.c         |   74 +++++++++++++++++++++++++++++++++++++++++++-----------
+ 5 files changed, 81 insertions(+), 21 deletions(-)
+
+diff --git a/anacron.8 b/anacron.8
+index 9070521..ed2ead1 100644
+--- a/anacron.8
++++ b/anacron.8
+@@ -2,7 +2,7 @@
+ .SH NAME
+ anacron \- runs commands periodically
+ .SH SYNOPSIS
+-.B anacron \fR[\fB-s\fR] [\fB-f\fR] [\fB-n\fR] [\fB-d\fR] [\fB-q\fR]
++.B anacron \fR[\fB-s\fR] [\fB-f\fR] [\fB-n\fR] [\fB-l\fR] [\fB-d\fR] [\fB-q\fR]
+ [\fB-t anacrontab\fR] [\fB-S spooldir\fR] [\fIjob\fR] ...
+ .br
+ .B anacron [\fB-S spooldir\fR] -u [\fB-t anacrontab\fR] \fR[\fIjob\fR] ...
+@@ -92,6 +92,9 @@ Run jobs now.  Ignore the delay specifications in the
+ .I /etc/anacrontab
+ file.  This options implies \fB-s\fR.
+ .TP
++.B -l
++Log job output to syslog when not mailing that output.
++.TP
+ .B -d
+ Don't fork to the background.  In this mode, Anacron will output informational
+ messages to standard error, as well as to syslog.  The output of jobs
+diff --git a/debian/changelog b/debian/changelog
+index 197ed43..2626ef5 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,3 +1,11 @@
++anacron (2.3-19) UNRELEASED; urgency=low
++
++  [ Josh Triplett ]
++  * Add a new -l option to log cron job output to syslog when not mailing that
++    output.
++
++ -- Peter Eisentraut <petere@debian.org>  Mon, 23 Apr 2012 00:33:44 -0700
++
+ anacron (2.3-18) unstable; urgency=low
+ 
+   * Set charset in mails sent by anacron based on system locale, adapted
+diff --git a/global.h b/global.h
+index d05966e..ada1fae 100644
+--- a/global.h
++++ b/global.h
+@@ -81,7 +81,7 @@ extern char *anacrontab;
+ extern char *spooldir;
+ extern int old_umask;
+ extern sigset_t old_sigmask;
+-extern int serialize,force,update_only,now,no_daemon,quiet,testing_only;
++extern int serialize,force,update_only,now,log_if_no_mail,no_daemon,quiet,testing_only;
+ extern int day_now;
+ extern int year,month,day_of_month;
+ extern int in_background;
+diff --git a/main.c b/main.c
+index 936abaa..3741ea1 100644
+--- a/main.c
++++ b/main.c
+@@ -45,7 +45,8 @@ char *program_name;
+ char *anacrontab;
+ char *spooldir;
+ int serialize, force, update_only, now,
+-    no_daemon, quiet, testing_only;            /* command-line options */
++    log_if_no_mail, no_daemon, quiet,
++    testing_only;                              /* command-line options */
+ char **args;                       /* vector of "job" command-line arguments */
+ int nargs;                                     /* number of these */
+ char *defarg = "*";
+@@ -77,7 +78,7 @@ print_version()
+ static void
+ print_usage()
+ {
+-    printf("Usage:  anacron [-s] [-f] [-n] [-d] [-q] [-t anacrontab] [-S spooldir] [job] ...\n"
++    printf("Usage:  anacron [-s] [-f] [-n] [-l] [-d] [-q] [-t anacrontab] [-S spooldir] [job] ...\n"
+ 	   "        anacron [-S spooldir] -u [job] ...\n"
+ 	   "        anacron [-V|-h]\n"
+ 	   "        anacron -T [-t anacrontab]\n"
+@@ -85,6 +86,7 @@ print_usage()
+ 	   " -s  Serialize execution of jobs\n"
+ 	   " -f  Force execution of jobs, even before their time\n"
+ 	   " -n  Run jobs with no delay, implies -s\n"
++	   " -l  Log job output to syslog when not mailing that output.\n"
+ 	   " -d  Don't fork to the background\n"
+ 	   " -q  Suppress stderr messages, only applicable with -d\n"
+ 	   " -u  Update the timestamps without actually running anything\n"
+@@ -104,9 +106,9 @@ parse_opts(int argc, char *argv[])
+ {
+     int opt;
+ 
+-    quiet = no_daemon = serialize = force = update_only = now = 0;
++    quiet = log_if_no_mail = no_daemon = serialize = force = update_only = now = 0;
+     opterr = 0;
+-    while ((opt = getopt(argc, argv, "sfundqt:TS:Vh")) != EOF)
++    while ((opt = getopt(argc, argv, "sfunldqt:TS:Vh")) != EOF)
+     {
+ 	switch (opt)
+ 	{
+@@ -122,6 +124,9 @@ parse_opts(int argc, char *argv[])
+ 	case 'n':
+ 	    now = serialize = 1;
+ 	    break;
++	case 'l':
++	    log_if_no_mail = 1;
++	    break;
+ 	case 'd':
+ 	    no_daemon = 1;
+ 	    break;
+diff --git a/runjob.c b/runjob.c
+index b5ed26c..bdb5fa1 100644
+--- a/runjob.c
++++ b/runjob.c
+@@ -152,16 +152,8 @@ static void
+ launch_mailer(job_rec *jr)
+ {
+     pid_t pid;
+-    struct stat buf;
+     int r;
+ 
+-    /* Check that we have a way of sending mail. */
+-    if(stat(SENDMAIL, &buf))
+-    {
+-	complain("Can't find sendmail at %s, not mailing output", SENDMAIL);
+-	return;
+-    }
+-
+     pid = xfork();
+     if (pid == 0)
+     {
+@@ -191,6 +183,37 @@ launch_mailer(job_rec *jr)
+ }
+ 
+ static void
++log_output(job_rec *jr)
++{
++    FILE *f;
++    char buf[4096];
++    if (lseek(jr->output_fd, jr->mail_header_size, SEEK_SET) < 0)
++    {
++        complain_e("Can't lseek()");
++        return;
++    }
++    f = fdopen(jr->output_fd, "r");
++    if (!f)
++    {
++        complain_e("Can't fdopen()");
++        return;
++    }
++    jr->output_fd = -1;
++    while(fgets(buf, sizeof(buf), f) != NULL)
++    {
++        size_t len;
++        len = strlen(buf);
++        if (buf[len-1] == '\n')
++            buf[len-1] = '\0';
++        explain("Job `%s' output: %s", jr->ident, buf);
++    }
++    if (ferror(f))
++        complain("ferror() reading output");
++    if (fclose(f))
++        complain_e("fclose()");
++}
++
++static void
+ tend_mailer(job_rec *jr, int status)
+ {
+     if (WIFEXITED(status) && WEXITSTATUS(status) != 0)
+@@ -276,15 +299,26 @@ static void
+ tend_job(job_rec *jr, int status)
+ /* Take care of a finished job */
+ {
+-    int mail_output;
+-    char *m;
++    struct stat buf;
++    int have_output, have_mailer;
++    char *m = "";
+ 
+     update_timestamp(jr);
+     unlock(jr);
+-    if (file_size(jr->output_fd) > jr->mail_header_size) mail_output = 1;
+-    else mail_output = 0;
++    if (file_size(jr->output_fd) > jr->mail_header_size) have_output = 1;
++    else have_output = 0;
++
++    if (have_output)
++    {
++        have_mailer = (stat(SENDMAIL, &buf) == 0);
++        if (have_mailer)
++            m = " (mailing output)";
++        else if (log_if_no_mail)
++            m = " (logging output)";
++        else
++            m = " (discarding output)";
++    }
+ 
+-    m = mail_output ? " (mailing output)" : "";
+     if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+ 	explain("Job `%s' terminated%s", jr->ident, m);
+     else if (WIFEXITED(status))
+@@ -298,8 +332,18 @@ tend_job(job_rec *jr, int status)
+ 
+     jr->job_pid = 0;
+     running_jobs--;
+-    if (mail_output) launch_mailer(jr);
+-    xclose(jr->output_fd);
++    if (have_output)
++    {
++        if (have_mailer)
++            launch_mailer(jr);
++        else if (log_if_no_mail)
++            log_output(jr);
++        else
++            complain("Can't find sendmail at %s and not configured to log output; discarding output", SENDMAIL);
++    }
++
++    if (jr->output_fd != -1)
++        xclose(jr->output_fd);
+ }
+ 
+ void
+-- 
+1.7.10
+

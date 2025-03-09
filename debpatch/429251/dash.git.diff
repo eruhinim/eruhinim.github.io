@@ -1,0 +1,263 @@
+diff --git a/src/expand.c b/src/expand.c
+index 7995d40..48c45e5 100644
+--- a/src/expand.c
++++ b/src/expand.c
+@@ -117,9 +117,6 @@ STATIC char *evalvar(char *, int);
+ STATIC size_t strtodest(const char *, const char *, int);
+ STATIC void memtodest(const char *, size_t, const char *, int);
+ STATIC ssize_t varvalue(char *, int, int);
+-STATIC void recordregion(int, int, int);
+-STATIC void removerecordregions(int); 
+-STATIC void ifsbreakup(char *, struct arglist *);
+ STATIC void ifsfree(void);
+ STATIC void expandmeta(struct strlist *, int);
+ #ifdef HAVE_GLOB
+@@ -412,7 +409,7 @@ lose:
+ }
+ 
+ 
+-STATIC void 
++void 
+ removerecordregions(int endoff)
+ {
+ 	if (ifslastp == NULL)
+@@ -1001,7 +998,7 @@ value:
+  * string for IFS characters.
+  */
+ 
+-STATIC void
++void
+ recordregion(int start, int end, int nulonly)
+ {
+ 	struct ifsregion *ifsp;
+@@ -1028,7 +1025,7 @@ recordregion(int start, int end, int nulonly)
+  * strings to the argument list.  The regions of the string to be
+  * searched for IFS characters have been stored by recordregion.
+  */
+-STATIC void
++void
+ ifsbreakup(char *string, struct arglist *arglist)
+ {
+ 	struct ifsregion *ifsp;
+diff --git a/src/expand.h b/src/expand.h
+index 1862aea..405af0b 100644
+--- a/src/expand.h
++++ b/src/expand.h
+@@ -67,6 +67,9 @@ void expari(int);
+ #define rmescapes(p) _rmescapes((p), 0)
+ char *_rmescapes(char *, int);
+ int casematch(union node *, char *);
++void recordregion(int, int, int);
++void removerecordregions(int); 
++void ifsbreakup(char *, struct arglist *);
+ 
+ /* From arith.y */
+ intmax_t arith(const char *);
+diff --git a/src/miscbltin.c b/src/miscbltin.c
+index 3f91bc3..8f2576b 100644
+--- a/src/miscbltin.c
++++ b/src/miscbltin.c
+@@ -55,18 +55,93 @@
+ #include "miscbltin.h"
+ #include "mystring.h"
+ #include "main.h"
++#include "expand.h"
++#include "parser.h"
+ 
+ #undef rflag
+ 
++/** handle one line of the read command.
++ *  more fields than variables -> remainder shall be part of last variable.
++ *  less fields than variables -> remaining variables unset.
++ *
++ *  @param line complete line of input
++ *  @param ap argument (variable) list
++ *  @param len length of line including trailing '\0'
++ */
++static void
++readcmd_handle_line(char *line, char **ap, size_t len)
++{
++	struct arglist arglist;
++	struct strlist *sl;
++	char *s, *backup;
++
++	/* ifsbreakup will fiddle with stack region... */
++	s = grabstackstr(line + len);
++	/* need a copy, so that delimiters aren't lost
++	 * in case there are more fields than variables */
++	if (len > 0) {
++		backup = sstrdup(line);
++	} else {
++		/* len==0, so just nullify all arguments...
++		 * otherwise memcpy (from sstrdup) would be called 
++		 * with equal memory regions.
++		 */
++		backup = NULL;
++		goto nullify;
++	}
++
++	arglist.lastp = &arglist.list;
++	recordregion(0, len, 0);
++	
++	ifsbreakup(s, &arglist);
++	*arglist.lastp = NULL;
++	removerecordregions(0);
++
++	for (sl = arglist.list; sl != NULL; sl = sl->next) {
++
++		/* remaining fields present, but no variables left. */
++		if ((*(ap + 1) == NULL) && (sl->next != NULL)) {
++			size_t offset;
++			char *remainder;
++
++			/* FIXME little bit hacky, assuming that ifsbreakup 
++			 * will not modify the length of the string */
++			offset = sl->text - s;
++			remainder = backup + offset;
++			rmescapes(remainder);
++			setvar(*ap, remainder, 0);
++
++			ungrabstackstr(backup, 0);
++			ungrabstackstr(s, 0);
++			return;
++		}
++		
++		/* set variable to field */
++		rmescapes(sl->text);
++		setvar(*ap, sl->text, 0);
++		ap++;
++	}
++
++nullify:
++	/* nullify remaining arguments */
++	for (; *ap != NULL; ap++) {
++		setvar(*ap, nullstr, 0);
++	}
++
++	if (backup != NULL) {
++		ungrabstackstr(backup, 0);
++	}
++	ungrabstackstr(s, 0);
++}
+ 
+ 
+ /*
+  * The read builtin.  The -e option causes backslashes to escape the
+- * following character.
++ * following character. The -p option followed by an argument prompts
++ * with the argument.
+  *
+  * This uses unbuffered input, which may be avoidable in some cases.
+  */
+-
+ int
+ readcmd(int argc, char **argv)
+ {
+@@ -75,14 +150,14 @@ readcmd(int argc, char **argv)
+ 	char c;
+ 	int rflag;
+ 	char *prompt;
+-	const char *ifs;
+ 	char *p;
+-	int startword;
+-	int status;
+ 	int i;
++	int res;
++	int status;
+ 
+ 	rflag = 0;
+ 	prompt = NULL;
++	status = 0;
+ 	while ((i = nextopt("p:r")) != '\0') {
+ 		if (i == 'p')
+ 			prompt = optionarg;
+@@ -95,60 +170,54 @@ readcmd(int argc, char **argv)
+ 		flushall();
+ #endif
+ 	}
+-	if (*(ap = argptr) == NULL)
++	if (*(ap = argptr) == NULL) {
+ 		sh_error("arg count");
+-	if ((ifs = bltinlookup("IFS")) == NULL)
+-		ifs = defifs;
+-	status = 0;
+-	startword = 1;
++	}
++
+ 	backslash = 0;
+ 	STARTSTACKSTR(p);
+ 	for (;;) {
+-		if (read(0, &c, 1) != 1) {
++		/* read character by character until eol */
++		res = read(0, &c, 1);
++		if (res != 1) {
+ 			status = 1;
+ 			break;
+ 		}
+-		if (c == '\0')
+-			continue;
+-		if (backslash) {
++
++		if (c == '\0') {
+ 			backslash = 0;
+-			if (c != '\n')
+-				goto put;
+-			continue;
+-		}
+-		if (!rflag && c == '\\') {
+-			backslash++;
+ 			continue;
+ 		}
+-		if (c == '\n')
++	
++		/* eol reached, end loop */
++		if ((backslash == 0) && (c == '\n')) {
+ 			break;
+-		if (startword && *ifs == ' ' && strchr(ifs, c)) {
++		}
++
++		/* preceeding backslash */
++		if (backslash != 0) {
++			backslash = 0;
++			if (c != '\n') {
++				STPUTC(CTLESC, p);
++				STPUTC(c, p);
++			}
+ 			continue;
+ 		}
+-		startword = 0;
+-		if (ap[1] != NULL && strchr(ifs, c) != NULL) {
+-			STACKSTRNUL(p);
+-			setvar(*ap, stackblock(), 0);
+-			ap++;
+-			startword = 1;
+-			STARTSTACKSTR(p);
+-		} else {
+-put:
+-			STPUTC(c, p);
++
++		if ((! rflag) && (c == '\\')) {
++			backslash++;
++			continue;
+ 		}
++
++		backslash = 0;
++		STPUTC(c, p);
+ 	}
++
+ 	STACKSTRNUL(p);
+-	/* Remove trailing blanks */
+-	while ((char *)stackblock() <= --p && strchr(ifs, *p) != NULL)
+-		*p = '\0';
+-	setvar(*ap, stackblock(), 0);
+-	while (*++ap != NULL)
+-		setvar(*ap, nullstr, 0);
++	readcmd_handle_line(stackblock(), ap, p - (char *)stackblock());
+ 	return status;
+ }
+ 
+-
+-
+ /*
+  * umask builtin
+  *

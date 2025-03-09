@@ -1,0 +1,95 @@
+>From f48188e767165bb735d9642b30e1fb20794ff06e Mon Sep 17 00:00:00 2001
+From: Chirayu Desai <chirayudesai1@gmail.com>
+Date: Thu, 25 Aug 2016 13:38:21 +0530
+Subject: [PATCH] mk-origtargz: rm excluded
+
+---
+ scripts/mk-origtargz.pl | 44 +++++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 39 insertions(+), 5 deletions(-)
+
+diff --git a/scripts/mk-origtargz.pl b/scripts/mk-origtargz.pl
+index f09c500a55..0839aed272 100644
+--- a/scripts/mk-origtargz.pl
++++ b/scripts/mk-origtargz.pl
+@@ -166,6 +166,10 @@ Put the resulting file in the given directory.
+ Add the extra options to use with the B<unzip> command such as B<-a>, B<-aa>,
+ and B<-b>.
+ 
++=item B<--rm-excluded>
++
++Use rm instead of tar --delete.
++
+ =back
+ 
+ =cut
+@@ -202,6 +206,7 @@ use Dpkg::Version;
+ use File::Spec;
+ 
+ use Devscripts::Compression qw/compression_is_supported compression_guess_from_file compression_get_property/;
++use Cwd;
+ use Cwd 'abs_path';
+ use File::Copy;
+ use Dpkg::Control::Hash;
+@@ -224,6 +229,7 @@ my $compression = "gzip";
+ my $mode = undef; # can be symlink, rename or copy. Can internally be repacked if the file was repacked.
+ my $repack = 0;
+ my $suffix = '';
++my $rm_excluded = 0;
+ 
+ my $upstream = undef;
+ 
+@@ -255,6 +261,7 @@ GetOptions(
+     'repack-suffix|S=s' => \$suffix,
+     "directory|C=s" => \$destdir,
+     "unzipopt=s" => \$unzipopt,
++    "rm-excluded" => \$rm_excluded,
+     "help|h" => sub { pod2usage({-exitval => 0, -verbose => 1}); },
+ ) or pod2usage({-exitval => 3, -verbose=>1});
+ 
+@@ -534,11 +541,38 @@ if ($do_repack || $deletecount) {
+     # We have to use piping because --delete is broken otherwise, as documented
+     # at https://www.gnu.org/software/tar/manual/html_node/delete.html
+     if (@to_delete) {
+-	spawn(exec => ['tar', '--delete', @to_delete ],
+-	      from_file => $destfiletar,
+-	      to_file => $destfiletar . ".tmp",
+-	      wait_child => 1) if scalar(@to_delete) > 0;
+-	move ($destfiletar . ".tmp", $destfiletar);
++	if ($rm_excluded) {
++		# Setup a temporary directory and extract the tar
++		my $tempdir = tempdir ("uscanXXXX", TMPDIR => 1, CLEANUP => 1);
++		$tempdir .= '/exclude';
++		mkdir $tempdir or die("Unable to mkdir($tempdir): $!\n");
++		spawn(exec => ['tar', '--extract',
++		      '--file', "$destfiletar",
++		      '--directory', $tempdir,],
++		      wait_child => 1);
++		opendir(TMPDIR, $tempdir) || die("Can't open $tempdir $!\n");
++		my $cwd = cwd();
++		chdir TMPDIR;
++		# Remove the excluded files
++		spawn(exec => ['rm', '-r', @to_delete ], wait_child => 1);
++		chdir $cwd;
++		my @files = grep {$_ ne "." && $_ ne ".."} readdir(TMPDIR);
++		close TMPDIR;
++		# Create a tar without the excluded files
++		spawn(exec => ['tar',
++		      '--owner=root', '--group=root', '--mode=a+rX',
++		      '--create', '--file', "$destfiletar" . ".tmp",
++		      '--directory', $tempdir,
++		      @files],
++		      wait_child => 1);
++		move ($destfiletar . ".tmp", $destfiletar);
++	} else {
++		spawn(exec => ['tar', '--delete', @to_delete ],
++		      from_file => $destfiletar,
++		      to_file => $destfiletar . ".tmp",
++		      wait_child => 1) if scalar(@to_delete) > 0;
++		move ($destfiletar . ".tmp", $destfiletar);
++	}
+     }
+     compress_archive($destfiletar, $destfile, $compression);
+ 
+-- 
+2.9.3
+

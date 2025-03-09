@@ -1,0 +1,124 @@
+--- dpkg-1.10.22.orig/main/query.c	2004-06-02 06:18:16.000000000 +0900
++++ dpkg-1.10.22/main/query.c	2004-07-04 06:36:49.000000000 +0900
+@@ -120,6 +120,78 @@
+   return ws.ws_col;
+ }
+ 
++
++#include <wchar.h>
++
++static int mbswidth(const char *str) {
++  size_t len;
++  wchar_t *wcs;
++  int width;
++
++  len = mbstowcs(0, str, 0);
++  wcs = malloc(sizeof(wchar_t) * len);
++
++  len = mbstowcs(wcs, str, len);
++  width = wcswidth(wcs, len);
++
++  free(wcs);
++  return width;
++}
++
++static int mbscrop(const char *str, int maxwidth, int *realwidth) {
++  mbstate_t state;
++  int totallength = 0;
++  int totalwidth = 0;
++
++  memset(&state, 0, sizeof(state));
++  while(totalwidth < maxwidth) {
++    wchar_t wc;
++    int w;
++    int length = mbrtowc(&wc, str, strlen(str), &state);
++    if (length <= 0) break;
++
++    w = wcwidth(wc);
++
++    if ((totalwidth + w) > maxwidth)
++      break;
++    totalwidth += w;
++    totallength += length;
++    str += length;
++  }
++  *realwidth = totalwidth;
++  return totallength;
++}
++
++static void printmbstr(int width, int precision, const char *str) {
++  int padding;
++  int len;
++  int realwidth;
++  int extrapadding;
++
++  if (width > 0) {
++    padding = (width - mbswidth(str));
++    if (padding > 0)
++      width = strlen(str) + padding;
++  }
++
++  len = mbscrop(str, precision, &realwidth);
++
++  if (len > precision) {
++    precision = len;
++    if (realwidth < precision)
++      extrapadding = precision - realwidth;
++  }
++  else
++    extrapadding = 0;
++
++  if (width) 
++    printf("%-*.*s", width, precision, str);
++  else
++    printf("%-.*s", precision, str);
++  while(extrapadding--)
++    printf(" ");
++}
++
+ static void list1package(struct pkginfo *pkg, int *head) {
+   int l,w;
+   static int nw,vw,dw;
+@@ -133,7 +205,7 @@
+     nw=(14+w);		/* name width */
+     vw=(14+w);		/* version width */
+     dw=(44+(2*w));	/* description width */
+-    sprintf(format,"%%c%%c%%c %%-%d.%ds %%-%d.%ds %%.*s\n", nw, nw, vw, vw);
++    sprintf(format,"%%c%%c%%c ");
+   }
+ 
+   if (!*head) {
+@@ -141,7 +213,14 @@
+ Desired=Unknown/Install/Remove/Purge/Hold\n\
+ | Status=Not/Installed/Config-files/Unpacked/Failed-config/Half-installed\n\
+ |/ Err?=(none)/Hold/Reinst-required/X=both-problems (Status,Err: uppercase=bad)\n"), stdout);
+-    printf(format,'|','|','/', _("Name"), _("Version"), 40, _("Description"));
++    printf(format,'|','|','/');
++    printmbstr(nw, nw, _("Name"));
++    printf(" ");
++    printmbstr(vw, vw, _("Version"));
++    printf(" ");
++    printmbstr(0, 40, _("Description"));
++    printf("\n");
++    
+     printf("+++-");					/* status */
+     for (l=0;l<nw;l++) printf("="); printf("-");	/* packagename */
+     for (l=0;l<vw;l++) printf("="); printf("-");	/* version */
+@@ -154,10 +233,13 @@
+   printf(format,
+          "uihrp"[pkg->want],
+          "nUFiHc"[pkg->status],
+-         " R?#"[pkg->eflag],
+-         pkg->name,
+-         versiondescribe(&pkg->installed.version,vdew_never),
+-         l, pdesc);
++         " R?#"[pkg->eflag]);
++  printmbstr(nw, nw, pkg->name);
++  printf(" ");
++  printmbstr(nw, nw, versiondescribe(&pkg->installed.version,vdew_never));
++  printf(" ");
++  printmbstr(0, l, pdesc);
++  printf("\n");
+ }
+ 
+ void listpackages(const char *const *argv) {

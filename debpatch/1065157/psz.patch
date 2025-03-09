@@ -1,0 +1,229 @@
+--- cups-2.4.2/backend/lpd.c.ORIG	2022-05-26 16:17:21.000000000 +1000
++++ cups-2.4.2/backend/lpd.c	2024-03-05 14:09:07.739682339 +1100
+@@ -214,7 +214,14 @@
+   format        = 'l';
+   order         = ORDER_CONTROL_DATA;
+   reserve       = RESERVE_ANY;
+-  manual_copies = 1;
++  /* PSz 29 Feb 2024
++   * Set default manual_copies "off".
++   * With manual_copies "on", we simply run the copies together.
++   * Then a job of odd number of pages sent to a duplex printer,
++   * the first page of second copy gets printed on the back of the
++   * last page of the first copy.
++   */
++  manual_copies = 0;
+   timeout       = 300;
+   contimeout    = 7 * 24 * 60 * 60;
+ 
+@@ -305,7 +312,7 @@
+       else if (!_cups_strcasecmp(name, "mode") && value[0])
+       {
+        /*
+-        * Set control/data order...
++        * Set mode...
+ 	*/
+ 
+         if (!_cups_strcasecmp(value, "standard"))
+@@ -351,6 +358,13 @@
+        /*
+         * Set manual copies...
+ 	*/
++	/* PSz 28 Feb 24
++	 * Should not this be
++	 *   cupsGetOption("manual_copies", num_jobopts, jobopts)
++	 * or maybe some
++	 *   ppd->manual_copies
++	 * instead?
++	 */
+ 
+         manual_copies = !value[0] || !_cups_strcasecmp(value, "on") ||
+ 	 		!_cups_strcasecmp(value, "yes") ||
+@@ -397,7 +411,10 @@
+     }
+   }
+ 
+-  if (mode == MODE_STREAM)
++  /* PSz 1 Mar 2024
++   * This override needed only if data from STDIN and in STREAM mode
++   */
++  if (argc == 6 && mode == MODE_STREAM)
+     order = ORDER_CONTROL_DATA;
+ 
+  /*
+@@ -499,7 +516,13 @@
+   * Queue the job...
+   */
+ 
+-  if (argc > 6)
++  /* PSz 27 Feb 2024
++   * Do not (needlessly) ignore number of copies requested.
++   * Surely can do when have file, whether named or our temporary.
++   * Can also do when data from STDIN and STREAM mode, though
++   * not in the manual_copies way.
++   */
++  if (argc > 6 || mode == MODE_STANDARD)
+   {
+     if (manual_copies)
+     {
+@@ -511,22 +534,16 @@
+       manual_copies = 1;
+       copies        = atoi(argv[4]);
+     }
++  }
+ 
+-    status = lpd_queue(hostname, addrlist, resource + 1, fd, snmp_fd, mode,
+-                       username, title, copies, banner, format, order, reserve,
+-		       manual_copies, timeout, contimeout,
+-		       cupsGetOption("job-originating-host-name", num_jobopts,
+-		                     jobopts));
++  status = lpd_queue(hostname, addrlist, resource + 1, fd, snmp_fd, mode,
++                     username, title, copies, banner, format, order, reserve,
++		     manual_copies, timeout, contimeout,
++		     cupsGetOption("job-originating-host-name", num_jobopts,
++		                   jobopts));
+ 
+-    if (!status)
+-      fprintf(stderr, "PAGE: 1 %d\n", atoi(argv[4]));
+-  }
+-  else
+-    status = lpd_queue(hostname, addrlist, resource + 1, fd, snmp_fd, mode,
+-                       username, title, 1, banner, format, order, reserve, 1,
+-		       timeout, contimeout,
+-		       cupsGetOption("job-originating-host-name", num_jobopts,
+-		                     jobopts));
++  if (!status)
++    fprintf(stderr, "PAGE: 1 %d\n", atoi(argv[4]));
+ 
+  /*
+   * Remove the temporary file if necessary...
+@@ -956,6 +973,10 @@
+     * Next, open the print file and figure out its size...
+     */
+ 
++    /* PSz 1 Mar 2024
++     * Are we sure to get a non-zero print_fd when have file:
++     * do we "really know" that we were invoked with STDIN open?
++     */
+     if (print_fd)
+     {
+      /*
+@@ -1019,13 +1040,18 @@
+       cptr   += strlen(cptr);
+     }
+ 
+-    while (copies > 0)
++    /* PSz 28 Feb 2024
++     * Check size remaining, do not blow with too many copies
++     */
++    while (copies > 0 && ((sizeof(control) - (size_t)(cptr - control)) > 256))
+     {
+       snprintf(cptr, sizeof(control) - (size_t)(cptr - control), "%cdfA%03d%.15s\n",
+                format, (int)getpid() % 1000, localhost);
+       cptr   += strlen(cptr);
+       copies --;
+     }
++    if (copies > 0)
++      fprintf(stderr, "DEBUG: Limited by control size, %d copies skipped\n", copies);
+ 
+     snprintf(cptr, sizeof(control) - (size_t)(cptr - control),
+              "UdfA%03d%.15s\n"
+--- cups-2.4.2/filter/pstops.c.ORIG	2022-05-26 16:17:21.000000000 +1000
++++ cups-2.4.2/filter/pstops.c	2024-03-05 07:40:30.742626230 +1100
+@@ -2557,18 +2557,20 @@
+ 
+  /*
+   * Now figure out if we have to force collated copies, etc.
++  * PSz 5 Mar 2024  Logic round here fixed
+   */
+ 
+-  if ((attr = ppdFindAttr(ppd, "cupsMaxCopies", NULL)) != NULL)
+-    max_copies = atoi(attr->value);
+-  else if (ppd && ppd->manual_copies)
++  if (ppd && !ppd->manual_copies)
+     max_copies = 1;
++  else if ((attr = ppdFindAttr(ppd, "cupsMaxCopies", NULL)) != NULL)
++    max_copies = atoi(attr->value);
+   else
+     max_copies = 9999;
+ 
+   if (doc->copies > max_copies)
+-    doc->collate = 1;
+-  else if (ppd && ppd->manual_copies && Duplex && doc->copies > 1)
++    doc->copies = max_copies;
++
++  if (Duplex && doc->copies > 1)
+   {
+    /*
+     * Force collated copies when printing a duplexed document to
+--- cups-2.4.2/scheduler/job.c.ORIG	2022-05-26 16:17:21.000000000 +1000
++++ cups-2.4.2/scheduler/job.c	2024-03-05 14:17:35.814239305 +1100
+@@ -881,6 +881,22 @@
+   * For remote jobs, we send all of the files in the argument list.
+   */
+ 
++ /* PSz  5 Mar 24
++  * Can it be "right" to ask each of the filters, then also the backend,
++  * to produce copies?
++  * - Asking all means that each need to handle the setting of ManualCopies.
++  *   Worse, when ManualCopies is set then all filters should produce copies,
++  *   producing N^2 or N^3 etc copies.
++  * - Would not it be best (cleaner, simpler, more likely correct) to ask
++  *   just one to do copies? Ask one of the filters when ManualCopies is set,
++  *   ask the backend when not.
++  * - Asking all (or more than one), there should be some mechanism for
++  *   the filters to report whether copies were done, and pass that info
++  *   on to the others. We do seem to collect reports of "impressions",
++  *   but start all filters and backend at same time and with the same
++  *   original setting of copies.
++  */
++
+   if (job->printer->remote)
+     argc = 6 + job->num_files;
+   else
+--- cups-filters-1.28.17/filter/pdftopdf/pdftopdf.cc.ORIG	2023-01-25 12:38:24.000000000 +1100
++++ cups-filters-1.28.17/filter/pdftopdf/pdftopdf.cc	2024-03-05 07:40:30.742626230 +1100
+@@ -824,14 +824,31 @@
+   } else if ((ppd)&&(!ppd->manual_copies)) { // hw copy generation available
+     param.deviceCopies=param.numCopies;
+     if (param.collate) { // collate requested by user
++      /* PSz  4 Mar 24
++       * Where did the user request to collate?
++       * I have never noticed that in any dialogs.
++       */
+       // Check output format (FINAL_CONTENT_TYPE env variable) whether it is
+       // of a driverless IPP printer (PDF, Apple Raster, PWG Raster, PCLm).
+       // These printers do always hardware collate if they do hardware copies.
+       // https://github.com/apple/cups/issues/5433
++      /* PSz  4 Mar 24
++       *  - Surely PostScript printers also can collate? Modern printers
++       *    accept either/both PDF and/or PS, with similar features.
++       *  - Should an inability to collate give us licence to override
++       *    the explicit PPD request of "no sw copies"? An override will
++       *    likely result in N*N copies, when HW does it also.
++       *  - There does not seem to any option to say "hw can collate",
++       *    or anyway not in the PPD. Why pretend to know what the
++       *    printer can do?
++       * Accepting PostScript also, as a partial (wrong?) fix.
++       */
+       char *final_content_type = getenv("FINAL_CONTENT_TYPE");
+       if (final_content_type &&
+ 	  (strcasestr(final_content_type, "/pdf") ||
+ 	   strcasestr(final_content_type, "/vnd.cups-pdf") ||
++	   strcasestr(final_content_type, "/postscript") ||
++	   strcasestr(final_content_type, "/vnd.cups-postscript") ||
+ 	   strcasestr(final_content_type, "/pwg-raster") ||
+ 	   strcasestr(final_content_type, "/urf") ||
+ 	   strcasestr(final_content_type, "/PCLm"))) {
+@@ -841,7 +858,10 @@
+ 	param.deviceCollate=printerWillCollate(ppd);
+ 	if (!param.deviceCollate) {
+ 	  // printer can't hw collate -> we must copy collated in sw
+-	  param.deviceCopies=1;
++	  /* PSz  4 Mar 24
++	   * Anyway I will not accept this abomination
++	   *  param.deviceCopies=1;
++	   */
+ 	}
+       }
+     } // else: printer copies w/o collate and takes care of duplex/evenDuplex

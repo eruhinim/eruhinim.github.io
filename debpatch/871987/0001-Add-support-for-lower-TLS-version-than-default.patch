@@ -1,0 +1,80 @@
+From fb214b15c5b6bf60da7781bae55b659bcb86db75 Mon Sep 17 00:00:00 2001
+From: Sebastian Andrzej Siewior <sebastian@breakpoint.cc>
+Date: Sat, 26 Aug 2017 17:04:59 +0200
+Subject: [PATCH] Add support for lower TLS version than default
+
+The openssl library in Debian unstable (targeting Buster) supports
+TLS1.2 by default. The library itself supports also TLS1.1 and TLS1.0.
+If the admin decides to also support TLS1.[01] users he can then enable
+the lower protocol version in case the users can't update their system.
+
+Signed-off-by: Sebastian Andrzej Siewior <sebastian@breakpoint.cc>
+---
+ src/config/all-settings.c                    |    1 +
+ src/lib-master/master-service-ssl-settings.c |    2 ++
+ src/lib-master/master-service-ssl-settings.h |    1 +
+ src/login-common/ssl-proxy-openssl.c         |   15 ++++++++++++++-
+ 4 files changed, 18 insertions(+), 1 deletion(-)
+
+--- a/src/config/all-settings.c
++++ b/src/config/all-settings.c
+@@ -308,6 +308,7 @@ struct master_service_ssl_settings {
+ 	const char *ssl_cert_username_field;
+ 	const char *ssl_crypto_device;
+ 	const char *ssl_options;
++	const char *ssl_lowest_version;
+ 
+ 	bool ssl_verify_client_cert;
+ 	bool ssl_require_crl;
+--- a/src/lib-master/master-service-ssl-settings.c
++++ b/src/lib-master/master-service-ssl-settings.c
+@@ -26,6 +26,7 @@ static const struct setting_define maste
+ 	DEF(SET_STR, ssl_protocols),
+ 	DEF(SET_STR, ssl_cert_username_field),
+ 	DEF(SET_STR, ssl_crypto_device),
++	DEF(SET_STR, ssl_lowest_version),
+ 	DEF(SET_BOOL, ssl_verify_client_cert),
+ 	DEF(SET_BOOL, ssl_require_crl),
+ 	DEF(SET_BOOL, verbose_ssl),
+@@ -54,6 +55,7 @@ static const struct master_service_ssl_s
+ 	.ssl_protocols = "!SSLv3",
+ #endif
+ 	.ssl_cert_username_field = "commonName",
++	.ssl_lowest_version = NULL,
+ 	.ssl_crypto_device = "",
+ 	.ssl_verify_client_cert = FALSE,
+ 	.ssl_require_crl = TRUE,
+--- a/src/lib-master/master-service-ssl-settings.h
++++ b/src/lib-master/master-service-ssl-settings.h
+@@ -16,6 +16,7 @@ struct master_service_ssl_settings {
+ 	const char *ssl_cert_username_field;
+ 	const char *ssl_crypto_device;
+ 	const char *ssl_options;
++	const char *ssl_lowest_version;
+ 
+ 	bool ssl_verify_client_cert;
+ 	bool ssl_require_crl;
+--- a/src/login-common/ssl-proxy-openssl.c
++++ b/src/login-common/ssl-proxy-openssl.c
+@@ -1302,7 +1302,20 @@ ssl_server_context_init(const struct log
+ 	if (ctx->prefer_server_ciphers)
+ 		SSL_CTX_set_options(ssl_ctx, SSL_OP_CIPHER_SERVER_PREFERENCE);
+ 	SSL_CTX_set_options(ssl_ctx, openssl_get_protocol_options(ctx->protocols));
+-
++#if OPENSSL_VERSION_NUMBER >= 0x10100000
++	if (ssl_set->ssl_lowest_version) {
++		if (!strcmp(ssl_set->ssl_lowest_version, "TLS1.0"))
++		    SSL_CTX_set_min_proto_version(ssl_ctx, TLS1_VERSION);
++		else if (!strcmp(ssl_set->ssl_lowest_version, "TLS1.1"))
++		    SSL_CTX_set_min_proto_version(ssl_ctx, TLS1_1_VERSION);
++		else if (!strcmp(ssl_set->ssl_lowest_version, "TLS1.2"))
++		    SSL_CTX_set_min_proto_version(ssl_ctx, TLS1_2_VERSION);
++		else
++			i_fatal("TLS min version: '%s' is invalid. Only "
++				"'TLS1.0' and 'TLS1.1' is supported",
++				ssl_set->ssl_lowest_version);
++	}
++#endif
+ 	if (ctx->pri.cert != NULL && *ctx->pri.cert != '\0' &&
+ 	    ssl_proxy_ctx_use_certificate_chain(ctx->ctx, ctx->pri.cert) != 1) {
+ 		i_fatal("Can't load ssl_cert: %s",

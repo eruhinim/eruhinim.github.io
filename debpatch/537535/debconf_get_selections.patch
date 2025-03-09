@@ -1,0 +1,184 @@
+diff --git a/debian/cdebconf.install b/debian/cdebconf.install
+index aa3b8a5..a32582c 100644
+--- a/debian/cdebconf.install
++++ b/debian/cdebconf.install
+@@ -4,6 +4,7 @@ deb/usr/lib/cdebconf/debconf usr/lib/cdebconf
+ deb/usr/lib/cdebconf/debconf-communicate usr/lib/cdebconf
+ deb/usr/lib/cdebconf/debconf-copydb usr/lib/cdebconf
+ deb/usr/lib/cdebconf/debconf-dumpdb usr/lib/cdebconf
++deb/usr/lib/cdebconf/debconf-get-selections usr/lib/cdebconf
+ deb/usr/lib/cdebconf/debconf-loadtemplate usr/lib/cdebconf
+ deb/usr/lib/cdebconf/dpkg-reconfigure usr/lib/cdebconf
+ deb/usr/lib/cdebconf/frontend/passthrough.so usr/lib/cdebconf/frontend
+diff --git a/src/.gitignore b/src/.gitignore
+index 4bb4aea..ffeeb89 100644
+--- a/src/.gitignore
++++ b/src/.gitignore
+@@ -7,6 +7,7 @@ debconf
+ debconf-communicate
+ debconf-copydb
+ debconf-dumpdb
++debconf-get-selections
+ debconf-loadtemplate
+ dpkg-reconfigure
+ debconf.conf
+diff --git a/src/Makefile.in b/src/Makefile.in
+index e97bbfb..e6319d0 100644
+--- a/src/Makefile.in
++++ b/src/Makefile.in
+@@ -13,7 +13,7 @@ CLILIBNAME=$(CLILIB).$(MAJOR).$(MINOR).$(MICRO)
+ CLISONAME=$(CLILIB).$(MAJOR)
+ DEBCONF=debconf
+ TOOLS=debconf-loadtemplate debconf-copydb debconf-communicate \
+-	debconf-dumpdb \
++	debconf-dumpdb debconf-get-selections \
+ 	dpkg-reconfigure #dpkg-preconfigure
+ BIN=$(DEBCONF) $(TOOLS)
+ 
+@@ -65,6 +65,7 @@ install:
+ 	install -m 755 debconf-copydb debconf-dumpdb $(DESTDIR)${moddir}
+ ifneq ($(TARGET),udeb)
+ 	install -m 755 debconf-communicate $(DESTDIR)${moddir}
++	install -m 755 debconf-get-selections $(DESTDIR)${moddir}
+ 	install -m 755 dpkg-reconfigure $(DESTDIR)${moddir}
+ endif
+ 	install -m 644 $(LIBNAME) $(DESTDIR)${moddir}
+diff --git a/src/cdebconf.conf-dist.in b/src/cdebconf.conf-dist.in
+index 369be94..6036d04 100644
+--- a/src/cdebconf.conf-dist.in
++++ b/src/cdebconf.conf-dist.in
+@@ -31,6 +31,11 @@ template {
+     driver "rfc822db";
+     path "/target/var/cache/debconf/templates.dat";
+   };
++
++  instance "di_templatedb" {
++    driver "rfc822db";
++    path "/var/log/installer/cdebconf/templates.dat";
++  };
+ };
+ 
+ config {
+@@ -68,5 +73,11 @@ config {
+     stack { "target_config_gen_db"; "target_config_passwd_db"; };
+     template "target_templatedb";
+   };
++
++  instance "di_configdb" {
++    driver "rfc822db";
++    path "/var/log/installer/cdebconf/questions.dat";
++    template "di_templatedb";
++  };
+ };
+ 
+diff --git a/src/debconf-get-selections.c b/src/debconf-get-selections.c
+new file mode 100644
+index 0000000..b5a024c
+--- /dev/null
++++ b/src/debconf-get-selections.c
+@@ -0,0 +1,105 @@
++/**
++ * @file debconf-get-selections.c
++ * @brief Output contents of debconf database
++ *
++ */
++
++#include "common.h"
++#include "configuration.h"
++#include "database.h"
++#include "question.h"
++#include "template.h"
++
++#include <stdlib.h>
++#include <stdio.h>
++#include <getopt.h>
++#include <locale.h>
++#include <string.h>
++
++static int installer = 0;
++static struct option g_dpc_args[] = {
++    { "installer", 0, &installer, 'i' },
++    { 0, 0, 0, 0 }
++};
++
++int main(int argc, char **argv)
++{
++    const char *defaultowner = "unknown";
++    struct configuration *config;
++    struct template_db *tdb;
++    struct question_db *qdb;
++    struct question *q;
++    void *iter;
++    int c;
++
++    setlocale(LC_ALL, "");
++
++    config = config_new();
++
++    while ((c = getopt_long(argc, argv, "", g_dpc_args, NULL)) > 0)
++    {
++        switch (c)
++        {
++            case 'i':
++                defaultowner = "d-i";
++                break;
++            default:
++                break;
++        }
++    }
++
++    /* parse the configuration info */
++    if (config->read(config, DEBCONFCONFIG) == 0)
++        DIE("Error reading configuration information");
++
++    /* initialize database modules */
++    if ((tdb = template_db_new(config, installer?"di_templatedb":NULL)) == 0)
++        DIE("Cannot initialize DebConf template database");
++    if ((qdb = question_db_new(config, tdb, installer?"di_configdb":NULL)) == 0)
++        DIE("Cannot initialize DebConf config database");
++
++    /* load database */
++    tdb->methods.load(tdb);
++    qdb->methods.load(qdb);
++
++    iter = 0;
++    while ((q = qdb->methods.iterate(qdb, &iter)) != NULL)
++    {
++        struct questionowner *owner = q->owners;
++        const char *type = q->template->type;
++
++        if ((type == NULL) ||
++            (strcmp(type, "title") == 0) ||
++            (strcmp(type, "text") == 0))
++            continue;
++
++	    printf("# %s\n", q_get_description(0, q));
++        if ((strcmp(type, "select") == 0) ||
++            (strcmp(type, "multiselect") == 0))
++            printf("# Choices: %s\n", q_get_choices(0, q));
++
++        if (!owner)
++        {
++            printf("%s\t%s\t%s\t%s\n", defaultowner, q->tag,
++                type, q->value?q->value:"");
++        }
++        else
++        {
++            while (owner)
++            {
++                printf("%s\t%s\t%s\t%s\n", owner->owner, q->tag,
++                    type, q->value?q->value:"");
++                owner = owner->next;
++            }
++        }
++        question_deref(q);
++    }
++
++    template_db_delete(tdb);
++    question_db_delete(qdb);
++
++    config_delete(config);
++
++    return 0;
++}
++

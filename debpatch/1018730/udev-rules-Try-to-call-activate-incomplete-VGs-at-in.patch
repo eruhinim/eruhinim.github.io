@@ -1,0 +1,55 @@
+From: Guilhem Moulin <guilhem@debian.org>
+Date: Wed, 10 May 2023 00:42:28 +0200
+Subject: udev rules: Try to call activate incomplete VGs at initramfs stage.
+
+The upstream udev rules don't autoactivate LVs residing on incomplete
+VGs, see https://bugzilla.redhat.com/show_bug.cgi?id=1337220#c10 .
+
+This change adds new rules to try to activate incomplete VGs, should
+there be any.  The target environment for these rules is an initrd from
+initramfs-tools.
+
+lvm <2.03.15-1 used to ship initramfs-tools boot scripts containing `lvm
+lvchange -aay -y --sysinit` which by default *does* activate incomplete
+VGs, so the deprecation of these scripts in favor of the upstream rules
+yield a regression on systems where the root FS and/or resume device(s)
+reside on complete LVs while the underlying VG is incomplete (as in, it
+contains LVs residing on missing PVs).  `lsblk` output on an affected
+system is as follows:
+
+	NAME               MAJ:MIN RM  SIZE RO TYPE  MOUNTPOINTS
+	vda                254:0    0    2G  0 disk
+	├─vda1             254:1    0    2M  0 part
+	├─vda2             254:2    0  128M  0 part  /boot
+	└─vda3             254:3    0  1.8G  0 part
+	  └─vda3_crypt     253:0    0  1.8G  0 crypt
+	    ├─cryptvg-swap 253:1    0  128M  0 lvm   [SWAP]
+	    └─cryptvg-root 253:2    0  1.7G  0 lvm   /
+	vdb                254:16   0    1G  0 disk
+	└─vdb_crypt        253:3    0 1008M  0 crypt
+	  └─cryptvg-home   253:4    0 1004M  0 lvm   /home
+
+(There vdb_crypt is not open at early boot stage since it hold neither
+the root FS nor the resume device, hence ‘cryptvg’ remains incomplete.
+Without this patch the LVs are never activated and the user is
+eventually dropped into an initramfs shell.)
+
+Closes: #1018730
+Closes: #1034836
+---
+ udev/69-dm-lvm.rules.in | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/udev/69-dm-lvm.rules.in b/udev/69-dm-lvm.rules.in
+index b32b94a..c46d965 100644
+--- a/udev/69-dm-lvm.rules.in
++++ b/udev/69-dm-lvm.rules.in
+@@ -87,6 +87,8 @@ GOTO="lvm_end"
+ 
+ LABEL="lvm_direct_vgchange"
+ ENV{LVM_VG_NAME_COMPLETE}=="?*", RUN+="(LVM_EXEC)/lvm vgchange -aay --autoactivation event $env{LVM_VG_NAME_COMPLETE}"
++TEST!="/run/initramfs", GOTO="lvm_end"
++ENV{LVM_VG_NAME_INCOMPLETE}=="?*", RUN+="(LVM_EXEC)/lvm vgchange --sysinit -aay --activation degraded $env{LVM_VG_NAME_INCOMPLETE}"
+ GOTO="lvm_end"
+ 
+ LABEL="lvm_end"

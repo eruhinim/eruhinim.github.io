@@ -1,0 +1,238 @@
+From 63b96c5399280c22f58eb69c8b5eb874d4a2b497 Mon Sep 17 00:00:00 2001
+From: Christian Seiler <christian@iwakd.de>
+Date: Sun, 25 Dec 2016 10:36:51 +0100
+Subject: [PATCH] Add wrapper for init-d-script
+
+Divert the original /lib/init/init-d-script to init-d-script.sysv in
+the same directory. An own wrapper is installed as
+init-d-script.systemd. and a symlink to init-d-script is created after
+the diversion is in place.
+
+The wrapper has the following tasks:
+
+1. Since init-d-script is surced after the init script name is
+   prepended to the parameter list (where the verb would usually be),
+   drop that again before sourcing the code that attempts the redirect
+   to systemctl.
+
+   This will make sure that the systemctl redirect works as expected.
+
+   If the logic doesn't redirect (custom verb, for example) the
+   argument list expected by the original init-d-script is restored
+   afterwards.
+
+2. Since init-d-script can now be sourced on systemd systems, and will
+   redirect to systemd - any package that installs an init-d-script
+   based init script together with a systemd service with the same
+   name does not have to depend on sysvinit-utils anymore.
+
+   On systemd systems without the initscripts package, calling the
+   init script directly will result in systemctl being called by this
+   wrapper.
+
+   On non-systemd systems, the init system will depend on the
+   sysvinit-utils pacakge (via e.g. the initscripts package), which
+   then provide the original init-d-script, which will then be sourced
+   by the wrapper as a fallback.
+
+However, if a custom verb is implemented in the init script
+(i.e. the script defines a function do_unknowwn), the package
+containing that init script must then still carry a dependency on the
+sysvinit-utils package, because the original init-d-script must be
+available.
+
+The wrapper is installed with the systemd package, not the systemd-sysv
+package, since once can boot into systemd (via init=) without having to
+install the systemd-sysv package.
+---
+ debian/extra/init-d-script.systemd       | 89 ++++++++++++++++++++++++++++++++
+ debian/extra/init-functions.d/40-systemd | 11 ++--
+ debian/systemd.install                   |  1 +
+ debian/systemd.postinst                  | 12 +++++
+ debian/systemd.prerm                     | 10 ++++
+ 5 files changed, 120 insertions(+), 3 deletions(-)
+ create mode 100755 debian/extra/init-d-script.systemd
+
+diff --git a/debian/extra/init-d-script.systemd b/debian/extra/init-d-script.systemd
+new file mode 100755
+index 000000000..92232d02c
+--- /dev/null
++++ b/debian/extra/init-d-script.systemd
+@@ -0,0 +1,89 @@
++#!/bin/sh
++
++# Wrapper around sysv's init-d-script. This serves two purposes:
++#
++#   1. Since scripts using init-d-script prepend their own name to the
++#      argument list before sourcing init-d-script, the logic to
++#      redirect to systemctl in init-functions.d/40-systemd doesn't
++#      properly detect the verb (start, stop, etc.) and will hence not
++#      redirect to systemctl, but allow the init script to be run
++#      directly. If systemd is running, this wrapper contains glue code
++#      to make this work regardless.
++#
++#   2. init-d-script itself shouldn't need to be installed on pure
++#      systemd systems if all installed packages provide native services
++#      in addition to the init script they provide. In that case this
++#      wrapper is sufficient to redirect to systemctl if an init script
++#      is called directly regardless, without having to have the
++#      init-d-script binary itself installed.
++#
++# The original init-d-script is diverted away to
++# /lib/init/init-d-script.sysv by systemd's postinst.
++
++if [ -d /run/systemd/system ] ; then
++    # Prevent recursion in badly written init scripts. (Same thing as
++    # init-d-script itself does.)
++    if [ x"${1#*init-d-script}" != x"${1}" ] ; then
++        exit 0
++    fi
++
++    INIT_D_SCRIPT_NAME="$1"
++    shift
++
++    if [ -f /lib/lsb/init-functions ] ; then
++        # Multiple sourcing of this is OK in case the redirect isn't
++        # performed, but in order for the redirect logic to work in the
++        # first place, this needs to happen with a restored argument
++        # list that contains the verb in first place.
++        . /lib/lsb/init-functions
++    else
++        # Not installed, but since only a redirect needs to be
++        # attempted in this case, it is possible to source the specific
++        # code directly. However, stubs for the functions used need to
++        # be defined first.
++        log_daemon_msg() { echo -n "$1:${2:+ $2}"; }
++        log_end_msg()    {
++            case "$1" in
++                0)   echo . ;;
++                255) echo " (warning)." ;;
++                *)   echo " failed!" ;;
++            esac
++        }
++        . /lib/lsb/init-functions.d/40-systemd
++    fi
++
++    # This will not be reached in most cases, but just in case
++    # revert the shift (a custom verb called, for example).
++    set "$INIT_D_SCRIPT_NAME" "$@"
++    unset INIT_D_SCRIPT_NAME
++
++    if ! [ -f /lib/init/init-d-script.sysv ] ; then
++        # Invalid verb specified, so show usage here, since sysv's
++        # init-d-script is not installed. (If custom verbs are to be
++        # supported by the init script, the pacakge containing it needs
++        # to Depend on sysvinit-utils to make sure this case is never
++        # hit.)
++        _prog="${1##*/}"
++        if [ "$(systemctl -p CanReload --value show ${_prog%.sh}.service 2>/dev/null)" = "no" ] ; then
++            echo "Usage: $1 {start|stop|status|restart|try-restart|force-reload}" >&2
++        else
++            echo "Usage: $1 {start|stop|status|reload|restart|try-restart|force-reload}" >&2
++        fi
++        exit 3
++    fi
++fi
++
++# Redirect to the original implementation of init-d-script. This can
++# be reached in three cases:
++#
++#   1. systemd isn't running.
++#   2. A custom verb is implemented in the init script (do_unknown)
++#      and the user called with that custom verb.
++#   3. reload was requested, but no native systemd service exists. In
++#      that case, systemd's sysv-generator will not detect the service
++#      as reloadable, and the current logic in
++#      init-functions.d/40-systemd will not redirect to systemctl to
++#      give the init script a chance to directly reload the service.
++
++. /lib/init/init-d-script.sysv
++exit $?
+diff --git a/debian/extra/init-functions.d/40-systemd b/debian/extra/init-functions.d/40-systemd
+index 8e31544b1..35198fb55 100644
+--- a/debian/extra/init-functions.d/40-systemd
++++ b/debian/extra/init-functions.d/40-systemd
+@@ -4,7 +4,12 @@
+ _use_systemctl=0
+ if [ -d /run/systemd/system ]; then
+ 
+-    prog=${0##*/}
++    if [ -n "$INIT_D_SCRIPT_NAME" ] ; then
++        script=${INIT_D_SCRIPT_NAME}
++    else
++        script=$0
++    fi
++    prog=${script##*/}
+     service="${prog%.sh}.service"
+ 
+     # Don't try to run masked services. systemctl <= 230 always succeeds here,
+@@ -18,7 +23,7 @@ if [ -d /run/systemd/system ]; then
+ 
+     # Redirect SysV init scripts when executed by the user
+     if [ $PPID -ne 1 ] && [ -z "${init:-}" ] && [ -z "${_SYSTEMCTL_SKIP_REDIRECT:-}" ]; then
+-        case $(readlink -f "$0") in
++        case $(readlink -f "${script}") in
+             /etc/init.d/*)
+                 _use_systemctl=1
+                 # Some services can't reload through the .service file,
+@@ -86,7 +91,7 @@ if [ "$_use_systemctl" = "1" ]; then
+         "x$1" = xforce-reload -o \
+         "x$1" = xstatus ] ; then
+ 
+-        systemctl_redirect $0 $1
++        systemctl_redirect $script $1
+         exit $?
+     fi
+ fi
+diff --git a/debian/systemd.install b/debian/systemd.install
+index 87cf0acbd..70a3354d0 100644
+--- a/debian/systemd.install
++++ b/debian/systemd.install
+@@ -65,3 +65,4 @@ var/lib
+ ../../extra/dhclient-exit-hooks.d/ etc/dhcp/
+ ../../extra/kernel-install.d/* usr/lib/kernel/install.d
+ ../../extra/pam.d etc/
++../../extra/init-d-script.systemd /lib/init
+diff --git a/debian/systemd.postinst b/debian/systemd.postinst
+index 4701665d8..3aca12ccc 100644
+--- a/debian/systemd.postinst
++++ b/debian/systemd.postinst
+@@ -150,4 +150,16 @@ if dpkg --compare-versions "$2" lt-nl "228-5~"; then
+    done
+ fi
+ 
++# Divert init-d-script with a small wrapper. Do this in postinst and
++# use a symlink to make sure that the init-d-script file is always
++# available never in a state where the original file is diverted away
++# but systemd isn't unpacked.
++if [ "$1" = "configure" ] ; then
++    dpkg-divert --add --package systemd --rename \
++        --divert /lib/init/init-d-script.sysv /lib/init/init-d-script
++    if ! [ -e /lib/init/init-d-script ] ; then
++        ln -s init-d-script.systemd /lib/init/init-d-script
++    fi
++fi
++
+ #DEBHELPER#
+diff --git a/debian/systemd.prerm b/debian/systemd.prerm
+index aedbf58e4..8b8f78ac2 100644
+--- a/debian/systemd.prerm
++++ b/debian/systemd.prerm
+@@ -12,4 +12,14 @@ if [ "$1" = "remove" ] && [ -d /run/systemd/system ]; then
+     exit 1
+ fi
+ 
++#
++# Remove previous diversion of /lib/init/init-d-script.
++#
++
++if [ "$1" = "remove" ] && [ -L /lib/init/init-d-script ] && [ x"$(readlink -f /lib/init/init-d-script)" = x"/lib/init/init-d-script.systemd" ] ; then
++    rm -f /lib/init/init-d-script
++    dpkg-divert --remove --package systemd --rename \
++        --divert /lib/init/init-d-script.sysv /lib/init/init-d-script
++fi
++
+ #DEBHELPER#
+-- 
+2.11.0
+

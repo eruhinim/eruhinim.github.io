@@ -1,0 +1,150 @@
+Only in exim4-4.86.2/debian/patches: 80_fix_ldap_attribute_separator.patch
+diff -ur exim4-4.86.2.bak/debian/patches/series exim4-4.86.2/debian/patches/series
+--- a/debian/patches/series	2016-03-16 23:42:33.241706602 +0100
++++ b/debian/patches/series	2016-03-16 23:45:43.241433813 +0100
+@@ -19,3 +19,4 @@
+ 75_0010_DKIM-ignore-space-tab-embedded-in-base64-during-deco.patch
+ 75_0011_MIME-fix-crash-on-filenames-having-null-charset.-Bug.patch
+ 75_0012_Cutthrough-Fix-bug-with-dot-only-line.patch
++80-LDAP-Fix-separator-for-multiple-attrs-and-ldapm.patch
+--- /dev/null	2016-03-16 23:35:21.536223322 +0100
++++ b/debian/patches/80-LDAP-Fix-separator-for-multiple-attrs-and-ldapm.patch	2016-03-17 00:07:29.366951467 +0100
+@@ -0,0 +1,138 @@
++From 07112f31e7d37b58a951329e4cab0af579e24866 Mon Sep 17 00:00:00 2001
++From: "Heiko Schlittermann (HS12-RIPE)" <hs@schlittermann.de>
++Date: Sun, 29 Nov 2015 01:30:46 +0100
++Subject: [PATCH] LDAP: Fix separator for multiple attrs and ldapm
++MIME-Version: 1.0
++Content-Type: text/plain; charset=UTF-8
++Content-Transfer-Encoding: 8bit
++
++Schema:
++    attributetype ( NAME foo … )
++    attributetype ( NAME foo1 SUP foo …)
++    attributetype ( NAME foo2 SUP foo …)
++
++Objects in Directory:
++    dn: …
++    foo1: foo, bar
++    foo1: baz
++    foo2: buz
++
++Query and response:
++    ldap://<HOST>/<BASE>?foo1?sub?<filter>
++    -> foo,, bar,baz
++
++    ldap://<HOST>/<BASE>?foo2?sub?<filter>
++    -> buz
++
++    ldap://<HOST>/<BASE>?foo1,foo2?sub?<filter>
++    -> foo1="foo,, bar,baz" foo2="buz"
++
++    ldap://<HOST>/<BASE>?foo?sub?<filter>
++    -> foo,, bar,baz,buz
++
++The same holds for ldam, but with multiple lines, for each
++object one single line.
++
++(cherry picked from commit bb4fd71d9937a07155e89b885d40c96f03700b84)
++(cherry picked from commit 9494140a9fbaed32259a60af2b59e6f61f06589c)
++---
++ src/lookups/ldap.c | 26 +++++++++++++++++++-------
++ 1 file changed, 19 insertions(+), 7 deletions(-)
++
++diff --git a/src/lookups/ldap.c b/src/lookups/ldap.c
++index b870df1..a3274e8 100644
++--- a/src/lookups/ldap.c
+++++ b/src/lookups/ldap.c
++@@ -156,7 +156,7 @@ uschar *error1 = NULL;   /* string representation of errcode (static) */
++ uschar *error2 = NULL;   /* error message from the server */
++ uschar *matched = NULL;  /* partially matched DN */
++ 
++-int    attr_count = 0;
+++int    attrs_requested = 0;
++ int    error_yield = DEFER;
++ int    msgid;
++ int    rc, ldap_rc, ldap_parse_rc;
++@@ -248,7 +248,7 @@ if (host != NULL)
++ /* Count the attributes; we need this later to tell us how to format results */
++ 
++ for (attrp = USS ludp->lud_attrs; attrp != NULL && *attrp != NULL; attrp++)
++-  attr_count++;
+++  attrs_requested++;
++ 
++ /* See if we can find a cached connection to this host. The port is not
++ relevant for ldapi. The host name pointer is set to NULL if no host was given
++@@ -713,10 +713,15 @@ while ((rc = ldap_result(lcp->ld, msgid, 0, timeoutptr, &result)) ==
++         LDAP_RES_SEARCH_ENTRY)
++   {
++   LDAPMessage  *e;
+++  int valuecount;   /* We can see an attr spread across several
+++                    entries. If B is derived from A and we request
+++                    A and the directory contains both, A and B,
+++                    then we get two entries, one for A and one for B.
+++                    Here we just count the values per entry */
++ 
++   DEBUG(D_lookup) debug_printf("ldap_result loop\n");
++ 
++-  for(e = ldap_first_entry(lcp->ld, result);
+++  for(e = ldap_first_entry(lcp->ld, result), valuecount = 0;
++       e != NULL;
++       e = ldap_next_entry(lcp->ld, e))
++     {
++@@ -774,6 +779,11 @@ while ((rc = ldap_result(lcp->ld, msgid, 0, timeoutptr, &result)) ==
++               attr != NULL;
++               attr = US ldap_next_attribute(lcp->ld, e, ber))
++       {
+++
+++      /* In case of attrs_requested == 1 we just count the values, in all other cases
+++      (0, >1) we count the values per attribute */
+++      if (attrs_requested != 1) valuecount = 0;
+++
++       if (attr[0] != 0)
++         {
++         /* Get array of values for this attribute. */
++@@ -781,7 +791,8 @@ while ((rc = ldap_result(lcp->ld, msgid, 0, timeoutptr, &result)) ==
++         if ((firstval = values = USS ldap_get_values(lcp->ld, e, CS attr))
++              != NULL)
++           {
++-          if (attr_count != 1)
+++
+++          if (attrs_requested != 1)
++             {
++             if (insert_space)
++               data = string_cat(data, &size, &ptr, US" ", 1);
++@@ -795,6 +806,7 @@ while ((rc = ldap_result(lcp->ld, msgid, 0, timeoutptr, &result)) ==
++             {
++             uschar *value = *values;
++             int len = Ustrlen(value);
+++            ++valuecount;
++ 
++             DEBUG(D_lookup) debug_printf("LDAP attr loop %s:%s\n", attr, value);
++ 
++@@ -804,13 +816,13 @@ while ((rc = ldap_result(lcp->ld, msgid, 0, timeoutptr, &result)) ==
++ 	     * attributeTypes B and C from A and then query for A.)
++ 	     * In all other cases we detect the different attribute
++ 	     * and append only every non first value. */
++-	    if ((attr_count == 1 && data) || (values != firstval))
+++            if (data && valuecount > 1)
++               data = string_cat(data, &size, &ptr, US",", 1);
++ 
++             /* For multiple attributes, the data is in quotes. We must escape
++             internal quotes, backslashes, newlines, and must double commas. */
++ 
++-            if (attr_count != 1)
+++            if (attrs_requested != 1)
++               {
++               int j;
++               for (j = 0; j < len; j++)
++@@ -851,7 +863,7 @@ while ((rc = ldap_result(lcp->ld, msgid, 0, timeoutptr, &result)) ==
++ 
++           /* Closing quote at the end of the data for a named attribute. */
++ 
++-          if (attr_count != 1)
+++          if (attrs_requested != 1)
++             data = string_cat(data, &size, &ptr, US"\"", 1);
++ 
++           /* Free the values */
++-- 
++2.1.4
++

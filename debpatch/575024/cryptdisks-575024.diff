@@ -1,0 +1,119 @@
+=== modified file 'debian/cryptdisks.functions'
+--- debian/cryptdisks.functions	2009-11-11 13:50:18 +0000
++++ debian/cryptdisks.functions	2010-01-21 14:46:41 +0000
+@@ -288,7 +288,12 @@
+ 		# no keyscript, no key => password
+ 		keyscriptarg="Unlocking the disk $src ($dst)\nEnter passphrase: "
+ 		key="-"
+-		KEYSCRIPT="/lib/cryptsetup/askpass"
++		if [ -x /bin/plymouth ] && plymouth --ping; then
++			KEYSCRIPT="plymouth ask-for-password --prompt"
++			keyscriptarg=$(printf "$keyscriptarg")
++		else
++			KEYSCRIPT="/lib/cryptsetup/askpass"
++		fi
+ 	elif [ "$key" != "${key%/dev/*}" ]; then
+ 		# no keyscript, device key => special treatment
+ 		keyscriptarg=""
+@@ -354,7 +359,12 @@
+ 		# no keyscript, no key => password
+ 		keyscriptarg="Unlocking the disk $cryptsource ($crypttarget)\nEnter passphrase: "
+ 		key="-"
+-		KEYSCRIPT="/lib/cryptsetup/askpass"
++		if [ -x /bin/plymouth ] && plymouth --ping; then
++			KEYSCRIPT="plymouth ask-for-password --prompt"
++			keyscriptarg=$(printf "$keyscriptarg")
++		else
++			KEYSCRIPT="/lib/cryptsetup/askpass"
++		fi
+ 	else
+ 		# no keyscript, key => file input
+ 		keyscriptarg=""
+@@ -366,16 +376,16 @@
+ 
+ 	while [ "$tried" -lt "$TRIES" ]; do
+ 		if [ -n "$KEYSCRIPT" ]; then
+-			"$KEYSCRIPT" "$keyscriptarg" | cryptsetup $PARAMS create "$dst" "$src"
++			$KEYSCRIPT "$keyscriptarg" | cryptsetup $PARAMS create "${dst}_unformatted" "$src"
+ 		else
+-			cryptsetup $PARAMS create "$dst" "$src"
++			cryptsetup $PARAMS create "${dst}_unformatted" "$src"
+ 		fi
+ 
+-		if [ -z "$CHECK" ] || "$CHECK" "/dev/mapper/$dst" $CHECKARGS; then
++		if [ -z "$CHECK" ] || "$CHECK" "/dev/mapper/${dst}_unformatted" $CHECKARGS; then
+ 			break
+ 		else
+ 			log_warning_msg "$dst: the check for '/dev/mapper/$dst' failed - maybe the password is wrong"
+-			cryptsetup remove "$dst"
++			cryptsetup remove "${dst}_unformatted"
+ 		fi
+ 
+ 		tried=$(( $tried + 1 ))
+@@ -412,13 +422,14 @@
+ do_swap () {
+ 	local swap_out
+ 
+-	if [ "$MAKESWAP" != "yes" ] || [ ! -b "/dev/mapper/$dst" ]; then
++	if [ "$MAKESWAP" != "yes" ] || [ ! -b "/dev/mapper/${dst}_unformatted" ]
++	then
+ 		return 0
+ 	fi
+ 
+-	if swap_out=$(/lib/cryptsetup/checks/un_blkid "/dev/mapper/$dst" 2> /dev/null) || \
+-	   /lib/cryptsetup/checks/blkid "/dev/mapper/$dst" swap > /dev/null 2>&1; then
+-		mkswap "/dev/mapper/$dst" > /dev/null 2>&1
++	if swap_out=$(/lib/cryptsetup/checks/un_blkid "/dev/mapper/${dst}_unformatted" 2> /dev/null) || \
++	   /lib/cryptsetup/checks/blkid "/dev/mapper/${dst}_unformatted" swap > /dev/null 2>&1; then
++		mkswap "/dev/mapper/${dst}_unformatted" > /dev/null 2>&1
+ 	else
+ 		log_warning_msg "$dst: the check for '/dev/mapper/$dst' failed. /dev/mapper/$dst contains data: $swap_out"
+ 		do_close
+@@ -430,17 +441,24 @@
+ 
+ # Prepares tmp partitions using random keys
+ do_tmp () {
+-	if [ "x$TMPFS" = "x" ] || [ ! -b "/dev/mapper/$dst" ]; then
++	if [ "x$TMPFS" = "x" ] || [ ! -b "/dev/mapper/${dst}_unformatted" ]; then
+ 		return 0
+ 	fi
+ 
+-	mkfs -t $TMPFS -q "/dev/mapper/$dst" > /dev/null 2>&1 || return 1
+-	mount -t $TMPFS "/dev/mapper/$dst" /tmp || return 1
+-	chmod 1777 /tmp
+-	umount /tmp
++	mkfs -t $TMPFS -q "/dev/mapper/${dst}_unformatted" > /dev/null 2>&1 || return 1
++	mkdir -p "/var/run/cryptsetup/$dst"
++	mount -t $TMPFS "/dev/mapper/${dst}_unformatted" "/var/run/cryptsetup/$dst" || return 1
++	chmod 1777 "/var/run/cryptsetup/$dst"
++	umount "/var/run/cryptsetup/$dst"
+ 	return 0
+ }
+ 
++# Rename the device from its temp name to its final name, which will
++# trigger mountall
++finalize_device () {
++	dmsetup rename "${dst}_unformatted" "$dst"
++}
++
+ # Removes a mapping
+ do_close () {
+ 	local found IFS opt
+@@ -530,7 +548,8 @@
+ 	fi
+ 
+ 	# Make sure that target device doesn't exist
+-	if [ -b "/dev/mapper/$dst" ]; then
++	if [ -b "/dev/mapper/${dst}_unformatted" ] || [ -b "/dev/mapper/$dst" ]
++	then
+ 		device_msg "$dst" "running"
+ 		return 0
+ 	fi
+@@ -552,6 +571,7 @@
+ 	else
+ 		do_swap
+ 		do_tmp
++		finalize_device
+ 		device_msg "$dst" "started"
+ 	fi
+ 

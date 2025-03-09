@@ -1,0 +1,135 @@
+From e9239ed200d3b098e97de91b56af9627e5c4cde0 Mon Sep 17 00:00:00 2001
+From: Modestas Vainius <modestas@vainius.eu>
+Date: Mon, 23 Mar 2009 02:23:17 +0200
+Subject: [PATCH] Add a global --remaining-packages option.
+
+Add a global --remaining-packages option which allows to skip the command on
+the packages which it has already been run on (i.e. if the command helper is
+already present in the package debhelper log).
+
+Signed-off-by: Modestas Vainius <modestas@vainius.eu>
+---
+ Debian/Debhelper/Dh_Getopt.pm |    6 ++++++
+ Debian/Debhelper/Dh_Lib.pm    |   19 +++++++++++++++++--
+ debhelper.pod                 |    8 ++++++++
+ dh                            |   17 +----------------
+ 4 files changed, 32 insertions(+), 18 deletions(-)
+
+diff --git a/Debian/Debhelper/Dh_Getopt.pm b/Debian/Debhelper/Dh_Getopt.pm
+index ef94e94..5585a54 100644
+--- a/Debian/Debhelper/Dh_Getopt.pm
++++ b/Debian/Debhelper/Dh_Getopt.pm
+@@ -91,6 +91,8 @@ sub getoptions {
+ 		"N=s" => \&ExcludePackage,
+ 		"no-package=s" => \&ExcludePackage,
+ 	
++		"remaining-packages" => \$dh{EXCLUDE_LOGGED},
++	
+ 		"dbg-package=s" => \&AddDebugPackage,
+ 		
+ 		"s" => \&AddPackage,
+@@ -222,6 +224,10 @@ sub parseopts {
+ 	my $package;
+ 	my %packages_seen;
+ 	foreach $package (@{$dh{DOPACKAGES}}) {
++		if (defined($dh{EXCLUDE_LOGGED}) &&
++		    grep { $_ eq basename($0) } load_log($package)) {
++			$exclude_package{$package}=1;
++		}
+ 		if (! $exclude_package{$package}) {
+ 			if (! exists $packages_seen{$package}) {
+ 				$packages_seen{$package}=1;
+diff --git a/Debian/Debhelper/Dh_Lib.pm b/Debian/Debhelper/Dh_Lib.pm
+index d481128..23e81a6 100644
+--- a/Debian/Debhelper/Dh_Lib.pm
++++ b/Debian/Debhelper/Dh_Lib.pm
+@@ -15,7 +15,7 @@ use vars qw(@ISA @EXPORT %dh);
+ 	    &filedoublearray &getpackages &basename &dirname &xargs %dh
+ 	    &compat &addsubstvar &delsubstvar &excludefile &package_arch
+ 	    &is_udeb &udeb_filename &debhelper_script_subst &escape_shell
+-	    &inhibit_log);
++	    &inhibit_log &load_log);
+ 
+ my $max_compat=7;
+ 
+@@ -102,7 +102,22 @@ sub END {
+ 	if ($? == 0 && $write_log) {
+ 		write_log(basename($0), @{$dh{DOPACKAGES}});
+ 	}
+-}	
++}
++
++sub load_log {
++	my ($package, $db)=@_;
++	my $ext=pkgext($package);
++
++	my @log;
++	open(LOG, "<", "debian/${ext}debhelper.log") || return;
++	while (<LOG>) {
++		chomp;
++		push @log, $_;
++		$db->{$package}{$_}=1 if (defined $db);
++	}
++	close LOG;
++	return @log;
++}
+ 
+ sub write_log {
+ 	my $cmd=shift;
+diff --git a/debhelper.pod b/debhelper.pod
+index 77ace5c..dad286e 100644
+--- a/debhelper.pod
++++ b/debhelper.pod
+@@ -118,6 +118,14 @@ are not architecture independent.
+ Do not act on the specified package even if an -a, -i, or -p option lists
+ the package as one that should be acted on.
+ 
++=item B<--remaining-packages>
++
++Do not act on the packages which have already been acted on by this debhelper
++command earlier (i.e. if the command is present in the package debhelper log).
++For example, if you need to call the command with special options only for a
++couple of binary packages, pass this option to the last call of the command to
++process the rest of packages with default settings. 
++
+ =item B<--ignore=>I<file>
+ 
+ Ignore the specified file. This can be used if debian/ contains a debhelper
+diff --git a/dh b/dh
+index 8639ed0..ab7ddb0 100755
+--- a/dh
++++ b/dh
+@@ -376,7 +376,7 @@ while (@ARGV_orig) {
+ my %logged;
+ my %startpoint;
+ foreach my $package (@packages) {
+-	my @log=loadlog($package);
++	my @log=load_log($package, \%logged);
+ 	if ($dh{AFTER}) {
+ 		# Run commands in the sequence that come after the
+ 		# specified command.
+@@ -484,21 +484,6 @@ sub run {
+ 	}
+ }
+ 
+-sub loadlog {
+-	my $package=shift;
+-	my $ext=pkgext($package);
+-	
+-	my @log;
+-	open(LOG, "<", "debian/${ext}debhelper.log") || return;
+-	while (<LOG>) {
+-		chomp;
+-		push @log, $_;
+-		$logged{$package}{$_}=1;
+-	}
+-	close LOG;
+-	return @log;
+-}
+-
+ sub writelog {
+ 	Debian::Debhelper::Dh_Lib::write_log(@_);
+ }
+-- 
+1.6.2.1
+

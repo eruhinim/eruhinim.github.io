@@ -1,0 +1,150 @@
+From 875b63ce9c0eaa72fc1451697b18c60ba50b8165 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Rapha=C3=ABl=20Pinson?= <raphael.pinson@camptocamp.com>
+Date: Tue, 11 Mar 2014 17:41:35 +0100
+Subject: [PATCH] Httpd: Allow eol comments after section tags
+
+(cherry picked from commit 3af5c7d44c838b52bbdaf1beb8780fd6a471a77e)
+
+Httpd: Define an eol_comment in section to allow for \n before comment
+
+(cherry picked from commit fb749ea4d1ba4ecd95a5cec6aa7b20b010ef04a8)
+
+Httpd: Do not pass empty as body to section
+
+This causes a conflict with eol_comment over newlines.
+`empty` is just a generic part of `section`, not really a body.
+
+(cherry picked from commit 97d3d931fefdfe816e6fb1d6e55a779742f255fa)
+
+Httpd: Make \ illegal in char_arg_dir
+
+Add tests to check non-recursive behaviour
+of partial lenses
+
+Fix #223
+
+(cherry picked from commit 3df041be9196a8ca0b7a3e8c90a47b800500cba1)
+
+Httpd: Properly manage eol after opening tag
+
+Allow comments and empty lines after opening tag.
+
+Fix #220
+
+(cherry picked from commit 34980ae52bf4367664ad0551a15c2d1e5a3f2ac4)
+---
+ lenses/httpd.aug            |  9 ++++---
+ lenses/tests/test_httpd.aug | 62 +++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 68 insertions(+), 3 deletions(-)
+
+diff --git a/lenses/httpd.aug b/lenses/httpd.aug
+index caea9b6..331d807 100644
+--- a/lenses/httpd.aug
++++ b/lenses/httpd.aug
+@@ -59,7 +59,7 @@ let empty               = Util.empty_dos
+ let indent              = Util.indent
+ 
+ (* borrowed from shellvars.aug *)
+-let char_arg_dir  = /[^ '"\t\r\n]|\\\\"|\\\\'/
++let char_arg_dir  = /[^\\ '"\t\r\n]|\\\\"|\\\\'/
+ let char_arg_sec  = /[^ '"\t\r\n>]|\\\\"|\\\\'/
+ let dquot = /"([^"\\\r\n]|\\\\.)*"/
+ let squot = /'([^'\\\r\n]|\\\\.)*'/
+@@ -77,13 +77,16 @@ let directive = [ indent . label "directive" . store word .
+                   (sep_spc . argv arg_dir)? . eol ]
+ 
+ let section (body:lens) =
++    (* opt_eol includes empty lines *)
++    let opt_eol = del /([ \t]*#?\r?\n)*/ "\n" in
+     let inner = (sep_spc . argv arg_sec)? . sep_osp .
+-             dels ">" . eol . body* . indent . dels "</" in
++             dels ">" . opt_eol . ((body|comment) . (body|empty|comment)*)? .
++             indent . dels "</" in
+     let kword = key word in
+     let dword = del word "a" in
+         [ indent . dels "<" . square kword inner dword . del ">" ">" . eol ]
+ 
+-let rec content = section (content|directive|comment|empty)
++let rec content = section (content|directive)
+ 
+ let lns = (content|directive|comment|empty)*
+ 
+diff --git a/lenses/tests/test_httpd.aug b/lenses/tests/test_httpd.aug
+index af6cdc1..bed6cc6 100644
+--- a/lenses/tests/test_httpd.aug
++++ b/lenses/tests/test_httpd.aug
+@@ -1,5 +1,11 @@
+ module Test_httpd =
+ 
++(* Check that we can iterate on directive *)
++let _ = Httpd.directive+
++
++(* Check that we can do a non iterative section *)
++let _ = Httpd.section Httpd.directive
++
+ (* directives testing *)
+ let d1 = "ServerRoot \"/etc/apache2\"\n"
+ test Httpd.directive get d1 =
+@@ -339,3 +345,59 @@ test Httpd.lns get conf2 =
+     {  }
+   }
+ 
++(* Eol comment *)
++test Httpd.lns get "<a> # a comment
++MyDirective Foo
++</a>\n" =
++  { "a"
++    { "#comment" = "a comment" }
++    { "directive" = "MyDirective" { "arg" = "Foo" } } }
++
++test Httpd.lns get "<a>
++# a comment
++</a>\n" =
++  { "a" { "#comment" = "a comment" } }
++
++(* GH #220 *)
++let double_comment = "<IfDefine Foo>
++##
++## Comment
++##
++</IfDefine>\n"
++
++test Httpd.lns get double_comment =
++  { "IfDefine"
++    { "arg" = "Foo" }
++    { "#comment" = "#" }
++    { "#comment" = "# Comment" }
++    { "#comment" = "#" }
++  }
++
++let single_comment = "<IfDefine Foo>
++#
++## Comment
++##
++</IfDefine>\n"
++
++test Httpd.lns get single_comment =
++  { "IfDefine"
++    { "arg" = "Foo" }
++    { "#comment" = "# Comment" }
++    { "#comment" = "#" }
++  }
++
++let single_empty = "<IfDefine Foo>
++#
++
++</IfDefine>\n"
++test Httpd.lns get single_empty =
++  { "IfDefine"
++    { "arg" = "Foo" }
++  }
++
++let eol_empty = "<IfDefine Foo> #
++</IfDefine>\n"
++test Httpd.lns get eol_empty =
++  { "IfDefine"
++    { "arg" = "Foo" }
++  }
+-- 
+2.4.3
+

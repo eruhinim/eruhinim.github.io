@@ -1,0 +1,682 @@
+From 599ff0985999ffe06d8ad733687f53a1dc7eeca8 Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Wed, 2 Jul 2014 04:10:37 +0200
+Subject: [PATCH 09/11] build: Convert from DebianDoc SGML to DocBook XML
+
+---
+ COMPILING                        |  2 +-
+ Makefile                         |  4 +--
+ buildlib/debiandoc.mak           | 60 --------------------------------
+ buildlib/defaults.mak            |  4 +--
+ buildlib/docbook.mak             | 74 ++++++++++++++++++++++++++++++++++++++++
+ buildlib/environment.mak.in      | 12 ++++---
+ buildlib/po4a_manpage.mak        | 13 ++++---
+ configure.ac                     |  5 +--
+ debian/control                   |  2 +-
+ debian/rules                     | 12 +++----
+ debian/tests/control             |  2 +-
+ doc/docbook-html-style.xsl       | 40 ++++++++++++++++++++++
+ doc/docbook-text-style.xsl       | 70 +++++++++++++++++++++++++++++++++++++
+ doc/makefile                     | 30 ++++++++--------
+ doc/po4a.conf                    | 28 +++++++--------
+ test/Makefile                    |  2 +-
+ test/libapt/parsedepends_test.cc |  4 +--
+ vendor/makefile                  |  2 +-
+ 18 files changed, 244 insertions(+), 122 deletions(-)
+ delete mode 100644 buildlib/debiandoc.mak
+ create mode 100644 buildlib/docbook.mak
+ create mode 100644 doc/docbook-html-style.xsl
+ create mode 100644 doc/docbook-text-style.xsl
+
+diff --git a/COMPILING b/COMPILING
+index 1076c63..93e6280 100644
+--- a/COMPILING
++++ b/COMPILING
+@@ -53,7 +53,7 @@ Debian GNU Linux 'potato'
+ Debian GNU Linux 'woody'
+   * All Archs
+   - Works flawlessly
+-  - You will want to have debiandoc-sgml and docbook2man installed to get
++  - You will want to have docbook-xml and docbook2man installed to get
+     best results.
+   - No IPv6 Support in glibc's < 2.1.
+ 
+diff --git a/Makefile b/Makefile
+index 394149b..6e1edbd 100644
+--- a/Makefile
++++ b/Makefile
+@@ -10,7 +10,7 @@ endif
+ default: startup all
+ 
+ .PHONY: headers library clean veryclean all binary program doc test update-po
+-all headers library clean veryclean binary program doc manpages debiandoc test update-po startup dirs:
++all headers library clean veryclean binary program doc manpages docbook test update-po startup dirs:
+ 	$(MAKE) -C vendor $@
+ 	$(MAKE) -C apt-pkg $@
+ 	$(MAKE) -C apt-inst $@
+@@ -23,7 +23,7 @@ all headers library clean veryclean binary program doc manpages debiandoc test u
+ 	$(MAKE) -C po $@
+ 	$(MAKE) -C test $@
+ 
+-all headers library clean veryclean binary program doc manpages debiandoc test update-po: startup dirs
++all headers library clean veryclean binary program doc manpages docbook test update-po: startup dirs
+ 
+ dirs: startup
+ 
+diff --git a/buildlib/debiandoc.mak b/buildlib/debiandoc.mak
+deleted file mode 100644
+index 7e22467..0000000
+--- a/buildlib/debiandoc.mak
++++ /dev/null
+@@ -1,60 +0,0 @@
+-# -*- make -*-
+-
+-# This processes debian-doc sgml to produce html and plain text output
+-
+-# Input
+-# $(SOURCE) - The documents to use
+-
+-# All output is writtin to files in the build doc directory
+-
+-# See defaults.mak for information about LOCAL
+-
+-# Some local definitions
+-LOCAL := debiandoc-$(firstword $(SOURCE))
+-$(LOCAL)-HTML := $(addsuffix .html,$(addprefix $(DOC)/,$(basename $(SOURCE))))
+-$(LOCAL)-TEXT := $(addsuffix .text,$(addprefix $(DOC)/,$(basename $(SOURCE))))
+-
+-debiandoc:
+-
+-#---------
+-
+-# Rules to build HTML documentations
+-ifdef DEBIANDOC_HTML
+-
+-# Install generation hooks
+-debiandoc: $($(LOCAL)-HTML)
+-veryclean: veryclean/html/$(LOCAL)
+-
+-vpath %.sgml $(SUBDIRS)
+-$(DOC)/%.html: %.sgml
+-	echo Creating html for $< to $@
+-	-rm -rf $@
+-	(HERE=`pwd`; cd $(@D) && $(DEBIANDOC_HTML) $(DEBIANDOC_HTML_OPTIONS) $$HERE/$<) || exit 199
+-
+-# Clean rule
+-.PHONY: veryclean/html/$(LOCAL)
+-veryclean/html/$(LOCAL):
+-	-rm -rf $($(@F)-HTML)
+-	
+-endif
+-
+-#---------
+-
+-# Rules to build Text documentations
+-ifdef DEBIANDOC_TEXT
+-
+-# Install generation hooks
+-debiandoc: $($(LOCAL)-TEXT)
+-veryclean: veryclean/text/$(LOCAL)
+-
+-vpath %.sgml $(SUBDIRS)
+-$(DOC)/%.text: %.sgml
+-	echo Creating text for $< to $@
+-	$(DEBIANDOC_TEXT) -O $< > $@ || exit 198
+-
+-# Clean rule
+-.PHONY: veryclean/text/$(LOCAL)
+-veryclean/text/$(LOCAL):
+-	-rm -rf $($(@F)-TEXT)
+-	
+-endif
+diff --git a/buildlib/defaults.mak b/buildlib/defaults.mak
+index 599b9ed..c7931c5 100644
+--- a/buildlib/defaults.mak
++++ b/buildlib/defaults.mak
+@@ -76,7 +76,7 @@ PO_DOMAINS := $(BUILD)/po/domains
+ 
+ # Module types
+ LIBRARY_H = $(BASE)/buildlib/library.mak
+-DEBIANDOC_H = $(BASE)/buildlib/debiandoc.mak
++DOCBOOK_H = $(BASE)/buildlib/docbook.mak
+ MANPAGE_H = $(BASE)/buildlib/manpage.mak
+ PROGRAM_H = $(BASE)/buildlib/program.mak
+ PYTHON_H = $(BASE)/buildlib/python.mak
+@@ -121,7 +121,7 @@ MKDIRS := $(BIN)
+ all: dirs binary doc
+ binary: library program
+ maintainer-clean dist-clean distclean pristine sanity: veryclean
+-startup headers library clean veryclean program test update-po manpages debiandoc:
++startup headers library clean veryclean program test update-po manpages docbook:
+ 
+ veryclean:
+ 	echo Very Clean done for $(SUBDIR)
+diff --git a/buildlib/docbook.mak b/buildlib/docbook.mak
+new file mode 100644
+index 0000000..2724757
+--- /dev/null
++++ b/buildlib/docbook.mak
+@@ -0,0 +1,74 @@
++# -*- make -*-
++
++# This processes DocBook XML to produce html and plain text output
++
++# Input
++# $(SOURCE) - The documents to use
++
++# All output is written to files in the build doc directory
++
++# See defaults.mak for information about LOCAL
++
++# Some local definitions
++LOCAL := docbook-$(firstword $(SOURCE))
++$(LOCAL)-HTML := $(addsuffix .html,$(addprefix $(DOC)/,$(basename $(SOURCE))))
++$(LOCAL)-TEXT := $(addsuffix .text,$(addprefix $(DOC)/,$(basename $(SOURCE))))
++
++docbook:
++
++
++#---------
++
++# Rules to build HTML documentations
++ifdef XSLTPROC
++
++DOCBOOK_HTML_STYLESHEET := docbook-html-style.xsl
++
++# Install generation hooks
++docbook: $($(LOCAL)-HTML)
++veryclean: veryclean/html/$(LOCAL)
++
++vpath %.dbk $(SUBDIRS)
++vpath $(DOCBOOK_HTML_STYLESHEET) $(SUBDIRS)
++$(DOC)/%.html: %.dbk $(DOCBOOK_HTML_STYLESHEET)
++	echo Creating html for $< to $@
++	-rm -rf $@
++	mkdir -p $@
++	$(DOCBOOK) \
++		--stringparam base.dir $@/ \
++		--stringparam l10n.gentext.default.language $(LC) \
++		$(<D)/$(DOCBOOK_HTML_STYLESHEET) $< || exit 199
++
++# Clean rule
++.PHONY: veryclean/html/$(LOCAL)
++veryclean/html/$(LOCAL):
++	-rm -rf $($(@F)-HTML)
++
++endif
++
++#---------
++
++# Rules to build Text documentations
++ifdef XSLTPROC
++
++DOCBOOK_TEXT_STYLESHEET := docbook-text-style.xsl
++
++# Install generation hooks
++docbook: $($(LOCAL)-TEXT)
++veryclean: veryclean/text/$(LOCAL)
++
++vpath %.dbk $(SUBDIRS)
++vpath $(DOCBOOK_TEXT_STYLESHEET) $(SUBDIRS)
++$(DOC)/%.text: %.dbk $(DOCBOOK_TEXT_STYLESHEET)
++	echo Creating text for $< to $@
++	$(DOCBOOK) \
++		--stringparam l10n.gentext.default.language $(LC) \
++		$(<D)/$(DOCBOOK_TEXT_STYLESHEET) $< | \
++		LC_ALL=C.UTF-8 $(DOCBOOK2TEXT) > $@ || exit 198
++
++# Clean rule
++.PHONY: veryclean/text/$(LOCAL)
++veryclean/text/$(LOCAL):
++	-rm -rf $($(@F)-TEXT)
++
++endif
+diff --git a/buildlib/environment.mak.in b/buildlib/environment.mak.in
+index c1bf296..b0a8d9d 100644
+--- a/buildlib/environment.mak.in
++++ b/buildlib/environment.mak.in
+@@ -28,15 +28,17 @@ RANLIB:=@RANLIB@
+ GCC3DEP = @GCC3DEP@
+ INLINEDEPFLAG = -MD
+ 
+-# Debian doc stuff
+-DEBIANDOC_HTML = @DEBIANDOC_HTML@
+-DEBIANDOC_TEXT = @DEBIANDOC_TEXT@
+-
+ DOXYGEN = @DOXYGEN@
++W3M = @W3M@
+ 
+-# xsltproc for the man pages
++# xsltproc for the man pages and documentation
+ XSLTPROC := @XSLTPROC@
+ 
++# DocBook XML
++DOCBOOK = $(XSLTPROC) --nonet --novalid --xinclude
++DOCBOOK2TEXT = $(W3M) -o display_charset=UTF-8 -no-graph -T text/html \
++	-cols 78 -dump
++
+ # po4a for the man pages
+ PO4A := @PO4A@
+ 
+diff --git a/buildlib/po4a_manpage.mak b/buildlib/po4a_manpage.mak
+index 62ada19..0f53a86 100644
+--- a/buildlib/po4a_manpage.mak
++++ b/buildlib/po4a_manpage.mak
+@@ -15,6 +15,9 @@ INCLUDES = apt.ent apt-verbatim.ent apt-vendor.ent
+ 
+ manpages:
+ 
++%.xsl: ../%.xsl
++	cp -a $< .
++
+ # Do not use XMLTO, build the manpages directly with XSLTPROC
+ ifdef XSLTPROC
+ 
+@@ -34,9 +37,6 @@ apt-verbatim.ent: ../apt-verbatim.ent
+ apt-vendor.ent: ../apt-vendor.ent
+ 	cp -a ../apt-vendor.ent .
+ 
+-manpage-style.xsl: ../manpage-style.xsl
+-	cp -a $< .
+-
+ $($(LOCAL)-LIST) :: % : %.xml $(STYLESHEET) $(INCLUDES)
+ 	echo Creating man page $@
+ 	$(XSLTPROC) \
+@@ -70,7 +70,6 @@ ifneq ($(words $(SOURCE)),0)
+ include $(MANPAGE_H)
+ endif
+ 
+-# Debian Doc SGML Documents
+-SOURCE := $(wildcard *.$(LC).sgml)
+-DEBIANDOC_HTML_OPTIONS=-l $(LC).UTF-8
+-include $(DEBIANDOC_H)
++# DocBook XML Documents
++SOURCE := $(wildcard *.$(LC).dbk)
++include $(DOCBOOK_H)
+diff --git a/configure.ac b/configure.ac
+index 5831e70..ca0c0f3 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -172,15 +172,12 @@ AC_EGREP_HEADER(h_errno, netdb.h, [AC_MSG_RESULT(normal)],
+        [AC_MSG_ERROR("not found.")])
+    ])
+ 
+-dnl Check for debiandoc
+-AC_PATH_PROG(DEBIANDOC_HTML,debiandoc2html)
+-AC_PATH_PROG(DEBIANDOC_TEXT,debiandoc2text)
+-
+ dnl Check for doxygen
+ AC_PATH_PROG(DOXYGEN, doxygen)
+ 
+ dnl Check for the XSLTProc tool needed to build man pages together with po4a
+ AC_PATH_PROG(XSLTPROC,xsltproc)
++AC_PATH_PROG(W3M, w3m)
+ 
+ dnl Check for the po4a tool needed to build man pages
+ AC_PATH_PROG(PO4A,po4a)
+diff --git a/debian/control b/debian/control
+index ff984db..0437aa7 100644
+--- a/debian/control
++++ b/debian/control
+@@ -10,7 +10,7 @@ Build-Depends: dpkg-dev (>= 1.15.8), debhelper (>= 8.1.3~), libdb-dev,
+  zlib1g-dev, libbz2-dev, liblzma-dev,
+  xsltproc, docbook-xsl, docbook-xml, po4a (>= 0.34-2),
+  autotools-dev, autoconf, automake, libgtest-dev
+-Build-Depends-Indep: doxygen, debiandoc-sgml, graphviz
++Build-Depends-Indep: doxygen, w3m, graphviz
+ Build-Conflicts: autoconf2.13, automake1.4
+ Vcs-Git: git://anonscm.debian.org/apt/apt.git
+ Vcs-Browser: http://anonscm.debian.org/gitweb/?p=apt/apt.git
+diff --git a/debian/rules b/debian/rules
+index f8b3929..c7b5aa3 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -70,7 +70,7 @@ LIBAPT_INST=libapt-inst$(LIBAPTINST_MAJOR)
+ export DPKG_GENSYMBOLS_CHECK_LEVEL=0
+ 
+ build-binary: build/build-binary-stamp
+-build-debiandoc: build/build-debiandoc-stamp
++build-docbook: build/build-docbook-stamp
+ build-manpages: build/build-manpages-stamp
+ 
+ # Note that this is unconditionally done first as part of loading environment.mak
+@@ -101,9 +101,9 @@ else
+ endif
+ 	touch $@
+ 
+-build/build-debiandoc-stamp: build/configure-stamp
++build/build-docbook-stamp: build/configure-stamp
+ 	# Add here commands to compile the package.
+-	$(MAKE) debiandoc
++	$(MAKE) docbook
+ 	touch $@
+ 
+ build/build-manpages-stamp: build/configure-stamp
+@@ -126,7 +126,7 @@ debian/%.install: debian/%.install.in
+ 	sed 's/@DEB_HOST_MULTIARCH@/$(DEB_HOST_MULTIARCH)/g' $< > $@
+ 
+ # Build architecture-independent files here.
+-libapt-pkg-doc: build-debiandoc
++libapt-pkg-doc: build-docbook
+ 	dh_testdir -p$@
+ 	dh_testroot -p$@
+ 	dh_prep -p$@
+@@ -153,7 +153,7 @@ libapt-pkg-doc: build-debiandoc
+ 	dh_md5sums -p$@
+ 	dh_builddeb -p$@
+ 
+-apt-doc: build-debiandoc
++apt-doc: build-docbook
+ 	dh_testdir -p$@
+ 	dh_testroot -p$@
+ 	dh_prep -p$@
+@@ -351,7 +351,7 @@ binary-arch: $(LIBAPT_PKG) $(LIBAPT_INST) apt libapt-pkg-dev apt-utils apt-trans
+ binary-indep: apt-doc libapt-pkg-doc
+ binary: binary-indep binary-arch
+ build-arch: build-binary
+-build-indep: build-manpages build-debiandoc
++build-indep: build-manpages build-docbook
+ build: build-indep build-arch
+ 
+ .PHONY: build clean binary-indep binary-arch binary
+diff --git a/debian/tests/control b/debian/tests/control
+index 72e9dee..ecaa089 100644
+--- a/debian/tests/control
++++ b/debian/tests/control
+@@ -1,3 +1,3 @@
+ Tests: run-tests
+ Restrictions: allow-stderr 
+-Depends: @, build-essential, fakeroot, wget, dpkg-dev, debhelper, libdb-dev, gettext, libcurl4-gnutls-dev, zlib1g-dev, libbz2-dev, xsltproc, docbook-xsl, docbook-xml, po4a, autotools-dev, autoconf, automake, doxygen, debiandoc-sgml, stunnel4, libdb-dev, db-util
++Depends: @, build-essential, fakeroot, wget, dpkg-dev, debhelper, libdb-dev, gettext, libcurl4-gnutls-dev, zlib1g-dev, libbz2-dev, xsltproc, docbook-xsl, docbook-xml, po4a, autotools-dev, autoconf, automake, doxygen, stunnel4, libdb-dev, db-util
+diff --git a/doc/docbook-html-style.xsl b/doc/docbook-html-style.xsl
+new file mode 100644
+index 0000000..e4af9f5
+--- /dev/null
++++ b/doc/docbook-html-style.xsl
+@@ -0,0 +1,40 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="1.0">
++
++  <!-- Import our base stylesheet -->
++  <xsl:import href="/usr/share/xml/docbook/stylesheet/docbook-xsl/xhtml-1_1/chunk.xsl" />
++
++  <!-- Since we use xsltproc (not saxon), add a workaround to ensure UTF-8 -->
++  <xsl:template xmlns="http://www.w3.org/1999/xhtml" name="head.content.generator">
++    <xsl:param name="node" select="."/>
++    <meta name="generator" content="DocBook {$DistroTitle} V{$VERSION}"/>
++    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>
++  </xsl:template>
++
++  <xsl:template name="generate.html.title"/>
++
++  <xsl:template match="releaseinfo" mode="titlepage.mode">
++    <xsl:apply-imports/>
++    <hr/>
++  </xsl:template>
++
++  <xsl:param name="root.filename">index</xsl:param>
++
++  <!-- We do not want a title in HTML. -->
++  <xsl:param name="generate.meta.abstract" select="0"/>
++
++  <!-- We do not want the first subsection on the same page as content. -->
++  <xsl:param name="chunk.first.sections" select="0"/>
++  <xsl:param name="chunk.section.depth" select="0"/>
++  <xsl:param name="chunker.output.indent" select="'yes'"/>
++
++  <xsl:param name="use.id.as.filename" select="1"/>
++
++  <xsl:param name="toc.section.depth" select="1"/>
++  <xsl:param name="generate.section.toc.level" select="0"/>
++  <xsl:param name="section.label.includes.component.label" select="1"/>
++  <xsl:param name="section.autolabel" select="1"/>
++
++  <xsl:param name="generate.css.header" select="1"/>
++
++</xsl:stylesheet>
+diff --git a/doc/docbook-text-style.xsl b/doc/docbook-text-style.xsl
+new file mode 100644
+index 0000000..376dded
+--- /dev/null
++++ b/doc/docbook-text-style.xsl
+@@ -0,0 +1,70 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<xsl:stylesheet xmlns:xsl="http://www.w3.org/1999/XSL/Transform" version="1.0">
++
++  <xsl:import href="/usr/share/xml/docbook/stylesheet/docbook-xsl/xhtml-1_1/docbook.xsl" />
++
++  <!-- Parameters for optimal text output. -->
++  <xsl:param name="callout.graphics" select="0"/>
++  <xsl:param name="callout.unicode" select="0"/>
++  <xsl:param name="section.autolabel" select="1"/>
++  <xsl:param name="section.label.includes.component.label" select="1"/>
++
++  <!-- Centering and aligning title elements. -->
++  <xsl:template match="/*/title[position()=1]" mode="titlepage.mode">
++    <br/>
++    <center>
++      <xsl:apply-imports/>
++    </center>
++    <br/>
++    <hr/> <!-- No underline, but at least something. -->
++  </xsl:template>
++  <xsl:template match="author|editor" mode="titlepage.mode">
++    <center>
++      <xsl:apply-imports/>
++    </center>
++  </xsl:template>
++
++  <xsl:template match="releaseinfo" mode="titlepage.mode">
++    <center>
++      <xsl:apply-imports/>
++    </center>
++    <hr/>
++  </xsl:template>
++
++  <!-- Dirty hack to get a left margin for paragraphs etc. -->
++  <xsl:template match="legalnotice/*
++        |chapter/*[not(name(.)='section') and not(name(.)='title')]
++        |section/*[not(name(.)='section') and not(name(.)='title')]
++        |appendix/*[not(name(.)='section') and not(name(.)='title')]
++        |footnote/*">
++    <xsl:copy><table><tr><td>&#xa0;&#xa0;&#xa0;</td><td>
++    <xsl:apply-imports/>
++    </td></tr></table></xsl:copy>
++  </xsl:template>
++
++  <!-- Skip URLs if it has something to print. -->
++  <xsl:template match="ulink[.!='']">
++    <xsl:copy-of select="."/>
++  </xsl:template>
++  <!-- Print URLs if nothing to print. -->
++  <xsl:template match="ulink[.='']">
++    <xsl:value-of select="@url"/>
++  </xsl:template>
++
++  <!-- Make clear where notes etc. begin and end. -->
++  <xsl:template match="caution|important|note|tip|warning">
++    <table width="80%" border="1">
++      <colgroup>
++        <col align="justify"/>
++      </colgroup>
++      <tbody>
++        <tr>
++          <td align="justify">
++            <xsl:apply-imports/>
++          </td>
++        </tr>
++      </tbody>
++    </table>
++  </xsl:template>
++
++</xsl:stylesheet>
+diff --git a/doc/makefile b/doc/makefile
+index 3939c74..5ab31ad 100644
+--- a/doc/makefile
++++ b/doc/makefile
+@@ -5,12 +5,12 @@ SUBDIR=doc
+ # Bring in the default rules
+ include ../buildlib/defaults.mak
+ 
+-# Debian Doc SGML Documents
+-SOURCE = $(wildcard *.sgml)
+-DEBIANDOC_HTML_OPTIONS=-l en.UTF-8
+-include $(DEBIANDOC_H)
++# DocBook XML Documents
++SOURCE = $(wildcard *.dbk)
++LC = en
++include $(DOCBOOK_H)
+ 
+-doc: manpages debiandoc
++doc: manpages docbook
+ 
+ examples/sources.list: ../vendor/current/sources.list
+ 	ln -sf $(shell readlink -f $^) $@
+@@ -24,12 +24,12 @@ TO = $(DOC)
+ TARGET = binary
+ include $(COPY_H)
+ 
+-.PHONY: clean clean/subdirs veryclean veryclean/subdirs manpages/subdirs debiandoc/subdirs all binary doc stats
++.PHONY: clean clean/subdirs veryclean veryclean/subdirs manpages/subdirs docbook/subdirs all binary doc stats
+ 
+ clean: clean/subdirs clean/examples
+ veryclean: veryclean/subdirs clean/examples
+ manpages: apt-vendor.ent manpages/subdirs
+-debiandoc: debiandoc/subdirs
++docbook: docbook/subdirs
+ 
+ DOCUMENTATIONPO = $(patsubst %.po,%,$(notdir $(wildcard po/*.po)))
+ DOCDIRLIST = $(addsuffix /makefile,$(DOCUMENTATIONPO))
+@@ -39,7 +39,7 @@ $(DOCDIRLIST) :: %/makefile : lang.makefile
+ 	test -d $(dir $@) || mkdir $(dir $@)
+ 	sed "s#@@LANG@@#$(subst /,,$(dir $@))#" $< > $@
+ 
+-debiandoc/subdirs manpages/subdirs clean/subdirs veryclean/subdirs:
++docbook/subdirs manpages/subdirs clean/subdirs veryclean/subdirs:
+ 	for dir in en $(dir $(DOCDIRLIST)); do \
+ 		$(MAKE) -C $$dir $(patsubst %/subdirs,%,$@); \
+ 	done
+@@ -53,11 +53,11 @@ stats:
+ 
+ ifdef PO4A
+ MANPAGEPOLIST = $(addprefix manpages-translation-,$(DOCUMENTATIONPO))
+-DEBIANDOCPOLIST = $(addprefix debiandoc-translation-,$(DOCUMENTATIONPO))
++DOCBOOKPOLIST = $(addprefix docbook-translation-,$(DOCUMENTATIONPO))
+ 
+-.PHONY: update-po po4a $(MANPAGEPOLIST) $(DEBIANDOCPOLIST) $(DOCDIRLIST)
++.PHONY: update-po po4a $(MANPAGEPOLIST) $(DOCBOOKPOLIST) $(DOCDIRLIST)
+ 
+-po4a: manpages/subdirs debiandoc/subdirs
++po4a: manpages/subdirs docbook/subdirs
+ 
+ update-po:
+ 	po4a --previous --no-backups --force --no-translations \
+@@ -78,10 +78,10 @@ $(MANPAGEPOLIST) :: manpages-translation-% : %/makefile po4a.conf
+ 		--package-name='$(PACKAGE)-doc' --package-version='$(PACKAGE_VERSION)' \
+ 		--msgid-bugs-address='$(PACKAGE_MAIL)' po4a.conf
+ 
+-debiandoc/subdirs: $(DEBIANDOCPOLIST)
+-$(DEBIANDOCPOLIST) :: debiandoc-translation-% : %/makefile po4a.conf
++docbook/subdirs: $(DOCBOOKPOLIST)
++$(DOCBOOKPOLIST) :: docbook-translation-% : %/makefile po4a.conf
+ 	po4a --previous --no-backups --translate-only $(dir $<)apt.ent \
+-		$(patsubst %,--translate-only $(dir $<)%,$(patsubst %.sgml,%.$(subst /,,$(dir $<)).sgml,$(wildcard *.sgml))) \
++		$(patsubst %,--translate-only $(dir $<)%,$(patsubst %.dbk,%.$(subst /,,$(dir $<)).dbk,$(wildcard *.dbk))) \
+ 		--package-name='$(PACKAGE)-doc' --package-version='$(PACKAGE_VERSION)' \
+ 		--msgid-bugs-address='$(PACKAGE_MAIL)' po4a.conf
+ endif
+@@ -101,5 +101,5 @@ $(BUILD)/doc/doxygen-stamp: $(DOXYGEN_SOURCES) $(BUILD)/doc/Doxyfile
+ 	$(DOXYGEN) $(BUILD)/doc/Doxyfile
+ 	touch $(BUILD)/doc/doxygen-stamp
+ 
+-debiandoc: $(BUILD)/doc/doxygen-stamp
++docbook: $(BUILD)/doc/doxygen-stamp
+ endif
+diff --git a/doc/po4a.conf b/doc/po4a.conf
+index 3f92c19..636cac9 100644
+--- a/doc/po4a.conf
++++ b/doc/po4a.conf
+@@ -27,18 +27,18 @@
+ [type: manpage] apt-sortpkgs.1.xml $lang:$lang/apt-sortpkgs.$lang.1.xml add_$lang:xml.add
+ [type: manpage] apt-ftparchive.1.xml $lang:$lang/apt-ftparchive.$lang.1.xml add_$lang:xml.add
+ 
+-[type: sgml]    guide.sgml $lang:$lang/guide.$lang.sgml
+-#                 add_$lang::$lang/addendum/debiandoc_$lang.add
+-[type: sgml]    offline.sgml $lang:$lang/offline.$lang.sgml
+-#                 add_$lang::$lang/addendum/debiandoc_$lang.add
+-#[type: sgml]    cache.sgml $lang:$lang/cache.$lang.sgml \
+-#                add_$lang::$lang/addendum/debiandoc_$lang.add
+-#[type: sgml]    design.sgml $lang:$lang/design.$lang.sgml\
+-#                add_$lang::$lang/addendum/debiandoc_$lang.add
+-#[type: sgml]    dpkg-tech.sgml $lang:$lang/dpkg-tech.$lang.sgml\
+-#                add_$lang::$lang/addendum/debiandoc_$lang.add
+-#[type: sgml]    files.sgml $lang:$lang/files.$lang.sgml\
+-#                add_$lang::$lang/addendum/debiandoc_$lang.add
+-#[type: sgml]    method.sgml $lang:$lang/method.$lang.sgml\
+-#                add_$lang::$lang/addendum/debiandoc_$lang.add
++[type: docbook] guide.dbk $lang:$lang/guide.$lang.dbk
++#                add_$lang::$lang/addendum/docbook_$lang.add
++[type: docbook] offline.dbk $lang:$lang/offline.$lang.dbk
++#                add_$lang::$lang/addendum/docbook_$lang.add
++#[type: docbook] cache.dbk $lang:$lang/cache.$lang.dbk \
++#                add_$lang::$lang/addendum/docbook_$lang.add
++#[type: docbook] design.dbk $lang:$lang/design.$lang.dbk\
++#                add_$lang::$lang/addendum/docbook_$lang.add
++#[type: docbook] dpkg-tech.dbk $lang:$lang/dpkg-tech.$lang.dbk\
++#                add_$lang::$lang/addendum/docbook_$lang.add
++#[type: docbook] files.dbk $lang:$lang/files.$lang.dbk\
++#                add_$lang::$lang/addendum/docbook_$lang.add
++#[type: docbook] method.dbk $lang:$lang/method.$lang.dbk\
++#                add_$lang::$lang/addendum/docbook_$lang.add
+ 
+diff --git a/test/Makefile b/test/Makefile
+index 74bffcc..35a0a51 100644
+--- a/test/Makefile
++++ b/test/Makefile
+@@ -7,7 +7,7 @@ ifndef NOISY
+ endif
+ 
+ .PHONY: startup headers library clean veryclean all binary program doc test update-po
+-startup all clean veryclean binary program dirs test update-po manpages debiandoc:
++startup all clean veryclean binary program dirs test update-po manpages docbook:
+ 	$(MAKE) -C libapt $@
+ 	$(MAKE) -C interactive-helper $@
+ 
+diff --git a/test/libapt/parsedepends_test.cc b/test/libapt/parsedepends_test.cc
+index 1e0afb6..52eac82 100644
+--- a/test/libapt/parsedepends_test.cc
++++ b/test/libapt/parsedepends_test.cc
+@@ -23,7 +23,7 @@ static void parseDependency(bool const StripMultiArch,  bool const ParseArchFlag
+       "libdb-dev:any, "
+       "gettext:native (<= 0.12), "
+       "libcurl4-gnutls-dev:native | libcurl3-gnutls-dev (>> 7.15.5), "
+-      "debiandoc-sgml, "
++      "docbook-xml, "
+       "apt (>= 0.7.25), "
+       "not-for-me [ !amd64 ], "
+       "only-for-me [ amd64 ], "
+@@ -82,7 +82,7 @@ static void parseDependency(bool const StripMultiArch,  bool const ParseArchFlag
+    EXPECT_EQ(Null | pkgCache::Dep::Greater, Op);
+ 
+    Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+-   EXPECT_EQ("debiandoc-sgml", Package);
++   EXPECT_EQ("docbook-xml", Package);
+    EXPECT_EQ("", Version);
+    EXPECT_EQ(Null | pkgCache::Dep::NoOp, Op);
+ 
+diff --git a/vendor/makefile b/vendor/makefile
+index 0701a03..ebf5787 100644
+--- a/vendor/makefile
++++ b/vendor/makefile
+@@ -5,7 +5,7 @@ SUBDIR=vendor
+ # Bring in the default rules
+ include ../buildlib/defaults.mak
+ 
+-all headers library binary program doc manpages debiandoc test update-po startup dirs: current
++all headers library binary program doc manpages docbook test update-po startup dirs: current
+ all: all/subdirs
+ binary: binary/subdirs
+ doc: doc/subdirs
+-- 
+2.0.1
+

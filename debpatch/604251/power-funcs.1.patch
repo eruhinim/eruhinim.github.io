@@ -1,0 +1,198 @@
+--- usr/share/acpi-support/power-funcs.orig	2010-11-17 09:56:51.000000000 +0100
++++ usr/share/acpi-support/power-funcs	2010-11-21 14:05:44.000000000 +0100
+@@ -5,43 +5,123 @@
+ PATH="$PATH:/usr/bin/X11"
+ POWERSTATE="/var/lib/acpi-support/powerstate"
+ 
++pwf_error() {
++	logger -t${0##*/} -perr -- power-funcs: $*
++	exit 1
++}
++
+ # getXuser gets the X user belonging to the display in $displaynum.
+ # If you want the foreground X user, use getXconsole!
+ 
+ getXuser() {
+-	user=`pinky -fw | awk '{ if ($2 == "?:'$displaynum'" || $(NF) == ":'$displaynum'" || $2 == "?:'$displaynum'.0" || $(NF) == ":'$displaynum'.0"  ) { print $1; exit; } }'`
+-
+-	if [ x"$user" = x"" ]; then
+-		startx=`pgrep -n startx`
+-		if [ x"$startx" != x"" ]; then
+-			user=`ps -o user --no-headers $startx`
+-		fi
++	plist=$(pinky -fw) || pwf_error "pinky lost"
++	user=
++	while read l; do
++		set -- $l
++		eval lastpp=\$$#
++		for ds in $2 $lastpp; do
++			case $ds in
++				:$displaynum)
++					user=$1
++					break
++					;;
++			esac
++		done
++		[ -z "$user" ] || break
++		for ds in $2 $lastpp; do
++			case $ds in
++				:$displaynum.0)
++					user=$1
++					break
++					;;
++			esac
++		done
++		[ -z "$user" ] || break
++	done <<-EOF
++		$plist
++	EOF
++
++	if [ -z "$user" ]; then
++		startx=$(pgrep -n startx || :)
++		[ -z "$startx" ] || user=$(ps -o user --no-headers $startx || :)
+ 	fi
+-	if [ x"$user" != x"" ]; then
+-        	userhome=`getent passwd $user | cut -d: -f6`
+-        	export XAUTHORITY=$userhome/.Xauthority
+-	else
+-		export XAUTHORITY=""
+-	fi
+-	export XUSER=$user
++
++	XAUTHORITY=
++	[ -z "$user" ] || {
++		passwd_line=$(getent passwd $user) || pwf_error "getent lost"
++		local IFS=:
++		set -- $passwd_line
++        	[ -z "$6" ] || XAUTHORITY="$6/.Xauthority"
++	}
++	XUSER=$user
++	export XAUTHORITY XUSER
+ }
+ 
+ # getXconsole gets the foreground (console) X user
+ getXconsole() {
+-	console=`fgconsole`;
+-	displaynum=`ps t tty$console | sed -n -re 's,.*/X .*:([0-9]+).*,\1,p'`
+-	if [ x"$displaynum" != x"" ]; then
+-		export DISPLAY=":$displaynum"
+-		getXuser
+-	fi
++	activeVT=$(fgconsole) || pwf_error "can't get active VT"
++	case $activeVT in
++		''|*[!0-9]*)
++			pwf_error "invalid active VT '$activeVT'"
++			;;
++	esac
++
++	cmdl="ps wt tty$activeVT --no-headers"
++	xproc=$($cmdl) || pwf_error "'$cmdl' failure"
++	[ "$xproc" ] || pwf_error "X process not found"
++
++# less error prone display detection method?
++# after a 'startx', something like this may show up:
++# '9859 tty7 Ss+ 46:22 /usr/bin/X -nolisten tcp :0 -auth /tmp/serverauth.hHIwM1r8IL'
++# (display is 8th word) but a gdm may show different:
++# '1647 tty7 Ss+ 2:16 /usr/bin/X :0 -audit 0 -auth /var/lib/gdm/:0.Xauth -nolisten tcp vt7'
++# (display is 6th word, and there's also a display like string in the 10th word)
++# the original greedy sed regex:
++#	displaynum=`ps t tty$console | sed -n -re 's,.*/X .*:([0-9]+).*,\1,p'`
++# matches the ':0' substring in the '-auth' option argument 
++# '/var/lib/gdm/:0.Xauth' in the example above, instead of the expected ':0'
++# argument
++	set -- $xproc
++	# skip first 4 positional parameters
++	shift 4
++	# 1st positional parameter now should be X
++	case $1 in
++		*/X)
++			shift
++			;;
++		*)
++			pwf_error "mismatch, */X expected"
++			;;
++	esac
++	# match the 1st of the remaining positional parameters that looks like
++	# a display number
++	displaynum=
++	while [ $1 ]; do
++		case $1 in
++			:[0-9]*)
++				displaynum=$1
++				break
++				;;
++		esac
++		shift
++	done
++	[ "$displaynum" ] || pwf_error "display number detection failed"
++
++	displaynum=${displaynum##*:}
++	displaynum=${displaynum%%.*}
++	case $displaynum in
++		*[!0-9]*)
++			pwf_error "invalid display number '$displaynum'"
++			;;
++	esac
++
++	export DISPLAY=":$displaynum"
++	getXuser
+ }
+ 
+ ac_adapters() {
+     for x in /sys/class/power_supply/*; do
+-       if [ -d "$x" ] ; then
+-            read type < $x/type
+-            test "$type" = "Mains" && echo $x
+-        fi
++	[ ! -d "$x" ] || ! read type <$x/type || [ "$type" != Mains ] || echo $x
+     done
+ }
+ 
+@@ -55,17 +135,15 @@
+ 
+         for x in $(ac_adapters); do
+             POWER_SUPPLY_PRESENT=1
+-            if grep -q 1 $x/online ; then
+-                ONLINE_POWER_SUPPLY_PRESENT=1
+-            fi
++	    ! read _olpsp <$x/online || [ "$_olpsp" != 1 ] ||
++		ONLINE_POWER_SUPPLY_PRESENT=1
+         done
+ 
+         for x in /proc/acpi/ac_adapter/*; do
+             if [ -d "$x" ] ; then
+                 POWER_SUPPLY_PRESENT=1
+-                if grep -q on-line $x/state ; then
+-                    ONLINE_POWER_SUPPLY_PRESENT=1
+-                fi
++		! read _olpsp <$x/state || [ "$_olpsp" != on-line ] ||
++			ONLINE_POWER_SUPPLY_PRESENT=1
+             fi
+         done
+         if [ $POWER_SUPPLY_PRESENT = 1 ] && [ $ONLINE_POWER_SUPPLY_PRESENT = 0 ] ; then
+@@ -78,16 +156,24 @@
+ #check our state has actually changed
+ checkStateChanged() {
+ # do we have our state stashed?
++# XXX:	if vaiable STATE is unset, set it to the null string
++	: ${STATE=${STATE:-}}
++# XXX:	make sure variable STATE has a non-null value
++	[ "$STATE" ] || getState
+         if [ -f "$POWERSTATE" ]; then
+-                OLDSTATE=$(cat $POWERSTATE) 
++# XXX:	unset or empty variable STATE and an existing but empty POWERSTATE file
++#	and the function will probably have undesired side effects
++                read OLDSTATE <$POWERSTATE || :
+                 if [ "$STATE" = "$OLDSTATE" ]; then
+                        exit 0
+                 else
+ #stash the new state
++# XXX:	unset or empty variable STATE, will create an empty POWERSTATE file
+                         echo "$STATE" > $POWERSTATE
+                 fi
+         else
+ #we need to stash the new state
++# XXX:	unset or empty variable STATE, will create an empty POWERSTATE file
+                 echo "$STATE" > $POWERSTATE
+         fi
+ }

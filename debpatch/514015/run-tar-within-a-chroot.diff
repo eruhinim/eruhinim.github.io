@@ -1,0 +1,99 @@
+diff -rux config.guess -x config.sub cdebootstrap-0.5.5/include/packages.h cdebootstrap-0.5.5.1/include/packages.h
+--- cdebootstrap-0.5.5/include/packages.h	2005-01-22 04:03:24.000000000 -0800
++++ cdebootstrap-0.5.5.1/include/packages.h	2009-12-05 23:00:28.000000000 -0800
+@@ -28,6 +28,6 @@
+ #include <debian-installer.h>
+ 
+ const char *package_get_local_filename (di_package *package);
+-int package_extract (di_package *package);
++int package_extract (di_package *package, const char *loader);
+ 
+ #endif
+diff -rux config.guess -x config.sub cdebootstrap-0.5.5/src/install.c cdebootstrap-0.5.5.1/src/install.c
+--- cdebootstrap-0.5.5/src/install.c	2008-03-23 13:55:27.000000000 -0700
++++ cdebootstrap-0.5.5.1/src/install.c	2009-12-05 23:01:07.000000000 -0800
+@@ -25,6 +25,7 @@
+ #include <config.h>
+ 
+ #include <errno.h>
++#include <libgen.h>
+ #include <limits.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -256,13 +257,56 @@
+ 
+ int install_extract (di_slist *install)
+ {
++  char buf[4096];
++  char line[4096];
++  char loader[4096];
++  FILE *pi;
++  int ret;
+   struct di_slist_node *node;
+ 
++  snprintf (buf, sizeof buf, "cp /bin/tar %s/var/cache/bootstrap", target_root);
++  ret = execute (buf);
++  if (ret)
++    return ret;
++
++  pi = popen ("ldd /bin/tar", "r");
++  if (!pi)
++    return 1;
++
++  while (fgets (line, sizeof line, pi))
++  {
++    char *end;
++    char *library;
++
++    library = strchr (line, '/');
++    if (!library)
++      continue;
++
++    end = strchr (library, ' ');
++    if (end)
++      *end = '\0';
++
++    snprintf (buf, sizeof buf, "cp %s %s/var/cache/bootstrap", library, target_root);
++    ret = execute (buf);
++    if (ret)
++    {
++      fclose (pi);
++      return ret;
++    }
++
++    if (!strstr (line, " => "))
++      strcpy (loader, basename (library));
++  }
++
++  ret = fclose (pi);
++  if (ret)
++    return ret;
++
+   for (node = install->head; node; node = node->next)
+   {
+     di_package *p = node->data;
+     log_message (LOG_MESSAGE_INFO_INSTALL_PACKAGE_EXTRACT, p->package);
+-    package_extract (p);
++    package_extract (p, loader);
+   }
+ 
+   return 0;
+diff -rux config.guess -x config.sub cdebootstrap-0.5.5/src/packages.c cdebootstrap-0.5.5.1/src/packages.c
+--- cdebootstrap-0.5.5/src/packages.c	2008-02-23 13:46:32.000000000 -0800
++++ cdebootstrap-0.5.5.1/src/packages.c	2009-12-05 23:10:05.000000000 -0800
+@@ -159,13 +159,13 @@
+   return ret;
+ }
+ 
+-int package_extract (di_package *package)
++int package_extract (di_package *package, const char *loader)
+ {
+   char buf_file[PATH_MAX];
+   char buf[PATH_MAX];
+ 
+   build_target_deb (buf_file, PATH_MAX, package_get_local_filename (package));
+-  snprintf (buf, PATH_MAX, "tar -xz -C %s -f -", target_root);
++  snprintf (buf, PATH_MAX, "gzip -d | chroot %s /var/cache/bootstrap/%s --library-path /var/cache/bootstrap /var/cache/bootstrap/tar -x -f -", target_root, loader);
+   return package_extract_self (buf_file, buf);
+ }
+ 

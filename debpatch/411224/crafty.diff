@@ -1,0 +1,123 @@
+diff -ur orig/crafty-20.14/chess.h crafty-20.14/chess.h
+--- orig/crafty-20.14/chess.h	2007-02-14 08:08:40.000000000 +0100
++++ crafty-20.14/chess.h	2007-02-14 07:49:49.000000000 +0100
+@@ -708,7 +708,7 @@
+ int       SetRootAlpha(unsigned char, int);
+ int       SetRootBeta(unsigned char, int);
+ void     *SharedMalloc(size_t, int);
+-void      SharedFree(void *address);
++void      SharedFree(void *address, size_t);
+ void      SignalInterrupt(int);
+ int       StrCnt(char *, char);
+ int       Swap(TREE * RESTRICT, int, int, int);
+diff -ur orig/crafty-20.14/init.c crafty-20.14/init.c
+--- orig/crafty-20.14/init.c	2006-06-20 15:57:17.000000000 +0200
++++ crafty-20.14/init.c	2007-02-14 07:48:22.000000000 +0100
+@@ -236,8 +236,8 @@
+   pawn_hash_table = (PAWN_HASH_ENTRY *) SharedMalloc(cb_pawn_hash_table, 0);
+   if (!trans_ref) {
+     Print(128, "malloc() failed, not enough memory.\n");
+-    SharedFree(trans_ref);
+-    SharedFree(pawn_hash_table);
++    SharedFree(trans_ref, cb_trans_ref);
++    SharedFree(pawn_hash_table, cb_pawn_hash_table);
+     hash_table_size = 0;
+     pawn_hash_table_size = 0;
+     log_hash = 0;
+diff -ur orig/crafty-20.14/option.c crafty-20.14/option.c
+--- orig/crafty-20.14/option.c	2007-02-14 08:08:40.000000000 +0100
++++ crafty-20.14/option.c	2007-02-14 07:49:22.000000000 +0100
+@@ -1227,7 +1227,7 @@
+       }
+       if (new_hash_size > 0) {
+         if (hash_table_size) {
+-          SharedFree(trans_ref);
++          SharedFree(trans_ref, cb_trans_ref);
+         }
+         new_hash_size /= 16 * 3;
+         for (log_hash = 0; log_hash < (int) (8 * sizeof(int)); log_hash++)
+@@ -1239,7 +1239,7 @@
+           trans_ref = (HASH_ENTRY *) SharedMalloc(cb_trans_ref, 0);
+           if (!trans_ref) {
+             printf("malloc() failed, not enough memory.\n");
+-            SharedFree(trans_ref);
++            SharedFree(trans_ref, cb_trans_ref);
+             hash_table_size = 0;
+             log_hash = 0;
+             trans_ref = 0;
+@@ -1282,7 +1282,7 @@
+         return (1);
+       }
+       if (pawn_hash_table) {
+-        SharedFree(pawn_hash_table);
++        SharedFree(pawn_hash_table, cb_pawn_hash_table);
+         pawn_hash_table_size = 0;
+         log_pawn_hash = 0;
+         pawn_hash_table = 0;
+@@ -1297,7 +1297,7 @@
+       pawn_hash_table = (PAWN_HASH_ENTRY *) SharedMalloc(cb_pawn_hash_table, 0);
+       if (!pawn_hash_table) {
+         printf("malloc() failed, not enough memory.\n");
+-        SharedFree(pawn_hash_table);
++        SharedFree(pawn_hash_table, cb_pawn_hash_table);
+         pawn_hash_table_size = 0;
+         log_pawn_hash = 0;
+         pawn_hash_table = 0;
+diff -ur orig/crafty-20.14/utility.c crafty-20.14/utility.c
+--- orig/crafty-20.14/utility.c	2006-06-20 15:57:17.000000000 +0200
++++ crafty-20.14/utility.c	2007-02-14 08:14:55.000000000 +0100
+@@ -46,6 +46,9 @@
+ #    include <sys/ioctl.h>
+ #  endif
+ #  if defined(SMP)
++#    if defined (LINUX)
++#      include <sys/mman.h>
++#    endif
+ #    include <signal.h>
+ #    include <sys/wait.h>
+ #  endif
+@@ -54,7 +57,7 @@
+ #  if !defined(CLK_TCK)
+ static clock_t clk_tck = 0;
+ #  endif
+-#  if defined(SMP)
++#  if defined(SMP) && !defined(LINUX)
+ #    include <sys/ipc.h>
+ #    include <sys/shm.h>
+ #  endif
+@@ -2718,6 +2721,9 @@
+ {
+ #if defined(UNIX)
+ #  if defined(SMP)
++#    if defined (LINUX)
++  return (mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
++#    else
+   int shmid;
+   void *shared;
+ 
+@@ -2737,6 +2743,7 @@
+   shared = shmat(shmid, 0, 0);
+   shmctl(shmid, IPC_RMID, 0);
+   return (shared);
++#    endif
+ #  else
+   return (malloc(size));
+ #  endif
+@@ -2749,11 +2756,16 @@
+ #endif
+ }
+ 
+-void SharedFree(void *address)
++void SharedFree(void *address, size_t size)
+ {
+ #if defined(SMP)
+ #  if defined(UNIX)
++#    if defined (LINUX)
++  if (address)
++    munmap(address, size);
++#    else
+   shmdt(address);
++#    endif
+ #  else
+   VirtualFree(address, 0, MEM_RELEASE);
+ #  endif

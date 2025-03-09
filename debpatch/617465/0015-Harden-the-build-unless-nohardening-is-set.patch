@@ -1,0 +1,228 @@
+From 03eeced4318f1d6efd0337b7d56d74b3c29e1f26 Mon Sep 17 00:00:00 2001
+From: Peter Pentchev <roam@ringlet.net>
+Date: Wed, 9 Mar 2011 19:14:36 +0200
+Subject: [PATCH 15/15] Harden the build unless "nohardening" is set.
+
+---
+ debian/changelog               |    1 +
+ debian/control                 |    2 +-
+ debian/patches/hardening.patch |  154 ++++++++++++++++++++++++++++++++++++++++
+ debian/patches/series          |    1 +
+ debian/rules                   |    6 ++
+ 5 files changed, 163 insertions(+), 1 deletions(-)
+ create mode 100644 debian/patches/hardening.patch
+
+diff --git a/debian/changelog b/debian/changelog
+index ce1128f..486ed1e 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -23,6 +23,7 @@ alex4 (1.1-4) UNRELEASED; urgency=low
+   * Convert all patch file headers to the DEP 3 format.
+   * Build with -Werror if the non-standard "werror" build option is set.
+   * Add the compiler-warnings patch to fix some, well, compiler warnings.
++  * Harden the build unless the "nohardening" build option is set.
+ 
+  -- Peter Pentchev <roam@ringlet.net>  Wed, 09 Mar 2011 14:14:04 +0200
+ 
+diff --git a/debian/control b/debian/control
+index 8663758..2610069 100644
+--- a/debian/control
++++ b/debian/control
+@@ -3,7 +3,7 @@ Section: games
+ Priority: optional
+ Maintainer: Debian Games Team <pkg-games-devel@lists.alioth.debian.org>
+ Uploaders: Peter De Wachter <pdewacht@gmail.com>
+-Build-Depends: debhelper (>= 8), dpkg-dev (>= 1.15.7~),
++Build-Depends: debhelper (>= 8), dpkg-dev (>= 1.15.7~), hardening-includes,
+ 	liballegro4.2-dev (>= 2:4.2.2-2), libdumb1-dev, libaldmb1-dev
+ Standards-Version: 3.9.1
+ Homepage: http://allegator.sourceforge.net/
+diff --git a/debian/patches/hardening.patch b/debian/patches/hardening.patch
+new file mode 100644
+index 0000000..eb8fb9c
+--- /dev/null
++++ b/debian/patches/hardening.patch
+@@ -0,0 +1,154 @@
++Description: Harden the build.
++ - check the fread() and fwrite() return values
++ - swap a return and an fclose()
++Forwarded: no
++Author: Peter Pentchev <roam@ringlet.net>
++Last-Update: 2011-03-07
++
++--- a/src/map.c
+++++ b/src/map.c
++@@ -76,28 +76,30 @@
++ #endif
++ }
++ 
++-static void fread_int(int *dest, FILE *fp)
+++static int fread_int(int *dest, FILE *fp)
++ {
++ #if __BYTE_ORDER == __LITTLE_ENDIAN
++-	fread(dest, 4, 1, fp);
+++	return (fread(dest, 4, 1, fp));
++ #else
++ 	unsigned char buf[4];
++-	fread(buf, 1, 4, fp);
+++	if (fread(buf, 1, 4, fp) < 4)
+++		return (0);
++ 	mem_to_int(dest, buf);
+++	return (1);
++ #endif
++ }
++ 
++-static void fwrite_int(const int *src, FILE *fp)
+++static int fwrite_int(const int *src, FILE *fp)
++ {
++ #if __BYTE_ORDER == __LITTLE_ENDIAN
++-	fwrite(src, 4, 1, fp);
+++	return (fwrite(src, 4, 1, fp));
++ #else
++ 	unsigned char buf[4];
++ 	buf[0] = *src;
++ 	buf[1] = *src >> 8;
++ 	buf[2] = *src >> 16;
++ 	buf[3] = *src >> 24;
++-	fwrite(buf, 1, 4, fp);
+++	return (fwrite(buf, 1, 4, fp) == 4? 1: 0);
++ #endif
++ }
++ 
++@@ -114,10 +116,13 @@
++ 	}
++ 
++ 	// does the header match?
++-	fread(header, 6, 1, fp);
+++	if (fread(header, 6, 1, fp) != 1) {
+++		fclose(fp);
+++		return (NULL);
+++	}
++ 	if (header[0] != 'A' && header[1] != 'X' && header[2] != '4' && header[3] != 'M' && header[4] != 'A' && header[5] != 'P') {
++-		return NULL;
++ 		fclose(fp);
+++		return NULL;
++ 	}
++ 
++ 	// get memory
++@@ -132,24 +137,35 @@
++ 	// the code below reads these struct dumps in an arch neutral manner
++ 	// Note this dumps contains pointers, these are not used because these
++ 	// ofcourse point to some no longer valid address.
++-	fread(m, 64, 1, fp);             // first 64 bytes data
++-	fread_int(&(m->width), fp);
++-	fread_int(&(m->height), fp);
++-	fread(header, 4, 1, fp);         // skip the first pointer
++-	fread_int(&(m->offset_x), fp);
++-	fread_int(&(m->offset_y), fp);
++-	fread(header, 4, 1, fp);         // skip the second pointer
++-	fread_int(&(m->start_x), fp);
++-	fread_int(&(m->start_y), fp);
+++	if (fread(m, 64, 1, fp) +            // first 64 bytes data
+++	    fread_int(&(m->width), fp) +
+++	    fread_int(&(m->height), fp) +
+++	    fread(header, 4, 1, fp) +         // skip the first pointer
+++	    fread_int(&(m->offset_x), fp) +
+++	    fread_int(&(m->offset_y), fp) +
+++	    fread(header, 4, 1, fp) +         // skip the second pointer
+++	    fread_int(&(m->start_x), fp) +
+++	    fread_int(&(m->start_y), fp) != 9) {
+++		fclose(fp);
+++		free(m);
+++		return NULL;
+++	}
++ 
++ 	// read map data
++ 	m->dat = malloc(m->width * m->height * sizeof(Tmappos));
++ 	if (m->dat == NULL) {
+++		fclose(fp);
++ 		free(m);
++ 		return NULL;
++ 	}
++ 
++-	fread(m->dat, sizeof(Tmappos), m->width * m->height, fp);
+++	if (fread(m->dat, sizeof(Tmappos), m->width * m->height, fp) !=
+++	    (size_t)m->width * m->height) {
+++		fclose(fp);
+++		free(m->dat);
+++		free(m);
+++		return NULL;
+++	}
++ 
++ 	// close file
++ 	fclose(fp);
++@@ -228,24 +244,34 @@
++ 	if (fp == NULL) return FALSE;
++ 
++ 	// write header
++-	fwrite(header, 6, 1, fp);
+++	if (fwrite(header, 6, 1, fp) != 1) {
+++		fclose(fp);
+++		return FALSE;
+++	}
++ 
++ 	// write datastruct
++ 	// a mapfile should contain a raw dump of the Tmap struct as made on an
++ 	// i386 the code below writes a struct dump as an i386 in an arch
++ 	// neutral manner
++-	fwrite(m, 64, 1, fp);             // first 64 bytes data
++-	fwrite_int(&(m->width), fp);
++-	fwrite_int(&(m->height), fp);
++-	fwrite(header, 4, 1, fp);         // skip the first pointer
++-	fwrite_int(&(m->offset_x), fp);
++-	fwrite_int(&(m->offset_y), fp);
++-	fwrite(header, 4, 1, fp);         // skip the second pointer
++-	fwrite_int(&(m->start_x), fp);
++-	fwrite_int(&(m->start_y), fp);
+++	if (fwrite(m, 64, 1, fp) +             // first 64 bytes data
+++	    fwrite_int(&(m->width), fp) +
+++	    fwrite_int(&(m->height), fp) +
+++	    fwrite(header, 4, 1, fp) +         // skip the first pointer
+++	    fwrite_int(&(m->offset_x), fp) +
+++	    fwrite_int(&(m->offset_y), fp) +
+++	    fwrite(header, 4, 1, fp) +         // skip the second pointer
+++	    fwrite_int(&(m->start_x), fp) +
+++	    fwrite_int(&(m->start_y), fp) != 9) {
+++		fclose(fp);
+++		return (FALSE);
+++	}
++ 
++ 	// write map data
++-	fwrite(m->dat, sizeof(Tmappos), m->width * m->height, fp);
+++	if (fwrite(m->dat, sizeof(Tmappos), m->width * m->height, fp) !=
+++	    (size_t)m->width * m->height) {
+++		fclose(fp);
+++		return (FALSE);
+++	}
++ 
++ 	// close file
++ 	fclose(fp);
+diff --git a/debian/patches/series b/debian/patches/series
+index 5a94e0c..c7f6537 100644
+--- a/debian/patches/series
++++ b/debian/patches/series
+@@ -4,3 +4,4 @@ save-some-cpu-cycles.patch
+ allegro-4.2.patch
+ fsf-address.patch
+ compiler-warnings.patch
++hardening.patch
+diff --git a/debian/rules b/debian/rules
+index ad96cb5..db2dc9d 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -15,6 +15,12 @@ ifneq (,$(filter werror,$(DEB_BUILD_OPTIONS)))
+ 	CFLAGS+=	-Werror
+ endif
+ 
++include /usr/share/hardening-includes/hardening.make
++ifeq (,$(filter nohardening,$(DEB_BUILD_OPTIONS)))
++CFLAGS+=	$(HARDENING_CFLAGS)
++LDFLAGS+=	$(HARDENING_LDFLAGS)
++endif
++
+ export CPPFLAGS CFLAGS LDFLAGS
+ 
+ override_dh_auto_build:
+-- 
+1.7.2.3
+

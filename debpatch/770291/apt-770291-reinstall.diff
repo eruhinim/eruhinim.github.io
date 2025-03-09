@@ -1,0 +1,77 @@
+diff --git a/apt-pkg/packagemanager.cc b/apt-pkg/packagemanager.cc
+index ba48c53..1fb99ea 100644
+--- a/apt-pkg/packagemanager.cc
++++ b/apt-pkg/packagemanager.cc
+@@ -400,7 +400,8 @@ bool pkgPackageManager::SmartConfigure(PkgIterator Pkg, int const Depth)
+ 	       // Check if the current version of the package is available and will satisfy this dependency
+ 	       if (DepPkg.CurrentVer() == Ver && List->IsNow(DepPkg) == true &&
+ 		   List->IsFlag(DepPkg,pkgOrderList::Removed) == false &&
+-		   DepPkg.State() == PkgIterator::NeedsNothing)
++		   DepPkg.State() == PkgIterator::NeedsNothing &&
++		   (Cache[DepPkg].iFlags & pkgDepCache::ReInstall) != pkgDepCache::ReInstall)
+ 	       {
+ 		  Bad = false;
+ 		  break;
+@@ -444,7 +445,8 @@ bool pkgPackageManager::SmartConfigure(PkgIterator Pkg, int const Depth)
+ 	       // Check if the current version of the package is available and will satisfy this dependency
+ 	       if (DepPkg.CurrentVer() == Ver && List->IsNow(DepPkg) == true &&
+ 		   List->IsFlag(DepPkg,pkgOrderList::Removed) == false &&
+-		   DepPkg.State() == PkgIterator::NeedsNothing)
++		   DepPkg.State() == PkgIterator::NeedsNothing &&
++		   (Cache[DepPkg].iFlags & pkgDepCache::ReInstall) != pkgDepCache::ReInstall)
+                   continue;
+ 
+ 	       // Check if the version that is going to be installed will satisfy the dependency
+@@ -722,7 +724,8 @@ bool pkgPackageManager::SmartUnPack(PkgIterator Pkg, bool const Immediate, int c
+ 
+ 		  // See if the current version is ok
+ 		  if (Pkg.CurrentVer() == Ver && List->IsNow(Pkg) == true &&
+-		      Pkg.State() == PkgIterator::NeedsNothing)
++		      Pkg.State() == PkgIterator::NeedsNothing &&
++		      (Cache[Pkg].iFlags & pkgDepCache::ReInstall) != pkgDepCache::ReInstall)
+ 		  {
+ 		     Bad = false;
+ 		     if (Debug)
+@@ -745,7 +748,8 @@ bool pkgPackageManager::SmartUnPack(PkgIterator Pkg, bool const Immediate, int c
+ 
+ 		  // Not the install version
+ 		  if (Cache[DepPkg].InstallVer != *I ||
+-		      (Cache[DepPkg].Keep() == true && DepPkg.State() == PkgIterator::NeedsNothing))
++		      (Cache[DepPkg].Keep() == true && DepPkg.State() == PkgIterator::NeedsNothing &&
++		       (Cache[DepPkg].iFlags & pkgDepCache::ReInstall) != pkgDepCache::ReInstall))
+ 		     continue;
+ 
+ 		  if (List->IsFlag(DepPkg,pkgOrderList::Configured))
+diff --git a/test/integration/test-bug-770291-reinstall b/test/integration/test-bug-770291-reinstall
+new file mode 100755
+index 0000000..cfb17ba
+--- /dev/null
++++ b/test/integration/test-bug-770291-reinstall
+@@ -0,0 +1,27 @@
++#!/bin/sh
++set -e
++
++TESTDIR=$(readlink -f $(dirname $0))
++. $TESTDIR/framework
++setupenvironment
++configarchitecture 'i386'
++
++insertpackage 'unstable,installed' 'libc6' 'i386' '1'
++insertpackage 'unstable,installed' 'libselinux1' 'i386' '1'
++insertpackage 'unstable,installed' 'systemd-sysv' 'i386' '215-5+b1' 'Depends: systemd (= 215-5+b1)
++Pre-Depends: systemd'
++# fun fact: we need these two pre-depends to get systemd ordered before systemd-sysv as
++# many pre-depends mean: do early (as they are a pain, so get them out of the way early)
++insertpackage 'unstable,installed' 'systemd' 'i386' '215-5+b1' 'Pre-Depends: libc6, libselinux1'
++insertpackage 'unstable,installed' 'init' 'i386' '1' 'Depends: systemd-sysv
++Essential: yes'
++
++setupaptarchive
++
++testequal 'Reading package lists...
++Building dependency tree...
++0 upgraded, 0 newly installed, 2 reinstalled, 0 to remove and 0 not upgraded.
++Inst systemd [215-5+b1] (215-5+b1 unstable [i386])
++Conf systemd (215-5+b1 unstable [i386])
++Inst systemd-sysv [215-5+b1] (215-5+b1 unstable [i386])
++Conf systemd-sysv (215-5+b1 unstable [i386])' aptget install --reinstall systemd systemd-sysv -s

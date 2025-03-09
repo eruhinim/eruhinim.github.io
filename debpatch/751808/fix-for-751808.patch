@@ -1,0 +1,81 @@
+diff --git a/Debbugs/Status.pm b/Debbugs/Status.pm
+index 4b8d82e..17c4578 100644
+--- a/Debbugs/Status.pm
++++ b/Debbugs/Status.pm
+@@ -282,6 +282,17 @@ sub read_bug{
+     $data{archived} = (defined($location) and ($location eq 'archive'))?1:0;
+     $data{bug_num} = $param{bug};
+ 
++    # Sort blockedby numerically so that bugs with identical blockers
++    # have identical lists.
++    if (defined $data{blockedby} and
++       $data{blockedby}) {
++	$data{blockedby} =
++	    join(' ',
++                 sort { $a <=> $b }
++		 split / /, $data{blockedby}
++		);
++    }
++
+     # mergedwith occasionally is sorted badly. Fix it to always be sorted by <=>
+     # and not include this bug
+     if (defined $data{mergedwith} and
+diff --git a/t/12_merge.t b/t/12_merge.t
+index c654359..533bd2f 100644
+--- a/t/12_merge.t
++++ b/t/12_merge.t
+@@ -1,6 +1,6 @@
+ # -*- mode: cperl;-*-
+ 
+-use Test::More tests => 35;
++use Test::More tests => 42;
+ 
+ use warnings;
+ use strict;
+@@ -141,7 +141,7 @@ send_message(to => 'control@bugs.something',
+ 			],
+ 	     body => <<'EOF') or fail 'message to control@bugs.something failed';
+ debug 10
+-clone 2 -1 -2 -3 -4 -5 -6
++clone 2 -1 -2 -3 -4 -5 -6 -7 -8
+ retitle 2 foo
+ owner 2 bar@baz.com
+ submitter 2 fleb@bleh.com
+@@ -158,6 +158,10 @@ fixed -4 1.2-3
+ found -4 1.2-1
+ found -5 1.2-5
+ fixed -5 1.2-6
++block -7 by -1
++block -7 by -2
++block -8 by -2
++block -8 by -1
+ thanks
+ EOF
+ 	;
+@@ -166,6 +170,13 @@ EOF
+ 			      $sendmail_dir,
+ 			      'control@bugs.something messages appear to have been sent out properly');
+ 
++# The order of "Blocked-By:" in *.summary is not deterministic, so
++# these tests assert that the blockers of bugs #9 and #10 are sorted
++# differently.
++ok(system('perl', '-i', '-pwe', 's/^Blocked-By: 4 3\n/Blocked-By: 3 4\n/;', $spool_dir . '/db-h/09/9.summary') == 0, 'Changed bug #9');
++ok(system('perl', '-i', '-pwe', 's/^Blocked-By: 3 4\n/Blocked-By: 4 3\n/;', $spool_dir . '/db-h/10/10.summary') == 0, 'Changed bug #10');
++is(`grep '^Blocked-By: ' $spool_dir/db-h/09/9.summary`, "Blocked-By: 3 4\n", 'Bug #9 has "Blocked-By: 3 4"');
++is(`grep '^Blocked-By: ' $spool_dir/db-h/10/10.summary`, "Blocked-By: 4 3\n", 'Bug #10 has "Blocked-By: 4 3"');
+ 
+ test_control_commands(forcemerge   => {command => 'forcemerge',
+ 				       value   => '1 2',
+@@ -193,6 +204,12 @@ test_control_commands(forcemerge   => {command => 'forcemerge',
+ 				       status_value => '8',
+ 				       bug => '7',
+ 				      },
++		      merge        => {command => 'merge',
++				       value   => '9 10',
++				       status_key => 'mergedwith',
++				       status_value => '10',
++				       bug => '9',
++				      },
+ 		     );
+ 
+ 

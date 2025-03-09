@@ -1,0 +1,253 @@
+>From a381af380f642080d11048d767fe7eb3704a74ce Mon Sep 17 00:00:00 2001
+From: Chris Lamb <lamby@debian.org>
+Date: Thu, 15 Dec 2016 22:58:43 +0100
+Subject: [PATCH] Warn when installing packages that are not reproducible.
+
+  ** This is obviously an digusting hack and you should not use it. **
+
+It is only a proof-of-concept to experiment with the user-facing interface
+of such a warning.
+
+Signed-off-by: Chris Lamb <lamby@debian.org>
+---
+ apt-pkg/init.cc                 |   1 +
+ apt-private/private-cmndline.cc |   1 +
+ apt-private/private-download.cc | 130 +++++++++++++++++++++++++++++++++++++++-
+ apt-private/private-download.h  |   6 ++
+ apt-private/private-install.cc  |   3 +
+ completions/bash/apt            |   1 +
+ debian/control                  |   3 +
+ 7 files changed, 144 insertions(+), 1 deletion(-)
+
+diff --git a/apt-pkg/init.cc b/apt-pkg/init.cc
+index 00d991027..8142ea1d8 100644
+--- a/apt-pkg/init.cc
++++ b/apt-pkg/init.cc
+@@ -145,6 +145,7 @@ bool pkgInitConfig(Configuration &Cnf)
+    Cnf.CndSet("Dir::Cache::archives","archives/");
+    Cnf.CndSet("Dir::Cache::srcpkgcache","srcpkgcache.bin");
+    Cnf.CndSet("Dir::Cache::pkgcache","pkgcache.bin");
++   Cnf.CndSet("Dir::Cache::reproduciblecache","reproducible.json.bz2");
+ 
+    // Configuration
+    Cnf.CndSet("Dir::Etc", CONF_DIR + 1);
+diff --git a/apt-private/private-cmndline.cc b/apt-private/private-cmndline.cc
+index de3992a00..ca218d1ec 100644
+--- a/apt-private/private-cmndline.cc
++++ b/apt-private/private-cmndline.cc
+@@ -274,6 +274,7 @@ static bool addArgumentsAPTGet(std::vector<CommandLine::Args> &Args, char const
+    addArg(0,"only-source","APT::Get::Only-Source",0);
+    addArg(0,"allow-unauthenticated","APT::Get::AllowUnauthenticated",0);
+    addArg(0,"allow-insecure-repositories","Acquire::AllowInsecureRepositories",0);
++   addArg(0,"allow-unreproducible","APT::Get::AllowUnreproducible",0);
+    addArg(0,"allow-weak-repositories","Acquire::AllowWeakRepositories",0);
+    addArg(0,"install-recommends","APT::Install-Recommends",CommandLine::Boolean);
+    addArg(0,"install-suggests","APT::Install-Suggests",CommandLine::Boolean);
+diff --git a/apt-private/private-download.cc b/apt-private/private-download.cc
+index ee477f4cb..85235ad6e 100644
+--- a/apt-private/private-download.cc
++++ b/apt-private/private-download.cc
+@@ -85,6 +85,132 @@ bool AuthPrompt(std::vector<std::string> const &UntrustedList, bool const Prompt
+ 
+    return _error->Error(_("There were unauthenticated packages and -y was used without --allow-unauthenticated"));
+ }
++
++// GetOutput - execute CmdLine and place the first line in output	/*{{{*/
++static bool GetOutput(std::string &output, std::string const CmdLine, bool const Debug)
++{
++   pid_t Child;
++   FileFd PipeFd;
++   char buf[1024];
++
++   if (Debug)
++      std::cerr << CmdLine << std::endl;
++
++   std::vector<const char *> Args = {"/bin/sh", "-c", CmdLine.c_str(), nullptr};
++   if (Popen(&Args[0], PipeFd, Child, FileFd::ReadOnly, false) == false)
++      return false;
++
++   PipeFd.ReadLine(buf, sizeof(buf));
++   buf[sizeof(buf) - 1] = '\0';
++   PipeFd.Close();
++
++   if (ExecWait(Child, "sh") == false)
++      return false;
++
++   output = _strstrip(buf);
++
++   return true;
++}
++
++// CheckReproducible - check if each download comes form a reproducible source	/*{{{*/
++bool CheckReproducible(pkgAcquire& Fetcher, bool const PromptUser)
++{
++   if (_config->FindB("APT::Get::AllowUnreproducible", false))
++      return true;
++
++   std::string Output;
++   std::vector<std::string> UnreproducibleList;
++   bool const Debug = _config->FindB("Debug::pkgAcquire::Reproducible",false);
++
++   std::string const Url = _config->Find("APT::Get::ReproducibleStatusJsonUrl",
++      "https://tests.reproducible-builds.org/reproducible.json.bz2");
++   std::string const NativeArch = _config->Find("APT::Architecture");
++   std::string const CacheFileName = _config->FindFile("Dir::Cache::reproduciblecache");
++   std::string const DefaultRelease = _config->Find("APT::Default-Release","unstable");
++
++   // Update local status file
++   std::string const UpdateCommand =
++      std::string("/usr/bin/curl")
++      + ((Debug) ? "" : " --silent")
++      + " --location"
++      + " -z " + CacheFileName
++      + " -o " + CacheFileName
++      + " " + Url;
++   if (GetOutput(Output, UpdateCommand, Debug) == false)
++      return _error->Error(_("Could not update reproducible cache"));
++
++   for (pkgAcquire::ItemIterator I = Fetcher.ItemsBegin(); I < Fetcher.ItemsEnd(); ++I) {
++      std::string const BinaryPkg = (*I)->ShortDesc();
++      std::string SrcPkg = BinaryPkg;
++
++      if (Debug)
++         std::cerr << "Checking reproducibility of " << BinaryPkg << std::endl;
++
++      // Determine source package name
++      std::string const SourcePackageCommand =
++         "apt-cache show " + BinaryPkg + " | awk '/Source: / { print $2 }'";
++      if (GetOutput(Output, SourcePackageCommand, Debug) == false)
++         return _error->Error(_("Could not check source package name"));
++
++      // If we got output, update the source package name
++      if (Output.length() > 0)
++         SrcPkg = Output;
++
++      std::string const JqCommand =
++         "bunzip2 -c " + CacheFileName + " | " +
++         "jq --compact-output --raw-output '.[] | " +
++            "select(.suite==\"" + DefaultRelease + "\") | " +
++            "select(.package==\"" + SrcPkg + "\") | " +
++            "select(.status==\"reproducible\") | " +
++            "select(.architecture==\"" + NativeArch + "\")" +
++            "'";
++      if (GetOutput(Output, JqCommand, Debug) == false)
++         return _error->Error(_("Could not filter reproducible status"));
++
++      // If we got no output, we failed to match filters
++      if (Output.length() == 0)
++         UnreproducibleList.push_back(BinaryPkg);
++   }
++
++   if (UnreproducibleList.empty())
++      return true;
++
++   return ReproduciblePrompt(UnreproducibleList, PromptUser);
++}
++									/*}}}*/
++
++
++bool ReproduciblePrompt(std::vector<std::string> const &UnreproducibleList, bool const PromptUser)/*{{{*/
++{
++   ShowList(c2out,_("WARNING: The following packages are not reproducible!"), UnreproducibleList,
++	 [](std::string const&) { return true; },
++	 [](std::string const&str) { return str; },
++	 [](std::string const&) { return ""; });
++
++   if (_config->FindB("APT::Get::AllowUnreproducible",false) == true)
++   {
++      c2out << _("Unreproducible warning overridden.\n");
++      return true;
++   }
++
++   if (PromptUser == false)
++      return _error->Error(_("Some packages are not reproducible"));
++
++   if (_config->FindI("quiet",0) < 2
++       && _config->FindB("APT::Get::Assume-Yes",false) == false)
++   {
++      if (!YnPrompt(_("Install these packages anyway?"), false))
++         return _error->Error(_("Some packages are not reproducible"));
++
++      return true;
++   }
++   else if (_config->FindB("APT::Get::Force-Yes",false) == true) {
++      _error->Warning(_("--force-yes is deprecated, use one of the options starting with --allow instead."));
++      return true;
++   }
++
++   return _error->Error(_("There were unreproducible packages and -y was used without --allow-unreproducible"));
++}
+ 									/*}}}*/
+ bool AcquireRun(pkgAcquire &Fetcher, int const PulseInterval, bool * const Failure, bool * const TransientNetworkFailure)/*{{{*/
+ {
+@@ -213,7 +339,9 @@ bool DoDownload(CommandLine &CmdL)
+       return true;
+    }
+ 
+-   if (_error->PendingError() == true || CheckAuth(Fetcher, false) == false)
++   if (_error->PendingError() == true
++       || CheckAuth(Fetcher, false) == false
++       || CheckReproducible(Fetcher, false) == false)
+       return false;
+ 
+    bool Failed = false;
+diff --git a/apt-private/private-download.h b/apt-private/private-download.h
+index d829e8b24..b3fabc14d 100644
+--- a/apt-private/private-download.h
++++ b/apt-private/private-download.h
+@@ -16,6 +16,12 @@ bool CheckAuth(pkgAcquire& Fetcher, bool const PromptUser);
+ // should continue
+ bool AuthPrompt(std::vector<std::string> const &UntrustedList, bool const PromptUser);
+ 
++// Check if all files in the fetcher are reproducible
++bool CheckReproducible(pkgAcquire& Fetcher, bool const PromptUser);
++
++// show a warning prompt and return true if the system should continue
++bool ReproduciblePrompt(std::vector<std::string> const &UnreproducibleList, bool const PromptUser);
++
+ APT_PUBLIC bool AcquireRun(pkgAcquire &Fetcher, int const PulseInterval, bool * const Failure, bool * const TransientNetworkFailure);
+ 
+ bool CheckFreeSpaceBeforeDownload(std::string const &Dir, unsigned long long FetchBytes);
+diff --git a/apt-private/private-install.cc b/apt-private/private-install.cc
+index 73a03a828..d9a7ead20 100644
+--- a/apt-private/private-install.cc
++++ b/apt-private/private-install.cc
+@@ -310,6 +310,9 @@ bool InstallPackages(CacheFile &Cache,bool ShwKept,bool Ask, bool Safety)
+    if (!CheckAuth(Fetcher, true))
+       return false;
+ 
++   if (!CheckReproducible(Fetcher, true))
++      return false;
++
+    /* Unlock the dpkg lock if we are not going to be doing an install
+       after. */
+    if (_config->FindB("APT::Get::Download-Only",false) == true)
+diff --git a/completions/bash/apt b/completions/bash/apt
+index f7dd61f3b..293a69be1 100644
+--- a/completions/bash/apt
++++ b/completions/bash/apt
+@@ -27,6 +27,7 @@ _apt()
+         --arch-only
+         --allow-unauthenticated
+         --allow-insecure-repositories
++        --allow-unreproducible
+         --install-recommends
+         --install-suggests
+         --fix-policy
+diff --git a/debian/control b/debian/control
+index 96bbef348..e4f9e4933 100644
+--- a/debian/control
++++ b/debian/control
+@@ -32,6 +32,9 @@ Package: apt
+ Architecture: any
+ Depends: adduser,
+          gpgv | gpgv2 | gpgv1,
++         curl,
++         ca-certificates,
++         jq,
+          ${apt:keyring},
+          ${misc:Depends},
+          ${shlibs:Depends}
+-- 
+2.11.0
+

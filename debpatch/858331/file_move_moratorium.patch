@@ -1,0 +1,568 @@
+diff --git a/README.usrmerge b/README.usrmerge
+new file mode 100644
+index 000000000..ee8b1646d
+--- /dev/null
++++ b/README.usrmerge
+@@ -0,0 +1,67 @@
++This is a proof of concept version of dpkg with explicit usrmerge
++support. This means the following file path conversions are done in
++various places:
++/lib -> /usr/lib
++/bin ->/ /usr/bin
++/sbin -> /usr/sbin
++
++Usrmerge also includes other links like "/libx32 -> /usr/libx32"
++depending on platform, but those are not handled. This shouldn't
++matter much for testing since few packages contain those anyway, and
++it does not matter much whether dpkg is aware of aliasing for those
++paths.
++
++The conversion is done at least in the following cases:
++- installing packages: any install path contained in .deb
++- reading list of existing installed files (/var/lib/dpkg/info/*.list)
++- dpkg-query (or dpkg) -S patterns beginning with '/'
++- reading existing statoverride locations, adding/removing
++- dpkg-statoverride --list glob patterns beginning with '/'
++- reading existing divert locations, adding/removing
++- dpkg-divert --list glob patterns beginning with '/'
++- file trigger locations
++- .md5sums file targets
++- .conffiles (should any exist with such paths)
++
++These conversions mean that dpkg should notice any file conflicts
++between /bin/x and /usr/bin/x, since both are now converted to the
++same literal path /usr/bin/x. Most maintainer scripts and tools should
++continue working, as the paths they use are automatically converted.
++However, there is some potential for maintainer scripts or other tools
++to break if they care about the exact paths returned from queries like
++"dpkg-divert --truename" or "dpkg-query -S" (since those will now
++refer to the real location under /usr).
++
++No separate database conversion step is required. Existing paths are
++converted as they are read from disk. Any files generated and written
++by dpkg will have the new paths, since they will have been converted
++before writing. This means newly created .list files use converted
++locations, but .triggers files do not (they are copied verbatim from
++the package, not generated from already parsed data). The
++dpkg-generated triggers/File file will contain converted locations
++when it is written. (Applies at least to udev /lib/udev/hwdb.d).
++
++The query conversions mean that for example "dpkg -S '/bin/ba*'"
++output will include "/usr/bin/bash" (as the query will be converted to
++"/usr/bin/ba*"), but "dpkg -S '/???/bash'" will find no matches since
++the query itself can not be converted and the pattern does not match
++the actual path "/usr/bin/bash".
++
++There's a minor cosmetic issue where the conversion does not add the
++"/usr" directory itself, so theoretically a package containing files
++only under /lib would be listed as containing the directory "/usr/lib"
++but not "/usr", but this shouldn't matter in practice (Debian packages
++contain /usr/share/doc/* anyway). Maybe it could cause issues when
++bootstrapping a new system in case this means trying to create
++/usr/bin before /usr? Could be worked around for example by just
++hardcoding "/usr" as contents of every package (in dpkg), more
++"correct" (and complex) fix, or disabling usrmerge logic for initial
++bootstrap as below.
++
++The usrmerge changes can be disabled by creating the file
++"/var/lib/dpkg/DISABLE_USRMERGE_LOGIC". There's no logic to create
++such a file automatically or to sanity check the existence of usrmerge
++links if the file does not exist. Expect things to break if you run
++this dpkg version on a system without the usrmerge links and without
++creating the file, or if you create the file on an usrmerged system
++after already running this dpkg without it existing.
+diff --git a/debian/dpkg.docs b/debian/dpkg.docs
+index 308db3568..ebdbd8139 100644
+--- a/debian/dpkg.docs
++++ b/debian/dpkg.docs
+@@ -1,5 +1,6 @@
+ AUTHORS
+ THANKS
++README.usrmerge
+ debian/README.bug-usertags
+ usr/share/doc/dpkg/README.api
+ usr/share/doc/dpkg/README.feature-removal-schedule
+diff --git a/lib/dpkg/db-ctrl-access.c b/lib/dpkg/db-ctrl-access.c
+index 2787d3977..a61482563 100644
+--- a/lib/dpkg/db-ctrl-access.c
++++ b/lib/dpkg/db-ctrl-access.c
+@@ -35,21 +35,16 @@
+ #include <dpkg/fsys.h>
+ #include <dpkg/db-ctrl.h>
+ #include <dpkg/debug.h>
++#include <dpkg/file.h>
+ 
+ bool
+ pkg_infodb_has_file(struct pkginfo *pkg, struct pkgbin *pkgbin,
+                     const char *name)
+ {
+ 	const char *filename;
+-	struct stat stab;
+ 
+ 	filename = pkg_infodb_get_file(pkg, pkgbin, name);
+-	if (lstat(filename, &stab) == 0)
+-		return true;
+-	else if (errno == ENOENT)
+-		return false;
+-	else
+-		ohshite(_("unable to check existence of '%.250s'"), filename);
++        return file_exists(filename);
+ }
+ 
+ void
+diff --git a/lib/dpkg/file.c b/lib/dpkg/file.c
+index 4f7c3aaa2..4db5ba5d2 100644
+--- a/lib/dpkg/file.c
++++ b/lib/dpkg/file.c
+@@ -255,3 +255,13 @@ file_show(const char *filename)
+ 		ohshite(_("cannot write file %s into the pager"), filename);
+ 	}
+ }
++
++bool file_exists(char *filename) {
++	struct stat stab;
++	if (lstat(filename, &stab) == 0)
++		return true;
++	else if (errno == ENOENT)
++		return false;
++	else
++		ohshite(_("unable to check existence of '%.250s'"), filename);
++}
+diff --git a/lib/dpkg/file.h b/lib/dpkg/file.h
+index 0136f6901..8b1cfd73a 100644
+--- a/lib/dpkg/file.h
++++ b/lib/dpkg/file.h
+@@ -65,6 +65,7 @@ void file_lock(int *lockfd, enum file_lock_flags flags, const char *filename,
+                const char *filedesc);
+ void file_unlock(int fd, const char *filename, const char *filedesc);
+ void file_show(const char *filename);
++bool file_exists(char *filename);
+ 
+ /** @} */
+ 
+diff --git a/lib/dpkg/fsys-hash.c b/lib/dpkg/fsys-hash.c
+index 20b755732..f47a2ac87 100644
+--- a/lib/dpkg/fsys-hash.c
++++ b/lib/dpkg/fsys-hash.c
+@@ -79,7 +79,14 @@ fsys_hash_find_node(const char *name, enum fsys_hash_find_flags flags)
+ 	 * leading slash. */
+ 	name = path_skip_slash_dotslash(name);
+ 
+-	pointerp = bins + (str_fnv_hash(name) % (BINS));
++        unsigned int hashval;
++        bool merge = path_is_usrmerged_nostartslash(name);
++        if (merge) {
++            hashval = str_fnv_hash("usr/");
++            hashval = str_fnv_hash_continue(name, hashval);
++        } else
++            hashval = str_fnv_hash(name);
++	pointerp = bins + (hashval % (BINS));
+ 	while (*pointerp) {
+ 		/* XXX: This should not be needed, but it has been a constant
+ 		 * source of assertions over the years. Hopefully with the
+@@ -88,8 +95,14 @@ fsys_hash_find_node(const char *name, enum fsys_hash_find_flags flags)
+ 			internerr("filename node '%s' does not start with '/'",
+ 			          (*pointerp)->name);
+ 
+-		if (strcmp((*pointerp)->name + 1, name) == 0)
++                if (!merge) {
++                    if (strcmp((*pointerp)->name + 1, name) == 0)
+ 			break;
++                } else {
++                    if (strncmp((*pointerp)->name, "/usr/", 5) == 0
++                        && strcmp((*pointerp)->name + 5, name) == 0)
++                        break;
++                }
+ 		pointerp = &(*pointerp)->next;
+ 	}
+ 	if (*pointerp)
+@@ -103,11 +116,7 @@ fsys_hash_find_node(const char *name, enum fsys_hash_find_flags flags)
+ 	if ((flags & FHFF_NOCOPY) && name > orig_name && name[-1] == '/') {
+ 		newnode->name = name - 1;
+ 	} else {
+-		char *newname = nfmalloc(strlen(name) + 2);
+-
+-		newname[0] = '/';
+-		strcpy(newname + 1, name);
+-		newnode->name = newname;
++                newnode->name = path_usrmerge_forhash(name);
+ 	}
+ 	*pointerp = newnode;
+ 	nfiles++;
+diff --git a/lib/dpkg/path.c b/lib/dpkg/path.c
+index 1a4dba182..321c32b27 100644
+--- a/lib/dpkg/path.c
++++ b/lib/dpkg/path.c
+@@ -25,8 +25,10 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <stdio.h>
++#include <stdbool.h>
+ 
+ #include <dpkg/dpkg.h>
++#include <dpkg/dpkg-db.h>
+ #include <dpkg/string.h>
+ #include <dpkg/path.h>
+ 
+@@ -168,3 +170,47 @@ path_quote_filename(char *dst, const char *src, size_t n)
+ 
+ 	return r;
+ }
++
++static bool disable_usrmerge;
++
++#define ARRAY_SIZE(s) (sizeof(s) / sizeof((s)[0]))
++#define PREFIX "/usr"
++static char *usrmerged_dirs[] = {
++    "bin",
++    "sbin",
++    "lib",
++};
++
++bool path_is_usrmerged_nostartslash(char *path) {
++    if (disable_usrmerge)
++        return false;
++    for (int i = 0; i < ARRAY_SIZE(usrmerged_dirs); i++) {
++        int l = strlen(usrmerged_dirs[i]);
++        if (strncmp(path, usrmerged_dirs[i], l) == 0
++            && (path[l] == 0 || path[l] == '/'))
++            return true;
++    }
++    return false;
++}
++
++char *path_usrmerge_forhash(char *orig) {
++    char *prefix;
++    if (path_is_usrmerged_nostartslash(orig))
++        prefix = PREFIX "/";
++    else
++        prefix = "/";
++    char *r = nfmalloc(strlen(orig) + strlen(prefix) + 1);
++    strcpy(r, prefix);
++    strcpy(r + strlen(prefix), orig);
++    return r;
++}
++
++char *path_usrmerge_malloc(char *orig) {
++    if (orig[0] == '/' && path_is_usrmerged_nostartslash(orig+1))
++        return str_fmt("%s%s", PREFIX, orig);
++    return m_strdup(orig);
++}
++
++void path_disable_usrmerge(void) {
++    disable_usrmerge = true;
++}
+diff --git a/lib/dpkg/path.h b/lib/dpkg/path.h
+index 3479a8b3a..4356aaf7b 100644
+--- a/lib/dpkg/path.h
++++ b/lib/dpkg/path.h
+@@ -24,6 +24,7 @@
+ #include <sys/stat.h>
+ 
+ #include <stddef.h>
++#include <stdbool.h>
+ 
+ #include <dpkg/macros.h>
+ 
+@@ -42,6 +43,11 @@ char *path_quote_filename(char *dst, const char *src, size_t size);
+ 
+ char *path_make_temp_template(const char *suffix);
+ 
++bool path_is_usrmerged_nostartslash(char *path);
++char *path_usrmerge_forhash(char *orig);
++char *path_usrmerge_malloc(char *orig);
++void path_disable_usrmerge(void);
++
+ int secure_unlink_statted(const char *pathname, const struct stat *stab);
+ int secure_unlink(const char *pathname);
+ int secure_remove(const char *pathname);
+diff --git a/lib/dpkg/strhash.c b/lib/dpkg/strhash.c
+index ed364695e..5e947f959 100644
+--- a/lib/dpkg/strhash.c
++++ b/lib/dpkg/strhash.c
+@@ -48,3 +48,11 @@ str_fnv_hash(const char *str)
+ 
+ 	return h;
+ }
++
++unsigned int str_fnv_hash_continue(char *str, unsigned int hashval) {
++    while (*str) {
++        hashval ^= *str++;
++        hashval *= FNV_MIXING_PRIME;
++    }
++    return hashval;
++}
+diff --git a/lib/dpkg/string.h b/lib/dpkg/string.h
+index 47ecd0487..1c001f116 100644
+--- a/lib/dpkg/string.h
++++ b/lib/dpkg/string.h
+@@ -55,6 +55,7 @@ str_is_set(const char *str)
+ bool str_match_end(const char *str, const char *end);
+ 
+ unsigned int str_fnv_hash(const char *str);
++unsigned int str_fnv_hash_continue(char *str, unsigned int hashval);
+ 
+ char *str_concat(char *dst, ...) DPKG_ATTR_SENTINEL;
+ char *str_fmt(const char *fmt, ...) DPKG_ATTR_PRINTF(1);
+diff --git a/src/at/divert.at b/src/at/divert.at
+index a2f03c48b..8ebe3c11f 100644
+--- a/src/at/divert.at
++++ b/src/at/divert.at
+@@ -105,7 +105,7 @@ dash
+ binutils-multiarch
+ ])
+ 
+-m4_define([di_dash], [diversion of /bin/sh to /bin/sh.distrib by dash
++m4_define([di_dash], [diversion of /usr/bin/sh to /usr/bin/sh.distrib by dash
+ ])
+ m4_define([di_dashman],
+           [diversion of /usr/share/man/man1/sh.1.gz to /usr/share/man/man1/sh.distrib.1.gz by dash
+@@ -113,21 +113,21 @@ m4_define([di_dashman],
+ m4_define([di_nm],
+           [diversion of /usr/bin/nm to /usr/bin/nm.single by binutils-multiarch
+ ])
+-m4_define([all_di], [m4_join([], di_nm, di_dashman, di_dash)])
++m4_define([all_di], [m4_join([], di_nm, di_dash, di_dashman)])
+ 
+ AT_CHECK([DPKG_DIVERT --list], [], all_di)
+ AT_CHECK([DPKG_DIVERT --list '*'], [], all_di)
+ AT_CHECK([DPKG_DIVERT --list ''])
+ 
+-AT_CHECK([DPKG_DIVERT --list '???????'], [], di_dash)
++AT_CHECK([DPKG_DIVERT --list '???????????'], [], m4_join([], di_nm, di_dash))
+ AT_CHECK([DPKG_DIVERT --list '*/sh'], [], di_dash)
+-AT_CHECK([DPKG_DIVERT --list '/bin/*'], [], di_dash)
++AT_CHECK([DPKG_DIVERT --list '/bin/*'], [], m4_join([], di_nm, di_dash))
+ AT_CHECK([DPKG_DIVERT --list binutils-multiarch], [], di_nm)
+ AT_CHECK([DPKG_DIVERT --list /bin/sh], [], di_dash)
+ AT_CHECK([DPKG_DIVERT --list -- /bin/sh], [], di_dash)
+ AT_CHECK([DPKG_DIVERT --list /usr/bin/nm.single], [], di_nm)
+ AT_CHECK([DPKG_DIVERT --list /bin/sh /usr/share/man/man1/sh.1.gz], [],
+-         [m4_join([], di_dashman, di_dash)])
++         [m4_join([], di_dash, di_dashman)])
+ 
+ AT_CLEANUP
+ 
+@@ -148,11 +148,11 @@ AT_CHECK([DPKG_DIVERT --listpackage /bin/true], [], [LOCAL
+ ])
+ AT_CHECK([DPKG_DIVERT --listpackage /bin/false])
+ 
+-AT_CHECK([DPKG_DIVERT --truename /bin/sh], [], [/bin/sh.distrib
++AT_CHECK([DPKG_DIVERT --truename /bin/sh], [], [/usr/bin/sh.distrib
+ ])
+-AT_CHECK([DPKG_DIVERT --truename /bin/sh.distrib], [], [/bin/sh.distrib
++AT_CHECK([DPKG_DIVERT --truename /bin/sh.distrib], [], [/usr/bin/sh.distrib
+ ])
+-AT_CHECK([DPKG_DIVERT --truename /bin/something], [], [/bin/something
++AT_CHECK([DPKG_DIVERT --truename /bin/something], [], [/usr/bin/something
+ ])
+ 
+ AT_CLEANUP
+diff --git a/src/divert/main.c b/src/divert/main.c
+index dae3ba227..9dc8e5070 100644
+--- a/src/divert/main.c
++++ b/src/divert/main.c
+@@ -46,6 +46,8 @@
+ #include <dpkg/buffer.h>
+ #include <dpkg/options.h>
+ #include <dpkg/db-fsys.h>
++#include <dpkg/path.h>
++#include <dpkg/file.h>
+ 
+ 
+ static const char printforhelp[] = N_(
+@@ -697,7 +699,7 @@ diversion_list(const char *const *argv)
+ 	const char *pattern;
+ 
+ 	while ((pattern = *argv++))
+-		glob_list_prepend(&glob_list, m_strdup(pattern));
++		glob_list_prepend(&glob_list, path_usrmerge_malloc(pattern));
+ 
+ 	if (glob_list == NULL)
+ 		glob_list_prepend(&glob_list, m_strdup("*"));
+@@ -735,7 +737,7 @@ diversion_list(const char *const *argv)
+ static int
+ diversion_truename(const char *const *argv)
+ {
+-	const char *filename = argv[0];
++	char *filename = argv[0];
+ 	struct fsys_namenode *namenode;
+ 
+ 	if (!filename || argv[1])
+@@ -743,6 +745,7 @@ diversion_truename(const char *const *argv)
+ 
+ 	diversion_check_filename(filename);
+ 
++        filename = path_usrmerge_malloc(filename);
+ 	namenode = fsys_hash_find_node(filename, FHFF_NONE);
+ 
+ 	/* Print the given name if file is not diverted. */
+@@ -751,13 +754,14 @@ diversion_truename(const char *const *argv)
+ 	else
+ 		printf("%s\n", filename);
+ 
++        free(filename);
+ 	return 0;
+ }
+ 
+ static int
+ diversion_listpackage(const char *const *argv)
+ {
+-	const char *filename = argv[0];
++        char *filename = argv[0];
+ 	struct fsys_namenode *namenode;
+ 
+ 	if (!filename || argv[1])
+@@ -765,6 +769,7 @@ diversion_listpackage(const char *const *argv)
+ 
+ 	diversion_check_filename(filename);
+ 
++        filename = path_usrmerge_malloc(filename);
+ 	namenode = fsys_hash_find_node(filename, FHFF_NONE);
+ 
+ 	/* Print nothing if file is not diverted. */
+@@ -778,6 +783,7 @@ diversion_listpackage(const char *const *argv)
+ 	else
+ 		printf("%s\n", namenode->divert->pkgset->name);
+ 
++        free(filename);
+ 	return 0;
+ }
+ 
+@@ -855,6 +861,9 @@ main(int argc, const char * const *argv)
+ 	instdir = dpkg_fsys_set_dir(instdir);
+ 	admindir = dpkg_db_set_dir(admindir);
+ 
++        if (file_exists(dpkg_db_get_path("DISABLE_USRMERGE_LOGIC")))
++            path_disable_usrmerge();
++
+ 	env_pkgname = getenv("DPKG_MAINTSCRIPT_PACKAGE");
+ 	if (opt_pkgname_match_any && env_pkgname)
+ 		set_package(NULL, env_pkgname);
+diff --git a/src/main/main.c b/src/main/main.c
+index 6b43e3e15..9f6ebadda 100644
+--- a/src/main/main.c
++++ b/src/main/main.c
+@@ -51,6 +51,8 @@
+ #include <dpkg/pager.h>
+ #include <dpkg/options.h>
+ #include <dpkg/db-fsys.h>
++#include <dpkg/path.h>
++#include <dpkg/file.h>
+ 
+ #include "main.h"
+ #include "filters.h"
+@@ -775,6 +777,9 @@ int main(int argc, const char *const *argv) {
+     ohshite(_("unable to setenv for subprocesses"));
+   free(force_string);
+ 
++  if (file_exists(dpkg_db_get_path("DISABLE_USRMERGE_LOGIC")))
++      path_disable_usrmerge();
++
+   if (!f_triggers)
+     f_triggers = (cipaction->arg_int == act_triggers && *argv) ? -1 : 1;
+ 
+diff --git a/src/query/main.c b/src/query/main.c
+index 6e3fe51ef..6898818c0 100644
+--- a/src/query/main.c
++++ b/src/query/main.c
+@@ -55,6 +55,7 @@
+ #include <dpkg/options.h>
+ #include <dpkg/db-ctrl.h>
+ #include <dpkg/db-fsys.h>
++#include <dpkg/file.h>
+ 
+ #include "actions.h"
+ 
+@@ -336,7 +337,7 @@ searchfiles(const char *const *argv)
+ {
+   struct fsys_namenode *namenode;
+   struct fsys_hash_iter *iter;
+-  const char *thisarg;
++  char *thisarg;
+   int found;
+   int failures = 0;
+   struct varbuf path = VARBUF_INIT;
+@@ -350,6 +351,7 @@ searchfiles(const char *const *argv)
+   ensure_diversions();
+ 
+   while ((thisarg = *argv++) != NULL) {
++    thisarg = path_usrmerge_malloc(thisarg);
+     found= 0;
+ 
+     if (!strchr("*[?/",*thisarg)) {
+@@ -385,6 +387,7 @@ searchfiles(const char *const *argv)
+     } else {
+       m_output(stdout, _("<standard output>"));
+     }
++    free(thisarg);
+   }
+   modstatdb_shutdown();
+ 
+@@ -880,6 +883,9 @@ int main(int argc, const char *const *argv) {
+   instdir = dpkg_fsys_set_dir(instdir);
+   admindir = dpkg_db_set_dir(admindir);
+ 
++  if (file_exists(dpkg_db_get_path("DISABLE_USRMERGE_LOGIC")))
++      path_disable_usrmerge();
++
+   if (!cipaction) badusage(_("need an action option"));
+ 
+   ret = cipaction->action(argv);
+diff --git a/src/statoverride/main.c b/src/statoverride/main.c
+index 1b3c998d4..35a92645b 100644
+--- a/src/statoverride/main.c
++++ b/src/statoverride/main.c
+@@ -46,6 +46,7 @@
+ #include <dpkg/glob.h>
+ #include <dpkg/db-fsys.h>
+ #include <dpkg/options.h>
++#include <dpkg/file.h>
+ 
+ #include "force.h"
+ #include "actions.h"
+@@ -349,8 +350,10 @@ statoverride_list(const char *const *argv)
+ 
+ 	while ((thisarg = *argv++)) {
+ 		char *pattern = path_cleanup(thisarg);
++                char *pattern2 = path_usrmerge_malloc(pattern);
++                free(pattern);
+ 
+-		glob_list_prepend(&glob_list, pattern);
++		glob_list_prepend(&glob_list, pattern2);
+ 	}
+ 	if (glob_list == NULL)
+ 		glob_list_prepend(&glob_list, m_strdup("*"));
+@@ -413,6 +416,8 @@ main(int argc, const char *const *argv)
+ 
+ 	instdir = dpkg_fsys_set_dir(instdir);
+ 	admindir = dpkg_db_set_dir(admindir);
++        if (file_exists(dpkg_db_get_path("DISABLE_USRMERGE_LOGIC")))
++            path_disable_usrmerge();
+ 
+ 	if (!cipaction)
+ 		badusage(_("need an action option"));
+diff --git a/src/trigger/main.c b/src/trigger/main.c
+index e7d589644..105d2a388 100644
+--- a/src/trigger/main.c
++++ b/src/trigger/main.c
+@@ -40,6 +40,8 @@
+ #include <dpkg/trigdeferred.h>
+ #include <dpkg/triglib.h>
+ #include <dpkg/pkg-spec.h>
++#include <dpkg/file.h>
++#include <dpkg/path.h>
+ 
+ static const char printforhelp[] = N_(
+ "Type dpkg-trigger --help for help about this utility.");
+@@ -225,6 +227,10 @@ main(int argc, const char *const *argv)
+ 	instdir = dpkg_fsys_set_dir(instdir);
+ 	admindir = dpkg_db_set_dir(admindir);
+ 
++        // Not sure if this matters for this program, shouldn't hurt...
++        if (file_exists(dpkg_db_get_path("DISABLE_USRMERGE_LOGIC")))
++            path_disable_usrmerge();
++
+ 	if (f_check) {
+ 		if (*argv)
+ 			badusage(_("--%s takes no arguments"),

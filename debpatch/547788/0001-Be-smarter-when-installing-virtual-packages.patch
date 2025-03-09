@@ -1,0 +1,72 @@
+From bde13f7a5099e1238b86e242bc8d59765366187a Mon Sep 17 00:00:00 2001
+From: Marius Vollmer <marius.vollmer@nokia.com>
+Date: Tue, 22 Sep 2009 11:21:01 +0300
+Subject: [PATCH] Be smarter when installing virtual packages.
+
+* cmdline/apt-get.cc (TryToInstall): When selecting a real package
+instead of a virtual one, ignore versions that are not candidates.
+This allows us to survive repositories that contain more than one
+version of a package.
+---
+ cmdline/apt-get.cc |   45 ++++++++++++++++++++++++++++++++++++---------
+ 1 files changed, 36 insertions(+), 9 deletions(-)
+
+diff --git a/cmdline/apt-get.cc b/cmdline/apt-get.cc
+index a7221d4..c1981c8 100644
+--- a/cmdline/apt-get.cc
++++ b/cmdline/apt-get.cc
+@@ -1045,15 +1045,42 @@ bool TryToInstall(pkgCache::PkgIterator Pkg,pkgDepCache &Cache,
+ 		  unsigned int &ExpectedInst,bool AllowFail = true)
+ {
+    /* This is a pure virtual package and there is a single available 
+-      provides */
+-   if (Cache[Pkg].CandidateVer == 0 && Pkg->ProvidesList != 0 &&
+-       Pkg.ProvidesList()->NextProvides == 0)
+-   {
+-      pkgCache::PkgIterator Tmp = Pkg.ProvidesList().OwnerPkg();
+-      ioprintf(c1out,_("Note, selecting %s instead of %s\n"),
+-	       Tmp.Name(),Pkg.Name());
+-      Pkg = Tmp;
+-   }
++      candidate providing it. */
++  if (Cache[Pkg].CandidateVer == 0)
++    {
++      pkgCache::PkgIterator Prov;
++      bool found_one = false, found_more_than_one = false;
++      
++      for (pkgCache::PrvIterator P = Pkg.ProvidesList(); P; P++)
++        {
++          pkgCache::VerIterator PVer = P.OwnerVer();
++          pkgCache::PkgIterator PPkg = PVer.ParentPkg();
++
++          if (Cache[PPkg].CandidateVer != PVer)
++            {
++              /* Ignore versions that are not a candidate. */
++              continue;
++            }
++
++          if (!found_one)
++            {
++              Prov = PPkg;
++              found_one = true;
++            }
++          else if (PPkg != Prov)
++            {
++              found_more_than_one = true;
++              break;
++            }
++        }
++
++      if (found_one && !found_more_than_one)
++        {
++          ioprintf(c1out,_("Note, selecting %s instead of %s\n"),
++                   Prov.Name(),Pkg.Name());
++          Pkg = Prov;
++        }
++    }
+    
+    // Handle the no-upgrade case
+    if (_config->FindB("APT::Get::upgrade",true) == false &&
+-- 
+1.6.3.3
+

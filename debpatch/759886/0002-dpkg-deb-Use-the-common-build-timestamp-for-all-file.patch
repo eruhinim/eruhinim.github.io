@@ -1,0 +1,137 @@
+From 365f53d5adec124e327d30e2b8e3646fc2a4fc09 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=A9my=20Bobbio?= <lunar@debian.org>
+Date: Fri, 15 Jan 2016 17:00:37 +0000
+Subject: [PATCH 2/4] dpkg-deb: Use the common build timestamp for all files
+ created at a later time
+
+In order to make build reproducible in the future, we now set the mtime of
+archived files that has been create during the build to the common build
+timestamp when tar supports the --clamp-mtime option.
+
+The latter is available in Debian since tar/1.28-1 but has not been accepted
+upstream yet.
+
+Address: #759886
+---
+ dpkg-deb/build.c | 63 ++++++++++++++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 59 insertions(+), 4 deletions(-)
+
+diff --git a/dpkg-deb/build.c b/dpkg-deb/build.c
+index 117e424..2e11e43 100644
+--- a/dpkg-deb/build.c
++++ b/dpkg-deb/build.c
+@@ -469,6 +469,7 @@ typedef void filenames_feed_func(const char *dir, int fd_out);
+  */
+ static void
+ tarball_pack(const char *dir, filenames_feed_func *tar_filenames_feeder,
++             time_t build_timestamp, int tar_supports_clamp_mtime,
+              struct compress_params *tar_compress_params, int fd_out)
+ {
+   int pipe_filenames[2], pipe_tarball[2];
+@@ -489,8 +490,17 @@ tarball_pack(const char *dir, filenames_feed_func *tar_filenames_feeder,
+     if (chdir(dir))
+       ohshite(_("failed to chdir to '%.255s'"), dir);
+ 
+-    execlp(TAR, "tar", "-cf", "-", "--format=gnu", "--null", "--no-unquote",
+-                       "--no-recursion", "-T", "-", NULL);
++    if (tar_supports_clamp_mtime) {
++      char mtime_option[30];
++      snprintf(mtime_option, sizeof(mtime_option), "--mtime=@%ld", build_timestamp);
++      mtime_option[29] = '\0';
++      execlp(TAR, "tar", "-cf", "-", "--format=gnu", "--null", "--no-unquote",
++                         mtime_option, "--clamp-mtime", "--no-recursion",
++                         "-T", "-", NULL);
++    } else {
++      execlp(TAR, "tar", "-cf", "-", "--format=gnu", "--null", "--no-unquote",
++                         "--no-recursion", "-T", "-", NULL);
++    }
+     ohshite(_("unable to execute %s (%s)"), "tar -cf", TAR);
+   }
+   close(pipe_filenames[0]);
+@@ -516,6 +526,40 @@ tarball_pack(const char *dir, filenames_feed_func *tar_filenames_feeder,
+ }
+ 
+ /**
++ * Parse `tar --help` output to see if it supports the given option.
++ */
++static int
++does_tar_support(const char *option)
++{
++  int pipe_tar_output[2];
++  pid_t pid_tar;
++  FILE *tar_output;
++  char line_buf[80];
++  int found = 0;
++
++  m_pipe(pipe_tar_output);
++  pid_tar = subproc_fork();
++  if (pid_tar == 0) {
++    m_dup2(pipe_tar_output[1], 1);
++    close(pipe_tar_output[0]);
++    close(pipe_tar_output[1]);
++    execlp(TAR, "tar", "--help", NULL);
++    ohshite(_("unable to execute %s (%s)"), "tar --help", TAR);
++  }
++  close(pipe_tar_output[1]);
++  tar_output = fdopen(pipe_tar_output[0], "r");
++  while (fgets(line_buf, sizeof(line_buf), tar_output)) {
++    if (strstr(line_buf, option)) {
++      found = 1;
++      /* we don't break to consume all output and avoid getting a SIGPIPE. */
++    }
++  }
++  close(pipe_tar_output[0]);
++  subproc_reap(pid_tar, "tar --help", 0);
++  return found;
++}
++
++/**
+  * Overly complex function that builds a .deb file.
+  */
+ int
+@@ -530,6 +574,7 @@ do_build(const char *const *argv)
+   int arfd;
+   int p1[2], gzfd;
+   pid_t c1, c2;
++  int tar_supports_clamp_mtime;
+   time_t build_timestamp;
+ 
+   /* Decode our arguments. */
+@@ -561,6 +606,8 @@ do_build(const char *const *argv)
+   }
+   m_output(stdout, _("<standard output>"));
+ 
++  tar_supports_clamp_mtime = does_tar_support("--clamp-mtime");
++
+   build_timestamp = time(NULL);
+ 
+   /* Now that we have verified everything its time to actually
+@@ -576,7 +623,15 @@ do_build(const char *const *argv)
+     m_dup2(p1[1],1); close(p1[0]); close(p1[1]);
+     if (chdir(ctrldir))
+       ohshite(_("failed to chdir to '%.255s'"), ctrldir);
+-    execlp(TAR, "tar", "-cf", "-", "--format=gnu", "--sort=name", ".", NULL);
++    if (tar_supports_clamp_mtime) {
++      char mtime_option[30];
++      snprintf(mtime_option, sizeof(mtime_option), "--mtime=@%ld", build_timestamp);
++      mtime_option[29] = '\0';
++      execlp(TAR, "tar", "-cf", "-", "--format=gnu", "--sort=name",
++                         mtime_option, "--clamp-mtime", ".", NULL);
++    } else {
++      execlp(TAR, "tar", "-cf", "-", "--format=gnu", "--sort=name", ".", NULL);
++    }
+     ohshite(_("unable to execute %s (%s)"), "tar -cf", TAR);
+   }
+   close(p1[1]);
+@@ -671,7 +726,7 @@ do_build(const char *const *argv)
+   }
+ 
+   /* Pack the directory into a tarball, feeding files from the callback. */
+-  tarball_pack(dir, file_treewalk_feed, &compress_params, gzfd);
++  tarball_pack(dir, file_treewalk_feed, build_timestamp, tar_supports_clamp_mtime, &compress_params, gzfd);
+ 
+   /* Okay, we have data.tar as well now, add it to the ar wrapper. */
+   if (deb_format.major == 2) {
+-- 
+2.1.4
+

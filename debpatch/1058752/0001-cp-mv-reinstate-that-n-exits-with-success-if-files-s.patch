@@ -1,0 +1,275 @@
+From 51cf6f3ff272467bc9cde75c48d0250446be9b9c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?P=C3=A1draig=20Brady?= <P@draigBrady.com>
+Date: Sat, 24 Feb 2024 19:51:56 +0000
+Subject: [PATCH 1/2] cp,mv: reinstate that -n exits with success if files
+ skipped
+
+* src/cp.c (main): Adjust so that -n will exit success if skipped files.
+* src/mv.c (main): Likewise.
+* doc/coreutils.texi (cp invocation): Adjust the description of -n.
+* src/system.h (emit_update_parameters_note): Adjust --update=none
+comparison.
+* tests/cp/cp-i.sh: Adjust -n exit status checks.
+* tests/mv/mv-n.sh: Likewise.
+* NEWS: Mention the change in behavior.
+Fixes https://bugs.gnu.org/62572
+---
+ NEWS               |  4 ++++
+ doc/coreutils.texi | 17 +++++++++--------
+ src/cp.c           | 14 ++++++++------
+ src/mv.c           | 10 ++++++----
+ src/system.h       |  4 ++--
+ tests/cp/cp-i.sh   | 11 +++++------
+ tests/mv/mv-n.sh   | 11 +++++------
+ 7 files changed, 39 insertions(+), 32 deletions(-)
+
+diff --git a/NEWS b/NEWS
+index 36b7fd1fe..a52b4cf66 100644
+--- a/NEWS
++++ b/NEWS
+@@ -43,6 +43,10 @@ GNU coreutils NEWS                                    -*- outline -*-
+   basenc --base16 -d now supports lower case hexadecimal characters.
+   Previously an error was given for lower case hex digits.
+ 
++  cp --no-clobber, and mv -n no longer exit with failure status if
++  existing files are encountered in the destination.  Instead they revert
++  to the behavior from before v9.2, silently skipping existing files.
++
+   ls --dired now implies long format output without hyperlinks enabled,
+   and will take precedence over previously specified formats or hyperlink mode.
+ 
+diff --git a/doc/coreutils.texi b/doc/coreutils.texi
+index c42126955..911e15b46 100644
+--- a/doc/coreutils.texi
++++ b/doc/coreutils.texi
+@@ -9059,12 +9059,13 @@ a regular file in the destination tree.
+ @itemx --no-clobber
+ @opindex -n
+ @opindex --no-clobber
+-Do not overwrite an existing file; silently fail instead.
+-This option overrides a previous
+-@option{-i} option.  This option is mutually exclusive with @option{-b} or
+-@option{--backup} option.
+-See also the @option{--update=none} option which will
+-skip existing files but not fail.
++Do not overwrite an existing file; silently skip instead.
++This option overrides a previous @option{-i} option.
++This option is mutually exclusive with @option{-b} or @option{--backup} option.
++This option is deprecated due to having a different exit status from
++other platforms.  See also the @option{--update} option which will
++give more control over how to deal with existing files in the destination,
++and over the exit status in particular.
+ 
+ @item -P
+ @itemx --no-dereference
+@@ -9335,8 +9336,8 @@ This is the default operation when an @option{--update} option is not specified,
+ and results in all existing files in the destination being replaced.
+ 
+ @item none
+-This is similar to the @option{--no-clobber} option, in that no files in the
+-destination are replaced, but also skipping a file does not induce a failure.
++This is like the deprecated @option{--no-clobber} option, where no files in the
++destination are replaced, and also skipping a file does not induce a failure.
+ 
+ @item older
+ This is the default operation when @option{--update} is specified, and results
+diff --git a/src/cp.c b/src/cp.c
+index 0355ed97f..36ae4fb66 100644
+--- a/src/cp.c
++++ b/src/cp.c
+@@ -195,8 +195,8 @@ Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.\n\
+   -L, --dereference            always follow symbolic links in SOURCE\n\
+ "), stdout);
+       fputs (_("\
+-  -n, --no-clobber             ensure no existing files overwritten, and fail\n\
+-                                 silently instead. See also --update\n\
++  -n, --no-clobber             silently skip existing files.\n\
++                                 See also --update\n\
+ "), stdout);
+       fputs (_("\
+   -P, --no-dereference         never follow symbolic links in SOURCE\n\
+@@ -984,6 +984,7 @@ main (int argc, char **argv)
+   char *target_directory = nullptr;
+   bool no_target_directory = false;
+   char const *scontext = nullptr;
++  bool no_clobber = false;
+ 
+   initialize_main (&argc, &argv);
+   set_program_name (argv[0]);
+@@ -1074,7 +1075,8 @@ main (int argc, char **argv)
+           break;
+ 
+         case 'n':
+-          x.interactive = I_ALWAYS_NO;
++          x.interactive = I_ALWAYS_SKIP;
++          no_clobber = true;
+           break;
+ 
+         case 'P':
+@@ -1140,7 +1142,7 @@ main (int argc, char **argv)
+         case 'u':
+           if (optarg == nullptr)
+             x.update = true;
+-          else if (x.interactive != I_ALWAYS_NO)  /* -n takes precedence.  */
++          else if (! no_clobber)  /* -n takes precedence.  */
+             {
+               enum Update_type update_opt;
+               update_opt = XARGMATCH ("--update", optarg,
+@@ -1225,10 +1227,10 @@ main (int argc, char **argv)
+       usage (EXIT_FAILURE);
+     }
+ 
+-  if (x.interactive == I_ALWAYS_NO)
++  if (x.interactive == I_ALWAYS_SKIP)
+     x.update = false;
+ 
+-  if (make_backups && x.interactive == I_ALWAYS_NO)
++  if (make_backups && x.interactive == I_ALWAYS_SKIP)
+     {
+       error (0, 0,
+              _("options --backup and --no-clobber are mutually exclusive"));
+diff --git a/src/mv.c b/src/mv.c
+index 8a6fef41a..2a8c977a7 100644
+--- a/src/mv.c
++++ b/src/mv.c
+@@ -322,6 +322,7 @@ main (int argc, char **argv)
+   int n_files;
+   char **file;
+   bool selinux_enabled = (0 < is_selinux_enabled ());
++  bool no_clobber = false;
+ 
+   initialize_main (&argc, &argv);
+   set_program_name (argv[0]);
+@@ -353,7 +354,8 @@ main (int argc, char **argv)
+           x.interactive = I_ASK_USER;
+           break;
+         case 'n':
+-          x.interactive = I_ALWAYS_NO;
++          x.interactive = I_ALWAYS_SKIP;
++          no_clobber = true;
+           break;
+         case DEBUG_OPTION:
+           x.debug = x.verbose = true;
+@@ -375,7 +377,7 @@ main (int argc, char **argv)
+         case 'u':
+           if (optarg == nullptr)
+             x.update = true;
+-          else if (x.interactive != I_ALWAYS_NO)  /* -n takes precedence.  */
++          else if (! no_clobber)  /* -n takes precedence.  */
+             {
+               enum Update_type update_opt;
+               update_opt = XARGMATCH ("--update", optarg,
+@@ -506,10 +508,10 @@ main (int argc, char **argv)
+     for (int i = 0; i < n_files; i++)
+       strip_trailing_slashes (file[i]);
+ 
+-  if (x.interactive == I_ALWAYS_NO)
++  if (x.interactive == I_ALWAYS_SKIP)
+     x.update = false;
+ 
+-  if (make_backups && x.interactive == I_ALWAYS_NO)
++  if (make_backups && x.interactive == I_ALWAYS_SKIP)
+     {
+       error (0, 0,
+              _("options --backup and --no-clobber are mutually exclusive"));
+diff --git a/src/system.h b/src/system.h
+index 43c78de3f..a8787a50e 100644
+--- a/src/system.h
++++ b/src/system.h
+@@ -596,8 +596,8 @@ emit_update_parameters_note (void)
+ UPDATE controls which existing files in the destination are replaced.\n\
+ 'all' is the default operation when an --update option is not specified,\n\
+ and results in all existing files in the destination being replaced.\n\
+-'none' is similar to the --no-clobber option, in that no files in the\n\
+-destination are replaced, but also skipped files do not induce a failure.\n\
++'none' is like the --no-clobber option, in that no files in the\n\
++destination are replaced, and skipped files do not induce a failure.\n\
+ 'older' is the default operation when --update is specified, and results\n\
+ in files being replaced if they're older than the corresponding source file.\n\
+ "), stdout);
+diff --git a/tests/cp/cp-i.sh b/tests/cp/cp-i.sh
+index d38268403..02a992c3a 100755
+--- a/tests/cp/cp-i.sh
++++ b/tests/cp/cp-i.sh
+@@ -29,7 +29,6 @@ echo n | returns_ 1 cp -iR a b 2>/dev/null || fail=1
+ # test miscellaneous combinations of -f -i -n parameters
+ touch c d || framework_failure_
+ echo "'c' -> 'd'" > out_copy || framework_failure_
+-echo "cp: not replacing 'd'" > err_skip || framework_failure_
+ touch out_empty || framework_failure_
+ 
+ # ask for overwrite, answer no
+@@ -45,12 +44,12 @@ echo y | cp -vni c d 2>/dev/null > out3 || fail=1
+ compare out3 out_copy  || fail=1
+ 
+ # -n wins over -i
+-echo y | returns_ 1 cp -vin c d 2>/dev/null > out4 || fail=1
++echo y | cp -vin c d 2>/dev/null > out4 || fail=1
+ compare out4 out_empty || fail=1
+ 
+ # -n wins over -i non verbose
+-echo y | returns_ 1 cp -in c d 2>err4 > out4 || fail=1
+-compare err4 err_skip || fail=1
++echo y | cp -in c d 2>err4 > out4 || fail=1
++compare /dev/null err4 || fail=1
+ compare out4 out_empty || fail=1
+ 
+ # ask for overwrite, answer yes
+@@ -58,11 +57,11 @@ echo y | cp -vfi c d 2>/dev/null > out5 || fail=1
+ compare out5 out_copy  || fail=1
+ 
+ # do not ask, prevent from overwrite
+-echo n | returns_ 1 cp -vfn c d 2>/dev/null > out6 || fail=1
++echo n | cp -vfn c d 2>/dev/null > out6 || fail=1
+ compare out6 out_empty || fail=1
+ 
+ # do not ask, prevent from overwrite
+-echo n | returns_ 1 cp -vnf c d 2>/dev/null > out7 || fail=1
++echo n | cp -vnf c d 2>/dev/null > out7 || fail=1
+ compare out7 out_empty || fail=1
+ 
+ # options --backup and --no-clobber are mutually exclusive
+diff --git a/tests/mv/mv-n.sh b/tests/mv/mv-n.sh
+index f484c2163..9bd3866cc 100755
+--- a/tests/mv/mv-n.sh
++++ b/tests/mv/mv-n.sh
+@@ -23,7 +23,6 @@ print_ver_ mv
+ # test miscellaneous combinations of -f -i -n parameters
+ touch a b || framework_failure_
+ echo "renamed 'a' -> 'b'" > out_move
+-echo "mv: not replacing 'b'" > err_skip || framework_failure_
+ > out_empty
+ 
+ # ask for overwrite, answer no
+@@ -38,23 +37,23 @@ compare out2 out_move || fail=1
+ 
+ # -n wins (as the last option)
+ touch a b || framework_failure_
+-echo y | returns_ 1 mv -vin a b 2>/dev/null > out3 || fail=1
++echo y | mv -vin a b 2>/dev/null > out3 || fail=1
+ compare out3 out_empty || fail=1
+ 
+ # -n wins (non verbose)
+ touch a b || framework_failure_
+-echo y | returns_ 1 mv -in a b 2>err3 > out3 || fail=1
++echo y | mv -in a b 2>err3 > out3 || fail=1
+ compare out3 out_empty || fail=1
+-compare err3 err_skip || fail=1
++compare /dev/null err3 || fail=1
+ 
+ # -n wins (as the last option)
+ touch a b || framework_failure_
+-echo y | returns_ 1 mv -vfn a b 2>/dev/null > out4 || fail=1
++echo y | mv -vfn a b 2>/dev/null > out4 || fail=1
+ compare out4 out_empty || fail=1
+ 
+ # -n wins (as the last option)
+ touch a b || framework_failure_
+-echo y | returns_ 1 mv -vifn a b 2>/dev/null > out5 || fail=1
++echo y | mv -vifn a b 2>/dev/null > out5 || fail=1
+ compare out5 out_empty || fail=1
+ 
+ # options --backup and --no-clobber are mutually exclusive
+-- 
+2.43.0
+

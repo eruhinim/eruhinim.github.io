@@ -1,0 +1,119 @@
+diff -urN dpkg-1.16.0.3.orig/debian/changelog dpkg-1.16.0.4/debian/changelog
+--- dpkg-1.16.0.3.orig/debian/changelog	2011-05-04 09:30:53.000000000 +0100
++++ dpkg-1.16.0.3/debian/changelog	2011-07-06 14:14:17.114196001 +0100
+@@ -1,3 +1,9 @@
++dpkg (1.16.0.3-stages) UNRELEASED; urgency=low
++
++  * Add Build-Depends-Stage1 support for bootstrapping
++
++ -- Wookey <wookey@debian.org>  Wed, 06 Jul 2011 13:13:34 +0000
++
+ dpkg (1.16.0.3) unstable; urgency=medium
+ 
+   * Allow again Priority field values not known to dpkg. Regression
+diff -urN dpkg-1.16.0.3.orig/scripts/Dpkg/Control/Fields.pm dpkg-1.16.0.4/scripts/Dpkg/Control/Fields.pm
+--- dpkg-1.16.0.3.orig/scripts/Dpkg/Control/Fields.pm	2011-05-04 09:28:00.000000000 +0100
++++ dpkg-1.16.0.3/scripts/Dpkg/Control/Fields.pm	2011-07-07 14:53:40.510189000 +0100
+@@ -73,10 +73,20 @@
+         dependency => 'normal',
+         dep_order => 1,
+     },
++    'Build-Depends-Stage1' => {
++        allowed => ALL_SRC,
++        dependency => 'normal',
++        dep_order => 1,
++    },
+     'Build-Depends-Indep' => {
+         allowed => ALL_SRC,
+         dependency => 'normal',
+         dep_order => 2,
++    },
++    'Build-Depends-Indep-Stage1' => {
++        allowed => ALL_SRC,
++        dependency => 'normal',
++        dep_order => 2,
+     },
+     'Built-Using' => {
+         allowed => ALL_PKG,
+diff -urN dpkg-1.16.0.3.orig/scripts/dpkg-buildpackage.pl dpkg-1.16.0.4/scripts/dpkg-buildpackage.pl
+--- dpkg-1.16.0.3.orig/scripts/dpkg-buildpackage.pl	2011-05-04 09:28:01.000000000 +0100
++++ dpkg-1.16.0.3/scripts/dpkg-buildpackage.pl	2011-07-06 02:23:11.439824001 +0100
+@@ -122,6 +122,7 @@
+ my $targetarch = my $targetgnusystem = '';
+ my $call_target = '';
+ my $call_target_as_root = 0;
++my $buildstage = 0;
+ my (@checkbuilddep_opts, @changes_opts, @source_opts);
+ 
+ use constant BUILD_DEFAULT    => 1;
+@@ -293,6 +294,11 @@
+     $build_opts->set("parallel", $parallel);
+     $build_opts->export();
+ }
++if (defined $buildstage) {
++    $buildstage = $build_opts->get("stage") if $build_opts->has("stage");
++    $build_opts->set("stage", $buildstage);
++    $build_opts->export();
++}
+ 
+ my $build_flags = Dpkg::BuildFlags->new();
+ $build_flags->load_config();
+@@ -363,7 +369,9 @@
+     if ($admindir) {
+ 	push @checkbuilddep_opts, "--admindir=$admindir";
+     }
+-
++if ($buildstage) {
++    push @checkbuilddep_opts, "--stage=$buildstage";
++}
+     system('dpkg-checkbuilddeps', @checkbuilddep_opts);
+     if (not WIFEXITED($?)) {
+         subprocerr('dpkg-checkbuilddeps');
+diff -urN dpkg-1.16.0.3.orig/scripts/dpkg-checkbuilddeps.pl dpkg-1.16.0.4/scripts/dpkg-checkbuilddeps.pl
+--- dpkg-1.16.0.3.orig/scripts/dpkg-checkbuilddeps.pl	2011-05-04 09:28:01.000000000 +0100
++++ dpkg-1.16.0.3/scripts/dpkg-checkbuilddeps.pl	2011-07-06 02:46:05.039824002 +0100
+@@ -49,6 +49,8 @@
+                  retrieving them from control file
+   --admindir=<directory>
+                  change the administrative directory.
++  --stage=<level>
++                 use build-depends-stage level specified
+   -h, --help     show this help message.
+       --version  show the version.")
+ 	. "\n\n" . _g(
+@@ -58,12 +60,14 @@
+ 
+ my $binary_only=0;
+ my ($bd_value, $bc_value);
++my $buildstage=0;
+ if (!GetOptions('B' => \$binary_only,
+                 'help|h' => sub { usage(); exit(0); },
+                 'version' => \&version,
+                 'd=s' => \$bd_value,
+                 'c=s' => \$bc_value,
+-                'admindir=s' => \$admindir)) {
++                'admindir=s' => \$admindir,
++                'stage=s' => \$buildstage)) {
+ 	usage();
+ 	exit(2);
+ }
+@@ -76,10 +80,16 @@
+ my $facts = parse_status("$admindir/status");
+ 
+ unless (defined($bd_value) or defined($bc_value)) {
++    my $BD_key="Build-Depends";
++    my $BDI_key="Build-Depends-Indep";
++    if ($buildstage) {
++	$BD_key="Build-Depends-Stage".$buildstage;
++	$BDI_key="Build-Depends-Indep-Stage".$buildstage;
++    }
+     $bd_value = 'build-essential';
+-    $bd_value .= ", " . $fields->{"Build-Depends"} if defined $fields->{"Build-Depends"};
+-    if (not $binary_only and defined $fields->{"Build-Depends-Indep"}) {
+-	$bd_value .= ", " . $fields->{"Build-Depends-Indep"};
++    $bd_value .= ", " . $fields->{$BD_key} if defined $fields->{$BD_key};
++    if (not $binary_only and defined $fields->{$BDI_key}) {
++	$bd_value .= ", " . $fields->{$BDI_key};
+     }
+     $bc_value = $fields->{"Build-Conflicts"} if defined $fields->{"Build-Conflicts"};
+     if (not $binary_only and defined $fields->{"Build-Conflicts-Indep"}) {

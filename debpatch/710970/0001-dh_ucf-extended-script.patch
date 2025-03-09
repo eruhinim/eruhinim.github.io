@@ -1,0 +1,232 @@
+From 053065013479e656e16f2e7d348bae7b78714d71 Mon Sep 17 00:00:00 2001
+From: Hannes von Haugwitz <hannes@vonhaugwitz.com>
+Date: Mon, 3 Jun 2013 21:18:06 +0200
+Subject: [PATCH] dh_ucf: extended script
+
+* support directories
+* support '--debconf-ok' ucf option
+* support '--three-way' ucf option
+* check for errors at code generation time
+* reduced size of generated code for multiple config files
+
+Signed-off-by: Hannes von Haugwitz <hannes@vonhaugwitz.com>
+---
+ autoscripts/postinst-ucf          |    5 +--
+ autoscripts/postinst-ucf-function |    6 +++
+ autoscripts/postrm-ucf            |   13 +-----
+ autoscripts/postrm-ucf-function   |   13 ++++++
+ dh_ucf                            |   88 ++++++++++++++++++++++++++++++++-----
+ 5 files changed, 97 insertions(+), 28 deletions(-)
+ create mode 100644 autoscripts/postinst-ucf-function
+ create mode 100644 autoscripts/postrm-ucf-function
+
+diff --git a/autoscripts/postinst-ucf b/autoscripts/postinst-ucf
+index 0546831..20db9ca 100644
+--- a/autoscripts/postinst-ucf
++++ b/autoscripts/postinst-ucf
+@@ -1,4 +1 @@
+-if [ "$1" = "configure" ]; then
+-	ucf "#UCFSRC#" "#UCFDEST#"
+-	ucfr #PACKAGE# "#UCFDEST#"
+-fi
++postinst_ucf $1 "#UCFSRC#" "#UCFDEST#"
+diff --git a/autoscripts/postinst-ucf-function b/autoscripts/postinst-ucf-function
+new file mode 100644
+index 0000000..8f59fc0
+--- /dev/null
++++ b/autoscripts/postinst-ucf-function
+@@ -0,0 +1,6 @@
++postinst_ucf() {
++    if [ "$1" = "configure" ]; then
++        ucf #UCFOPTIONS# "$2" "$3"
++        ucfr #PACKAGE# "$3"
++    fi
++}
+diff --git a/autoscripts/postrm-ucf b/autoscripts/postrm-ucf
+index da37572..0c80d0a 100644
+--- a/autoscripts/postrm-ucf
++++ b/autoscripts/postrm-ucf
+@@ -1,12 +1 @@
+-if [ "$1" = "purge" ]; then
+-	for ext in .ucf-new .ucf-old .ucf-dist ""; do
+-		rm -f "#UCFDEST#$ext"
+-	done
+-	
+-	if [ -x "`which ucf 2>/dev/null`" ]; then
+-		ucf --purge "#UCFDEST#"
+-	fi
+-	if [ -x "`which ucfr 2>/dev/null`" ]; then
+-		ucfr --purge #PACKAGE# "#UCFDEST#"
+-	fi
+-fi
++postrm_ucf $1 "#UCFDEST#"
+diff --git a/autoscripts/postrm-ucf-function b/autoscripts/postrm-ucf-function
+new file mode 100644
+index 0000000..4417cda
+--- /dev/null
++++ b/autoscripts/postrm-ucf-function
+@@ -0,0 +1,13 @@
++postrm_ucf() {
++    if [ "$1" = "purge" ]; then
++        for ext in .ucf-new .ucf-old .ucf-dist ""; do
++            rm -f "$2$ext"
++        done
++        if [ -x "`which ucf 2>/dev/null`" ]; then
++            ucf --purge "$2"
++        fi
++        if [ -x "`which ucfr 2>/dev/null`" ]; then
++            ucfr --purge #PACKAGE# "$2"
++        fi
++    fi
++}
+diff --git a/dh_ucf b/dh_ucf
+index 98fc4ae..af16c60 100755
+--- a/dh_ucf
++++ b/dh_ucf
+@@ -7,30 +7,38 @@ dh_ucf - register configuration files with ucf
+ =cut
+ 
+ use strict;
++use File::Find;
+ use Debian::Debhelper::Dh_Lib;
+ 
+ =head1 SYNOPSIS
+ 
+-B<dh_ucf> [S<I<debhelper options>>] [B<-n>]
++B<dh_ucf> [S<I<debhelper options>>] [B<-n>] [B<--debconf-ok>] [B<--three-way>]
+ 
+ =head1 DESCRIPTION
+ 
+ B<dh_ucf> is a debhelper program that is responsible for generating the
+ F<postinst> and F<postrm> commands that register files with ucf(1) and ucfr(1).
+ 
++A dependency on ucf will be generated in B<${misc:Depends}>.
++
+ =head1 FILES
+ 
+ =over 4
+ 
+ =item debian/I<package>.ucf
+ 
+-List pairs of source and destination files to register with ucf. Each pair
+-should be put on its own line, with the source and destination separated by
+-whitespace. Both source and destination must be absolute paths. The source
+-should be a file that is provided by your package, typically in /usr/share/,
+-while the destination is typically a file in /etc/.
++List pairs of source and destination files (or directories) to register with
++ucf. Each pair should be put on its own line, with the source and destination
++separated by whitespace. Both source and destination must be absolute paths.
++The source should be a file/directory that is provided by your package,
++typically in /usr/share/, while the destination is typically a file/directory
++in /etc/. If a source directory contains sub-directories, your package must
++ensure that these sub-directories exist in the destination directories. They
++are neither created by B<dh_ucf> nor by B<ucf>(1).
+ 
+-A dependency on ucf will be generated in B<${misc:Depends}>.
++The script checks if each source file and the destination directory are
++available in the package and the corresponding destination file does not
++already exist in the package.
+ 
+ =back
+ 
+@@ -42,6 +50,14 @@ A dependency on ucf will be generated in B<${misc:Depends}>.
+ 
+ Do not modify F<postinst>/F<postrm> scripts. Turns this command into a no-op.
+ 
++=item B<--debconf-ok>
++
++Call F<ucf>(1) in F<postinst> with B<--debconf-ok> option.
++
++=item B<--three-way>
++
++Call F<ucf>(1) in F<postinst> with B<--three-way> option.
++
+ =back
+ 
+ =head1 NOTES
+@@ -52,10 +68,50 @@ instances of the same text to be added to maintainer scripts.
+ 
+ =cut
+ 
+-init();
++init(options => {"debconf-ok" => \$dh{DEBCONFOK},
++	"three-way" => \$dh{THREEWAY}});
+ 
+ # PROMISE: DH NOOP WITHOUT ucf
+ 
++my $ucfoptions = "";
++if ($dh{DEBCONFOK}) {
++	$ucfoptions="$ucfoptions --debconf-ok";
++}
++if ($dh{THREEWAY}) {
++	$ucfoptions="$ucfoptions --three-way";
++}
++
++sub add_ucf {
++	my $src = shift;
++	my $dest = shift;
++	my $package = shift;
++	my $tmp = shift;
++
++	if (-e "$tmp$src") {
++		if (-d dirname("$tmp$dest")) {
++			if (! -f "$tmp$dest") {
++				autoscript($package,"postinst","postinst-ucf","s:#UCFSRC#:$src:;s:#UCFDEST#:$dest:",);
++				autoscript($package,"postrm","postrm-ucf","s:#UCFDEST#:$dest:");
++			} else {
++				error("ucf destination file '$dest' already exist in package '$package'");
++			}
++		} else {
++			error("ucf destination file '$dest' directory not found in package '$package'");
++		}
++	} else {
++		error("ucf source file '$src' not found in package '$package'");
++	}
++}
++
++sub process {
++	my($srcd, $destd, $package, $tmp)= @_;
++	my $file = $File::Find::name;
++	if (-f "$file") {
++		$file =~ s:^$tmp$srcd::;
++		add_ucf("$srcd$file", "$destd$file", $package, $tmp);
++	}
++}
++
+ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 	my $tmp=tmpdir($package);
+ 	my $file=pkgfile($package,"ucf");
+@@ -72,12 +128,19 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 	if (! $dh{NOSCRIPTS}) {
+ 		if (@ucf) {
+ 			addsubstvar($package, "misc:Depends", "ucf");
++			autoscript($package,"postinst","postinst-ucf-function", "s:#UCFOPTIONS#:$ucfoptions:;s/#PACKAGE#/$package/");
+ 		}
+ 		foreach my $set (@ucf) {
+-			my $src = $set->[0];
+-			my $dest = $set->[1];
+-			autoscript($package,"postinst","postinst-ucf","s:#UCFSRC#:$src:;s:#UCFDEST#:$dest:;s/#PACKAGE#/$package/",);
+-			autoscript($package,"postrm","postrm-ucf","s:#UCFDEST#:$dest:;s/#PACKAGE#/$package/");
++			if(-d "$tmp$set->[0]" && -d "$tmp$set->[1]") {
++				if (substr($set->[0],-1) ne '/') { $set->[0] = $set->[0]."/"; }
++				if (substr($set->[1],-1) ne '/') { $set->[1] = $set->[1]."/"; }
++				find( { wanted => sub { process($set->[0], $set->[1], $package, $tmp); }, no_chdir => 1} , "$tmp$set->[0]");
++			} else {
++				add_ucf($set->[0], $set->[1], $package, $tmp);
++			}
++		}
++		if (@ucf) {
++			autoscript($package,"postrm","postrm-ucf-function", "s/#PACKAGE#/$package/");
+ 		}
+ 	}
+ }
+@@ -92,5 +155,6 @@ This program is a part of debhelper.
+ 
+ Joey Hess <joeyh@debian.org>
+ Jeroen Schot <schot@a-eskwadraat.nl>
++Hannes von Haugwitz <hannes@vonhaugwitz.com>
+ 
+ =cut
+-- 
+1.7.10.4
+

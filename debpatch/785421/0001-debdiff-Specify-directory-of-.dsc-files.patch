@@ -1,0 +1,147 @@
+>From 7730bedb165939d3be864fcf55dd0425d8128a90 Mon Sep 17 00:00:00 2001
+From: Craig Small <csmall@debian.org>
+Date: Sat, 16 May 2015 13:03:12 +1000
+Subject: [PATCH] debdiff: Specify directory of .dsc files
+
+debdiff is one of the few devscripts utilities that does not
+either have a --debs-dir option or use the DEBRELEASE_DEBS_DIR
+option found in devscripts.conf
+
+This patch enables both methods which means instead of having to
+manually specify the .dsc files when you have a different DEBS_DIR
+to .., it will Just Work like the other tools.
+---
+ scripts/debdiff.1  | 16 ++++++++++++++++
+ scripts/debdiff.pl | 31 ++++++++++++++++++++++++++++++-
+ 2 files changed, 46 insertions(+), 1 deletion(-)
+
+diff --git a/scripts/debdiff.1 b/scripts/debdiff.1
+index 46a50b5..3a39898 100644
+--- a/scripts/debdiff.1
++++ b/scripts/debdiff.1
+@@ -155,6 +155,12 @@ Do not unpack tarballs inside source packages.
+ Do not read any configuration files.  This can only be used as the
+ first option given on the command-line.
+ .TP
++\fB\-\-debs\-dir\fR \fIdirectory\fR
++Look for the \fI.dsc\fR files in \fIdirectory\fR
++instead of the parent of the source directory.  This should
++either be an absolute path or relative to the top of the source
++directory.
++.TP
+ .BR \-\-help ", " \-h
+ Show a summary of options.
+ .TP
+@@ -210,6 +216,16 @@ If this is set to \fIyes\fR, then it is the same as the
+ .B DEBDIFF_UNPACK_TARBALLS
+ If this is set to \fIno\fR, then it is the same as the
+ \fB\-\-no\-unpack\-tarballs\fR command line parameter being used.
++.TP
++.B DEBRELEASE_DEBS_DIR
++This specifies the directory in which to look for the \fI.dsc\fR
++and files, and is either an absolute path or relative to
++the top of the source tree.  This corresponds to the
++\fB\-\-debs\-dir\fR command line option.  This directive could be
++used, for example, if you always use \fBpbuilder\fR or
++\fBsvn-buildpackage\fR to build your packages.  Note that it also
++affects \fBdebrelease\fR(1) in the same way, hence the strange name of
++the option.
+ .SH "EXIT VALUES"
+ Normally the exit value will be 0 if no differences are reported and 1
+ if any are reported.  If there is some fatal error, the exit code will
+diff --git a/scripts/debdiff.pl b/scripts/debdiff.pl
+index 54c7573..fee877d 100755
+--- a/scripts/debdiff.pl
++++ b/scripts/debdiff.pl
+@@ -111,6 +111,8 @@ EOF
+ 
+ # Start by setting default values
+ 
++my $debsdir;
++my $debsdir_warning;
+ my $ignore_dirs = 1;
+ my $compare_control = 1;
+ my $controlfiles = 'control';
+@@ -142,6 +144,7 @@ if (@ARGV and $ARGV[0] =~ /^--no-?conf$/) {
+ 		       'DEBDIFF_WDIFF_SOURCE_CONTROL' => 'no',
+ 		       'DEBDIFF_AUTO_VER_SORT' => 'no',
+ 		       'DEBDIFF_UNPACK_TARBALLS' => 'yes',
++		       'DEBRELEASE_DEBS_DIR' => '..',
+ 		       );
+     my %config_default = %config_vars;
+ 
+@@ -172,6 +175,11 @@ if (@ARGV and $ARGV[0] =~ /^--no-?conf$/) {
+ 	or $config_vars{'DEBDIFF_AUTO_VER_SORT'}='no';
+     $config_vars{'DEBDIFF_UNPACK_TARBALLS'} =~ /^(yes|no)$/
+ 	or $config_vars{'DEBDIFF_UNPACK_TARBALLS'}='yes';
++    # We do not replace this with a default directory to avoid accidentally
++    # installing a broken package
++    $config_vars{'DEBRELEASE_DEBS_DIR'} =~ s%/+%/%;
++    $config_vars{'DEBRELEASE_DEBS_DIR'} =~ s%(.)/$%$1%;
++    $debsdir_warning = "config file specified DEBRELEASE_DEBS_DIR directory $config_vars{'DEBRELEASE_DEBS_DIR'} does not exist!";
+ 
+     foreach my $var (sort keys %config_vars) {
+ 	if ($config_vars{$var} ne $config_default{$var}) {
+@@ -181,6 +189,7 @@ if (@ARGV and $ARGV[0] =~ /^--no-?conf$/) {
+     $modified_conf_msg ||= "  (none)\n";
+     chomp $modified_conf_msg;
+ 
++    $debsdir = $config_vars{'DEBRELEASE_DEBS_DIR'};
+     $ignore_dirs = $config_vars{'DEBDIFF_DIRS'} eq 'yes' ? 0 : 1;
+     $compare_control = $config_vars{'DEBDIFF_CONTROL'} eq 'no' ? 0 : 1;
+     $controlfiles = $config_vars{'DEBDIFF_CONTROLFILES'};
+@@ -199,6 +208,7 @@ my $type = '';
+ my @excludes = ();
+ my @move = ();
+ my %renamed = ();
++my $opt_debsdir;
+ 
+ 
+ # handle command-line options
+@@ -259,6 +269,16 @@ while (@ARGV) {
+     elsif ($ARGV[0] =~ s/^--controlfiles=//) {
+ 	$controlfiles = shift;
+     }
++    elsif ($ARGV[0] eq '--debs-dir') {
++	fatal "Malformed command-line option $ARGV[0]; run $progname --help for more info"
++	    unless @ARGV >= 2;
++	shift @ARGV;
++
++	$opt_debsdir = shift;
++    }
++    elsif ($ARGV[0] =~ s/^--debs-dir=//) {
++	$opt_debsdir = shift;
++    }
+     elsif ($ARGV[0] =~ /^(--dirs|-d)$/) { $ignore_dirs = 0; shift; }
+     elsif ($ARGV[0] eq '--nodirs') { $ignore_dirs = 1; shift; }
+     elsif ($ARGV[0] =~ /^(--quiet|-q)$/) { $quiet = 1; shift; }
+@@ -296,16 +316,25 @@ while (@ARGV) {
+ 
+ my $guessed_version = 0;
+ 
++if ($opt_debsdir) {
++    $opt_debsdir =~ s%^/+%/%;
++    $opt_debsdir =~ s%(.)/$%$1%;
++    $debsdir_warning = "--debs-dir directory $opt_debsdir does not exist!";
++    $debsdir = $opt_debsdir;
++}
++
+ # If no file is given, assume that we are in a source directory
+ # and try to create a diff with the previous version
+ if(@ARGV == 0) {
+     my $namepat = qr/[-+0-9a-z.]/i;
+ 
++    fatal $debsdir_warning unless -d $debsdir;
++
+     fatal "Can't read file: debian/changelog" unless -r "debian/changelog";
+     open CHL, "debian/changelog";
+     while(<CHL>) {
+ 	if(/^(\w$namepat*)\s\((\d+:)?(.+)\)((\s+$namepat+)+)\;\surgency=.+$/) {
+-	    unshift @ARGV, "../".$1."_".$3.".dsc";
++	    unshift @ARGV, $debsdir."/".$1."_".$3.".dsc";
+ 	    $guessed_version++;
+ 	}
+ 	last if $guessed_version > 1;
+-- 
+2.1.4
+

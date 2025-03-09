@@ -1,0 +1,98 @@
+From 75ab11ae3880530c5354cc90c8d1ff0998f8146b Mon Sep 17 00:00:00 2001
+From: Michael Vogt <mvo@debian.org>
+Date: Sat, 21 Dec 2013 18:50:03 +0100
+Subject: [PATCH] make /etc/apt/preferences parser deal with comment only
+ sections
+
+---
+ apt-pkg/policy.cc                            |  4 ++++
+ apt-pkg/tagfile.cc                           | 11 ++++++++--
+ test/integration/test-bug-732746-preferences | 32 ++++++++++++++++++++++++++++
+ 3 files changed, 45 insertions(+), 2 deletions(-)
+ create mode 100755 test/integration/test-bug-732746-preferences
+
+diff --git a/apt-pkg/policy.cc b/apt-pkg/policy.cc
+index 0a06cc6..d0f9744 100644
+--- a/apt-pkg/policy.cc
++++ b/apt-pkg/policy.cc
+@@ -405,6 +405,10 @@ bool ReadPinFile(pkgPolicy &Plcy,string File)
+    PreferenceSection Tags;
+    while (TF.Step(Tags) == true)
+    {
++      // can happen when there are only comments in a record
++      if (Tags.Count() == 0)
++         continue;
++
+       string Name = Tags.FindS("Package");
+       if (Name.empty() == true)
+ 	 return _error->Error(_("Invalid record in the preferences file %s, no Package header"), File.c_str());
+diff --git a/apt-pkg/tagfile.cc b/apt-pkg/tagfile.cc
+index e0802e3..bef3c76 100644
+--- a/apt-pkg/tagfile.cc
++++ b/apt-pkg/tagfile.cc
+@@ -259,7 +259,12 @@ bool pkgTagSection::Scan(const char *Start,unsigned long MaxLength)
+    TagCount = 0;
+    while (TagCount+1 < sizeof(Indexes)/sizeof(Indexes[0]) && Stop < End)
+    {
+-       TrimRecord(true,End);
++      TrimRecord(true,End);
++
++      // this can happen when TrimRecord trims away the entire Record
++      // (e.g. because it just contains comments)
++      if(Stop == End)
++         return true;
+ 
+       // Start a new index and add it to the hash
+       if (isspace(Stop[0]) == 0)
+@@ -273,7 +278,9 @@ bool pkgTagSection::Scan(const char *Start,unsigned long MaxLength)
+       if (Stop == 0)
+ 	 return false;
+ 
+-      for (; Stop+1 < End && Stop[1] == '\r'; Stop++);
++      for (; Stop+1 < End && Stop[1] == '\r'; Stop++)
++         /* nothing */
++         ;
+ 
+       // Double newline marks the end of the record
+       if (Stop+1 < End && Stop[1] == '\n')
+diff --git a/test/integration/test-bug-732746-preferences b/test/integration/test-bug-732746-preferences
+new file mode 100755
+index 0000000..b31f98a
+--- /dev/null
++++ b/test/integration/test-bug-732746-preferences
+@@ -0,0 +1,32 @@
++#!/bin/sh
++set -e
++
++TESTDIR=$(readlink -f $(dirname $0))
++. $TESTDIR/framework
++setupenvironment
++configarchitecture 'i386'
++
++insertinstalledpackage 'bar' 'i386' '1.0'
++
++cat > rootdir/etc/apt/preferences << EOF
++# random test comment header
++
++# commented out by puppy^Wpuppet
++#Package: foo
++#Pin: origin "ftp.debian.org"
++#Pin: 800
++
++Package: bar
++Pin: version 1.0
++Pin-Priority: 700
++
++#Package: bar
++#Pin: version 1.0
++#Pin: 800
++EOF
++
++testequal "Reading package lists...
++Building dependency tree..." aptget check
++
++msgtest "Ensure policy is applied"
++aptcache policy bar|grep -q "*** 1.0 700" && msgpass || msgfail
+-- 
+1.8.3.2
+

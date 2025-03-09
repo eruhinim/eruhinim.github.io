@@ -1,0 +1,930 @@
+From 7b6d953f834b1e8800d3f8af4570d57d86e5c592 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=A9my=20Bobbio?= <lunar@debian.org>
+Date: Fri, 6 Nov 2015 12:17:39 +0000
+Subject: [PATCH] Add support for .buildinfo files
+
+.buildinfo files are a new type of control files, similar to .changes
+files, meant to describe the environment of a build and its products.
+They are meant to be added to the Debian archive to allow independent
+parties to reproduce a build and verify the result.
+
+Specifications for .buildinfo are available at:
+https://wiki.debian.org/ReproducibleBuilds/BuildinfoSpecification
+
+This patch adds support for .buildinfo files in Dpkg::Control and
+adds a new script, dpkg-genbuildinfo, that will now be called by
+dpkg-buildpackage before generating the .changes file.
+---
+ debian/dpkg-dev.install            |   1 +
+ debian/dpkg-dev.manpages           |   1 +
+ man/Makefile.am                    |   1 +
+ man/dpkg-buildpackage.1            |  26 ++-
+ man/dpkg-genbuildinfo.1            |  98 +++++++++++
+ man/po/po4a.cfg                    |   3 +
+ scripts/.gitignore                 |   1 +
+ scripts/Dpkg/Control.pm            |   5 +
+ scripts/Dpkg/Control/FieldsCore.pm |  32 +++-
+ scripts/Dpkg/Control/Types.pm      |  22 +--
+ scripts/Makefile.am                |   2 +
+ scripts/dpkg-buildpackage.pl       |  52 +++++-
+ scripts/dpkg-genbuildinfo.pl       | 322 +++++++++++++++++++++++++++++++++++++
+ scripts/po/POTFILES.in             |   1 +
+ 14 files changed, 541 insertions(+), 26 deletions(-)
+ create mode 100644 man/dpkg-genbuildinfo.1
+ create mode 100755 scripts/dpkg-genbuildinfo.pl
+
+diff --git a/debian/dpkg-dev.install b/debian/dpkg-dev.install
+index 5cec6fe..2ed6d65 100644
+--- a/debian/dpkg-dev.install
++++ b/debian/dpkg-dev.install
+@@ -6,6 +6,7 @@ usr/bin/dpkg-buildflags
+ usr/bin/dpkg-buildpackage
+ usr/bin/dpkg-checkbuilddeps
+ usr/bin/dpkg-distaddfile
++usr/bin/dpkg-genbuildinfo
+ usr/bin/dpkg-genchanges
+ usr/bin/dpkg-gencontrol
+ usr/bin/dpkg-gensymbols
+diff --git a/debian/dpkg-dev.manpages b/debian/dpkg-dev.manpages
+index 0a08ac6..30a00e6 100644
+--- a/debian/dpkg-dev.manpages
++++ b/debian/dpkg-dev.manpages
+@@ -20,6 +20,7 @@ debian/tmp/usr/share/man/*/dpkg-buildflags.1
+ debian/tmp/usr/share/man/*/dpkg-buildpackage.1
+ debian/tmp/usr/share/man/*/dpkg-checkbuilddeps.1
+ debian/tmp/usr/share/man/*/dpkg-distaddfile.1
++debian/tmp/usr/share/man/*/dpkg-genbuildinfo.1
+ debian/tmp/usr/share/man/*/dpkg-genchanges.1
+ debian/tmp/usr/share/man/*/dpkg-gencontrol.1
+ debian/tmp/usr/share/man/*/dpkg-gensymbols.1
+diff --git a/man/Makefile.am b/man/Makefile.am
+index f656b6b..5d65dab 100644
+--- a/man/Makefile.am
++++ b/man/Makefile.am
+@@ -24,6 +24,7 @@ dist_man_MANS = \
+ 	dpkg-deb.1 \
+ 	dpkg-distaddfile.1 \
+ 	dpkg-divert.1 \
++	dpkg-genbuildinfo.1 \
+ 	dpkg-genchanges.1 \
+ 	dpkg-gencontrol.1 \
+ 	dpkg-gensymbols.1 \
+diff --git a/man/dpkg-buildpackage.1 b/man/dpkg-buildpackage.1
+index 13770ba..54cee7b 100644
+--- a/man/dpkg-buildpackage.1
++++ b/man/dpkg-buildpackage.1
+@@ -58,25 +58,30 @@ or \fBbuild\-arch\fP and \fBbinary\-arch\fP (if \fB\-B\fP or \fB\-G\fP are
+ specified), or \fBbuild\-indep\fP and \fBbinary\-indep\fP (if \fB\-A\fP
+ or \fB\-g\fP are specified).
+ .IP \fB6.\fP 3
++Unless a source-only build has been requested, it runs the \fBbuildinfo\fP hook
++and calls \fBdpkg\-genbuildinfo\fP to generate a \fB.buildinfo\fP file.
++Several \fBdpkg\-buildpackage\fP options are forwarded to
++\fBdpkg\-genbuildinfo\fP.
++.IP \fB7.\fP 3
+ It runs the \fBchanges\fP hook and calls \fBdpkg\-genchanges\fP to
+ generate a \fB.changes\fP file.
+ Many \fBdpkg\-buildpackage\fP options are forwarded to
+ \fBdpkg\-genchanges\fP.
+-.IP \fB7.\fP 3
++.IP \fB8.\fP 3
+ It runs the \fBpostclean\fP hook and if \fB\-tc\fP is specified, it will
+ call \fBfakeroot debian/rules clean\fP again.
+-.IP \fB8.\fP 3
+-It calls \fBdpkg\-source \-\-after\-build\fP.
+ .IP \fB9.\fP 3
++It calls \fBdpkg\-source \-\-after\-build\fP.
++.IP \fB10.\fP 3
+ It runs the \fBcheck\fP hook and calls a package checker for the
+ \fB.changes\fP file (if a command is specified in \fBDEB_CHECK_COMMAND\fP or
+ with \fB\-\-check\-command\fP).
+-.IP \fB10.\fP 3
++.IP \fB11.\fP 3
+ It runs the \fBsign\fP hook and calls \fBgpg2\fP or \fBgpg\fP to sign
+ the \fB.dsc\fP file (if any, unless \fB\-us\fP is specified or on UNRELEASED
+ builds), and the \fB.changes\fP file (unless \fB\-uc\fP is specified or on
+ UNRELEASED builds).
+-.IP \fB11.\fP 3
++.IP \fB12.\fP 3
+ It runs the \fBdone\fP hook.
+ .
+ .SH OPTIONS
+@@ -317,6 +322,12 @@ The source package version (without the epoch).
+ The upstream version.
+ .RE
+ .TP
++.BI \-\-buildinfo-identifier= identifier
++By default, \fBdpkg\-buildpackage\fP put the system hostname and the
++current time in the name of the \fB.buildinfo\fP file. An arbitrary
++identifier can be specified as a replacement (since dpkg 1.18.5). It must
++contain only alphanumeric characters and hyphens.
++.TP
+ .BI \-p sign-command
+ When \fBdpkg\-buildpackage\fP needs to execute GPG to sign a source
+ control (\fB.dsc\fP) file or a \fB.changes\fP file it will run
+@@ -351,6 +362,10 @@ Passed unchanged to \fBdpkg\-source\fP. See its manual page.
+ Pass option \fIopt\fP to \fBdpkg\-source\fP (since dpkg 1.15.6).
+ Can be used multiple times.
+ .TP
++.BI \-\-buildinfo\-option= opt
++Pass option \fIopt\fP to \fBdpkg\-genbuildinfo\fP (since dpkg 1.18.5).
++Can be used multiple times.
++.TP
+ .BI \-\-changes\-option= opt
+ Pass option \fIopt\fP to \fBdpkg\-genchanges\fP (since dpkg 1.15.6).
+ Can be used multiple times.
+@@ -422,6 +437,7 @@ and initial arguments for
+ .BR dpkg\-source (1),
+ .BR dpkg\-architecture (1),
+ .BR dpkg\-buildflags (1),
++.BR dpkg\-genbuildinfo (1),
+ .BR dpkg\-genchanges (1),
+ .BR fakeroot (1),
+ .BR lintian (1),
+diff --git a/man/dpkg-genbuildinfo.1 b/man/dpkg-genbuildinfo.1
+new file mode 100644
+index 0000000..77f2a76
+--- /dev/null
++++ b/man/dpkg-genbuildinfo.1
+@@ -0,0 +1,98 @@
++.\" dpkg manual page - dpkg-genbuildinfo(1)
++.\"
++.\" Copyright © 1995-1996 Ian Jackson <ian@chiark.chu.cam.ac.uk>
++.\" Copyright © 2000 Wichert Akkerman <wakkerma@debian.org>
++.\" Copyright © 2008-2010 Raphaël Hertzog <hertzog@debian.org>
++.\" Copyright © 2006-2014 Guillem Jover <guillem@debian.org>
++.\" Copyright © 2015 Jérémy Bobbio <lunar@debian.org>
++.\"
++.\" This is free software; you can redistribute it and/or modify
++.\" it under the terms of the GNU General Public License as published by
++.\" the Free Software Foundation; either version 2 of the License, or
++.\" (at your option) any later version.
++.\"
++.\" This is distributed in the hope that it will be useful,
++.\" but WITHOUT ANY WARRANTY; without even the implied warranty of
++.\" MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++.\" GNU General Public License for more details.
++.\"
++.\" You should have received a copy of the GNU General Public License
++.\" along with this program.  If not, see <https://www.gnu.org/licenses/>.
++.
++.TH dpkg\-genbuildinfo 1 "2015-01-01" "Debian Project" "dpkg utilities"
++.SH NAME
++dpkg\-genbuildinfo \- generate Debian .buildinfo files
++.
++.SH SYNOPSIS
++.B dpkg\-genbuildinfo
++.RI [ option ...]
++.br
++.
++.SH DESCRIPTION
++.B dpkg\-genbuildinfo
++reads information from an unpacked and built Debian source tree and
++from the files it has generated and generates a Debian control
++file describing the build environment and the build products
++.RB ( .buildinfo " file)."
++.
++.SH OPTIONS
++.TP
++.BI \-c controlfile
++Specifies the main source control file to read information from. The
++default is
++.BR debian/control .
++.TP
++.BI \-l changelog-file
++Specifies the changelog file to read information from. The
++default is
++.BR debian/changelog .
++.TP
++.BI \-f files-list-file
++Specifies where is the list of files that have been produced by the build,
++rather than using
++.BR debian/files .
++.TP
++.BI \-F changelog-format
++Specifies the format of the changelog. See \fBdpkg\-parsechangelog\fP(1)
++for information about alternative formats.
++.TP
++.BI \-u upload-files-dir
++Look for the files to be uploaded in
++.I upload-files-dir
++rather than
++.B ..
++.RB ( dpkg\-genbuildinfo
++needs to find these files so that it can include their sizes and
++checksums in the
++.B .buildinfo
++file).
++.TP
++.BI \-\-admindir= dir
++Change the location of the \fBdpkg\fR database. The default location is
++\fI/var/lib/dpkg\fP.
++.TP
++.BI \-\-always\-include\-path
++By default, the \fBBuild-Path\fR field will only be written if the current
++directory starts with \fB/build/\fR. Specify this option to always write
++a \fBBuild-Path\fR field when generating the \fB.buildinfo\fR.
++.TP
++.B \-q
++.B dpkg\-genbuildinfo
++might produce informative messages on standard error.
++.B \-q
++suppresses these messages.
++.TP
++.BR \-? ", " \-\-help
++Show the usage message and exit.
++.TP
++.BR \-\-version
++Show the version and exit.
++.
++.SH FILES
++.TP
++.B debian/files
++The list of generated files.
++.B dpkg\-genbuildinfo
++reads the data here when producing a
++.B .buildinfo
++file.
+diff --git a/man/po/po4a.cfg b/man/po/po4a.cfg
+index 64d00ae..21d2bf8 100644
+--- a/man/po/po4a.cfg
++++ b/man/po/po4a.cfg
+@@ -93,6 +93,9 @@
+ [type:man] dpkg-divert.1 $lang:$lang/dpkg-divert.1 \
+            add_$lang:po/$lang.add
+ 
++[type:man] dpkg-genbuildinfo.1 $lang:$lang/dpkg-genbuildinfo.1 \
++           add_$lang:po/$lang.add
++
+ [type:man] dpkg-genchanges.1 $lang:$lang/dpkg-genchanges.1 \
+            add_$lang:po/$lang.add
+ 
+diff --git a/scripts/.gitignore b/scripts/.gitignore
+index 380ad91..0d1f29a 100644
+--- a/scripts/.gitignore
++++ b/scripts/.gitignore
+@@ -3,6 +3,7 @@ dpkg-buildflags
+ dpkg-buildpackage
+ dpkg-checkbuilddeps
+ dpkg-distaddfile
++dpkg-genbuildinfo
+ dpkg-genchanges
+ dpkg-gencontrol
+ dpkg-gensymbols
+diff --git a/scripts/Dpkg/Control.pm b/scripts/Dpkg/Control.pm
+index 27b9270..9f25564 100644
+--- a/scripts/Dpkg/Control.pm
++++ b/scripts/Dpkg/Control.pm
+@@ -27,6 +27,7 @@ our @EXPORT = qw(
+     CTRL_INDEX_PKG
+     CTRL_PKG_SRC
+     CTRL_PKG_DEB
++    CTRL_FILE_BUILDINFO
+     CTRL_FILE_CHANGES
+     CTRL_FILE_VENDOR
+     CTRL_FILE_STATUS
+@@ -95,6 +96,10 @@ Corresponds to a .dsc file of a Debian source package.
+ Corresponds to the F<control> file generated by dpkg-gencontrol
+ (F<DEBIAN/control>) and to the same file inside .deb packages.
+ 
++=item CTRL_FILE_BUILDINFO
++
++Corresponds to a .buildinfo file.
++
+ =item CTRL_FILE_CHANGES
+ 
+ Corresponds to a .changes file.
+diff --git a/scripts/Dpkg/Control/FieldsCore.pm b/scripts/Dpkg/Control/FieldsCore.pm
+index 7983509..a1689a0 100644
+--- a/scripts/Dpkg/Control/FieldsCore.pm
++++ b/scripts/Dpkg/Control/FieldsCore.pm
+@@ -65,11 +65,11 @@ use constant {
+ # Deprecated fields of dpkg's status file are also not listed
+ our %FIELDS = (
+     'Architecture' => {
+-        allowed => (ALL_PKG | ALL_SRC | CTRL_FILE_CHANGES) & (~CTRL_INFO_SRC),
++        allowed => (ALL_PKG | ALL_SRC | CTRL_FILE_BUILDINFO | CTRL_FILE_CHANGES) & (~CTRL_INFO_SRC),
+         separator => FIELD_SEP_SPACE,
+     },
+     'Binary' => {
+-        allowed => CTRL_PKG_SRC | CTRL_FILE_CHANGES,
++        allowed => CTRL_PKG_SRC | CTRL_FILE_BUILDINFO | CTRL_FILE_CHANGES,
+         # XXX: This field values are separated either by space or comma
+         # depending on the context.
+         separator => FIELD_SEP_SPACE | FIELD_SEP_COMMA,
+@@ -86,6 +86,9 @@ our %FIELDS = (
+     'Bugs' => {
+         allowed => (ALL_PKG | CTRL_INFO_SRC | CTRL_FILE_VENDOR) & (~CTRL_INFO_PKG),
+     },
++    'Build-Architecture' => {
++        allowed => CTRL_FILE_BUILDINFO,
++    },
+     'Build-Conflicts' => {
+         allowed => ALL_SRC,
+         separator => FIELD_SEP_COMMA,
+@@ -122,9 +125,18 @@ our %FIELDS = (
+         dependency => 'normal',
+         dep_order => 3,
+     },
++    'Build-Environment' => {
++        allowed => CTRL_FILE_BUILDINFO,
++        separator => FIELD_SEP_COMMA,
++        dependency => 'union',
++        dep_order => 11,
++    },
+     'Build-Essential' => {
+         allowed => ALL_PKG,
+     },
++    'Build-Path' => {
++        allowed => CTRL_FILE_BUILDINFO,
++    },
+     'Build-Profiles' => {
+         allowed => CTRL_INFO_PKG,
+         separator => FIELD_SEP_SPACE,
+@@ -143,7 +155,7 @@ our %FIELDS = (
+         allowed => CTRL_FILE_CHANGES,
+     },
+     'Changes' => {
+-        allowed => ALL_CHANGES,
++        allowed => CTRL_FILE_BUILDINFO | ALL_CHANGES,
+     },
+     'Closes' => {
+         allowed => ALL_CHANGES,
+@@ -198,7 +210,7 @@ our %FIELDS = (
+         separator => FIELD_SEP_LINE | FIELD_SEP_SPACE,
+     },
+     'Format' => {
+-        allowed => CTRL_PKG_SRC | CTRL_FILE_CHANGES,
++        allowed => CTRL_PKG_SRC | CTRL_FILE_CHANGES | CTRL_FILE_BUILDINFO,
+     },
+     'Homepage' => {
+         allowed => ALL_SRC | ALL_PKG,
+@@ -269,7 +281,7 @@ our %FIELDS = (
+         separator => FIELD_SEP_LINE | FIELD_SEP_SPACE,
+     },
+     'Source' => {
+-        allowed => (ALL_PKG | ALL_SRC | ALL_CHANGES) &
++        allowed => (ALL_PKG | ALL_SRC | CTRL_FILE_BUILDINFO | ALL_CHANGES) &
+                    (~(CTRL_INDEX_SRC | CTRL_INFO_PKG)),
+     },
+     'Standards-Version' => {
+@@ -348,7 +360,7 @@ our %FIELDS = (
+         allowed => CTRL_FILE_VENDOR,
+     },
+     'Version' => {
+-        allowed => (ALL_PKG | ALL_SRC | ALL_CHANGES) &
++        allowed => (ALL_PKG | ALL_SRC | CTRL_FILE_BUILDINFO | ALL_CHANGES) &
+                     (~(CTRL_INFO_SRC | CTRL_INFO_PKG)),
+     },
+ );
+@@ -356,7 +368,7 @@ our %FIELDS = (
+ my @checksum_fields = map { &field_capitalize("Checksums-$_") } checksums_get_list();
+ my @sum_fields = map { $_ eq 'md5' ? 'MD5sum' : &field_capitalize($_) }
+                  checksums_get_list();
+-&field_register($_, CTRL_PKG_SRC | CTRL_FILE_CHANGES) foreach @checksum_fields;
++&field_register($_, CTRL_PKG_SRC | CTRL_FILE_BUILDINFO | CTRL_FILE_CHANGES) foreach @checksum_fields;
+ &field_register($_, CTRL_INDEX_PKG,
+                 separator => FIELD_SEP_LINE | FIELD_SEP_SPACE) foreach @sum_fields;
+ 
+@@ -375,6 +387,12 @@ our %FIELD_ORDER = (
+         Vcs-Svn Testsuite), &field_list_src_dep(), qw(Package-List),
+         @checksum_fields, qw(Files)
+     ],
++    CTRL_FILE_BUILDINFO() => [
++        qw(Format Build-Architecture Source Binary Architecture Version
++        Changes),
++        @checksum_fields,
++        qw(Build-Path Build-Environment),
++    ],
+     CTRL_FILE_CHANGES() => [
+         qw(Format Date Source Binary Binary-Only Built-For-Profiles Architecture
+         Version Distribution Urgency Maintainer Changed-By Description
+diff --git a/scripts/Dpkg/Control/Types.pm b/scripts/Dpkg/Control/Types.pm
+index 09e12d1..ad6e11b 100644
+--- a/scripts/Dpkg/Control/Types.pm
++++ b/scripts/Dpkg/Control/Types.pm
+@@ -25,6 +25,7 @@ our @EXPORT = qw(
+     CTRL_INDEX_PKG
+     CTRL_PKG_SRC
+     CTRL_PKG_DEB
++    CTRL_FILE_BUILDINFO
+     CTRL_FILE_CHANGES
+     CTRL_FILE_VENDOR
+     CTRL_FILE_STATUS
+@@ -51,16 +52,17 @@ between Dpkg::Control and Dpkg::Control::Fields.
+ 
+ use constant {
+     CTRL_UNKNOWN => 0,
+-    CTRL_INFO_SRC => 1,      # First control block in debian/control
+-    CTRL_INFO_PKG => 2,      # Subsequent control blocks in debian/control
+-    CTRL_INDEX_SRC => 4,     # Entry in repository's Packages files
+-    CTRL_INDEX_PKG => 8,     # Entry in repository's Sources files
+-    CTRL_PKG_SRC => 16,      # .dsc file of source package
+-    CTRL_PKG_DEB => 32,      # DEBIAN/control in binary packages
+-    CTRL_FILE_CHANGES => 64, # .changes file
+-    CTRL_FILE_VENDOR => 128, # File in $Dpkg::CONFDIR/origins
+-    CTRL_FILE_STATUS => 256, # $Dpkg::ADMINDIR/status
+-    CTRL_CHANGELOG => 512,   # Output of dpkg-parsechangelog
++    CTRL_INFO_SRC => 1,         # First control block in debian/control
++    CTRL_INFO_PKG => 2,         # Subsequent control blocks in debian/control
++    CTRL_INDEX_SRC => 4,        # Entry in repository's Packages files
++    CTRL_INDEX_PKG => 8,        # Entry in repository's Sources files
++    CTRL_PKG_SRC => 16,         # .dsc file of source package
++    CTRL_PKG_DEB => 32,         # DEBIAN/control in binary packages
++    CTRL_FILE_BUILDINFO => 64,  # .buildinfo file
++    CTRL_FILE_CHANGES => 128,   # .changes file
++    CTRL_FILE_VENDOR => 256,    # File in $Dpkg::CONFDIR/origins
++    CTRL_FILE_STATUS => 512,    # $Dpkg::ADMINDIR/status
++    CTRL_CHANGELOG => 1024,     # Output of dpkg-parsechangelog
+ };
+ 
+ =head1 CHANGES
+diff --git a/scripts/Makefile.am b/scripts/Makefile.am
+index 54cfad9..9056a7c 100644
+--- a/scripts/Makefile.am
++++ b/scripts/Makefile.am
+@@ -8,6 +8,7 @@ bin_SCRIPTS = \
+ 	dpkg-buildpackage \
+ 	dpkg-checkbuilddeps \
+ 	dpkg-distaddfile \
++	dpkg-genbuildinfo \
+ 	dpkg-genchanges \
+ 	dpkg-gencontrol \
+ 	dpkg-gensymbols \
+@@ -31,6 +32,7 @@ EXTRA_DIST = \
+ 	dpkg-buildpackage.pl \
+ 	dpkg-checkbuilddeps.pl \
+ 	dpkg-distaddfile.pl \
++	dpkg-genbuildinfo.pl \
+ 	dpkg-genchanges.pl \
+ 	dpkg-gencontrol.pl \
+ 	dpkg-gensymbols.pl \
+diff --git a/scripts/dpkg-buildpackage.pl b/scripts/dpkg-buildpackage.pl
+index 17ada97..ef62297 100755
+--- a/scripts/dpkg-buildpackage.pl
++++ b/scripts/dpkg-buildpackage.pl
+@@ -28,9 +28,11 @@ use Cwd;
+ use File::Temp qw(tempdir);
+ use File::Basename;
+ use File::Copy;
+-use POSIX qw(:sys_wait_h);
++use POSIX qw(:sys_wait_h strftime);
++use Sys::Hostname;
+ 
+ use Dpkg ();
++use Dpkg::Control::Info;
+ use Dpkg::Gettext;
+ use Dpkg::ErrorHandling;
+ use Dpkg::BuildOptions;
+@@ -84,8 +86,10 @@ sub usage {
+                  pass <opt> to <check-command>.
+   --hook-<hook-name>=<hook-command>
+                  set <hook-command> as the hook <hook-name>, known hooks:
+-                   init preclean source build binary changes postclean
+-                   check sign done
++                   init preclean source build binary buildinfo changes
++                   postclean check sign done
++  --buildinfo-identifier=<identifier>
++                 set the identifier part of the .buildinfo filename.
+   -p<sign-command>
+                  command to sign .dsc and/or .changes files
+                    (default is gpg2 or gpg).
+@@ -106,6 +110,10 @@ sub usage {
+       --target-arch <arch>  set the target Debian architecture.
+       --target-type <type>  set the target GNU system type.')
+     . "\n\n" . g_(
++'Options passed to dpkg-genbuildinfo:
++      --buildinfo-option=<opt>
++                 pass option <opt> to dpkg-genbuildinfo.')
++    . "\n\n" . g_(
+ 'Options passed to dpkg-genchanges:
+   -si            source includes orig, if new upstream (default).
+   -sa            source includes orig, always.
+@@ -161,9 +169,11 @@ my $since;
+ my $maint;
+ my $changedby;
+ my $desc;
++my $buildinfo_identifier;
++my @buildinfo_opts;
+ my @changes_opts;
+ my @hook_names = qw(
+-    init preclean source build binary changes postclean check sign done
++    init preclean source build binary buildinfo changes postclean check sign done
+ );
+ my %hook;
+ $hook{$_} = undef foreach @hook_names;
+@@ -232,6 +242,8 @@ while (@ARGV) {
+ 	$admindir = $1;
+     } elsif (/^--source-option=(.*)$/) {
+ 	push @source_opts, $1;
++    } elsif (/^--buildinfo-option=(.*)$/) {
++	push @buildinfo_opts, $1;
+     } elsif (/^--changes-option=(.*)$/) {
+ 	push @changes_opts, $1;
+     } elsif (/^-j(\d*|auto)$/) {
+@@ -254,6 +266,8 @@ while (@ARGV) {
+ 	usageerr(g_('missing hook %s command'), $hook_name)
+ 	    if not defined $hook_cmd;
+ 	$hook{$hook_name} = $hook_cmd;
++    } elsif (/^--buildinfo-identifier=(.*)$/) {
++        $buildinfo_identifier = $1;
+     } elsif (/^-p(.*)$/) {
+ 	$signcommand = $1;
+     } elsif (/^-k(.*)$/) {
+@@ -312,9 +326,11 @@ while (@ARGV) {
+     } elsif (/^-B$/) {
+ 	set_build_type(BUILD_ARCH_DEP, $_);
+ 	push @changes_opts, '-B';
++	push @buildinfo_opts, '-B';
+     } elsif (/^-A$/) {
+ 	set_build_type(BUILD_ARCH_INDEP, $_);
+ 	push @changes_opts, '-A';
++	push @buildinfo_opts, '-A';
+     } elsif (/^-S$/) {
+ 	set_build_type(BUILD_SOURCE, $_);
+ 	push @changes_opts, '-S';
+@@ -412,6 +428,15 @@ if (defined $parallel) {
+     $build_opts->export();
+ }
+ 
++if (defined $buildinfo_identifier) {
++    error(g_('buildinfo identifiers must not be empty and only contain alphanumeric characters and hyphens'))
++        unless $buildinfo_identifier =~ /\A[A-Za-z0-9-]+\z/;
++} else {
++    my $hostname = hostname;
++    my $timestamp = strftime('%Y%m%dT%H%M%SZ', gmtime());
++    $buildinfo_identifier = "$hostname-$timestamp";
++}
++
+ set_build_profiles(@build_profiles) if @build_profiles;
+ 
+ my $cwd = cwd();
+@@ -569,6 +594,25 @@ if ($include & BUILD_BINARY) {
+     withecho(@debian_rules, $buildtarget);
+     run_hook('binary', 1);
+     withecho(@rootcommand, @debian_rules, $binarytarget);
++
++    if (-e "../$pv.dsc") {
++        run_hook('buildinfo', 1);
++
++        push @buildinfo_opts, "--admindir=$admindir" if $admindir;
++
++        my $buildinfo = "${pv}_${buildinfo_identifier}.buildinfo";
++        withecho("dpkg-genbuildinfo @buildinfo_opts >../$buildinfo");
++
++        my $control = Dpkg::Control::Info->new('debian/control');
++        my $sec = $control->get_source->{'Section'} // '-';
++        my $pri = $control->get_source->{'Priority'} // '-';
++        warning(_g('missing Section for source files')) if $sec eq '-';
++        warning(_g('missing Priority for source files')) if $pri eq '-';
++        withecho('dpkg-distaddfile', $buildinfo, $sec, $pri);
++
++    } else {
++        warning(_g('no .dsc file, skipping .buildinfo generation'));
++    }
+ }
+ 
+ run_hook('changes', 1);
+diff --git a/scripts/dpkg-genbuildinfo.pl b/scripts/dpkg-genbuildinfo.pl
+new file mode 100755
+index 0000000..5c5122b
+--- /dev/null
++++ b/scripts/dpkg-genbuildinfo.pl
+@@ -0,0 +1,322 @@
++#!/usr/bin/perl
++#
++# dpkg-genbuildinfo
++#
++# Copyright © 1996 Ian Jackson
++# Copyright © 2000,2001 Wichert Akkerman
++# Copyright © 2003-2013 Yann Dirson <dirson@debian.org>
++# Copyright © 2006-2014 Guillem Jover <guillem@debian.org>
++# Copyright © 2014 Niko Tyni <ntyni@debian.org>
++# Copyright © 2014-2015 Jérémy Bobbio <lunar@debian.org>
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 2 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <https://www.gnu.org/licenses/>.
++
++use strict;
++use warnings;
++
++use Carp;
++use Cwd;
++
++use Dpkg ();
++use Dpkg::Gettext;
++use Dpkg::Checksums;
++use Dpkg::ErrorHandling;
++use Dpkg::Arch qw(get_build_arch);
++use Dpkg::Control::Info;
++use Dpkg::Control::Fields;
++use Dpkg::Control;
++use Dpkg::Changelog::Parse;
++use Dpkg::Deps;
++use Dpkg::Dist::Files;
++use Dpkg::Version;
++
++textdomain('dpkg-dev');
++
++my $controlfile = 'debian/control';
++my $changelogfile = 'debian/changelog';
++my $changelogformat;
++my $fileslistfile = 'debian/files';
++my $uploadfilesdir = '..';
++my $admindir = $Dpkg::ADMINDIR;
++my $always_include_path = 0;
++my $buildinfo_format = '1.0';
++
++my $checksums = Dpkg::Checksums->new();
++my %archadded;
++my @archvalues;
++
++use constant BUILD_ARCH_DEP   => 1;
++use constant BUILD_ARCH_INDEP => 2;
++use constant BUILD_ALL        => BUILD_ARCH_DEP | BUILD_ARCH_INDEP;
++my $include = BUILD_ALL;
++
++sub build_is_default() { return ($include & BUILD_ALL) == BUILD_ALL; }
++sub build_opt {
++    if ($include == BUILD_ARCH_DEP) {
++        return '-B';
++    } elsif ($include == BUILD_ARCH_INDEP) {
++        return '-A';
++    } else {
++        croak "build_opt called with include=$include";
++    }
++}
++
++sub set_build_type
++{
++    my ($build_type, $build_option) = @_;
++
++    usageerr(_g('cannot combine %s and %s'), build_opt(), $build_option)
++        if not build_is_default and $include != $build_type;
++    $include = $build_type;
++}
++
++# There's almost the same function in dpkg-checkbuilddeps,
++# they probably should be factored out.
++sub parse_status {
++    my $status = shift;
++
++    my $facts = Dpkg::Deps::KnownFacts->new();
++    my %depends;
++    my @essential_pkgs;
++    local $/ = '';
++    open(my $status_fh, '<', $status)
++        or syserr(_g('cannot open %s'), $status);
++    while (<$status_fh>) {
++        next unless /^Status: .*ok installed$/m;
++
++        my ($package) = /^Package: (.*)$/m;
++        my ($version) = /^Version: (.*)$/m;
++        my ($arch) = /^Architecture: (.*)$/m;
++        my ($multiarch) = /^Multi-Arch: (.*)$/m;
++        $facts->add_installed_package($package, $version, $arch,
++                                      $multiarch);
++
++        if (/^Essential: yes$/m) {
++            push @essential_pkgs, $package;
++        }
++
++        if (/^Provides: (.*)$/m) {
++            my $provides = deps_parse($1, reduce_arch => 1, union => 1);
++            next if not defined $provides;
++            foreach (grep { $_->isa('Dpkg::Deps::Simple') }
++                                 $provides->get_deps())
++            {
++                $facts->add_provided_package($_->{package},
++                                    $_->{relation}, $_->{version},
++                                    $package);
++            }
++        }
++
++        if (/^(?:Pre-)?Depends: (.*)$/m) {
++            foreach (split(/,\s*/, $1)) {
++                push @{$depends{$package}}, $_;
++            }
++        }
++    }
++    close $status_fh;
++
++    return ($facts, \%depends, \@essential_pkgs);
++}
++
++sub append_deps {
++    my $env_pkgs = shift;
++    my $deps;
++
++    foreach my $dep_str (@_) {
++        next unless $dep_str;
++        $deps = deps_parse($dep_str, reduce_restrictions => 1, build_dep => 1);
++        # add packages as unseen if they were not there before
++        deps_iterate $deps, sub { ${$env_pkgs}{$_[0]->{package}} //= 0; 1 };
++    }
++}
++
++sub version {
++    printf _g("Debian %s version %s.\n"), $Dpkg::PROGNAME, $Dpkg::PROGVERSION;
++
++    printf _g('
++This is free software; see the GNU General Public License version 2 or
++later for copying conditions. There is NO warranty.
++');
++}
++
++sub usage {
++    printf _g(
++'Usage: %s [<option>...]')
++    . "\n\n" . _g(
++"Options:
++  -B                       build of only arch-specific files.
++  -A                       build of only arch-indep files.
++  -c<control-file>         get control info from this file.
++  -l<changelog-file>       get per-version info from this file.
++  -f<files-list-file>      get .deb files list from this file.
++  -F<changelog-format>     force changelog format.
++  -u<upload-files-dir>     directory with files (default is '..').
++  --admindir=<directory>   change the administrative directory.
++  --always-include-path    always include Build-Path
++  -?, --help               show this help message.
++      --version            show the version.
++"), $Dpkg::PROGNAME;
++}
++
++while (@ARGV) {
++    $_=shift(@ARGV);
++    if (m/^-B$/) {
++	set_build_type(BUILD_ARCH_DEP, $_);
++    } elsif (m/^-A$/) {
++	set_build_type(BUILD_ARCH_INDEP, $_);
++    } elsif (m/^-c(.*)$/) {
++	$controlfile = $1;
++    } elsif (m/^-l(.*)$/) {
++	$changelogfile = $1;
++    } elsif (m/^-f(.*)$/) {
++	$fileslistfile = $1;
++    } elsif (m/^-F([0-9a-z]+)$/) {
++        $changelogformat = $1;
++    } elsif (m/^-u(.*)$/) {
++	$uploadfilesdir = $1;
++    } elsif (m/^--admindir=(.*)$/) {
++	$admindir = $1;
++    } elsif (m/^--always-include-path$/) {
++	$always_include_path = 1;
++    } elsif (m/^-(?:\?|-help)$/) {
++	usage();
++	exit(0);
++    } elsif (m/^--version$/) {
++	version();
++	exit(0);
++    } else {
++        usageerr(_g("unknown option \`%s'"), $_);
++    }
++}
++
++my $control = Dpkg::Control::Info->new($controlfile);
++my $fields = Dpkg::Control->new(type => CTRL_FILE_BUILDINFO);
++my $dist = Dpkg::Dist::Files->new();
++
++# Retrieve info from the current changelog entry
++my %options = (file => $changelogfile);
++$options{changelogformat} = $changelogformat if $changelogformat;
++my $changelog = changelog_parse(%options);
++
++# Retrieve info from the former changelog entry to handle binNMUs
++$options{count} = 1;
++$options{offset} = 1;
++my $prev_changelog = changelog_parse(%options);
++
++my $sourceversion = $changelog->{'Binary-Only'} ?
++                    $prev_changelog->{'Version'} : $changelog->{'Version'};
++my $binaryversion = $changelog->{'Version'};
++
++# include .dsc
++my $spackage = $changelog->{'Source'};
++(my $sversion = $sourceversion) =~ s/^\d+://;
++my $dsc = "${spackage}_${sversion}.dsc";
++my $dsc_pathname = "$uploadfilesdir/$dsc";
++my $dsc_fields = Dpkg::Control->new(type => CTRL_PKG_SRC);
++$checksums->add_from_file($dsc_pathname, key => $dsc);
++
++my $dist_count = 0;
++
++$dist_count = $dist->load($fileslistfile) if -e $fileslistfile;
++
++warning(_g('binary build with no binary artifacts found; .buildinfo will be meaningless'))
++    if $dist_count == 0;
++
++foreach my $file ($dist->get_files()) {
++    my $path = "$uploadfilesdir/$file->{filename}";
++    $checksums->add_from_file($path, key => $file->{filename});
++
++    if (defined $file->{arch}) {
++        push @archvalues, $file->{arch}
++            if $file->{arch} and not $archadded{$file->{arch}}++;
++    }
++}
++
++my $build_arch = get_build_arch();
++
++$fields->{'Format'} = $buildinfo_format;
++$fields->{'Build-Architecture'} = $build_arch;
++
++$fields->{'Source'} = $spackage;
++if ($changelog->{'Binary-Only'}) {
++    $fields->{'Source'} .= ' (' . $sourceversion . ')';
++    $fields->{'Changes'} = $changelog->{'Changes'} . "\n\n"
++                         . ' -- ' . $changelog->{'Maintainer'}
++                         . '  ' . $changelog->{'Date'};
++}
++
++$fields->{'Binary'} = join(' ', map { $_->{'Package'} } $control->get_packages());
++# Avoid overly long line by splitting over multiple lines
++if (length($fields->{'Binary'}) > 980) {
++    $fields->{'Binary'} =~ s/(.{0,980}) /$1\n/g;
++}
++
++$fields->{'Architecture'} = join ' ', sort @archvalues;
++$fields->{'Version'} = $binaryversion;
++
++my $cwd = cwd();
++# Only include build path if explicitely required or in the common location
++if ($always_include_path or $cwd =~ /\A\/build\//) {
++    $fields->{'Build-Path'} = $cwd;
++}
++
++$checksums->export_to_control($fields);
++
++my @status = parse_status("$admindir/status");
++my $facts = shift @status;
++my %depends=%{shift @status};
++my @essential_pkgs=@{shift @status};
++my $deps;
++my %env_pkgs;
++
++# parse essential list
++
++append_deps(\%env_pkgs, @essential_pkgs, 'build-essential',
++                        $control->get_source->{'Build-Depends'});
++
++if ($include & BUILD_ARCH_DEP) {
++    append_deps(\%env_pkgs, $control->get_source->{'Build-Depends-Arch'});
++}
++
++if ($include & BUILD_ARCH_INDEP) {
++    append_deps(\%env_pkgs, $control->get_source->{'Build-Depends-Indep'});
++}
++
++while (my ($pkg, $seen) = each(%env_pkgs)) {
++    next if $seen;
++    $env_pkgs{$pkg} = 1; # mark as seen
++    next unless defined $facts->{pkg}->{$pkg}->[0];
++    append_deps(\%env_pkgs, @{$depends{$pkg}});
++    keys %env_pkgs; # reset iterator
++}
++
++my $environment = Dpkg::Deps::AND->new();
++foreach my $pkg (sort keys %env_pkgs) {
++    foreach my $installed_pkg (@{$facts->{pkg}->{$pkg}}) {
++        my $version = $installed_pkg->{version};
++        my $architecture = $installed_pkg->{architecture};
++        my $pkg_name = $pkg;
++        if (defined $architecture &&
++            $architecture ne 'all' && $architecture ne $build_arch) {
++            $pkg_name = "$pkg_name:$architecture";
++        }
++        my $dep = Dpkg::Deps::Simple->new("$pkg_name (= $version)");
++        $environment->add($dep);
++    }
++}
++$environment = "\n" . $environment->output();
++$environment =~ s/, /,\n/g;
++$fields->{'Build-Environment'} = $environment;
++
++$fields->output(\*STDOUT);
+diff --git a/scripts/po/POTFILES.in b/scripts/po/POTFILES.in
+index e662514..1407103 100644
+--- a/scripts/po/POTFILES.in
++++ b/scripts/po/POTFILES.in
+@@ -5,6 +5,7 @@ scripts/dpkg-buildflags.pl
+ scripts/dpkg-buildpackage.pl
+ scripts/dpkg-checkbuilddeps.pl
+ scripts/dpkg-distaddfile.pl
++scripts/dpkg-genbuildinfo.pl
+ scripts/dpkg-genchanges.pl
+ scripts/dpkg-gencontrol.pl
+ scripts/dpkg-gensymbols.pl
+-- 
+2.1.4
+

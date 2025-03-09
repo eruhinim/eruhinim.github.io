@@ -1,0 +1,302 @@
+diff -u acpid-1.0.6/debian/rules acpid-1.0.6/debian/rules
+--- acpid-1.0.6/debian/rules
++++ acpid-1.0.6/debian/rules
+@@ -2,6 +2,8 @@
+ 
+ export DH_VERBOSE=1
+ 
++DISTRO := $(shell lsb_release -is)
++
+ build: build-stamp
+ 	
+ build-stamp:
+@@ -9,13 +11,14 @@
+ 	chmod g-s -R *
+ 	$(MAKE)
+ 	$(MAKE) man
++	sed -e "s/@@DISTRO@@/${DISTRO}/" debian/acpid.init.d.in > debian/acpid.init.d
+ 	
+ 	touch build-stamp
+ 
+ clean:
+ 	dh_testdir
+ 	dh_testroot
+-	rm -f build-stamp
++	rm -f build-stamp debian/acpid.init.d
+ 	
+ 	[ ! -f Makefile ] || $(MAKE) clean
+ 	
+diff -u acpid-1.0.6/debian/control acpid-1.0.6/debian/control
+--- acpid-1.0.6/debian/control
++++ acpid-1.0.6/debian/control
+@@ -4,7 +4,7 @@
+ Maintainer: Debian Acpi Team <pkg-acpi-devel@lists.alioth.debian.org>
+ Uploaders: Anibal Monsalve Salazar <anibal@debian.org>, Michael Meskes <meskes@debian.org>
+ Standards-Version: 3.8.0
+-Build-Depends: debhelper (>= 5)
++Build-Depends: debhelper (>= 5), lsb-release
+ XS-Vcs-Svn: https://bollin.googlecode.com/svn/acpid/trunk
+ XS-Vcs-Browser: http://bollin.googlecode.com/svn/acpid/trunk
+ Homepage: http://acpid.sourceforge.net/
+reverted:
+--- acpid-1.0.6/debian/acpid.init.d
++++ acpid-1.0.6.orig/debian/acpid.init.d
+@@ -1,122 +0,0 @@
+-#! /bin/sh -e
+-### BEGIN INIT INFO
+-# Provides:          acpid
+-# Required-Start:    $remote_fs $syslog
+-# Required-Stop:     $remote_fs $syslog
+-# X-Start-Before:    kdm gdm xdm hal
+-# X-Stop-After:      kdm gdm xdm hal
+-# Default-Start:     2 3 4 5
+-# Default-Stop:      0 1 6
+-# Short-Description: Start the Advanced Configuration and Power Interface daemon
+-# Description:       Provide a socket for X11, hald and others to multiplex
+-#                    kernel ACPI events.
+-### END INIT INFO
+-
+-# Check for daemon presence
+-test -x /usr/sbin/acpid || exit 0
+-
+-# Check for ACPI support on kernel side
+-[ -d "/proc/acpi" ] || exit 0
+-
+-# Include acpid defaults if available
+-OPTIONS=""
+-if [ -f "/etc/default/acpid" ] ; then
+-	. /etc/default/acpid
+-fi
+-
+-# Get lsb functions
+-. /lib/lsb/init-functions
+-. /etc/default/rcS
+-
+-# Are we Debian or Ubuntu? If we have at least one Ubuntu line in /etc/apt/sources let's assume Ubuntu.
+-# Pure Debian systems should not look into Ubuntu directory.
+-if `grep -q ubuntu /etc/apt/sources.list`; then
+-	DISTRO=Ubuntu
+-else
+-	DISTRO=Debian
+-fi
+-
+-if [ "$VERBOSE" = "no" ]; then
+-	MODPROBE_OPTIONS="$MODPROBE_OPTIONS --quiet"
+-	export MODPROBE_OPTIONS
+-fi
+-
+-# As the name says. If the kernel supports modules, it'll try to load
+-# the ones listed in "MODULES".
+-load_modules() {
+-	PRINTK=$(cat /proc/sys/kernel/printk)
+-	[ "$VERBOSE" = "no" ] && echo "0 0 0 0" > /proc/sys/kernel/printk
+-
+-	LIST="$(/sbin/lsmod | awk '!/Module/ {print $1}')"
+-
+-	# Get list of available modules
+-	LOC="/lib/modules/$(uname -r)/kernel/drivers/acpi"
+-	if [ -d "$LOC" ]; then
+-	  MODAVAIL="$( ( find $LOC -type f -name "*.o" -printf "basename %f .o\n"; \
+-		find $LOC -type f -name "*.ko" -printf "basename %f .ko\n" ) | /bin/sh )"
+-	else
+-	  MODAVAIL=""
+-	fi
+-
+-	if [ $DISTRO = "Ubuntu" ]; then
+-		LOC="/lib/modules/$(uname -r)/kernel/ubuntu/acpi"
+-		if [ -d "$LOC" ]; then
+-		  MODAVAIL="$MODAVAIL $( ( find $LOC -type f -name "*.o" -printf "basename %f .o\n"; \
+-			find $LOC -type f -name "*.ko" -printf "basename %f .ko\n" ) | /bin/sh )"
+-		fi
+-	fi
+-
+-	if [ "$MODULES" = "all" ]; then
+-		MODULES="$MODAVAIL"
+-	fi
+-
+-	if [ -n "$MODULES" ]; then
+-		log_begin_msg "Loading ACPI modules..."
+-		STATUS=0
+-		for mod in $MODULES; do
+-			echo $MODAVAIL | grep -q -w "$mod" || continue
+-			if echo $LIST | grep -q -w "$mod"; then
+-				[ "$VERBOSE" != "no" ] && log_success_msg "Module already loaded: $mod"
+-			else
+-				if modprobe -b $mod 2>/dev/null; then
+-					[ "$VERBOSE" != "no" ] && log_success_msg "Loaded module: $mod"
+-				else
+-					if [ "$VERBOSE" != "no" ]; then
+-						log_warning_msg "Unable to load module: $mod"
+-					fi
+-				fi
+-			fi		
+-		done
+-		log_end_msg $STATUS
+-	fi
+-	echo "$PRINTK" > /proc/sys/kernel/printk
+-}
+-
+-case "$1" in
+-  start)
+-    [ -f /proc/modules ] && load_modules
+-    log_begin_msg "Starting ACPI services..."
+-    start-stop-daemon --start --quiet --oknodo --exec /usr/sbin/acpid -- $OPTIONS
+-    log_end_msg $?
+-    ;;
+-  stop)
+-    log_begin_msg "Stopping ACPI services..."
+-    start-stop-daemon --stop --quiet --oknodo --retry 2 --exec /usr/sbin/acpid
+-    log_end_msg $?
+-    ;;
+-  restart)
+-    $0 stop
+-    sleep 1
+-    $0 start
+-    ;;
+-  reload|force-reload) 
+-    log_begin_msg "Reloading ACPI services..."
+-    start-stop-daemon --stop --signal 1 --exec /usr/sbin/acpid
+-    log_end_msg $?
+-    ;;
+-  *)
+-    log_success_msg "Usage: /etc/init.d/acpid {start|stop|restart|reload|force-reload}"
+-    exit 1
+-esac
+-
+-exit 0
+diff -u acpid-1.0.6/debian/changelog acpid-1.0.6/debian/changelog
+--- acpid-1.0.6/debian/changelog
++++ acpid-1.0.6/debian/changelog
+@@ -1,3 +1,10 @@
++acpid (1.0.6-12sven1) unstable; urgency=low
++
++  * Check for Debian/Ubuntu at package creation time, closes: #500003.
++  * Add build-dependency on lsb-release.
++
++ -- Sven Joachim <svenjoac@gmx.de>  Wed, 24 Sep 2008 12:12:53 +0200
++
+ acpid (1.0.6-12) unstable; urgency=low
+ 
+   * Check for Ubuntu/Debian in apt sources list instead of /etc/issue,
+only in patch2:
+unchanged:
+--- acpid-1.0.6.orig/debian/acpid.init.d.in
++++ acpid-1.0.6/debian/acpid.init.d.in
+@@ -0,0 +1,117 @@
++#! /bin/sh -e
++### BEGIN INIT INFO
++# Provides:          acpid
++# Required-Start:    $remote_fs $syslog
++# Required-Stop:     $remote_fs $syslog
++# X-Start-Before:    kdm gdm xdm hal
++# X-Stop-After:      kdm gdm xdm hal
++# Default-Start:     2 3 4 5
++# Default-Stop:      0 1 6
++# Short-Description: Start the Advanced Configuration and Power Interface daemon
++# Description:       Provide a socket for X11, hald and others to multiplex
++#                    kernel ACPI events.
++### END INIT INFO
++
++# Check for daemon presence
++test -x /usr/sbin/acpid || exit 0
++
++# Check for ACPI support on kernel side
++[ -d "/proc/acpi" ] || exit 0
++
++# Include acpid defaults if available
++OPTIONS=""
++if [ -f "/etc/default/acpid" ] ; then
++	. /etc/default/acpid
++fi
++
++# Get lsb functions
++. /lib/lsb/init-functions
++. /etc/default/rcS
++
++# Are we Debian or Ubuntu?
++DISTRO=@@DISTRO@@
++
++if [ "$VERBOSE" = "no" ]; then
++	MODPROBE_OPTIONS="$MODPROBE_OPTIONS --quiet"
++	export MODPROBE_OPTIONS
++fi
++
++# As the name says. If the kernel supports modules, it'll try to load
++# the ones listed in "MODULES".
++load_modules() {
++	PRINTK=$(cat /proc/sys/kernel/printk)
++	[ "$VERBOSE" = "no" ] && echo "0 0 0 0" > /proc/sys/kernel/printk
++
++	LIST="$(/sbin/lsmod | awk '!/Module/ {print $1}')"
++
++	# Get list of available modules
++	LOC="/lib/modules/$(uname -r)/kernel/drivers/acpi"
++	if [ -d "$LOC" ]; then
++	  MODAVAIL="$( ( find $LOC -type f -name "*.o" -printf "basename %f .o\n"; \
++		find $LOC -type f -name "*.ko" -printf "basename %f .ko\n" ) | /bin/sh )"
++	else
++	  MODAVAIL=""
++	fi
++
++	if [ $DISTRO = "Ubuntu" ]; then
++		LOC="/lib/modules/$(uname -r)/kernel/ubuntu/acpi"
++		if [ -d "$LOC" ]; then
++		  MODAVAIL="$MODAVAIL $( ( find $LOC -type f -name "*.o" -printf "basename %f .o\n"; \
++			find $LOC -type f -name "*.ko" -printf "basename %f .ko\n" ) | /bin/sh )"
++		fi
++	fi
++
++	if [ "$MODULES" = "all" ]; then
++		MODULES="$MODAVAIL"
++	fi
++
++	if [ -n "$MODULES" ]; then
++		log_begin_msg "Loading ACPI modules..."
++		STATUS=0
++		for mod in $MODULES; do
++			echo $MODAVAIL | grep -q -w "$mod" || continue
++			if echo $LIST | grep -q -w "$mod"; then
++				[ "$VERBOSE" != "no" ] && log_success_msg "Module already loaded: $mod"
++			else
++				if modprobe -b $mod 2>/dev/null; then
++					[ "$VERBOSE" != "no" ] && log_success_msg "Loaded module: $mod"
++				else
++					if [ "$VERBOSE" != "no" ]; then
++						log_warning_msg "Unable to load module: $mod"
++					fi
++				fi
++			fi		
++		done
++		log_end_msg $STATUS
++	fi
++	echo "$PRINTK" > /proc/sys/kernel/printk
++}
++
++case "$1" in
++  start)
++    [ -f /proc/modules ] && load_modules
++    log_begin_msg "Starting ACPI services..."
++    start-stop-daemon --start --quiet --oknodo --exec /usr/sbin/acpid -- $OPTIONS
++    log_end_msg $?
++    ;;
++  stop)
++    log_begin_msg "Stopping ACPI services..."
++    start-stop-daemon --stop --quiet --oknodo --retry 2 --exec /usr/sbin/acpid
++    log_end_msg $?
++    ;;
++  restart)
++    $0 stop
++    sleep 1
++    $0 start
++    ;;
++  reload|force-reload) 
++    log_begin_msg "Reloading ACPI services..."
++    start-stop-daemon --stop --signal 1 --exec /usr/sbin/acpid
++    log_end_msg $?
++    ;;
++  *)
++    log_success_msg "Usage: /etc/init.d/acpid {start|stop|restart|reload|force-reload}"
++    exit 1
++esac
++
++exit 0

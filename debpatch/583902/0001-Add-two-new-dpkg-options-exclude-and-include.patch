@@ -1,0 +1,329 @@
+From 54f4d335b12eafb0efded4d71a1a7cd6cbe46486 Mon Sep 17 00:00:00 2001
+From: Martin Pitt <martin.pitt@ubuntu.com>
+Date: Wed, 19 May 2010 12:41:28 +0200
+Subject: [PATCH] Add two new dpkg options --exclude and --include
+
+This provides support for filtering files on package installation. This allows
+embedded systems to skip /usr/share/doc, manpages, etc.
+
+Based-on-patch-by: Tollef Fog Heen <tfheen@err.no>
+---
+ debian/changelog |    5 ++
+ man/dpkg.1       |   22 +++++++++
+ src/Makefile.am  |    1 +
+ src/archives.c   |   10 ++++
+ src/filters.c    |  130 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/filters.h    |   31 +++++++++++++
+ src/main.c       |   11 +++++
+ 7 files changed, 210 insertions(+), 0 deletions(-)
+ create mode 100644 src/filters.c
+ create mode 100644 src/filters.h
+
+diff --git a/debian/changelog b/debian/changelog
+index 16ddb25..ddd14c2 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -49,6 +49,11 @@ dpkg (1.15.8) UNRELEASED; urgency=low
+   * Russian (Yuri Kozlov). Closes: #579149
+   * Swedish (Peter Krefting).
+ 
++  [ Martin Pitt ]
++  * Add two new dpkg options --exclude and --include for filtering files on
++    package installation. This allows embedded systems to skip
++    /usr/share/doc, manpages, etc. Based on work from Tollef Fog Heen, thanks!
++
+  -- Guillem Jover <guillem@debian.org>  Wed, 21 Apr 2010 04:40:12 +0200
+ 
+ dpkg (1.15.7.2) unstable; urgency=low
+diff --git a/man/dpkg.1 b/man/dpkg.1
+index 880fbaf..f247993 100644
+--- a/man/dpkg.1
++++ b/man/dpkg.1
+@@ -572,6 +572,28 @@ may leave packages in the improper \fBtriggers\-awaited\fP and
+ .TP
+ \fB\-\-triggers\fP
+ Cancels a previous \fB\-\-no\-triggers\fP.
++.TP
++\fB\-\-exclude=\fP\fIpattern\fP
++Do not install files which match a shell pattern. '*' matches any sequence of
++characters, including the empty string and also '/'.
++For example, '/usr/*/READ*' matches '/usr/share/doc/mypackage/README'\fP.
++As usual, '?' matches any single character (again, including '/').
++
++This option be specified multiple times, and interleaved with
++\fB\-\-include\fP options. Both are processed in the given order, with the last
++rule that matches a file name making the decision.
++.TP
++\fB\-\-include=\fP\fIpattern\fP
++Re-include a pattern after a previous \fB\-\-exclude\fP. This can be used to
++remove all files except some particular ones; a typical case is:
++
++.B \-\-exclude=/usr/share/doc/* \-\-include=/usr/share/doc/*/copyright
++
++to remove all documentation files except the copyright files.
++
++This option be specified multiple times, and interleaved with
++\fB\-\-include\fP options. Both are processed in the given order, with the last
++rule that matches a file name making the decision.
+ .
+ .SH FILES
+ .TP
+diff --git a/src/Makefile.am b/src/Makefile.am
+index ddde846..d6fdfd2 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -26,6 +26,7 @@ dpkg_SOURCES = \
+ 	enquiry.c \
+ 	errors.c \
+ 	filesdb.c filesdb.h \
++	filters.c filters.h \
+ 	divertdb.c \
+ 	statdb.c \
+ 	help.c \
+diff --git a/src/archives.c b/src/archives.c
+index b0a0fd1..33dd349 100644
+--- a/src/archives.c
++++ b/src/archives.c
+@@ -57,6 +57,7 @@
+ #include "filesdb.h"
+ #include "main.h"
+ #include "archives.h"
++#include "filters.h"
+ 
+ #define MAXCONFLICTORS 20
+ 
+@@ -427,6 +428,15 @@ int tarobject(struct TarInfo *ti) {
+         nifd->namenode->divert && nifd->namenode->divert->useinstead
+         ? nifd->namenode->divert->useinstead->name : "<none>");
+ 
++  if (filter_should_skip(ti)) {
++    struct filenamenode *fnn = findnamenode(ti->Name, 0);
++
++    fnn->flags &= ~fnnf_new_inarchive;
++    tarfile_skip_one_forward(ti, oldnifd, nifd);
++
++    return 0;
++  }
++
+   if (nifd->namenode->divert && nifd->namenode->divert->camefrom) {
+     divpkg= nifd->namenode->divert->pkg;
+ 
+diff --git a/src/filters.c b/src/filters.c
+new file mode 100644
+index 0000000..709a35e
+--- /dev/null
++++ b/src/filters.c
+@@ -0,0 +1,130 @@
++/*
++ * dpkg - main program for package management
++ * filters.c - filtering routines for excluding bits of packages
++ *
++ * Copyright (C) 2007,2008 Tollef Fog Heen <tfheen@err.no>
++ *
++ * This is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2,
++ * or (at your option) any later version.
++ *
++ * This is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ */
++
++#include <config.h>
++
++#include <dpkg/i18n.h>
++
++#include <fnmatch.h>
++
++#include <dpkg/dpkg.h>
++#include <dpkg/dpkg-db.h>
++
++#include "main.h"
++#include "filesdb.h"
++#include "filters.h"
++
++struct filterlist {
++	int positive;
++	char *glob;
++	struct filterlist *next;
++};
++
++static struct filterlist *filters = NULL;
++static struct filterlist **filtertail = &filters;
++
++void add_filter(const char* glob, int positive)
++{
++	struct filterlist *filter;
++
++	filter = m_malloc(sizeof(struct filterlist));
++	memset(filter, 0, sizeof(struct filterlist));
++
++	filter->positive = positive;
++	filter->glob = m_strdup(glob);
++	if (!filter->glob)
++		ohshite(_("error allocating memory for filter entry"));
++
++	debug(dbg_general, "adding %s filter for '%s'\n",
++	      positive ? "include" : "exclude", glob);
++
++	*filtertail = filter;
++	filtertail = &filter->next;
++}
++
++static int do_filter_should_skip(struct TarInfo *ti)
++{
++	int remove = 0;
++	struct filterlist *f;
++
++	/* Last match wins. */
++	for (f = filters; f != NULL; f = f->next) {
++		debug(dbg_eachfile, "tarobject comparing '%s' and '%s'",
++		      &ti->Name[1], f->glob);
++
++		if (fnmatch(f->glob, &ti->Name[1], 0) == 0) {
++			if (f->positive == 0) {
++				remove = 1;
++				debug(dbg_eachfile, "do_filter removing %s",
++				      ti->Name);
++			} else {
++				remove = 0;
++				debug(dbg_eachfile, "do_filter including %s",
++				      ti->Name);
++			}
++		}
++	}
++
++	/* We need to keep directories if a glob excludes them, but a more specific
++	 * include glob brings back files; this will probably create more directories
++	 * than necessary, but better err on the side of caution than failing with
++	 * "no such file or directory" (which would leave the package in a very bad
++	 * state). */
++	if (remove && ti->Type == Directory) {
++		char* pos;
++		int cmplen;
++
++		debug(dbg_eachfile,
++		      "tarobject seeing if '%s' needs to be reincluded",
++		      &ti->Name[1]);
++
++		for (f = filters; f != NULL; f = f->next) {
++			if (f->positive == 0)
++				continue;
++
++			/* calculate the offset of the first * or ? char in the glob */
++			cmplen = strlen(f->glob);
++			pos = strchr(f->glob, '*');
++			if (pos)
++				cmplen = pos - f->glob;
++			pos = strchr(f->glob, '?');
++			if (pos && (pos - f->glob) < cmplen)
++				cmplen = pos - f->glob;
++
++			if (strncmp(&ti->Name[1], f->glob, cmplen) == 0) {
++				remove = 0;
++				debug(dbg_eachfile, "tarobject reincluding %s",
++						ti->Name);
++			}
++		}
++	}
++
++	return remove;
++}
++
++int filter_should_skip(struct TarInfo *ti)
++{
++	if (filters)
++		return do_filter_should_skip(ti);
++	else
++		return 0;
++}
++
+diff --git a/src/filters.h b/src/filters.h
+new file mode 100644
+index 0000000..00730a0
+--- /dev/null
++++ b/src/filters.h
+@@ -0,0 +1,31 @@
++/*
++ * dpkg - main program for package management
++ * filters.h - external definitions for filter handling
++ *
++ * Copyright (C) 2007,2008 Tollef Fog Heen <tfheen@err.no>
++ *
++ * This is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2,
++ * or (at your option) any later version.
++ *
++ * This is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program; if not, write to the Free Software Foundation, Inc.,
++ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++ */
++
++#ifndef DPKG_FILTERS_H
++#define DPKG_FILTERS_H
++
++#include <dpkg/tarfn.h>
++
++void add_filter(const char* glob, int positive);
++int filter_should_skip(struct TarInfo *ti);
++
++#endif
++
+diff --git a/src/main.c b/src/main.c
+index b902406..932eb25 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -49,6 +49,7 @@
+ 
+ #include "main.h"
+ #include "filesdb.h"
++#include "filters.h"
+ 
+ static void DPKG_ATTR_NORET
+ printversion(const struct cmdinfo *ci, const char *value)
+@@ -139,6 +140,10 @@ usage(const struct cmdinfo *ci, const char *value)
+ "  --no-force-...|--refuse-...\n"
+ "                             Stop when problems encountered.\n"
+ "  --abort-after <n>          Abort after encountering <n> errors.\n"
++"  --exclude <pattern>        Do not install files which match a shell pattern.\n"
++"  --include <pattern>        Re-include a pattern after a previous --exclude.\n"
++"                             --exclude and --include can be specified multiple\n"
++"                             times and are processed in order.\n"
+ "\n"), ADMINDIR);
+ 
+   printf(_(
+@@ -255,6 +260,10 @@ static void setdebug(const struct cmdinfo *cpi, const char *value) {
+   if (value == endp || *endp) badusage(_("--debug requires an octal argument"));
+ }
+ 
++static void setfilter(const struct cmdinfo *cpi, const char *value) {
++  add_filter(value, cpi->arg);
++}
++
+ static void setroot(const struct cmdinfo *cip, const char *value) {
+   char *p;
+   instdir= value;
+@@ -517,6 +526,8 @@ static const struct cmdinfo cmdinfos[]= {
+   { "refuse",            0,   2, NULL,          NULL,      setforce,      0 },
+   { "no-force",          0,   2, NULL,          NULL,      setforce,      0 },
+   { "debug",             'D', 1, NULL,          NULL,      setdebug,      0 },
++  { "exclude",           0,   1, NULL,          NULL,      setfilter,     0 },
++  { "include",           0,   1, NULL,          NULL,      setfilter,     1 },
+   { "help",              'h', 0, NULL,          NULL,      usage,         0 },
+   { "version",           0,   0, NULL,          NULL,      printversion,  0 },
+   ACTIONBACKEND( "build",		'b', BACKEND),
+-- 
+1.7.0.4
+

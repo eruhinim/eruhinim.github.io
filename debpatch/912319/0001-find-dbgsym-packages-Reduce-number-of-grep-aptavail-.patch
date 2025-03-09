@@ -1,0 +1,67 @@
+From 4f732b5e1d544751b9086e54b9e64a39037273a1 Mon Sep 17 00:00:00 2001
+From: Jakub Wilk <jwilk@jwilk.net>
+Date: Tue, 30 Oct 2018 10:23:46 +0100
+Subject: [PATCH] find-dbgsym-packages: Reduce number of grep-aptavail calls
+
+The original code called grep-aptavail for each interesting build ID.
+This was very slow for binaries using many shared libraries.
+
+Instead, call grep-aptavail once to get all the needed data about
+interesting build IDs.
+---
+ find-dbgsym-packages | 25 +++++++++++++++++--------
+ 1 file changed, 17 insertions(+), 8 deletions(-)
+
+diff --git a/find-dbgsym-packages b/find-dbgsym-packages
+index 9aef361..22b8aca 100755
+--- a/find-dbgsym-packages
++++ b/find-dbgsym-packages
+@@ -43,12 +43,13 @@ foreach my $arg (@ARGV) {
+         %build_ids = get_build_ids_from_file($arg);
+     }
+ 
++    my %debs_from_id = get_debs_from_ids(keys %build_ids);
+     foreach my $id (keys %build_ids) {
+         my ($path, $name) = @{$build_ids{$id}};
+ 
+         next if $name =~ $vdso_regexp;
+ 
+-        my @p = get_debs_from_id($id);
++        my @p = @{$debs_from_id{$id} // []};
+         if (scalar @p == 0) {
+             @p = get_debs_from_path($path);
+             if (scalar @p == 0) {
+@@ -184,15 +185,23 @@ sub get_build_ids_from_pid
+     return parse_eu_unstrip($output);
+ }
+ 
+-sub get_debs_from_id
++sub get_debs_from_ids
+ {
+-    my ($id) = @_;
+-
++    my $id_regexp = join('|', @_);
++    my %map;
+     my $output;
+-    $output = capturex([0, 1], qw(grep-aptavail --no-field-names --show-field Package --field Build-IDs --pattern), $id);
+-
+-    my %pkgs = map { $_ => 1 } split(/\n/, $output);
+-    return sort keys %pkgs;
++    $output = capturex([0, 1], qw(grep-aptavail --no-field-names --show-field Package --show-field Build-IDs --field Build-IDs --eregex --pattern), $id_regexp);
++    while ($output =~ /\G(\S+)\n(\S+(?: \S+)*)\n\n/gc) {
++        my $pkg = $1;
++        my $ids = $2;
++        while ($ids =~ m/\b($id_regexp)\b/g) {
++            push @{$map{$1}}, $pkg;
++        }
++    }
++    if (length $output != (pos $output // 0)) {
++        die "Cannot parse grep-aptavail output";
++    }
++    return %map;
+ }
+ 
+ sub get_debs_from_path
+-- 
+2.19.1
+

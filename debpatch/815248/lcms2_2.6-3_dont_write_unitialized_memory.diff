@@ -1,0 +1,71 @@
+diff -Nru lcms2-2.6/debian/patches/dont-write-uninitialized-memory-for-color-strings.patch lcms2-2.6/debian/patches/dont-write-uninitialized-memory-for-color-strings.patch
+--- lcms2-2.6/debian/patches/dont-write-uninitialized-memory-for-color-strings.patch	1970-01-01 01:00:00.000000000 +0100
++++ lcms2-2.6/debian/patches/dont-write-uninitialized-memory-for-color-strings.patch	2016-02-20 12:43:36.000000000 +0100
+@@ -0,0 +1,59 @@
++Description: Zero named color strings before writing them
++ For each named colors (namedColor2Type) a prefix, a suffix and the
++ color root name get written. These three strings are 32-characters long.
++ In order to avoid capturing unitialized memory—which is not good for
++ privacy and prevent getting the same bytes for the same profile—the
++ placeholder allocated on the stack are zero'ed before a copy of the
++ actual string is made.
++ .
++ For consistency, we also remove unneeded extra allocated bytes in
++ Type_ColorantTable_Write() and Type_NamedColor_Write().
++Author: Jérémy Bobbio <lunar@debian.org>
++
++diff --git a/src/cmstypes.c b/src/cmstypes.c
++index 60c09ef..0afec90 100644
++--- a/src/cmstypes.c
+++++ b/src/cmstypes.c
++@@ -3013,9 +3013,10 @@ cmsBool  Type_ColorantTable_Write(struct _cms_typehandler_struct* self, cmsIOHAN
++ 
++     for (i=0; i < nColors; i++) {
++ 
++-        char root[33];
+++        char root[32];
++         cmsUInt16Number PCS[3];
++ 
+++        memset(root, 0, 32); /* Ensure we don't write uninitialized memory. */
++         if (!cmsNamedColorInfo(NamedColorList, i, root, NULL, NULL, PCS, NULL)) return 0;
++         root[32] = 0;
++ 
++@@ -3138,11 +3139,13 @@ cmsBool Type_NamedColor_Write(struct _cms_typehandler_struct* self, cmsIOHANDLER
++     if (!_cmsWriteUInt32Number(io, 0)) return FALSE;
++     if (!_cmsWriteUInt32Number(io, nColors)) return FALSE;
++     if (!_cmsWriteUInt32Number(io, NamedColorList ->ColorantCount)) return FALSE;
+++    /* Ensure we don't write unitialized memory. */
+++    memset(prefix, 0, 32);
+++    memset(suffix, 0, 32);
++ 
++-    strncpy(prefix, (const char*) NamedColorList->Prefix, 32);
++-    strncpy(suffix, (const char*) NamedColorList->Suffix, 32);
++-
++-    suffix[31] = prefix[31] = 0;
+++    /* Only copy 31 characters to ensure strings will be NULL-terminated */
+++    strncpy(prefix, (const char*) NamedColorList->Prefix, 31);
+++    strncpy(suffix, (const char*) NamedColorList->Suffix, 31);
++ 
++     if (!io ->Write(io, 32, prefix)) return FALSE;
++     if (!io ->Write(io, 32, suffix)) return FALSE;
++@@ -3151,9 +3154,11 @@ cmsBool Type_NamedColor_Write(struct _cms_typehandler_struct* self, cmsIOHANDLER
++ 
++        cmsUInt16Number PCS[3];
++        cmsUInt16Number Colorant[cmsMAXCHANNELS];
++-       char Root[33];
+++       char Root[32];
++ 
+++	/* Ensure we don't write unitialized memory. */
+++	memset(Root, 0, 32);
++         if (!cmsNamedColorInfo(NamedColorList, i, Root, NULL, NULL, PCS, Colorant)) return 0;
++         if (!io ->Write(io, 32 , Root)) return FALSE;
++         if (!_cmsWriteUInt16Array(io, 3, PCS)) return FALSE;
++         if (!_cmsWriteUInt16Array(io, NamedColorList ->ColorantCount, Colorant)) return FALSE;
+diff -Nru lcms2-2.6/debian/patches/series lcms2-2.6/debian/patches/series
+--- lcms2-2.6/debian/patches/series	2014-06-16 17:15:31.000000000 +0200
++++ lcms2-2.6/debian/patches/series	2016-02-20 12:42:05.000000000 +0100
+@@ -4,3 +4,4 @@
+ sanity-check-profiles-CVE-2014-0459.patch
+ fix-unaligned-access.patch
+ endianness-verification-fix-powerpc.patch
++dont-write-uninitialized-memory-for-color-strings.patch

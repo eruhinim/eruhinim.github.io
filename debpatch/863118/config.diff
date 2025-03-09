@@ -1,0 +1,36 @@
+diff --git a/scripts/uscan.pl b/scripts/uscan.pl
+index dd1f4231..a1151bc9 100755
+--- a/scripts/uscan.pl
++++ b/scripts/uscan.pl
+@@ -1948,15 +1948,28 @@ if (@ARGV and $ARGV[0] =~ /^--no-?conf$/) {
+     my %config_default = %config_vars;
+ 
+     my $shell_cmd;
+-    # Set defaults
++    # Set defaults with caution while respecting bash syntax
++    # See https://bugs.debian.org/863118 (avoid "ENV_VAR= yes" line etc.)
++    $shell_cmd .= 'set -e' . "\n";
+     foreach my $var (keys %config_vars) {
+ 	$shell_cmd .= qq[$var="$config_vars{$var}";\n];
+     }
+-    $shell_cmd .= 'for file in ' . join(" ",@config_files) . "; do\n";
+-    $shell_cmd .= '[ -f $file ] && . $file; done;' . "\n";
++    $shell_cmd .= 'for file in ' . join(" ",@config_files) . '; do' . "\n";
++    $shell_cmd .= '[ -f $file ] && \\' . "\n";
++    $shell_cmd .= '{ if egrep -e "^\s*[^\s#]\w+=\s+[^#]" $file >&2 ; then' . "\n";
++    $shell_cmd .= 'echo "Error: space after \"=\" in $file" >&2 ; exit 1' . "\n";
++    $shell_cmd .= 'elif ! /bin/bash -n $file >&2 ; then' . "\n";
++    $shell_cmd .= 'echo "Error: Bash syntax error in $file" >&2 ; exit 1' . "\n";
++    $shell_cmd .= 'else' . "\n";
++    $shell_cmd .= '. $file' . "\n";
++    $shell_cmd .= 'fi ; }' . "\n";
++    $shell_cmd .= 'done' . "\n";
+     # Read back values
+     foreach my $var (keys %config_vars) { $shell_cmd .= "echo \$$var;\n" }
+     my $shell_out = `/bin/bash -c '$shell_cmd'`;
++    if ( $? != 0 ) {
++        uscan_die "Error detected while parsing configuration files (bash -e).\n";
++    }
+     @config_vars{keys %config_vars} = split /\n/, $shell_out, -1;
+ 
+     # Check validity

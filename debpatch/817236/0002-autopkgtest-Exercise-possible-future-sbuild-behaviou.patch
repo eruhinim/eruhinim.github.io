@@ -1,0 +1,92 @@
+From 322e9ee8c4d7e713df83257913ee6c6ba4a9daea Mon Sep 17 00:00:00 2001
+From: Simon McVittie <smcv@debian.org>
+Date: Sun, 5 Mar 2017 18:27:41 +0000
+Subject: [PATCH 2/2] autopkgtest: Exercise possible future sbuild behaviour
+ (#856877)
+
+---
+ debian/tests/debian-testing        |  3 ++
+ debian/tests/fake/schroot-proposed | 57 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 60 insertions(+)
+ create mode 100755 debian/tests/fake/schroot-proposed
+
+diff --git a/debian/tests/debian-testing b/debian/tests/debian-testing
+index 928e4e1..65ee196 100755
+--- a/debian/tests/debian-testing
++++ b/debian/tests/debian-testing
+@@ -113,6 +113,9 @@ sub check_chroot {
+         $reference);
+ 
+     check_fake_schroot(%params, reference => $reference);
++    check_fake_schroot(%params, reference => $reference, version => 'proposed');
++    check_fake_schroot(%params, reference => $reference, version => 'proposed',
++        extra_argv => ['--sbuild']);
+ 
+     # https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=817236
+     if (Dpkg::Version->new($params{kernel}) < Dpkg::Version->new('4.7') &&
+diff --git a/debian/tests/fake/schroot-proposed b/debian/tests/fake/schroot-proposed
+new file mode 100755
+index 0000000..96d4309
+--- /dev/null
++++ b/debian/tests/fake/schroot-proposed
+@@ -0,0 +1,57 @@
++#!/bin/sh
++# fake/schroot-proposed -- emulate proposed mount behaviour for schroot
++#
++# Copyright © 2017 Simon McVittie
++# SPDX-License-Identifier: MIT
++# (see debian/copyright)
++
++set -e
++
++# /etc/schroot/default/fstab
++bind_dev=yes
++
++while true; do
++	case "$1" in
++		(--sbuild)
++			shift
++			# /etc/schroot/sbuild/fstab
++			bind_dev=no
++			;;
++		(*)
++			break
++	esac
++done
++
++chroot="$1"
++shift
++if test -z "$chroot" || test -z "$1"; then
++	echo "Usage: $0 CHROOT COMMAND...">&2
++	exit 2
++fi
++
++[ "$bind_dev" = no ] || mount --bind /dev "$chroot/dev"
++mount -t devpts -o rw,newinstance,ptmxmode=666,mode=620,gid=5 /dev/pts "$chroot/dev/pts"
++
++ls -l "$chroot/dev/ptmx" | sed -e 's/^/# fake-schroot: /' >&2
++ls -l "$chroot/dev/pts/ptmx" | sed -e 's/^/# fake-schroot: /' >&2
++
++mounted_ptmx=no
++
++if [ -e "$chroot/dev/pts/ptmx" ] && \
++        [ -e "$chroot/dev/ptmx" ] && \
++        ! [ "$chroot/dev/pts/ptmx" -ef "$chroot/dev/ptmx" ]; then
++    mount --bind "$chroot/dev/pts/ptmx" "$chroot/dev/ptmx"
++    mounted_ptmx=yes
++fi
++
++ls -l "$chroot/dev/ptmx" | sed -e 's/^/# fake-schroot: /' >&2
++ls -l "$chroot/dev/pts/ptmx" | sed -e 's/^/# fake-schroot: /' >&2
++
++e=0
++chroot "$chroot" "$@" || e=$?
++
++[ "$mounted_ptmx" = no ] || umount "$chroot/dev/ptmx"
++umount "$chroot/dev/pts"
++[ "$bind_dev" = no ] || umount "$chroot/dev"
++
++exit "$e"
+-- 
+2.11.0
+

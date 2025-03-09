@@ -1,0 +1,258 @@
+--- ../e-book-backend-webdav.c.orig	2014-04-27 20:46:28.031504658 +0200
++++ ./addressbook/backends/webdav/e-book-backend-webdav.c	2014-04-27 21:28:44.912193111 +0200
+@@ -22,7 +22,7 @@
+ /*
+  * Implementation notes:
+  *   We use the DavResource URIs as UID in the evolution contact
+- *   ETags are saved in the E_CONTACT_REV field so we know which cached contacts
++ *   ETags are saved in the WEBDAV_CONTACT_ETAG field so we know which cached contacts
+  *   are outdated.
+  */
+ #include <config.h>
+@@ -62,6 +62,9 @@
+ #define USERAGENT             "Evolution/" VERSION
+ #define WEBDAV_CLOSURE_NAME   "EBookBackendWebdav.BookView::closure"
+ #define WEBDAV_CTAG_KEY "WEBDAV_CTAG"
++#define WEBDAV_CACHE_VERSION_KEY "WEBDAV_CACHE_VERSION"
++#define WEBDAV_CACHE_VERSION "1"
++#define WEBDAV_CONTACT_ETAG "X-EVOLUTION-WEBDAV-ETAG"
+ 
+ G_DEFINE_TYPE (EBookBackendWebdav, e_book_backend_webdav, E_TYPE_BOOK_BACKEND)
+ 
+@@ -109,6 +112,47 @@
+ }
+ 
+ static void
++webdav_contact_set_etag (EContact *contact,
++			 const gchar *etag)
++{
++	EVCardAttribute *attr;
++
++	g_return_if_fail (E_IS_CONTACT (contact));
++
++	attr = e_vcard_get_attribute (E_VCARD (contact), WEBDAV_CONTACT_ETAG);
++
++	if (attr) {
++		e_vcard_attribute_remove_values (attr);
++		if (etag) {
++			e_vcard_attribute_add_value (attr, etag);
++		} else {
++			e_vcard_remove_attribute (E_VCARD (contact), attr);
++		}
++	} else if (etag) {
++		e_vcard_append_attribute_with_value (
++			E_VCARD (contact),
++			e_vcard_attribute_new (NULL, WEBDAV_CONTACT_ETAG),
++			etag);
++	}
++}
++
++static gchar *
++webdav_contact_get_etag (EContact *contact)
++{
++	EVCardAttribute *attr;
++	GList *v = NULL;
++
++	g_return_val_if_fail (E_IS_CONTACT (contact), NULL);
++
++	attr = e_vcard_get_attribute (E_VCARD (contact), WEBDAV_CONTACT_ETAG);
++
++	if (attr)
++		v = e_vcard_attribute_get_values (attr);
++
++	return ((v && v->data) ? g_strstrip (g_strdup (v->data)) : NULL);
++}
++
++static void
+ closure_destroy (WebdavBackendSearchClosure *closure)
+ {
+ 	e_flag_free (closure->running);
+@@ -178,9 +222,9 @@
+ 		return NULL;
+ 	}
+ 
+-	/* the etag is remembered in the revision field */
++	/* the etag is remembered in the WEBDAV_CONTACT_ETAG field */
+ 	if (etag != NULL) {
+-		e_contact_set (contact, E_CONTACT_REV, (gconstpointer) etag);
++		webdav_contact_set_etag (contact, etag);
+ 	}
+ 
+ 	g_object_unref (message);
+@@ -225,7 +269,7 @@
+ 	 * we can leave it out */
+ 	if (!avoid_ifmatch) {
+ 		/* only override if etag is still the same on the server */
+-		etag = e_contact_get (contact, E_CONTACT_REV);
++		etag = webdav_contact_get_etag (contact);
+ 		if (etag == NULL) {
+ 			soup_message_headers_append (message->request_headers,
+ 						    "If-None-Match", "*");
+@@ -234,10 +278,14 @@
+ 		} else {
+ 			soup_message_headers_append (message->request_headers,
+ 						    "If-Match", etag);
+-			g_free (etag);
+ 		}
++
++		g_free (etag);
+ 	}
+ 
++	/* Remove the stored ETag, before saving to the server */
++	webdav_contact_set_etag (contact, NULL);
++
+ 	request = e_vcard_to_string (E_VCARD (contact), EVC_FORMAT_VCARD_30);
+ 	soup_message_set_request(message, "text/vcard", SOUP_MEMORY_TEMPORARY,
+ 				 request, strlen (request));
+@@ -247,8 +295,8 @@
+ 
+ 	redir_uri = soup_message_headers_get (message->response_headers, "Location");
+ 
+-	/* set UID and REV fields */
+-	e_contact_set (contact, E_CONTACT_REV, (gconstpointer) new_etag);
++	/* set UID and WEBDAV_CONTACT_ETAG fields */
++	webdav_contact_set_etag (contact, new_etag);
+ 	if (redir_uri && *redir_uri) {
+ 		if (!strstr (redir_uri, "://")) {
+ 			/* it's a relative URI */
+@@ -310,7 +358,7 @@
+ 	EContact                  *contact;
+ 	gchar                     *uid;
+ 	guint                      status;
+-	gchar                     *status_reason = NULL;
++	gchar                     *status_reason = NULL, *stored_etag;
+ 	const gchar               *vcard = (const gchar *) vcards->data;
+ 	GSList                     added_contacts = {NULL,};
+ 
+@@ -336,8 +384,8 @@
+ 
+ 	contact = e_contact_new_from_vcard_with_uid (vcard, uid);
+ 
+-	/* kill revision field (might have been set by some other backend) */
+-	e_contact_set (contact, E_CONTACT_REV, NULL);
++	/* kill WEBDAV_CONTACT_ETAG field (might have been set by some other backend) */
++	webdav_contact_set_etag (contact, NULL);
+ 
+ 	status = upload_contact (webdav, contact, &status_reason);
+ 	if (status != 201 && status != 204) {
+@@ -358,7 +406,8 @@
+ 	g_free (status_reason);
+ 
+ 	/* PUT request didn't return an etag? try downloading to get one */
+-	if (e_contact_get_const (contact, E_CONTACT_REV) == NULL) {
++	stored_etag = webdav_contact_get_etag (contact);
++	if (!stored_etag) {
+ 		const gchar *new_uid;
+ 		EContact *new_contact;
+ 
+@@ -374,6 +423,8 @@
+ 			return;
+ 		}
+ 		contact = new_contact;
++	} else {
++		g_free (stored_etag);
+ 	}
+ 
+ 	e_book_backend_cache_add_contact (priv->cache, contact);
+@@ -464,7 +515,7 @@
+ 	EContact                  *contact;
+ 	GSList                     modified_contacts = {NULL,};
+ 	const gchar                *uid;
+-	const gchar                *etag;
++	gchar                *etag;
+ 	guint status;
+ 	gchar *status_reason = NULL;
+ 	const gchar *vcard = vcards->data;
+@@ -519,7 +570,7 @@
+ 	uid = e_contact_get_const (contact, E_CONTACT_UID);
+ 	e_book_backend_cache_remove_contact (priv->cache, uid);
+ 
+-	etag = e_contact_get_const (contact, E_CONTACT_REV);
++	etag = webdav_contact_get_etag (contact);
+ 
+ 	/* PUT request didn't return an etag? try downloading to get one */
+ 	if (etag == NULL || (etag[0] == 'W' && etag[1] == '/')) {
+@@ -528,9 +579,13 @@
+ 		g_warning("Server didn't return etag for modified address resource");
+ 		new_contact = download_contact (webdav, uid);
+ 		if (new_contact != NULL) {
++			g_object_unref (contact);
+ 			contact = new_contact;
+ 		}
+ 	}
++
++	g_free (etag);
++
+ 	e_book_backend_cache_add_contact (priv->cache, contact);
+ 
+ 	modified_contacts.data = contact;
+@@ -845,6 +900,14 @@
+ 
+ 			if (xp_object_get_status (xpath_eval (xpctx, GETCTAG_XPATH_STATUS)) == 200) {
+ 				gchar *txt = xp_object_get_string (xpath_eval (xpctx, GETCTAG_XPATH_VALUE));
++				const gchar *stored_version;
++				gboolean old_version;
++
++				stored_version = e_file_cache_get_object (E_FILE_CACHE (priv->cache), WEBDAV_CACHE_VERSION_KEY);
++
++				/* The ETag was moved from REV to its own attribute, thus
++				   if the cache version is too low, update it. */
++				old_version = !stored_version || atoi (stored_version) < atoi (WEBDAV_CACHE_VERSION);
+ 
+ 				if (txt && *txt) {
+ 					gint len = strlen (txt);
+@@ -861,12 +924,21 @@
+ 						const gchar *my_ctag;
+ 
+ 						my_ctag = e_file_cache_get_object (E_FILE_CACHE (priv->cache), WEBDAV_CTAG_KEY);
+-						res = !my_ctag || !g_str_equal (my_ctag, *new_ctag);
++						res = old_version || !my_ctag || !g_str_equal (my_ctag, *new_ctag);
+ 						priv->supports_getctag = TRUE;
+ 					}
+ 				}
+ 
+ 				g_free (txt);
++
++				if (old_version) {
++					if (!e_file_cache_replace_object (E_FILE_CACHE (priv->cache),
++						WEBDAV_CACHE_VERSION_KEY,
++						WEBDAV_CACHE_VERSION))
++						e_file_cache_add_object (E_FILE_CACHE (priv->cache),
++							WEBDAV_CACHE_VERSION_KEY,
++							WEBDAV_CACHE_VERSION);
++				}
+ 			}
+ 
+ 			xmlXPathFreeContext (xpctx);
+@@ -964,7 +1036,7 @@
+ 		const gchar  *uri;
+ 		const gchar *etag;
+ 		EContact    *contact;
+-		gchar *complete_uri;
++		gchar *complete_uri, *stored_etag;
+ 
+ 		/* stop downloading if search was aborted */
+ 		if (running != NULL && !e_flag_is_set (running))
+@@ -996,9 +1068,12 @@
+ 		etag = (const gchar *) element->etag;
+ 
+ 		contact = e_book_backend_cache_get_contact (priv->cache, complete_uri);
++
++		stored_etag = webdav_contact_get_etag (contact);
++
+ 		/* download contact if it is not cached or its ETag changed */
+-		if (contact == NULL || etag == NULL ||
+-				strcmp (e_contact_get_const (contact, E_CONTACT_REV),etag) != 0) {
++		if (contact == NULL || etag == NULL || !stored_etag ||
++				strcmp (stored_etag, etag) != 0) {
+ 			contact = download_contact (webdav, complete_uri);
+ 			if (contact != NULL) {
+ 				e_book_backend_cache_remove_contact (priv->cache, complete_uri);
+@@ -1011,6 +1086,7 @@
+ 		}
+ 
+ 		g_free (complete_uri);
++		g_free (stored_etag);
+ 	}
+ 
+ 	/* free element list */

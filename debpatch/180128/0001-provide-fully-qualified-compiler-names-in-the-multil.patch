@@ -1,0 +1,135 @@
+From 8cac76fb8c00fb3429e651994d001ca6c9ad02f5 Mon Sep 17 00:00:00 2001
+From: Shawn Landden <shawnlandden@gmail.com>
+Date: Sat, 21 Jul 2012 15:55:58 -0700
+Subject: [PATCH] provide fully qualified compiler names in the multilib
+ infrastructure
+
+This means that you can use dpkg's multi-arch cross-compile features
+with multilib, like so: (on i386)
+
+apt-get install gcc-multilib build-essential
+apt-get build-dep -aamd64 iceweasel
+apt-get source iceweasel
+cd iceweasel-*
+dpkg-buildpackage -aamd64
+---
+ debian/rules |   42 +++++++++++++++++++++++++++++++++++++++++-
+ gcc-32       |   19 +++++++++++++++++++
+ gcc-64       |   19 +++++++++++++++++++
+ 3 files changed, 79 insertions(+), 1 deletion(-)
+ create mode 100755 gcc-32
+ create mode 100755 gcc-64
+
+diff --git a/debian/rules b/debian/rules
+index 9a14d93..385402f 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -352,6 +352,25 @@ PV_GIJ	:= $(shell echo $(V_GIJ)   | awk -F. '{printf "%d.%d", $$1, $$2}')
+ PV_GPC	:= $(shell echo $(V_GPC)   | awk -F. '{printf "%d.%d", $$1, $$2}')
+ PV_SPU	:= $(shell echo $(V_SPU)   | awk -F. '{printf "%d.%d", $$1, $$2}')
+ 
++# multilib_archs = amd64 i386 kfreebsd-amd64 mips mipsel powerpc ppc64 s390 s390x sparc
++# multilib variables
++MULTILIB_amd64 := i386
++MULTILIB_i386 := amd64
++MULTILIB_kfreebsd-amd64 := kfreebsd-i386
++MULTILIB_mips := i386
++MULTILIB_powerpc := ppc64
++MULTILIB_ppc64 := powerpc
++MULTILIB_s390 := s390x
++MULTILIB_s390x := s390
++MULTILIB_sparc := sparc64
++#MULTILIB_mips := mips64 # need to add mips64/mips64el to dpkg
++#MULTILIB_mipsel := mips64el
++#MULTILIB_mips_gnu := mips64-linux-gnuabi64 # does not work well with d-a -t, because dpkg does not know bitness
++#MULTILIB_mipsel_gnu := mips64el-linux-gnuabi64
++multilib_arch := ${MULTILIB_${DEB_HOST_ARCH}}
++multilib_gnu_type := $(shell dpkg-architecture -f -a${multilib_arch} -qDEB_HOST_GNU_TYPE)
++multilib_bits := $(shell dpkg-architecture -f -a${multilib_arch} -qDEB_HOST_ARCH_BITS)
++
+ README:
+ 	m4 -DPACKAGES="$(packages)" \
+ 	   -DOS_NAME=$(OS_NAME) \
+@@ -552,7 +571,28 @@ ifeq ($(with_multiarch_lib),yes)
+ 	# have separate asm headers installed for our non-default targets.
+ 	dh_link -pgcc-multilib \
+ 	  /usr/include/$(DEB_HOST_MULTIARCH)/asm /usr/include/asm
+-  endif  
++
++  ifdef MULTILIB_${DEB_HOST_ARCH}
++	# wrapper so that gcc-multilib can be called by its fully-qualified name
++	# as a first-class compiler
++	mkdir -p debian/gcc-multilib/usr/lib/gcc/
++	install -m 755 -p gcc-32 debian/gcc-multilib/usr/lib/gcc/gcc-32
++	install -m 755 -p gcc-64 debian/gcc-multilib/usr/lib/gcc/gcc-64
++
++	dh_link -pgcc-multilib \
++	  /usr/lib/gcc/gcc-${multilib_bits} /usr/bin/${multilib_gnu_type}-gcc
++	dh_link -pg++-multilib \
++	  /usr/lib/gcc/gcc-${multilib_bits} /usr/bin/${multilib_gnu_type}-g++
++	dh_link -pgccgo-multilib \
++	  /usr/lib/gcc/gcc-${multilib_bits} /usr/bin/${multilib_gnu_type}-gccgo
++	dh_link -pgfortran-multilib \
++	  /usr/lib/gcc/gcc-${multilib_bits} /usr/bin/${multilib_gnu_type}-gfortran
++	dh_link -pgobjc-multilib \
++	  /usr/lib/gcc/gcc-${multilib_bits} /usr/bin/${multilib_gnu_type}-gobjc
++	dh_link -pgobjc++-multilib \
++	  /usr/lib/gcc/gcc-${multilib_bits} /usr/bin/${multilib_gnu_type}-gobjc++
++  endif
++  endif
+ endif  
+ 
+ ifneq (,$(filter gdc, $(packages)))
+diff --git a/gcc-32 b/gcc-32
+new file mode 100755
+index 0000000..19d6f5b
+--- /dev/null
++++ b/gcc-32
+@@ -0,0 +1,19 @@
++#! /bin/sh
++
++# Call the appropriate compiler or preprocessor with options to build for 32-bit multilib
++
++extra_flag=-m32
++
++for i; do
++    case "$i" in
++	-m32)
++	    extra_flag=
++	    ;;
++	-m64)
++	    echo >&2 "`basename $0` called with non 32-bit multilib option $i"
++	    exit 1
++	    ;;
++    esac
++done
++
++exec ${0##*-} $extra_flag ${1+"$@"}Z
+diff --git a/gcc-64 b/gcc-64
+new file mode 100755
+index 0000000..c31ea5c
+--- /dev/null
++++ b/gcc-64
+@@ -0,0 +1,19 @@
++#! /bin/sh
++
++# Call the appropriate compiler or preprocessor with options to build for 64-bit multilib
++
++extra_flag=-m64
++
++for i; do
++    case "$i" in
++	-m64)
++	    extra_flag=
++	    ;;
++	-m32)
++	    echo >&2 "`basename $0` called with non 64-bit multilib option $i"
++	    exit 1
++	    ;;
++    esac
++done
++
++exec ${0##*-} $extra_flag ${1+"$@"}Z
+-- 
+1.7.9.5
+

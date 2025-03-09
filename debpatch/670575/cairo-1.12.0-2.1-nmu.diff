@@ -1,0 +1,151 @@
+diff -Nru cairo-1.12.0/debian/changelog cairo-1.12.0/debian/changelog
+--- cairo-1.12.0/debian/changelog	2012-03-30 09:49:24.000000000 +0200
++++ cairo-1.12.0/debian/changelog	2012-04-26 21:58:23.000000000 +0200
+@@ -1,3 +1,16 @@
++cairo (1.12.0-2.1) unstable; urgency=low
++
++  * Non-maintainer upload.
++  * 07_traps-Clip-the-trapezoid-extents-against-the-clip-ex.patch:
++    patch from upstream git fixing crashes in evince (closes: #668619)
++  * 08_xlib-Allow-applications-to-create-0x0-surfaces.patch: patch from
++    upstream git fixing libreoffice impress slideshow mode (closes: #668172)
++  * Exclude cairo-perf-utils from libcairo2-dbg (closes: #669990)
++  * Properly remove all stamp files in debian/rules clean.
++  * Drop dh_testroot from debian/rules clean.
++
++ -- Julien Cristau <jcristau@debian.org>  Thu, 26 Apr 2012 21:57:15 +0200
++
+ cairo (1.12.0-2) unstable; urgency=low
+ 
+   * debian/rules:
+diff -Nru cairo-1.12.0/debian/patches/07_traps-Clip-the-trapezoid-extents-against-the-clip-ex.patch cairo-1.12.0/debian/patches/07_traps-Clip-the-trapezoid-extents-against-the-clip-ex.patch
+--- cairo-1.12.0/debian/patches/07_traps-Clip-the-trapezoid-extents-against-the-clip-ex.patch	1970-01-01 01:00:00.000000000 +0100
++++ cairo-1.12.0/debian/patches/07_traps-Clip-the-trapezoid-extents-against-the-clip-ex.patch	2012-04-24 20:42:23.000000000 +0200
+@@ -0,0 +1,42 @@
++From 113ec6bf0c8ed1ff12293d1ed2a2de9bd5b9904b Mon Sep 17 00:00:00 2001
++From: Chris Wilson <chris@chris-wilson.co.uk>
++Date: Sun, 8 Apr 2012 17:58:13 +0100
++Subject: [PATCH] traps: Clip the trapezoid extents against the clip extents
++
++Just in case the clip polygon turns out to be much larger than the
++operation extents (silly us for not reducing it correctly) and lead to
++catastrophe, such as:
++
++Program received signal SIGSEGV, Segmentation fault.
++pixman_fill_sse2 (bits=<optimized out>, stride=4, bpp=8, x=0, y=0,
++width=3, height=-34811, data=0) at pixman-sse2.c:3369
++3369		    *(uint16_t *)d = data;
++
++Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
++---
++ src/cairo-traps-compositor.c |    9 +++++++--
++ 1 file changed, 7 insertions(+), 2 deletions(-)
++
++diff --git a/src/cairo-traps-compositor.c b/src/cairo-traps-compositor.c
++index 284a0be..c49e208 100644
++--- a/src/cairo-traps-compositor.c
+++++ b/src/cairo-traps-compositor.c
++@@ -218,8 +218,13 @@ combine_clip_as_traps (const cairo_traps_compositor_t *compositor,
++     _cairo_traps_fini (&traps);
++     cairo_surface_destroy (src);
++ 
++-    if (status == CAIRO_INT_STATUS_SUCCESS &&
++-	(fixup.width < extents->width || fixup.height < extents->height)) {
+++    if (unlikely (status))
+++	return status;
+++
+++    if (! _cairo_rectangle_intersect (&fixup, extents))
+++	return CAIRO_STATUS_SUCCESS;
+++
+++    if (fixup.width < extents->width || fixup.height < extents->height) {
++ 	cairo_boxes_t clear;
++ 
++ 	_cairo_boxes_init (&clear);
++-- 
++1.7.10
++
+diff -Nru cairo-1.12.0/debian/patches/08_xlib-Allow-applications-to-create-0x0-surfaces.patch cairo-1.12.0/debian/patches/08_xlib-Allow-applications-to-create-0x0-surfaces.patch
+--- cairo-1.12.0/debian/patches/08_xlib-Allow-applications-to-create-0x0-surfaces.patch	1970-01-01 01:00:00.000000000 +0100
++++ cairo-1.12.0/debian/patches/08_xlib-Allow-applications-to-create-0x0-surfaces.patch	2012-04-26 21:10:08.000000000 +0200
+@@ -0,0 +1,46 @@
++From 9e81c5b737cda9dc539b2cf497c20ac48ddb91ac Mon Sep 17 00:00:00 2001
++From: Chris Wilson <chris@chris-wilson.co.uk>
++Date: Wed, 25 Apr 2012 20:41:16 +0100
++Subject: [PATCH] xlib: Allow applications to create 0x0 surfaces
++
++Although 0x0 is not a legimate surface size, we do allow applications
++the flexibility to reset the size before drawing. As we previously never
++checked the size against minimum legal constraints, applications expect
++to be able to create seemingly illegal surfaces, and so we must continue
++to provide backwards compatibility.
++
++Many thanks to Pauli Nieminen for trawling through the protocol traces,
++diving into the depths of libreoffice and identifying the regression.
++
++Fixes https://bugs.freedesktop.org/show_bug.cgi?id=49118 (presentation
++mode in loimpress is blank).
++
++Reported-by: Eric Valette <eric.valette@free.fr>
++Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
++---
++ src/cairo-xlib-surface.c |    9 ++++++++-
++ 1 file changed, 8 insertions(+), 1 deletion(-)
++
++diff --git a/src/cairo-xlib-surface.c b/src/cairo-xlib-surface.c
++index 0645da6..95fadac 100644
++--- a/src/cairo-xlib-surface.c
+++++ b/src/cairo-xlib-surface.c
++@@ -1613,7 +1613,14 @@ _cairo_xlib_screen_from_visual (Display *dpy, Visual *visual)
++ 
++ static cairo_bool_t valid_size (int width, int height)
++ {
++-    return width > 0 && width <= XLIB_COORD_MAX && height > 0 && height <= XLIB_COORD_MAX;
+++    /* Note: the minimum surface size allowed in the X protocol is 1x1.
+++     * However, as we historically did not check the minimum size we
+++     * allowed applications to lie and set the correct size later (one hopes).
+++     * To preserve compatability we must allow applications to use
+++     * 0x0 surfaces.
+++     */
+++    return (width  >= 0 && width  <= XLIB_COORD_MAX &&
+++	    height >= 0 && height <= XLIB_COORD_MAX);
++ }
++ 
++ /**
++-- 
++1.7.10
++
+diff -Nru cairo-1.12.0/debian/patches/series cairo-1.12.0/debian/patches/series
+--- cairo-1.12.0/debian/patches/series	2012-03-30 09:47:08.000000000 +0200
++++ cairo-1.12.0/debian/patches/series	2012-04-26 21:10:38.000000000 +0200
+@@ -3,3 +3,5 @@
+ 03_export-symbols.patch
+ 05-flto.patch
+ 06_hurd-map-noreserve.patch
++07_traps-Clip-the-trapezoid-extents-against-the-clip-ex.patch
++08_xlib-Allow-applications-to-create-0x0-surfaces.patch
+diff -Nru cairo-1.12.0/debian/rules cairo-1.12.0/debian/rules
+--- cairo-1.12.0/debian/rules	2012-03-30 09:38:27.000000000 +0200
++++ cairo-1.12.0/debian/rules	2012-04-26 21:57:01.000000000 +0200
+@@ -113,10 +113,9 @@
+ 
+ clean:
+ 	dh_testdir
+-	dh_testroot
+ 	[ ! -r src/cairo-features.h.orig ] || mv -f src/cairo-features.h.orig src/cairo-features.h
+ 	[ ! -r configure-common-stamp ] || patch -NRp1 < debian/ltmain_as-needed.patch
+-	rm -f *-stamp
++	rm -f *-stamp*
+ 	rm -rf $(buildbasedir) $(installbasedir)
+ 	dh_autoreconf_clean
+ 	dh_clean
+@@ -166,8 +165,8 @@
+ 	dh_installman -s
+ 	dh_installexamples -s
+ 	dh_link -s
+-	dh_strip -s --dbg-package=libcairo2-dbg -Nlibcairo2-udeb
+-	dh_strip -plibcairo2-udeb
++	dh_strip -s --dbg-package=libcairo2-dbg -Nlibcairo2-udeb -Ncairo-perf-utils
++	dh_strip -plibcairo2-udeb -pcairo-perf-utils
+ 	dh_compress -s
+ 	dh_fixperms -s
+ 	dh_makeshlibs -plibcairo2 --add-udeb=libcairo2-udeb -V 'libcairo2 (>= 1.12.0)' -- -c4

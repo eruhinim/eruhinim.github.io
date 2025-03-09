@@ -1,0 +1,4025 @@
+From d63a1ce3921a6a6c573a6a70dbf2e152adf74c3f Mon Sep 17 00:00:00 2001
+From: Milan Crha <mcrha@redhat.com>
+Date: Thu, 3 Jun 2021 17:43:27 +0200
+Subject: [PATCH] Addressbook: Switch from GData Contacts API to CardDAV API
+ for Google books
+
+The GData Contacts API is going to be shut down [1], thus move to
+the CardDAV API, which the Google server supports too.
+
+[1] https://developers.google.com/contacts/v3/announcement
+
+Related to https://gitlab.gnome.org/GNOME/libgdata/-/issues/42
+---
+ po/POTFILES.in                                |    2 -
+ src/addressbook/backends/CMakeLists.txt       |    4 -
+ .../backends/carddav/e-book-backend-carddav.c |    3 +-
+ .../backends/google/CMakeLists.txt            |  100 -
+ .../google/e-book-backend-google-factory.c    |   78 -
+ .../backends/google/e-book-backend-google.c   | 1371 -------------
+ .../backends/google/e-book-backend-google.h   |   63 -
+ .../backends/google/e-book-google-utils.c     | 1747 -----------------
+ .../backends/google/e-book-google-utils.h     |   69 -
+ .../backends/google/tests/CMakeLists.txt      |   38 -
+ .../backends/google/tests/phone-numbers.c     |  125 --
+ .../google-backend/module-google-backend.c    |  141 +-
+ ...evolution-source-registry-migrate-tweaks.c |   51 +
+ 13 files changed, 65 insertions(+), 3727 deletions(-)
+ delete mode 100644 src/addressbook/backends/google/CMakeLists.txt
+ delete mode 100644 src/addressbook/backends/google/e-book-backend-google-factory.c
+ delete mode 100644 src/addressbook/backends/google/e-book-backend-google.c
+ delete mode 100644 src/addressbook/backends/google/e-book-backend-google.h
+ delete mode 100644 src/addressbook/backends/google/e-book-google-utils.c
+ delete mode 100644 src/addressbook/backends/google/e-book-google-utils.h
+ delete mode 100644 src/addressbook/backends/google/tests/CMakeLists.txt
+ delete mode 100644 src/addressbook/backends/google/tests/phone-numbers.c
+
+diff --git a/po/POTFILES.in b/po/POTFILES.in
+index 9a25ab509..111edaa5d 100644
+--- a/po/POTFILES.in
++++ b/po/POTFILES.in
+@@ -4,8 +4,6 @@
+ src/addressbook/backends/carddav/e-book-backend-carddav.c
+ src/addressbook/backends/file/e-book-backend-file.c
+ src/addressbook/backends/file/e-book-backend-file-migrate-bdb.c
+-src/addressbook/backends/google/e-book-backend-google.c
+-src/addressbook/backends/google/e-book-google-utils.c
+ src/addressbook/backends/ldap/e-book-backend-ldap.c
+ src/addressbook/libebook-contacts/e-book-contacts-utils.c
+ src/addressbook/libebook-contacts/e-contact.c
+diff --git a/src/addressbook/backends/CMakeLists.txt b/src/addressbook/backends/CMakeLists.txt
+index dced9968e..f38ad6ac1 100644
+--- a/src/addressbook/backends/CMakeLists.txt
++++ b/src/addressbook/backends/CMakeLists.txt
+@@ -1,10 +1,6 @@
+ add_subdirectory(carddav)
+ add_subdirectory(file)
+ 
+-if(ENABLE_GOOGLE)
+-	add_subdirectory(google)
+-endif(ENABLE_GOOGLE)
+-
+ if(HAVE_LDAP)
+ 	add_subdirectory(ldap)
+ endif(HAVE_LDAP)
+diff --git a/src/addressbook/backends/carddav/e-book-backend-carddav.c b/src/addressbook/backends/carddav/e-book-backend-carddav.c
+index 0f587eaef..faf90b127 100644
+--- a/src/addressbook/backends/carddav/e-book-backend-carddav.c
++++ b/src/addressbook/backends/carddav/e-book-backend-carddav.c
+@@ -165,7 +165,8 @@ ebb_carddav_connect_sync (EBookMetaBackend *meta_backend,
+ 				}
+ 
+ 				g_free (path);
+-			} else if (soup_uri->host && e_util_utf8_strstrcase (soup_uri->host, ".googleusercontent.com")) {
++			} else if (soup_uri->host && (e_util_utf8_strstrcase (soup_uri->host, ".googleusercontent.com") ||
++						      e_util_utf8_strstrcase (soup_uri->host, ".googleapis.com"))) {
+ 				g_clear_error (&local_error);
+ 				success = TRUE;
+ 
+diff --git a/src/addressbook/backends/google/CMakeLists.txt b/src/addressbook/backends/google/CMakeLists.txt
+deleted file mode 100644
+index 09e2beeae..000000000
+--- a/src/addressbook/backends/google/CMakeLists.txt
++++ /dev/null
+@@ -1,100 +0,0 @@
+-set(DEPENDENCIES
+-	ebackend
+-	ebook
+-	ebook-contacts
+-	edataserver
+-	edata-book
+-)
+-
+-add_library(ebookbackendgoogle MODULE
+-	e-book-backend-google-factory.c
+-	e-book-backend-google.c
+-	e-book-backend-google.h
+-	e-book-google-utils.c
+-	e-book-google-utils.h
+-)
+-
+-add_dependencies(ebookbackendgoogle
+-	${DEPENDENCIES}
+-)
+-
+-target_compile_definitions(ebookbackendgoogle PRIVATE
+-	-DG_LOG_DOMAIN=\"e-book-backend-google\"
+-	-DBACKENDDIR=\"${ebook_backenddir}\"
+-)
+-
+-target_compile_options(ebookbackendgoogle PUBLIC
+-	${ADDRESSBOOK_CFLAGS}
+-	${LIBGDATA_CFLAGS}
+-)
+-
+-target_include_directories(ebookbackendgoogle PUBLIC
+-	${CMAKE_BINARY_DIR}
+-	${CMAKE_BINARY_DIR}/src
+-	${CMAKE_SOURCE_DIR}/src
+-	${CMAKE_BINARY_DIR}/src/addressbook
+-	${CMAKE_SOURCE_DIR}/src/addressbook
+-	${ADDRESSBOOK_INCLUDE_DIRS}
+-	${LIBGDATA_INCLUDE_DIRS}
+-)
+-
+-target_link_libraries(ebookbackendgoogle
+-	${DEPENDENCIES}
+-	${ADDRESSBOOK_LDFLAGS}
+-	${LIBGDATA_LDFLAGS}
+-)
+-
+-install(TARGETS ebookbackendgoogle
+-	DESTINATION ${ebook_backenddir}
+-)
+-
+-# Private utility library.
+-# This is split out to allow it to be unit tested.
+-
+-set(SOURCES
+-	e-book-google-utils.c
+-	e-book-google-utils.h
+-)
+-
+-add_library(ebook-google-utils STATIC
+-	${SOURCES}
+-)
+-
+-add_dependencies(ebook-google-utils
+-	ebackend
+-	ebook
+-	ebook-contacts
+-	edataserver
+-	edata-book
+-)
+-
+-target_compile_definitions(ebook-google-utils PRIVATE
+-	-DG_LOG_DOMAIN=\"e-book-google-utils\"
+-)
+-
+-target_compile_options(ebook-google-utils PUBLIC
+-	${ADDRESSBOOK_CFLAGS}
+-	${LIBGDATA_CFLAGS}
+-)
+-
+-target_include_directories(ebook-google-utils PUBLIC
+-	${CMAKE_BINARY_DIR}
+-	${CMAKE_BINARY_DIR}/src
+-	${CMAKE_SOURCE_DIR}/src
+-	${CMAKE_BINARY_DIR}/src/addressbook
+-	${CMAKE_SOURCE_DIR}/src/addressbook
+-	${ADDRESSBOOK_INCLUDE_DIRS}
+-	${LIBGDATA_INCLUDE_DIRS}
+-)
+-
+-target_link_libraries(ebook-google-utils
+-	ebackend
+-	ebook
+-	ebook-contacts
+-	edataserver
+-	edata-book
+-	${ADDRESSBOOK_LDFLAGS}
+-	${LIBGDATA_LDFLAGS}
+-)
+-
+-add_subdirectory(tests)
+diff --git a/src/addressbook/backends/google/e-book-backend-google-factory.c b/src/addressbook/backends/google/e-book-backend-google-factory.c
+deleted file mode 100644
+index 68b4d5189..000000000
+--- a/src/addressbook/backends/google/e-book-backend-google-factory.c
++++ /dev/null
+@@ -1,78 +0,0 @@
+-/* e-book-backend-google-factory.c - Google contact backend factory.
+- *
+- * Copyright (C) 2008 Joergen Scheibengruber
+- *
+- * This library is free software: you can redistribute it and/or modify it
+- * under the terms of the GNU Lesser General Public License as published by
+- * the Free Software Foundation.
+- *
+- * This library is distributed in the hope that it will be useful, but
+- * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+- * or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License
+- * for more details.
+- *
+- * You should have received a copy of the GNU Lesser General Public License
+- * along with this library. If not, see <http://www.gnu.org/licenses/>.
+- *
+- * Authors: Joergen Scheibengruber <joergen.scheibengruber AT googlemail.com>
+- */
+-
+-#include "evolution-data-server-config.h"
+-
+-#include "e-book-backend-google.h"
+-
+-#define FACTORY_NAME "google"
+-
+-typedef EBookBackendFactory EBookBackendGoogleFactory;
+-typedef EBookBackendFactoryClass EBookBackendGoogleFactoryClass;
+-
+-static EModule *e_module;
+-
+-/* Module Entry Points */
+-void e_module_load (GTypeModule *type_module);
+-void e_module_unload (GTypeModule *type_module);
+-
+-/* Forward Declarations */
+-GType e_book_backend_google_factory_get_type (void);
+-
+-G_DEFINE_DYNAMIC_TYPE (
+-	EBookBackendGoogleFactory,
+-	e_book_backend_google_factory,
+-	E_TYPE_BOOK_BACKEND_FACTORY)
+-
+-static void
+-e_book_backend_google_factory_class_init (EBookBackendFactoryClass *class)
+-{
+-	EBackendFactoryClass *backend_factory_class;
+-
+-	backend_factory_class = E_BACKEND_FACTORY_CLASS (class);
+-	backend_factory_class->e_module = e_module;
+-	backend_factory_class->share_subprocess = TRUE;
+-
+-	class->factory_name = FACTORY_NAME;
+-	class->backend_type = E_TYPE_BOOK_BACKEND_GOOGLE;
+-}
+-
+-static void
+-e_book_backend_google_factory_class_finalize (EBookBackendFactoryClass *class)
+-{
+-}
+-
+-static void
+-e_book_backend_google_factory_init (EBookBackendFactory *factory)
+-{
+-}
+-
+-G_MODULE_EXPORT void
+-e_module_load (GTypeModule *type_module)
+-{
+-	e_module = E_MODULE (type_module);
+-
+-	e_book_backend_google_factory_register_type (type_module);
+-}
+-
+-G_MODULE_EXPORT void
+-e_module_unload (GTypeModule *type_module)
+-{
+-	e_module = NULL;
+-}
+diff --git a/src/addressbook/backends/google/e-book-backend-google.c b/src/addressbook/backends/google/e-book-backend-google.c
+deleted file mode 100644
+index 4597169eb..000000000
+--- a/src/addressbook/backends/google/e-book-backend-google.c
++++ /dev/null
+@@ -1,1371 +0,0 @@
+-/* e-book-backend-google.c - Google contact backendy.
+- *
+- * Copyright (C) 2008 Joergen Scheibengruber
+- * Copyright (C) 2010, 2011 Philip Withnall
+- * Copyright (C) 2017 Red Hat, Inc. (www.redhat.com)
+- *
+- * This library is free software: you can redistribute it and/or modify it
+- * under the terms of the GNU Lesser General Public License as published by
+- * the Free Software Foundation.
+- *
+- * This library is distributed in the hope that it will be useful, but
+- * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+- * or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License
+- * for more details.
+- *
+- * You should have received a copy of the GNU Lesser General Public License
+- * along with this library. If not, see <http://www.gnu.org/licenses/>.
+- *
+- * Authors: Joergen Scheibengruber <joergen.scheibengruber AT googlemail.com>
+- *          Philip Withnall <philip@tecnocode.co.uk>
+- */
+-
+-#include "evolution-data-server-config.h"
+-
+-#include <string.h>
+-#include <errno.h>
+-
+-#include <glib/gi18n-lib.h>
+-#include <gdata/gdata.h>
+-
+-#include "libedataserver/libedataserver.h"
+-
+-#include "e-book-backend-google.h"
+-#include "e-book-google-utils.h"
+-
+-#ifdef G_OS_WIN32
+-#ifdef gmtime_r
+-#undef gmtime_r
+-#endif
+-
+-/* The gmtime() in Microsoft's C library is MT-safe */
+-#define gmtime_r(tp,tmp) (gmtime(tp)?(*(tmp)=*gmtime(tp),(tmp)):0)
+-#endif
+-
+-#define URI_GET_CONTACTS "https://www.google.com/m8/feeds/contacts/default/full"
+-
+-/* Local cache data version. Change it to re-download whole book content */
+-#define EBB_GOOGLE_DATA_VERSION 2
+-
+-struct _EBookBackendGooglePrivate {
+-	/* For all the group-related members */
+-	GRecMutex groups_lock;
+-	/* Mapping from group ID to (human readable) group name */
+-	GHashTable *groups_by_id;
+-	/* Mapping from (human readable) group name to group ID */
+-	GHashTable *groups_by_name;
+-	/* Mapping system_group_id to entry ID */
+-	GHashTable *system_groups_by_id;
+-	/* Mapping entry ID to system_group_id */
+-	GHashTable *system_groups_by_entry_id;
+-	/* Time when the groups were last queried */
+-	GTimeVal groups_last_update;
+-	/* Did the server-side groups change? If so, re-download the book */
+-	gboolean groups_changed;
+-
+-	GRecMutex conn_lock;
+-	GDataAuthorizer *authorizer;
+-	GDataService *service;
+-	GHashTable *preloaded; /* gchar *uid ~> EContact * */
+-};
+-
+-G_DEFINE_TYPE_WITH_PRIVATE (EBookBackendGoogle, e_book_backend_google, E_TYPE_BOOK_META_BACKEND)
+-
+-static void
+-ebb_google_data_book_error_from_gdata_error (GError **error,
+-					     const GError *gdata_error)
+-{
+-	gboolean use_fallback = FALSE;
+-
+-	g_return_if_fail (gdata_error != NULL);
+-
+-	if (!error)
+-		return;
+-
+-	/* Authentication errors */
+-	if (gdata_error->domain == GDATA_SERVICE_ERROR) {
+-		switch (gdata_error->code) {
+-		case GDATA_SERVICE_ERROR_UNAVAILABLE:
+-			g_propagate_error (error,
+-				e_client_error_create (E_CLIENT_ERROR_REPOSITORY_OFFLINE, NULL));
+-			break;
+-		case GDATA_SERVICE_ERROR_PROTOCOL_ERROR:
+-			g_propagate_error (error,
+-				e_client_error_create (E_CLIENT_ERROR_INVALID_QUERY, gdata_error->message));
+-			break;
+-		case GDATA_SERVICE_ERROR_ENTRY_ALREADY_INSERTED:
+-			g_propagate_error (error,
+-				e_book_client_error_create (E_BOOK_CLIENT_ERROR_CONTACT_ID_ALREADY_EXISTS, NULL));
+-			break;
+-		case GDATA_SERVICE_ERROR_AUTHENTICATION_REQUIRED:
+-			g_propagate_error (error,
+-				e_client_error_create (E_CLIENT_ERROR_AUTHENTICATION_REQUIRED, NULL));
+-			break;
+-		case GDATA_SERVICE_ERROR_NOT_FOUND:
+-			g_propagate_error (error,
+-				e_book_client_error_create (E_BOOK_CLIENT_ERROR_CONTACT_NOT_FOUND, NULL));
+-			break;
+-		case GDATA_SERVICE_ERROR_CONFLICT:
+-			g_propagate_error (error,
+-				e_book_client_error_create (E_BOOK_CLIENT_ERROR_CONTACT_ID_ALREADY_EXISTS, NULL));
+-			break;
+-		case GDATA_SERVICE_ERROR_FORBIDDEN:
+-			g_propagate_error (error,
+-				e_client_error_create (E_CLIENT_ERROR_QUERY_REFUSED, NULL));
+-			break;
+-		case GDATA_SERVICE_ERROR_BAD_QUERY_PARAMETER:
+-			g_propagate_error (error,
+-				e_client_error_create (E_CLIENT_ERROR_INVALID_QUERY, gdata_error->message));
+-			break;
+-		default:
+-			use_fallback = TRUE;
+-			break;
+-		}
+-
+-	} else {
+-		use_fallback = TRUE;
+-	}
+-
+-	/* Generic fallback */
+-	if (use_fallback) {
+-		g_propagate_error (error,
+-			e_client_error_create (E_CLIENT_ERROR_OTHER_ERROR, gdata_error->message));
+-	}
+-}
+-
+-static gboolean
+-ebb_google_is_authorized_locked (EBookBackendGoogle *bbgoogle)
+-{
+-	g_return_val_if_fail (E_IS_BOOK_BACKEND_GOOGLE (bbgoogle), FALSE);
+-
+-	if (!bbgoogle->priv->service)
+-		return FALSE;
+-
+-	return gdata_service_is_authorized (GDATA_SERVICE (bbgoogle->priv->service));
+-}
+-
+-static gboolean
+-ebb_google_request_authorization_locked (EBookBackendGoogle *bbgoogle,
+-					 const ENamedParameters *credentials,
+-					 GCancellable *cancellable,
+-					 GError **error)
+-{
+-	/* Make sure we have the GDataService configured
+-	 * before requesting authorization. */
+-
+-	if (!bbgoogle->priv->authorizer) {
+-		ESource *source;
+-		EGDataOAuth2Authorizer *authorizer;
+-
+-		source = e_backend_get_source (E_BACKEND (bbgoogle));
+-
+-		authorizer = e_gdata_oauth2_authorizer_new (source, GDATA_TYPE_CONTACTS_SERVICE);
+-		bbgoogle->priv->authorizer = GDATA_AUTHORIZER (authorizer);
+-	}
+-
+-	if (E_IS_GDATA_OAUTH2_AUTHORIZER (bbgoogle->priv->authorizer)) {
+-		e_gdata_oauth2_authorizer_set_credentials (E_GDATA_OAUTH2_AUTHORIZER (bbgoogle->priv->authorizer), credentials);
+-	}
+-
+-	if (!bbgoogle->priv->service) {
+-		GDataContactsService *contacts_service;
+-
+-		contacts_service = gdata_contacts_service_new (bbgoogle->priv->authorizer);
+-		bbgoogle->priv->service = GDATA_SERVICE (contacts_service);
+-
+-		e_binding_bind_property (
+-			bbgoogle, "proxy-resolver",
+-			bbgoogle->priv->service, "proxy-resolver",
+-			G_BINDING_SYNC_CREATE);
+-	}
+-
+-	/* If we're using OAuth tokens, then as far as the backend
+-	 * is concerned it's always authorized.  The GDataAuthorizer
+-	 * will take care of everything in the background. */
+-	if (!GDATA_IS_CLIENT_LOGIN_AUTHORIZER (bbgoogle->priv->authorizer))
+-		return TRUE;
+-
+-	/* Otherwise it's up to us to obtain a login secret, but
+-	   there is currently no way to do it, thus simply fail. */
+-	return FALSE;
+-}
+-
+-/* returns whether group changed from the one stored in the cache;
+- * returns FALSE, if the group was not in the cache yet;
+- * also adds the group into the cache;
+- * use group_name = NULL to remove it from the cache.
+- */
+-static gboolean
+-ebb_google_cache_update_group (EBookBackendGoogle *bbgoogle,
+-			       const gchar *group_id,
+-			       const gchar *group_name)
+-{
+-	EBookCache *book_cache;
+-	gboolean changed;
+-	gchar *key, *old_value;
+-
+-	g_return_val_if_fail (E_IS_BOOK_BACKEND_GOOGLE (bbgoogle), FALSE);
+-	g_return_val_if_fail (group_id != NULL, FALSE);
+-
+-	book_cache = e_book_meta_backend_ref_cache (E_BOOK_META_BACKEND (bbgoogle));
+-	g_return_val_if_fail (book_cache != NULL, FALSE);
+-
+-	key = g_strconcat ("google-group", ":", group_id, NULL);
+-	old_value = e_cache_dup_key (E_CACHE (book_cache), key, NULL);
+-
+-	if (group_name) {
+-		changed = old_value && g_strcmp0 (old_value, group_name) != 0;
+-
+-		e_cache_set_key (E_CACHE (book_cache), key, group_name, NULL);
+-
+-		/* Add the category to Evolution’s category list. */
+-		e_categories_add (group_name, NULL, NULL, TRUE);
+-	} else {
+-		changed = old_value != NULL;
+-
+-		e_cache_set_key (E_CACHE (book_cache), key, NULL, NULL);
+-
+-		/* Remove the category from Evolution’s category list. */
+-		if (changed)
+-			e_categories_remove (old_value);
+-	}
+-
+-	g_object_unref (book_cache);
+-	g_free (old_value);
+-	g_free (key);
+-
+-	return changed;
+-}
+-
+-static void
+-ebb_google_process_group (EBookBackendGoogle *bbgoogle,
+-			  GDataEntry *entry)
+-{
+-	const gchar *uid, *system_group_id;
+-	gchar *name;
+-	gboolean is_deleted;
+-
+-	uid = gdata_entry_get_id (entry);
+-	name = e_contact_sanitise_google_group_name (entry);
+-
+-	system_group_id = gdata_contacts_group_get_system_group_id (GDATA_CONTACTS_GROUP (entry));
+-	is_deleted = gdata_contacts_group_is_deleted (GDATA_CONTACTS_GROUP (entry));
+-
+-	g_rec_mutex_lock (&bbgoogle->priv->groups_lock);
+-
+-	if (system_group_id) {
+-		if (is_deleted) {
+-			gchar *entry_id = g_hash_table_lookup (bbgoogle->priv->system_groups_by_id, system_group_id);
+-			g_hash_table_remove (bbgoogle->priv->system_groups_by_entry_id, entry_id);
+-			g_hash_table_remove (bbgoogle->priv->system_groups_by_id, system_group_id);
+-		} else {
+-			gchar *entry_id, *system_group_id_dup;
+-
+-			entry_id = e_contact_sanitise_google_group_id (uid);
+-			system_group_id_dup = g_strdup (system_group_id);
+-
+-			g_hash_table_replace (bbgoogle->priv->system_groups_by_entry_id, entry_id, system_group_id_dup);
+-			g_hash_table_replace (bbgoogle->priv->system_groups_by_id, system_group_id_dup, entry_id);
+-		}
+-
+-		g_free (name);
+-
+-		/* use evolution's names for google's system groups */
+-		name = g_strdup (e_contact_map_google_with_evo_group (system_group_id, TRUE));
+-
+-		g_warn_if_fail (name != NULL);
+-		if (!name)
+-			name = g_strdup (system_group_id);
+-	}
+-
+-	if (is_deleted) {
+-		g_hash_table_remove (bbgoogle->priv->groups_by_id, uid);
+-		g_hash_table_remove (bbgoogle->priv->groups_by_name, name);
+-
+-		bbgoogle->priv->groups_changed = ebb_google_cache_update_group (bbgoogle, uid, NULL) || bbgoogle->priv->groups_changed;
+-	} else {
+-		g_hash_table_replace (bbgoogle->priv->groups_by_id, e_contact_sanitise_google_group_id (uid), g_strdup (name));
+-		g_hash_table_replace (bbgoogle->priv->groups_by_name, g_strdup (name), e_contact_sanitise_google_group_id (uid));
+-
+-		bbgoogle->priv->groups_changed = ebb_google_cache_update_group (bbgoogle, uid, name) || bbgoogle->priv->groups_changed;
+-	}
+-
+-	g_rec_mutex_unlock (&bbgoogle->priv->groups_lock);
+-
+-	g_free (name);
+-}
+-
+-static gboolean
+-ebb_google_get_groups_locked_sync (EBookBackendGoogle *bbgoogle,
+-				   gboolean with_time_constraint,
+-				   GCancellable *cancellable,
+-				   GError **error)
+-{
+-	GDataQuery *query;
+-	GDataFeed *feed;
+-	gboolean success;
+-	GError *local_error = NULL;
+-
+-	g_return_val_if_fail (E_IS_BOOK_BACKEND_GOOGLE (bbgoogle), FALSE);
+-	g_return_val_if_fail (ebb_google_is_authorized_locked (bbgoogle), FALSE);
+-
+-	g_rec_mutex_lock (&bbgoogle->priv->groups_lock);
+-
+-	/* Build our query, always fetch all of them */
+-	query = GDATA_QUERY (gdata_contacts_query_new_with_limits (NULL, 0, G_MAXINT));
+-	if (with_time_constraint && bbgoogle->priv->groups_last_update.tv_sec != 0) {
+-		gdata_query_set_updated_min (query, bbgoogle->priv->groups_last_update.tv_sec);
+-		gdata_contacts_query_set_show_deleted (GDATA_CONTACTS_QUERY (query), TRUE);
+-	}
+-
+-	bbgoogle->priv->groups_changed = FALSE;
+-
+-	/* Run the query synchronously */
+-	feed = gdata_contacts_service_query_groups (
+-		GDATA_CONTACTS_SERVICE (bbgoogle->priv->service),
+-		query, cancellable, NULL, NULL, &local_error);
+-
+-	if (with_time_constraint && bbgoogle->priv->groups_last_update.tv_sec != 0 && (
+-	    g_error_matches (local_error, GDATA_SERVICE_ERROR, GDATA_SERVICE_ERROR_BAD_QUERY_PARAMETER) ||
+-	    g_error_matches (local_error, GDATA_SERVICE_ERROR, GDATA_SERVICE_ERROR_PROTOCOL_ERROR))) {
+-		g_clear_error (&local_error);
+-
+-		gdata_query_set_updated_min (query, -1);
+-
+-		feed = gdata_contacts_service_query_groups (
+-			GDATA_CONTACTS_SERVICE (bbgoogle->priv->service),
+-			query, cancellable, NULL, NULL, error);
+-	} else if (local_error) {
+-		g_propagate_error (error, local_error);
+-	}
+-
+-	success = feed != NULL;
+-
+-	if (success) {
+-		GList *link;
+-
+-		for (link = gdata_feed_get_entries (feed); link; link = g_list_next (link)) {
+-			ebb_google_process_group (bbgoogle, link->data);
+-		}
+-
+-		g_get_current_time (&bbgoogle->priv->groups_last_update);
+-	}
+-
+-	g_rec_mutex_unlock (&bbgoogle->priv->groups_lock);
+-
+-	g_clear_object (&feed);
+-	g_object_unref (query);
+-
+-	return success;
+-}
+-
+-static gboolean
+-ebb_google_connect_sync (EBookMetaBackend *meta_backend,
+-			 const ENamedParameters *credentials,
+-			 ESourceAuthenticationResult *out_auth_result,
+-			 gchar **out_certificate_pem,
+-			 GTlsCertificateFlags *out_certificate_errors,
+-			 GCancellable *cancellable,
+-			 GError **error)
+-{
+-	EBookBackendGoogle *bbgoogle;
+-	gboolean success;
+-	GError *local_error = NULL;
+-
+-	g_return_val_if_fail (E_IS_BOOK_BACKEND_GOOGLE (meta_backend), FALSE);
+-	g_return_val_if_fail (out_auth_result != NULL, FALSE);
+-
+-	bbgoogle = E_BOOK_BACKEND_GOOGLE (meta_backend);
+-
+-	*out_auth_result = E_SOURCE_AUTHENTICATION_ACCEPTED;
+-
+-	g_rec_mutex_lock (&bbgoogle->priv->conn_lock);
+-
+-	if (ebb_google_is_authorized_locked (bbgoogle)) {
+-		g_rec_mutex_unlock (&bbgoogle->priv->conn_lock);
+-		return TRUE;
+-	}
+-
+-	success = ebb_google_request_authorization_locked (bbgoogle, credentials, cancellable, &local_error);
+-	if (success)
+-		success = gdata_authorizer_refresh_authorization (bbgoogle->priv->authorizer, cancellable, &local_error);
+-
+-	if (success)
+-		success = ebb_google_get_groups_locked_sync (bbgoogle, FALSE, cancellable, &local_error);
+-
+-	g_rec_mutex_unlock (&bbgoogle->priv->conn_lock);
+-
+-	if (!success) {
+-		if (g_error_matches (local_error, GDATA_SERVICE_ERROR, GDATA_SERVICE_ERROR_AUTHENTICATION_REQUIRED)) {
+-			*out_auth_result = E_SOURCE_AUTHENTICATION_REJECTED;
+-		} else if (g_error_matches (local_error, G_IO_ERROR, G_IO_ERROR_CONNECTION_REFUSED) ||
+-			   g_error_matches (local_error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND)) {
+-			*out_auth_result = E_SOURCE_AUTHENTICATION_REJECTED;
+-			g_propagate_error (error, local_error);
+-			local_error = NULL;
+-		} else {
+-			*out_auth_result = E_SOURCE_AUTHENTICATION_ERROR;
+-			ebb_google_data_book_error_from_gdata_error (error, local_error);
+-		}
+-
+-		g_clear_error (&local_error);
+-	}
+-
+-	return success;
+-}
+-
+-static gboolean
+-ebb_google_disconnect_sync (EBookMetaBackend *meta_backend,
+-			    GCancellable *cancellable,
+-			    GError **error)
+-{
+-	EBookBackendGoogle *bbgoogle;
+-
+-	g_return_val_if_fail (E_IS_BOOK_BACKEND_GOOGLE (meta_backend), FALSE);
+-
+-	bbgoogle = E_BOOK_BACKEND_GOOGLE (meta_backend);
+-
+-	g_rec_mutex_lock (&bbgoogle->priv->conn_lock);
+-
+-	g_clear_object (&bbgoogle->priv->service);
+-	g_clear_object (&bbgoogle->priv->authorizer);
+-
+-	g_rec_mutex_unlock (&bbgoogle->priv->conn_lock);
+-
+-	return TRUE;
+-}
+-
+-static gboolean
+-ebb_google_get_changes_sync (EBookMetaBackend *meta_backend,
+-			     const gchar *last_sync_tag,
+-			     gboolean is_repeat,
+-			     gchar **out_new_sync_tag,
+-			     gboolean *out_repeat,
+-			     GSList **out_created_objects, /* EBookMetaBackendInfo * */
+-			     GSList **out_modified_objects, /* EBookMetaBackendInfo * */
+-			     GSList **out_removed_objects, /* EBookMetaBackendInfo * */
+-			     GCancellable *cancellable,
+-			     GError **error)
+-{
+-	EBookBackendGoogle *bbgoogle;
+-	EBookCache *book_cache;
+-	gint64 updated_time = 0;
+-	GTimeVal last_updated;
+-	GDataFeed *feed;
+-	GDataContactsQuery *contacts_query;
+-	GHashTable *known_uids = NULL;
+-	GError *local_error = NULL;
+-
+-	g_return_val_if_fail (E_IS_BOOK_BACKEND_GOOGLE (meta_backend), FALSE);
+-	g_return_val_if_fail (out_new_sync_tag != NULL, FALSE);
+-	g_return_val_if_fail (out_created_objects != NULL, FALSE);
+-	g_return_val_if_fail (out_modified_objects != NULL, FALSE);
+-	g_return_val_if_fail (out_removed_objects != NULL, FALSE);
+-
+-	bbgoogle = E_BOOK_BACKEND_GOOGLE (meta_backend);
+-
+-	*out_created_objects = NULL;
+-	*out_modified_objects = NULL;
+-	*out_removed_objects = NULL;
+-
+-	g_rec_mutex_lock (&bbgoogle->priv->conn_lock);
+-
+-	if (!ebb_google_get_groups_locked_sync (bbgoogle, TRUE, cancellable, error)) {
+-		g_rec_mutex_unlock (&bbgoogle->priv->conn_lock);
+-		return FALSE;
+-	}
+-
+-	book_cache = e_book_meta_backend_ref_cache (meta_backend);
+-
+-	/* Download everything when the local data version mismatches */
+-	if (e_cache_get_key_int (E_CACHE (book_cache), "google-data-version", NULL) != EBB_GOOGLE_DATA_VERSION)
+-		last_sync_tag = NULL;
+-
+-	if (!last_sync_tag ||
+-	    !g_time_val_from_iso8601 (last_sync_tag, &last_updated)) {
+-		last_updated.tv_sec = 0;
+-	}
+-
+-	contacts_query = gdata_contacts_query_new_with_limits (NULL, 0, G_MAXINT);
+-	if (last_updated.tv_sec > 0 && !bbgoogle->priv->groups_changed) {
+-		gdata_query_set_updated_min (GDATA_QUERY (contacts_query), last_updated.tv_sec);
+-		gdata_contacts_query_set_show_deleted (contacts_query, TRUE);
+-	}
+-
+-	feed = gdata_contacts_service_query_contacts (GDATA_CONTACTS_SERVICE (bbgoogle->priv->service), GDATA_QUERY (contacts_query), cancellable, NULL, NULL, &local_error);
+-
+-	if (last_updated.tv_sec > 0 && !bbgoogle->priv->groups_changed && (
+-	    g_error_matches (local_error, GDATA_SERVICE_ERROR, GDATA_SERVICE_ERROR_BAD_QUERY_PARAMETER) ||
+-	    g_error_matches (local_error, GDATA_SERVICE_ERROR, GDATA_SERVICE_ERROR_PROTOCOL_ERROR))) {
+-		g_clear_error (&local_error);
+-
+-		gdata_query_set_updated_min (GDATA_QUERY (contacts_query), -1);
+-
+-		feed = gdata_contacts_service_query_contacts (GDATA_CONTACTS_SERVICE (bbgoogle->priv->service), GDATA_QUERY (contacts_query), cancellable, NULL, NULL, &local_error);
+-	}
+-
+-	if (feed && !g_cancellable_is_cancelled (cancellable) && !local_error) {
+-		GList *link;
+-
+-		if (!last_sync_tag) {
+-			GSList *uids = NULL, *slink;
+-
+-			if (e_cache_get_uids (E_CACHE (book_cache), E_CACHE_EXCLUDE_DELETED, &uids, NULL, cancellable, NULL)) {
+-				known_uids = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+-
+-				for (slink = uids; slink; slink = g_slist_next (slink)) {
+-					gchar *uid = slink->data;
+-
+-					if (uid) {
+-						g_hash_table_insert (known_uids, uid, NULL);
+-						/* Steal the data */
+-						slink->data = NULL;
+-					}
+-				}
+-
+-				g_slist_free_full (uids, g_free);
+-			}
+-		}
+-
+-		if (gdata_feed_get_updated (feed) > updated_time)
+-			updated_time = gdata_feed_get_updated (feed);
+-
+-		for (link = gdata_feed_get_entries (feed); link && !g_cancellable_is_cancelled (cancellable); link = g_list_next (link)) {
+-			GDataContactsContact *gdata_contact = link->data;
+-			EContact *cached_contact = NULL;
+-			gchar *uid;
+-
+-			if (!GDATA_IS_CONTACTS_CONTACT (gdata_contact))
+-				continue;
+-
+-			uid = g_strdup (e_book_google_utils_uid_from_entry (GDATA_ENTRY (gdata_contact)));
+-			if (!uid || !*uid) {
+-				g_free (uid);
+-				continue;
+-			}
+-
+-			if (known_uids)
+-				g_hash_table_remove (known_uids, uid);
+-
+-			if (!e_book_cache_get_contact (book_cache, uid, FALSE, &cached_contact, cancellable, NULL))
+-				cached_contact = NULL;
+-
+-			if (gdata_contacts_contact_is_deleted (gdata_contact)) {
+-				*out_removed_objects = g_slist_prepend (*out_removed_objects,
+-					e_book_meta_backend_info_new (uid, NULL, NULL, NULL));
+-			} else {
+-				EContact *new_contact;
+-
+-				if (cached_contact) {
+-					gchar *old_etag;
+-
+-					old_etag = e_vcard_util_dup_x_attribute (E_VCARD (cached_contact), E_GOOGLE_X_ETAG);
+-					if (!old_etag)
+-						old_etag = e_contact_get (cached_contact, E_CONTACT_REV);
+-
+-					if (g_strcmp0 (gdata_entry_get_etag (GDATA_ENTRY (gdata_contact)), old_etag) == 0) {
+-						g_object_unref (cached_contact);
+-						g_free (old_etag);
+-						g_free (uid);
+-						continue;
+-					}
+-
+-					g_free (old_etag);
+-				}
+-
+-				g_rec_mutex_lock (&bbgoogle->priv->groups_lock);
+-				new_contact = e_contact_new_from_gdata_entry (GDATA_ENTRY (gdata_contact),
+-					bbgoogle->priv->groups_by_id, bbgoogle->priv->system_groups_by_entry_id);
+-				g_rec_mutex_unlock (&bbgoogle->priv->groups_lock);
+-
+-				if (new_contact) {
+-					const gchar *etag, *photo_etag;
+-					gchar *object, *revision, *extra;
+-
+-					photo_etag = gdata_contacts_contact_get_photo_etag (gdata_contact);
+-					if (photo_etag && cached_contact) {
+-						gchar *old_photo_etag;
+-
+-						old_photo_etag = e_vcard_util_dup_x_attribute (E_VCARD (cached_contact), E_GOOGLE_X_PHOTO_ETAG);
+-						if (g_strcmp0 (photo_etag, old_photo_etag) == 0) {
+-							EContactPhoto *photo;
+-
+-							/* To not download it again, when it's already available locally */
+-							photo_etag = NULL;
+-
+-							/* Copy the photo attribute to the changed contact */
+-							photo = e_contact_get (cached_contact, E_CONTACT_PHOTO);
+-							e_contact_set (new_contact, E_CONTACT_PHOTO, photo);
+-
+-							e_contact_photo_free (photo);
+-						}
+-
+-						g_free (old_photo_etag);
+-					}
+-
+-					if (photo_etag) {
+-						guint8 *photo_data;
+-						gsize photo_length = 0;
+-						gchar *photo_content_type = NULL;
+-						GError *local_error2 = NULL;
+-
+-						photo_data = gdata_contacts_contact_get_photo (gdata_contact, GDATA_CONTACTS_SERVICE (bbgoogle->priv->service),
+-							&photo_length, &photo_content_type, cancellable, &local_error2);
+-
+-						if (!local_error2) {
+-							EContactPhoto *photo;
+-
+-							photo = e_contact_photo_new ();
+-							photo->type = E_CONTACT_PHOTO_TYPE_INLINED;
+-							photo->data.inlined.data = (guchar *) photo_data;
+-							photo->data.inlined.length = photo_length;
+-							photo->data.inlined.mime_type = photo_content_type;
+-
+-							e_contact_set (E_CONTACT (new_contact), E_CONTACT_PHOTO, photo);
+-
+-							e_contact_photo_free (photo);
+-
+-							/* Read of the photo frees previously obtained photo_etag */
+-							photo_etag = gdata_contacts_contact_get_photo_etag (gdata_contact);
+-
+-							e_vcard_util_set_x_attribute (E_VCARD (new_contact), E_GOOGLE_X_PHOTO_ETAG, photo_etag);
+-						} else {
+-							g_debug ("%s: Downloading contact photo for '%s' failed: %s", G_STRFUNC,
+-								gdata_entry_get_id (GDATA_ENTRY (gdata_contact)), local_error2->message);
+-
+-							g_clear_error (&local_error2);
+-						}
+-					}
+-
+-					etag = gdata_entry_get_etag (GDATA_ENTRY (gdata_contact));
+-					e_vcard_util_set_x_attribute (E_VCARD (new_contact), E_GOOGLE_X_ETAG, etag);
+-					revision = e_book_google_utils_time_to_revision (gdata_entry_get_updated (GDATA_ENTRY (gdata_contact)));
+-					e_contact_set (new_contact, E_CONTACT_REV, revision);
+-					object = e_vcard_to_string (E_VCARD (new_contact), EVC_FORMAT_VCARD_30);
+-					extra = gdata_parsable_get_xml (GDATA_PARSABLE (gdata_contact));
+-
+-					if (cached_contact) {
+-						*out_modified_objects = g_slist_prepend (*out_modified_objects,
+-							e_book_meta_backend_info_new (uid, revision, object, extra));
+-					} else {
+-						*out_created_objects = g_slist_prepend (*out_created_objects,
+-							e_book_meta_backend_info_new (uid, revision, object, extra));
+-					}
+-
+-					g_free (revision);
+-					g_free (object);
+-					g_free (extra);
+-				}
+-
+-				g_clear_object (&new_contact);
+-			}
+-
+-			g_clear_object (&cached_contact);
+-			g_free (uid);
+-		}
+-	}
+-
+-	g_rec_mutex_unlock (&bbgoogle->priv->conn_lock);
+-	g_clear_object (&contacts_query);
+-	g_clear_object (&feed);
+-
+-	if (!g_cancellable_is_cancelled (cancellable) && !local_error) {
+-		last_updated.tv_sec = updated_time;
+-		last_updated.tv_usec = 0;
+-
+-		*out_new_sync_tag = g_time_val_to_iso8601 (&last_updated);
+-
+-		if (!last_sync_tag)
+-			e_cache_set_key_int (E_CACHE (book_cache), "google-data-version", EBB_GOOGLE_DATA_VERSION, NULL);
+-
+-		if (known_uids) {
+-			GHashTableIter iter;
+-			gpointer key;
+-
+-			g_hash_table_iter_init (&iter, known_uids);
+-			while (g_hash_table_iter_next (&iter, &key, NULL)) {
+-				const gchar *uid = key;
+-
+-				if (uid) {
+-					*out_removed_objects = g_slist_prepend (*out_removed_objects,
+-						e_book_meta_backend_info_new (uid, NULL, NULL, NULL));
+-				}
+-			}
+-		}
+-	}
+-
+-	if (known_uids)
+-		g_hash_table_destroy (known_uids);
+-
+-	g_clear_object (&book_cache);
+-
+-	if (local_error) {
+-		g_propagate_error (error, local_error);
+-		return FALSE;
+-	}
+-
+-	return TRUE;
+-}
+-
+-static gboolean
+-ebb_google_load_contact_sync (EBookMetaBackend *meta_backend,
+-			      const gchar *uid,
+-			      const gchar *extra,
+-			      EContact **out_contact,
+-			      gchar **out_extra,
+-			      GCancellable *cancellable,
+-			      GError **error)
+-{
+-	EBookBackendGoogle *bbgoogle;
+-
+-	g_return_val_if_fail (E_IS_BOOK_BACKEND_GOOGLE (meta_backend), FALSE);
+-	g_return_val_if_fail (uid != NULL, FALSE);
+-	g_return_val_if_fail (out_contact != NULL, FALSE);
+-	g_return_val_if_fail (out_extra != NULL, FALSE);
+-
+-	bbgoogle = E_BOOK_BACKEND_GOOGLE (meta_backend);
+-
+-	/* Only "load" preloaded during save, otherwise fail with an error,
+-	   because the backend provides objects within get_changes_sync() */
+-
+-	if (bbgoogle->priv->preloaded) {
+-		EContact *contact;
+-
+-		contact = g_hash_table_lookup (bbgoogle->priv->preloaded, uid);
+-		if (contact) {
+-			*out_contact = e_contact_duplicate (contact);
+-
+-			g_hash_table_remove (bbgoogle->priv->preloaded, uid);
+-
+-			return TRUE;
+-		}
+-	}
+-
+-	g_set_error_literal (error, E_BOOK_CLIENT_ERROR, E_BOOK_CLIENT_ERROR_CONTACT_NOT_FOUND,
+-		e_book_client_error_to_string (E_BOOK_CLIENT_ERROR_CONTACT_NOT_FOUND));
+-
+-	return FALSE;
+-}
+-
+-static gchar *
+-ebb_google_create_group_sync (EBookBackendGoogle *bbgoogle,
+-			      const gchar *category_name,
+-			      GCancellable *cancellable,
+-			      GError **error)
+-{
+-	GDataEntry *group, *new_group;
+-	const gchar *system_group_id;
+-	gchar *uid;
+-
+-	system_group_id = e_contact_map_google_with_evo_group (category_name, FALSE);
+-	if (system_group_id) {
+-		gchar *group_entry_id;
+-
+-		g_rec_mutex_lock (&bbgoogle->priv->groups_lock);
+-		group_entry_id = g_strdup (g_hash_table_lookup (bbgoogle->priv->system_groups_by_id, system_group_id));
+-		g_rec_mutex_unlock (&bbgoogle->priv->groups_lock);
+-
+-		g_return_val_if_fail (group_entry_id != NULL, NULL);
+-
+-		return group_entry_id;
+-	}
+-
+-	group = GDATA_ENTRY (gdata_contacts_group_new (NULL));
+-
+-	gdata_entry_set_title (group, category_name);
+-
+-	/* Insert the new group */
+-	g_rec_mutex_lock (&bbgoogle->priv->conn_lock);
+-	new_group = GDATA_ENTRY (gdata_contacts_service_insert_group (
+-			GDATA_CONTACTS_SERVICE (bbgoogle->priv->service),
+-			GDATA_CONTACTS_GROUP (group),
+-			cancellable, error));
+-	g_rec_mutex_unlock (&bbgoogle->priv->conn_lock);
+-	g_object_unref (group);
+-
+-	if (new_group == NULL)
+-		return NULL;
+-
+-	/* Add the new group to the group mappings */
+-	uid = g_strdup (gdata_entry_get_id (new_group));
+-
+-	g_rec_mutex_lock (&bbgoogle->priv->groups_lock);
+-	g_hash_table_replace (bbgoogle->priv->groups_by_id, e_contact_sanitise_google_group_id (uid), g_strdup (category_name));
+-	g_hash_table_replace (bbgoogle->priv->groups_by_name, g_strdup (category_name), e_contact_sanitise_google_group_id (uid));
+-	g_rec_mutex_unlock (&bbgoogle->priv->groups_lock);
+-
+-	g_object_unref (new_group);
+-
+-	/* Update the cache. */
+-	ebb_google_cache_update_group (bbgoogle, uid, category_name);
+-
+-	return uid;
+-}
+-
+-static gboolean
+-ebb_google_photo_changed (EBookMetaBackend *meta_backend,
+-			  EContact *old_contact,
+-			  EContact *new_contact,
+-			  GCancellable *cancellable)
+-{
+-	EContact *old_contact_copy = NULL;
+-	EContactPhoto *old_photo;
+-	EContactPhoto *new_photo;
+-	gboolean changed = FALSE;
+-
+-	old_photo = e_contact_get (old_contact, E_CONTACT_PHOTO);
+-	new_photo = e_contact_get (new_contact, E_CONTACT_PHOTO);
+-
+-	if (!old_photo && new_photo)
+-		changed = TRUE;
+-
+-	if (old_photo && !new_photo)
+-		changed = TRUE;
+-
+-	/* old_photo comes from cache, thus it's always URI (to local file or elsewhere),
+-	   while the new_photo is to be saved, which is always inlined. */
+-	if (!changed && old_photo && new_photo &&
+-	    old_photo->type == E_CONTACT_PHOTO_TYPE_URI &&
+-	    new_photo->type == E_CONTACT_PHOTO_TYPE_INLINED) {
+-		e_contact_photo_free (old_photo);
+-		old_photo = NULL;
+-
+-		old_contact_copy = e_contact_duplicate (old_contact);
+-
+-		if (e_book_meta_backend_inline_local_photos_sync (meta_backend, old_contact_copy, cancellable, NULL))
+-			old_photo = e_contact_get (old_contact_copy, E_CONTACT_PHOTO);
+-	}
+-
+-	if (old_photo && new_photo &&
+-	    old_photo->type == E_CONTACT_PHOTO_TYPE_INLINED &&
+-	    new_photo->type == E_CONTACT_PHOTO_TYPE_INLINED) {
+-		guchar *old_data;
+-		guchar *new_data;
+-		gsize old_length;
+-		gsize new_length;
+-
+-		old_data = old_photo->data.inlined.data;
+-		new_data = new_photo->data.inlined.data;
+-
+-		old_length = old_photo->data.inlined.length;
+-		new_length = new_photo->data.inlined.length;
+-
+-		changed =
+-			(old_length != new_length) ||
+-			(memcmp (old_data, new_data, old_length) != 0);
+-	}
+-
+-	e_contact_photo_free (old_photo);
+-	e_contact_photo_free (new_photo);
+-	g_clear_object (&old_contact_copy);
+-
+-	return changed;
+-}
+-
+-static GDataEntry *
+-ebb_google_update_contact_photo_sync (GDataContactsContact *contact,
+-				      GDataContactsService *service,
+-				      EContactPhoto *photo,
+-				      GCancellable *cancellable,
+-				      GError **error)
+-{
+-	GDataAuthorizationDomain *authorization_domain;
+-	GDataEntry *gdata_contact = NULL;
+-	const gchar *content_type;
+-	const guint8 *photo_data;
+-	gsize photo_length;
+-	gboolean success;
+-
+-	authorization_domain = gdata_contacts_service_get_primary_authorization_domain ();
+-
+-	if (photo != NULL) {
+-		photo_data = (guint8 *) photo->data.inlined.data;
+-		photo_length = photo->data.inlined.length;
+-		content_type = photo->data.inlined.mime_type;
+-	} else {
+-		photo_data = NULL;
+-		photo_length = 0;
+-		content_type = NULL;
+-	}
+-
+-	success = gdata_contacts_contact_set_photo (
+-		contact, service,
+-		photo_data, photo_length,
+-		content_type,
+-		cancellable, error);
+-
+-	if (success) {
+-		/* Setting the photo changes the contact's ETag,
+-		 * so query for the contact to obtain its new ETag. */
+-		gdata_contact = gdata_service_query_single_entry (
+-			GDATA_SERVICE (service),
+-			authorization_domain,
+-			gdata_entry_get_id (GDATA_ENTRY (contact)),
+-			NULL, GDATA_TYPE_CONTACTS_CONTACT,
+-			cancellable, error);
+-	}
+-
+-	return gdata_contact;
+-}
+-
+-static gboolean
+-ebb_google_save_contact_sync (EBookMetaBackend *meta_backend,
+-			      gboolean overwrite_existing,
+-			      EConflictResolution conflict_resolution,
+-			      /* const */ EContact *contact,
+-			      const gchar *extra,
+-			      guint32 opflags,
+-			      gchar **out_new_uid,
+-			      gchar **out_new_extra,
+-			      GCancellable *cancellable,
+-			      GError **error)
+-{
+-	EBookBackendGoogle *bbgoogle;
+-	EBookCache *book_cache;
+-	GDataEntry *entry = NULL;
+-	GDataContactsContact *gdata_contact;
+-	EContact *cached_contact = NULL;
+-	EContact *new_contact;
+-	const gchar *uid;
+-	EContactPhoto *photo;
+-	gboolean photo_changed;
+-	GError *local_error = NULL;
+-
+-	g_return_val_if_fail (E_IS_BOOK_BACKEND_GOOGLE (meta_backend), FALSE);
+-	g_return_val_if_fail (E_IS_CONTACT (contact), FALSE);
+-	g_return_val_if_fail (out_new_uid != NULL, FALSE);
+-	g_return_val_if_fail (out_new_extra != NULL, FALSE);
+-
+-	book_cache = e_book_meta_backend_ref_cache (meta_backend);
+-	g_return_val_if_fail (book_cache != NULL, FALSE);
+-
+-	bbgoogle = E_BOOK_BACKEND_GOOGLE (meta_backend);
+-
+-	if (!overwrite_existing || !e_book_cache_get_contact (book_cache, e_contact_get_const (contact, E_CONTACT_UID),
+-		FALSE, &cached_contact, cancellable, NULL)) {
+-		cached_contact = NULL;
+-	}
+-
+-	if (extra && *extra)
+-		entry = GDATA_ENTRY (gdata_parsable_new_from_xml (GDATA_TYPE_CONTACTS_CONTACT, extra, -1, NULL));
+-
+-	g_rec_mutex_lock (&bbgoogle->priv->conn_lock);
+-	g_rec_mutex_lock (&bbgoogle->priv->groups_lock);
+-
+-	/* Ensure the system groups have been fetched. */
+-	if (g_hash_table_size (bbgoogle->priv->system_groups_by_id) == 0)
+-		ebb_google_get_groups_locked_sync (bbgoogle, FALSE, cancellable, NULL);
+-
+-	if (overwrite_existing || entry) {
+-		if (gdata_entry_update_from_e_contact (entry, contact, FALSE,
+-			bbgoogle->priv->groups_by_name,
+-			bbgoogle->priv->system_groups_by_id,
+-			ebb_google_create_group_sync,
+-			bbgoogle,
+-			cancellable)) {
+-			overwrite_existing = TRUE;
+-		} else {
+-			g_clear_object (&entry);
+-		}
+-	} else {
+-		/* Build the GDataEntry from the vCard */
+-		entry = gdata_entry_new_from_e_contact (
+-			contact,
+-			bbgoogle->priv->groups_by_name,
+-			bbgoogle->priv->system_groups_by_id,
+-			ebb_google_create_group_sync,
+-			bbgoogle,
+-			cancellable);
+-	}
+-
+-	g_rec_mutex_unlock (&bbgoogle->priv->groups_lock);
+-
+-	photo_changed = cached_contact && ebb_google_photo_changed (meta_backend, cached_contact, contact, cancellable);
+-
+-	g_clear_object (&cached_contact);
+-	g_clear_object (&book_cache);
+-
+-	if (!entry) {
+-		g_rec_mutex_unlock (&bbgoogle->priv->conn_lock);
+-		g_propagate_error (error, e_client_error_create (E_CLIENT_ERROR_OTHER_ERROR, _("Object to save is not a valid vCard")));
+-		return FALSE;
+-	}
+-
+-	if (overwrite_existing) {
+-		gdata_contact = GDATA_CONTACTS_CONTACT (gdata_service_update_entry (
+-			bbgoogle->priv->service,
+-			gdata_contacts_service_get_primary_authorization_domain (),
+-			entry, cancellable, &local_error));
+-	} else {
+-		gdata_contact = gdata_contacts_service_insert_contact (
+-			GDATA_CONTACTS_SERVICE (bbgoogle->priv->service),
+-			GDATA_CONTACTS_CONTACT (entry),
+-			cancellable, &local_error);
+-	}
+-
+-	photo = g_object_steal_data (G_OBJECT (entry), "photo");
+-
+-	g_object_unref (entry);
+-
+-	if (!gdata_contact) {
+-		g_rec_mutex_unlock (&bbgoogle->priv->conn_lock);
+-		ebb_google_data_book_error_from_gdata_error (error, local_error);
+-		g_clear_error (&local_error);
+-		e_contact_photo_free (photo);
+-
+-		return FALSE;
+-	}
+-
+-	if (photo_changed) {
+-		entry = ebb_google_update_contact_photo_sync (gdata_contact, GDATA_CONTACTS_SERVICE (bbgoogle->priv->service), photo, cancellable, &local_error);
+-		if (!entry) {
+-			g_rec_mutex_unlock (&bbgoogle->priv->conn_lock);
+-			ebb_google_data_book_error_from_gdata_error (error, local_error);
+-			g_clear_error (&local_error);
+-			e_contact_photo_free (photo);
+-			g_clear_object (&gdata_contact);
+-
+-			return FALSE;
+-		}
+-
+-		g_object_unref (gdata_contact);
+-		gdata_contact = GDATA_CONTACTS_CONTACT (entry);
+-	}
+-
+-	g_rec_mutex_unlock (&bbgoogle->priv->conn_lock);
+-
+-	g_rec_mutex_lock (&bbgoogle->priv->groups_lock);
+-	new_contact = e_contact_new_from_gdata_entry (GDATA_ENTRY (gdata_contact),
+-		bbgoogle->priv->groups_by_id,
+-		bbgoogle->priv->system_groups_by_entry_id);
+-	g_rec_mutex_unlock (&bbgoogle->priv->groups_lock);
+-
+-	if (!new_contact) {
+-		g_object_unref (gdata_contact);
+-		e_contact_photo_free (photo);
+-		g_propagate_error (error, e_client_error_create (E_CLIENT_ERROR_OTHER_ERROR, _("Failed to create contact from returned server data")));
+-		return FALSE;
+-	}
+-
+-	e_contact_set (new_contact, E_CONTACT_PHOTO, photo);
+-	e_vcard_util_set_x_attribute (E_VCARD (new_contact), E_GOOGLE_X_PHOTO_ETAG, gdata_contacts_contact_get_photo_etag (gdata_contact));
+-
+-	*out_new_extra = gdata_parsable_get_xml (GDATA_PARSABLE (gdata_contact));
+-
+-	g_object_unref (gdata_contact);
+-
+-	e_contact_photo_free (photo);
+-
+-	uid = e_contact_get_const (new_contact, E_CONTACT_UID);
+-
+-	if (!uid) {
+-		g_propagate_error (error, e_client_error_create (E_CLIENT_ERROR_OTHER_ERROR, _("Server returned contact without UID")));
+-
+-		g_object_unref (new_contact);
+-		g_free (*out_new_extra);
+-		*out_new_extra = NULL;
+-
+-		return FALSE;
+-	}
+-
+-	if (bbgoogle->priv->preloaded) {
+-		*out_new_uid = g_strdup (uid);
+-		g_hash_table_insert (bbgoogle->priv->preloaded, g_strdup (uid), new_contact);
+-	} else {
+-		g_object_unref (new_contact);
+-	}
+-
+-	return TRUE;
+-}
+-
+-static gboolean
+-ebb_google_remove_contact_sync (EBookMetaBackend *meta_backend,
+-				EConflictResolution conflict_resolution,
+-				const gchar *uid,
+-				const gchar *extra,
+-				const gchar *object,
+-				guint32 opflags,
+-				GCancellable *cancellable,
+-				GError **error)
+-{
+-	EBookBackendGoogle *bbgoogle;
+-	GDataEntry *entry;
+-	GError *local_error = NULL;
+-
+-	g_return_val_if_fail (E_IS_BOOK_BACKEND_GOOGLE (meta_backend), FALSE);
+-	g_return_val_if_fail (uid != NULL, FALSE);
+-	g_return_val_if_fail (extra != NULL, FALSE);
+-
+-	entry = GDATA_ENTRY (gdata_parsable_new_from_xml (GDATA_TYPE_CONTACTS_CONTACT, extra, -1, NULL));
+-	if (!entry) {
+-		g_propagate_error (error, e_client_error_create (E_CLIENT_ERROR_INVALID_ARG, NULL));
+-		return FALSE;
+-	}
+-
+-	bbgoogle = E_BOOK_BACKEND_GOOGLE (meta_backend);
+-
+-	g_rec_mutex_lock (&bbgoogle->priv->conn_lock);
+-
+-	if (!gdata_service_delete_entry (bbgoogle->priv->service,
+-		gdata_contacts_service_get_primary_authorization_domain (), entry,
+-		cancellable, &local_error)) {
+-		g_rec_mutex_unlock (&bbgoogle->priv->conn_lock);
+-		ebb_google_data_book_error_from_gdata_error (error, local_error);
+-		g_error_free (local_error);
+-		g_object_unref (entry);
+-
+-		return FALSE;
+-	}
+-
+-	g_rec_mutex_unlock (&bbgoogle->priv->conn_lock);
+-	g_object_unref (entry);
+-
+-	return TRUE;
+-}
+-
+-static gchar *
+-ebb_google_get_backend_property (EBookBackend *book_backend,
+-				 const gchar *prop_name)
+-{
+-	g_return_val_if_fail (prop_name != NULL, NULL);
+-
+-	if (g_str_equal (prop_name, CLIENT_BACKEND_PROPERTY_CAPABILITIES)) {
+-		return g_strjoin (",",
+-			"net",
+-			"do-initial-query",
+-			"contact-lists",
+-			e_book_meta_backend_get_capabilities (E_BOOK_META_BACKEND (book_backend)),
+-			NULL);
+-
+-	} else if (g_str_equal (prop_name, E_BOOK_BACKEND_PROPERTY_REQUIRED_FIELDS)) {
+-		return g_strdup ("");
+-
+-	} else if (g_str_equal (prop_name, E_BOOK_BACKEND_PROPERTY_SUPPORTED_FIELDS)) {
+-		return g_strjoin (",",
+-			e_contact_field_name (E_CONTACT_UID),
+-			e_contact_field_name (E_CONTACT_REV),
+-			e_contact_field_name (E_CONTACT_FULL_NAME),
+-
+-			e_contact_field_name (E_CONTACT_EMAIL_1),
+-			e_contact_field_name (E_CONTACT_EMAIL_2),
+-			e_contact_field_name (E_CONTACT_EMAIL_3),
+-			e_contact_field_name (E_CONTACT_EMAIL_4),
+-			e_contact_field_name (E_CONTACT_EMAIL),
+-
+-			e_contact_field_name (E_CONTACT_ADDRESS_LABEL_HOME),
+-			e_contact_field_name (E_CONTACT_ADDRESS_LABEL_WORK),
+-			e_contact_field_name (E_CONTACT_ADDRESS_LABEL_OTHER),
+-
+-			e_contact_field_name (E_CONTACT_IM_AIM),
+-			e_contact_field_name (E_CONTACT_IM_JABBER),
+-			e_contact_field_name (E_CONTACT_IM_YAHOO),
+-			e_contact_field_name (E_CONTACT_IM_MSN),
+-			e_contact_field_name (E_CONTACT_IM_ICQ),
+-			e_contact_field_name (E_CONTACT_IM_SKYPE),
+-			e_contact_field_name (E_CONTACT_IM_GOOGLE_TALK),
+-			/* current implementation uses http://schemas.google.com/g/2005# namespace
+-			 * see google-utils:gdata_gd_im_address_from_attribute
+-			 *
+-			 * google namespace does not support:
+-			 * e_contact_field_name (E_CONTACT_IM_TWITTER),
+-			 * e_contact_field_name (E_CONTACT_IM_GADUGADU),
+-			 * e_contact_field_name (E_CONTACT_IM_GROUPWISE),
+-			 * see https://developers.google.com/gdata/docs/2.0/elements#gdIm
+-			 * see google-utils:is_known_google_im_protocol
+-			*/
+-
+-			e_contact_field_name (E_CONTACT_ADDRESS),
+-			e_contact_field_name (E_CONTACT_ADDRESS_HOME),
+-			e_contact_field_name (E_CONTACT_ADDRESS_WORK),
+-			e_contact_field_name (E_CONTACT_ADDRESS_OTHER),
+-			e_contact_field_name (E_CONTACT_NAME),
+-			e_contact_field_name (E_CONTACT_GIVEN_NAME),
+-			e_contact_field_name (E_CONTACT_FAMILY_NAME),
+-			e_contact_field_name (E_CONTACT_PHONE_HOME),
+-			e_contact_field_name (E_CONTACT_PHONE_HOME_FAX),
+-			e_contact_field_name (E_CONTACT_PHONE_BUSINESS),
+-			e_contact_field_name (E_CONTACT_PHONE_BUSINESS_FAX),
+-			e_contact_field_name (E_CONTACT_PHONE_MOBILE),
+-			e_contact_field_name (E_CONTACT_PHONE_PAGER),
+-			e_contact_field_name (E_CONTACT_PHONE_ASSISTANT),
+-			e_contact_field_name (E_CONTACT_PHONE_BUSINESS_2),
+-			e_contact_field_name (E_CONTACT_PHONE_CALLBACK),
+-			e_contact_field_name (E_CONTACT_PHONE_CAR),
+-			e_contact_field_name (E_CONTACT_PHONE_COMPANY),
+-			e_contact_field_name (E_CONTACT_PHONE_HOME_2),
+-			e_contact_field_name (E_CONTACT_PHONE_ISDN),
+-			e_contact_field_name (E_CONTACT_PHONE_OTHER),
+-			e_contact_field_name (E_CONTACT_PHONE_OTHER_FAX),
+-			e_contact_field_name (E_CONTACT_PHONE_PRIMARY),
+-			e_contact_field_name (E_CONTACT_PHONE_RADIO),
+-			e_contact_field_name (E_CONTACT_PHONE_TELEX),
+-			e_contact_field_name (E_CONTACT_PHONE_TTYTDD),
+-			e_contact_field_name (E_CONTACT_TEL),
+-
+-			e_contact_field_name (E_CONTACT_IM_AIM_HOME_1),
+-			e_contact_field_name (E_CONTACT_IM_AIM_HOME_2),
+-			e_contact_field_name (E_CONTACT_IM_AIM_HOME_3),
+-			e_contact_field_name (E_CONTACT_IM_AIM_WORK_1),
+-			e_contact_field_name (E_CONTACT_IM_AIM_WORK_2),
+-			e_contact_field_name (E_CONTACT_IM_AIM_WORK_3),
+-			e_contact_field_name (E_CONTACT_IM_GROUPWISE_HOME_1),
+-			e_contact_field_name (E_CONTACT_IM_GROUPWISE_HOME_2),
+-			e_contact_field_name (E_CONTACT_IM_GROUPWISE_HOME_3),
+-			e_contact_field_name (E_CONTACT_IM_GROUPWISE_WORK_1),
+-			e_contact_field_name (E_CONTACT_IM_GROUPWISE_WORK_2),
+-			e_contact_field_name (E_CONTACT_IM_GROUPWISE_WORK_3),
+-			e_contact_field_name (E_CONTACT_IM_JABBER_HOME_1),
+-			e_contact_field_name (E_CONTACT_IM_JABBER_HOME_2),
+-			e_contact_field_name (E_CONTACT_IM_JABBER_HOME_3),
+-			e_contact_field_name (E_CONTACT_IM_JABBER_WORK_1),
+-			e_contact_field_name (E_CONTACT_IM_JABBER_WORK_2),
+-			e_contact_field_name (E_CONTACT_IM_JABBER_WORK_3),
+-			e_contact_field_name (E_CONTACT_IM_YAHOO_HOME_1),
+-			e_contact_field_name (E_CONTACT_IM_YAHOO_HOME_2),
+-			e_contact_field_name (E_CONTACT_IM_YAHOO_HOME_3),
+-			e_contact_field_name (E_CONTACT_IM_YAHOO_WORK_1),
+-			e_contact_field_name (E_CONTACT_IM_YAHOO_WORK_2),
+-			e_contact_field_name (E_CONTACT_IM_YAHOO_WORK_3),
+-			e_contact_field_name (E_CONTACT_IM_MSN_HOME_1),
+-			e_contact_field_name (E_CONTACT_IM_MSN_HOME_2),
+-			e_contact_field_name (E_CONTACT_IM_MSN_HOME_3),
+-			e_contact_field_name (E_CONTACT_IM_MSN_WORK_1),
+-			e_contact_field_name (E_CONTACT_IM_MSN_WORK_2),
+-			e_contact_field_name (E_CONTACT_IM_MSN_WORK_3),
+-			e_contact_field_name (E_CONTACT_IM_ICQ_HOME_1),
+-			e_contact_field_name (E_CONTACT_IM_ICQ_HOME_2),
+-			e_contact_field_name (E_CONTACT_IM_ICQ_HOME_3),
+-			e_contact_field_name (E_CONTACT_IM_ICQ_WORK_1),
+-			e_contact_field_name (E_CONTACT_IM_ICQ_WORK_2),
+-			e_contact_field_name (E_CONTACT_IM_ICQ_WORK_3),
+-			e_contact_field_name (E_CONTACT_IM_GADUGADU_HOME_1),
+-			e_contact_field_name (E_CONTACT_IM_GADUGADU_HOME_2),
+-			e_contact_field_name (E_CONTACT_IM_GADUGADU_HOME_3),
+-			e_contact_field_name (E_CONTACT_IM_GADUGADU_WORK_1),
+-			e_contact_field_name (E_CONTACT_IM_GADUGADU_WORK_2),
+-			e_contact_field_name (E_CONTACT_IM_GADUGADU_WORK_3),
+-			e_contact_field_name (E_CONTACT_IM_SKYPE_HOME_1),
+-			e_contact_field_name (E_CONTACT_IM_SKYPE_HOME_2),
+-			e_contact_field_name (E_CONTACT_IM_SKYPE_HOME_3),
+-			e_contact_field_name (E_CONTACT_IM_SKYPE_WORK_1),
+-			e_contact_field_name (E_CONTACT_IM_SKYPE_WORK_2),
+-			e_contact_field_name (E_CONTACT_IM_SKYPE_WORK_3),
+-			e_contact_field_name (E_CONTACT_IM_GOOGLE_TALK_HOME_1),
+-			e_contact_field_name (E_CONTACT_IM_GOOGLE_TALK_HOME_2),
+-			e_contact_field_name (E_CONTACT_IM_GOOGLE_TALK_HOME_3),
+-			e_contact_field_name (E_CONTACT_IM_GOOGLE_TALK_WORK_1),
+-			e_contact_field_name (E_CONTACT_IM_GOOGLE_TALK_WORK_2),
+-			e_contact_field_name (E_CONTACT_IM_GOOGLE_TALK_WORK_3),
+-
+-			e_contact_field_name (E_CONTACT_SIP),
+-			e_contact_field_name (E_CONTACT_ORG),
+-			e_contact_field_name (E_CONTACT_ORG_UNIT),
+-			e_contact_field_name (E_CONTACT_TITLE),
+-			e_contact_field_name (E_CONTACT_ROLE),
+-			e_contact_field_name (E_CONTACT_HOMEPAGE_URL),
+-			e_contact_field_name (E_CONTACT_BLOG_URL),
+-			e_contact_field_name (E_CONTACT_BIRTH_DATE),
+-			e_contact_field_name (E_CONTACT_ANNIVERSARY),
+-			e_contact_field_name (E_CONTACT_NOTE),
+-			e_contact_field_name (E_CONTACT_PHOTO),
+-			e_contact_field_name (E_CONTACT_CATEGORIES),
+-			e_contact_field_name (E_CONTACT_CATEGORY_LIST),
+-			e_contact_field_name (E_CONTACT_FILE_AS),
+-			e_contact_field_name (E_CONTACT_NICKNAME),
+-			NULL);
+-	}
+-
+-	/* Chain up to parent's method. */
+-	return E_BOOK_BACKEND_CLASS (e_book_backend_google_parent_class)->impl_get_backend_property (book_backend, prop_name);
+-}
+-
+-static void
+-ebb_google_constructed (GObject *object)
+-{
+-	EBookBackendGoogle *bbgoogle = E_BOOK_BACKEND_GOOGLE (object);
+-
+-	/* Chain up to parent's method. */
+-	G_OBJECT_CLASS (e_book_backend_google_parent_class)->constructed (object);
+-
+-	/* Set it as always writable, regardless online/offline state */
+-	e_book_backend_set_writable (E_BOOK_BACKEND (bbgoogle), TRUE);
+-}
+-
+-static void
+-ebb_google_dispose (GObject *object)
+-{
+-	EBookBackendGoogle *bbgoogle = E_BOOK_BACKEND_GOOGLE (object);
+-
+-	g_rec_mutex_lock (&bbgoogle->priv->conn_lock);
+-
+-	g_clear_object (&bbgoogle->priv->service);
+-	g_clear_object (&bbgoogle->priv->authorizer);
+-
+-	g_rec_mutex_unlock (&bbgoogle->priv->conn_lock);
+-
+-	g_hash_table_destroy (bbgoogle->priv->preloaded);
+-	bbgoogle->priv->preloaded = NULL;
+-
+-	/* Chain up to parent's method. */
+-	G_OBJECT_CLASS (e_book_backend_google_parent_class)->dispose (object);
+-}
+-
+-static void
+-ebb_google_finalize (GObject *object)
+-{
+-	EBookBackendGoogle *bbgoogle = E_BOOK_BACKEND_GOOGLE (object);
+-
+-	g_clear_pointer (&bbgoogle->priv->groups_by_id, (GDestroyNotify) g_hash_table_destroy);
+-	g_clear_pointer (&bbgoogle->priv->groups_by_id, (GDestroyNotify) g_hash_table_destroy);
+-	g_clear_pointer (&bbgoogle->priv->groups_by_name, (GDestroyNotify) g_hash_table_destroy);
+-	g_clear_pointer (&bbgoogle->priv->system_groups_by_entry_id, (GDestroyNotify) g_hash_table_destroy);
+-	g_clear_pointer (&bbgoogle->priv->system_groups_by_id, (GDestroyNotify) g_hash_table_destroy);
+-
+-	g_rec_mutex_clear (&bbgoogle->priv->groups_lock);
+-	g_rec_mutex_clear (&bbgoogle->priv->conn_lock);
+-
+-	/* Chain up to parent's method. */
+-	G_OBJECT_CLASS (e_book_backend_google_parent_class)->finalize (object);
+-}
+-
+-static void
+-e_book_backend_google_init (EBookBackendGoogle *bbgoogle)
+-{
+-	bbgoogle->priv = e_book_backend_google_get_instance_private (bbgoogle);
+-	bbgoogle->priv->preloaded = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_object_unref);
+-
+-	g_rec_mutex_init (&bbgoogle->priv->groups_lock);
+-	g_rec_mutex_init (&bbgoogle->priv->conn_lock);
+-
+-	bbgoogle->priv->groups_by_id = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+-	bbgoogle->priv->groups_by_name = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+-	bbgoogle->priv->system_groups_by_id = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+-	/* shares keys and values with system_groups_by_id */
+-	bbgoogle->priv->system_groups_by_entry_id = g_hash_table_new (g_str_hash, g_str_equal);
+-}
+-
+-static void
+-e_book_backend_google_class_init (EBookBackendGoogleClass *klass)
+-{
+-	GObjectClass *object_class;
+-	EBookBackendClass *book_backend_class;
+-	EBookMetaBackendClass *book_meta_backend_class;
+-
+-	book_meta_backend_class = E_BOOK_META_BACKEND_CLASS (klass);
+-	book_meta_backend_class->backend_module_filename = "libebookbackendgoogle.so";
+-	book_meta_backend_class->backend_factory_type_name = "EBookBackendGoogleFactory";
+-	book_meta_backend_class->connect_sync = ebb_google_connect_sync;
+-	book_meta_backend_class->disconnect_sync = ebb_google_disconnect_sync;
+-	book_meta_backend_class->get_changes_sync = ebb_google_get_changes_sync;
+-	book_meta_backend_class->load_contact_sync = ebb_google_load_contact_sync;
+-	book_meta_backend_class->save_contact_sync = ebb_google_save_contact_sync;
+-	book_meta_backend_class->remove_contact_sync = ebb_google_remove_contact_sync;
+-
+-	book_backend_class = E_BOOK_BACKEND_CLASS (klass);
+-	book_backend_class->impl_get_backend_property = ebb_google_get_backend_property;
+-
+-	object_class = G_OBJECT_CLASS (klass);
+-	object_class->constructed = ebb_google_constructed;
+-	object_class->dispose = ebb_google_dispose;
+-	object_class->finalize = ebb_google_finalize;
+-}
+diff --git a/src/addressbook/backends/google/e-book-backend-google.h b/src/addressbook/backends/google/e-book-backend-google.h
+deleted file mode 100644
+index fcbf1dec1..000000000
+--- a/src/addressbook/backends/google/e-book-backend-google.h
++++ /dev/null
+@@ -1,63 +0,0 @@
+-/* e-book-backend-google.h - Google contact backendy.
+- *
+- * Copyright (C) 2008 Joergen Scheibengruber
+- *
+- * This library is free software: you can redistribute it and/or modify it
+- * under the terms of the GNU Lesser General Public License as published by
+- * the Free Software Foundation.
+- *
+- * This library is distributed in the hope that it will be useful, but
+- * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+- * or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License
+- * for more details.
+- *
+- * You should have received a copy of the GNU Lesser General Public License
+- * along with this library. If not, see <http://www.gnu.org/licenses/>.
+- *
+- * Authors: Joergen Scheibengruber <joergen.scheibengruber AT googlemail.com>
+- */
+-
+-#ifndef E_BOOK_BACKEND_GOOGLE_H
+-#define E_BOOK_BACKEND_GOOGLE_H
+-
+-#include <libedata-book/libedata-book.h>
+-
+-/* Standard GObject macros */
+-#define E_TYPE_BOOK_BACKEND_GOOGLE \
+-	(e_book_backend_google_get_type ())
+-#define E_BOOK_BACKEND_GOOGLE(obj) \
+-	(G_TYPE_CHECK_INSTANCE_CAST \
+-	((obj), E_TYPE_BOOK_BACKEND_GOOGLE, EBookBackendGoogle))
+-#define E_BOOK_BACKEND_GOOGLE_CLASS(cls) \
+-	(G_TYPE_CHECK_CLASS_CAST \
+-	((cls), E_TYPE_BOOK_BACKEND_GOOGLE, EBookBackendGoogleClass))
+-#define E_IS_BOOK_BACKEND_GOOGLE(obj) \
+-	(G_TYPE_CHECK_INSTANCE_TYPE \
+-	((obj), E_TYPE_BOOK_BACKEND_GOOGLE))
+-#define E_IS_BOOK_BACKEND_GOOGLE_CLASS(cls) \
+-	(G_TYPE_CHECK_CLASS_TYPE \
+-	((cls), E_TYPE_BOOK_BACKEND_GOOGLE))
+-#define E_BOOK_BACKEND_GOOGLE_GET_CLASS(obj) \
+-	(G_TYPE_INSTANCE_GET_CLASS \
+-	((obj), E_TYPE_BOOK_BACKEND_GOOGLE, EBookBackendGoogleClass))
+-
+-G_BEGIN_DECLS
+-
+-typedef struct _EBookBackendGoogle EBookBackendGoogle;
+-typedef struct _EBookBackendGoogleClass EBookBackendGoogleClass;
+-typedef struct _EBookBackendGooglePrivate EBookBackendGooglePrivate;
+-
+-struct _EBookBackendGoogle {
+-	EBookMetaBackend parent_object;
+-	EBookBackendGooglePrivate *priv;
+-};
+-
+-struct _EBookBackendGoogleClass {
+-	EBookMetaBackendClass parent_class;
+-};
+-
+-GType		e_book_backend_google_get_type	(void);
+-
+-G_END_DECLS
+-
+-#endif /* E_BOOK_BACKEND_GOOGLE_H */
+diff --git a/src/addressbook/backends/google/e-book-google-utils.c b/src/addressbook/backends/google/e-book-google-utils.c
+deleted file mode 100644
+index 3b14a4e9d..000000000
+--- a/src/addressbook/backends/google/e-book-google-utils.c
++++ /dev/null
+@@ -1,1747 +0,0 @@
+-/* e-book-google-utils.c - Google contact conversion utilities.
+- *
+- * Copyright (C) 2008 Joergen Scheibengruber
+- * Copyright (C) 2010, 2011, 2012 Philip Withnall
+- *
+- * This library is free software: you can redistribute it and/or modify it
+- * under the terms of the GNU Lesser General Public License as published by
+- * the Free Software Foundation.
+- *
+- * This library is distributed in the hope that it will be useful, but
+- * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+- * or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License
+- * for more details.
+- *
+- * You should have received a copy of the GNU Lesser General Public License
+- * along with this library. If not, see <http://www.gnu.org/licenses/>.
+- *
+- * Authors: Joergen Scheibengruber <joergen.scheibengruber AT googlemail.com>
+- *          Philip Withnall <philip@tecnocode.co.uk>
+- */
+-
+-#include "evolution-data-server-config.h"
+-
+-#include <string.h>
+-#include <errno.h>
+-
+-#include <glib/gi18n-lib.h>
+-#include <libebook/libebook.h>
+-#include <gdata/gdata.h>
+-
+-#include "e-book-google-utils.h"
+-
+-/* Definitions for our custom X-URIS vCard attribute for storing URIs.
+- * See: bgo#659079. It would be nice to move this into EVCard sometime. */
+-#define GDATA_URIS_ATTR "X-URIS"
+-#define GDATA_URIS_TYPE_HOME_PAGE "X-HOME-PAGE"
+-#define GDATA_URIS_TYPE_BLOG "X-BLOG"
+-#define GDATA_URIS_TYPE_PROFILE "X-PROFILE"
+-#define GDATA_URIS_TYPE_FTP "X-FTP"
+-
+-#define GOOGLE_SYSTEM_GROUP_ATTR "X-GOOGLE-SYSTEM-GROUP-IDS"
+-
+-#define MULTIVALUE_ATTRIBUTE_SUFFIX "-MULTIVALUE"
+-
+-gboolean __e_book_google_utils_debug__;
+-#define __debug__(...) (__e_book_google_utils_debug__ ? g_log (G_LOG_DOMAIN, G_LOG_LEVEL_DEBUG, __VA_ARGS__) : (void) 0)
+-
+-#define GOOGLE_PRIMARY_PARAM "X-EVOLUTION-UI-SLOT"
+-#define GOOGLE_LABEL_PARAM "X-GOOGLE-LABEL"
+-#define GDATA_ENTRY_XML_ATTR "X-GDATA-ENTRY-XML"
+-#define GDATA_ENTRY_LINK_ATTR "X-GDATA-ENTRY-LINK"
+-
+-static void add_attribute_from_gdata_gd_email_address (EVCard *vcard, GDataGDEmailAddress *email);
+-static void add_attribute_from_gdata_gd_im_address (EVCard *vcard, GDataGDIMAddress *im);
+-static void add_attribute_from_gdata_gd_phone_number (EVCard *vcard, GDataGDPhoneNumber *number);
+-static void add_attribute_from_gdata_gd_postal_address (EVCard *vcard, GDataGDPostalAddress *address);
+-static void add_attribute_from_gdata_gd_organization (EVCard *vcard, GDataGDOrganization *org);
+-static void add_attribute_from_gc_contact_website (EVCard *vcard, GDataGContactWebsite *website);
+-
+-static GDataGDEmailAddress *gdata_gd_email_address_from_attribute (EVCardAttribute *attr, gboolean *primary);
+-static GDataGDIMAddress *gdata_gd_im_address_from_attribute (EVCardAttribute *attr, gboolean *primary);
+-static GDataGDPhoneNumber *gdata_gd_phone_number_from_attribute (EVCardAttribute *attr, gboolean *primary);
+-static GDataGDPostalAddress *gdata_gd_postal_address_from_attribute (EVCardAttribute *attr, gboolean *primary);
+-static GDataGDOrganization *gdata_gd_organization_from_attribute (EVCardAttribute *attr, gboolean *primary);
+-static GDataGContactWebsite *gdata_gc_contact_website_from_attribute (EVCardAttribute *attr, gboolean *primary);
+-
+-static gboolean is_known_google_im_protocol (const gchar *protocol);
+-
+-GDataEntry *
+-gdata_entry_new_from_e_contact (EContact *contact,
+-				GHashTable *groups_by_name,
+-				GHashTable *system_groups_by_id,
+-				EContactGoogleCreateGroupFunc create_group,
+-				EBookBackendGoogle *bbgoogle,
+-				GCancellable *cancellable)
+-{
+-	GDataEntry *entry;
+-
+-	g_return_val_if_fail (E_IS_CONTACT (contact), NULL);
+-	g_return_val_if_fail (groups_by_name != NULL, NULL);
+-	g_return_val_if_fail (system_groups_by_id != NULL, NULL);
+-	g_return_val_if_fail (g_hash_table_size (system_groups_by_id) > 0, FALSE);
+-	g_return_val_if_fail (create_group != NULL, NULL);
+-
+-	entry = GDATA_ENTRY (gdata_contacts_contact_new (NULL));
+-
+-	if (gdata_entry_update_from_e_contact (entry, contact, TRUE, groups_by_name, system_groups_by_id, create_group, bbgoogle, cancellable))
+-		return entry;
+-
+-	g_object_unref (entry);
+-
+-	return NULL;
+-}
+-
+-static void
+-remove_anniversary (GDataContactsContact *contact)
+-{
+-	GList *events, *itr;
+-
+-	events = gdata_contacts_contact_get_events (contact);
+-	if (!events)
+-		return;
+-
+-	events = g_list_copy (events);
+-	g_list_foreach (events, (GFunc) g_object_ref, NULL);
+-
+-	gdata_contacts_contact_remove_all_events (contact);
+-	for (itr = events; itr; itr = itr->next) {
+-		GDataGContactEvent *event = itr->data;
+-
+-		if (g_strcmp0 (gdata_gcontact_event_get_relation_type (event), GDATA_GCONTACT_EVENT_ANNIVERSARY) != 0)
+-			gdata_contacts_contact_add_event (contact, event);
+-	}
+-
+-	g_list_foreach (events, (GFunc) g_object_unref, NULL);
+-	g_list_free (events);
+-}
+-
+-gboolean
+-gdata_entry_update_from_e_contact (GDataEntry *entry,
+-				   EContact *contact,
+-				   gboolean ensure_personal_group,
+-				   GHashTable *groups_by_name,
+-				   GHashTable *system_groups_by_id,
+-				   EContactGoogleCreateGroupFunc create_group,
+-				   EBookBackendGoogle *bbgoogle,
+-				   GCancellable *cancellable)
+-{
+-	GList *attributes, *iter, *category_names, *extended_property_names;
+-	EContactName *name_struct = NULL;
+-	EContactPhoto *photo;
+-	gboolean have_email_primary = FALSE;
+-	gboolean have_im_primary = FALSE;
+-	gboolean have_phone_primary = FALSE;
+-	gboolean have_postal_primary = FALSE;
+-	gboolean have_org_primary = FALSE;
+-	gboolean have_uri_primary = FALSE;
+-	gchar *title, *role, *note, *nickname;
+-	EContactDate *bdate;
+-	const gchar *url;
+-
+-#if defined(GDATA_CHECK_VERSION)
+-#if GDATA_CHECK_VERSION(0, 11, 0)
+-	const gchar *file_as;
+-#endif
+-#endif
+-
+-	g_return_val_if_fail (GDATA_IS_ENTRY (entry), FALSE);
+-	g_return_val_if_fail (E_IS_CONTACT (contact), FALSE);
+-	g_return_val_if_fail (groups_by_name != NULL, FALSE);
+-	g_return_val_if_fail (system_groups_by_id != NULL, FALSE);
+-	g_return_val_if_fail (g_hash_table_size (system_groups_by_id) > 0, FALSE);
+-	g_return_val_if_fail (create_group != NULL, FALSE);
+-
+-	attributes = e_vcard_get_attributes (E_VCARD (contact));
+-
+-	/* N and FN */
+-	name_struct = e_contact_get (contact, E_CONTACT_NAME);
+-	if (name_struct) {
+-		GDataGDName *name;
+-		const gchar *given = NULL, *family = NULL;
+-
+-		if (name_struct->given && *(name_struct->given) != '\0')
+-			given = name_struct->given;
+-		if (name_struct->family && *(name_struct->family) != '\0')
+-			family = name_struct->family;
+-
+-		name = gdata_gd_name_new (given, family);
+-		if (name_struct->additional && *(name_struct->additional) != '\0')
+-			gdata_gd_name_set_additional_name (name, name_struct->additional);
+-		if (name_struct->prefixes && *(name_struct->prefixes) != '\0')
+-			gdata_gd_name_set_prefix (name, name_struct->prefixes);
+-		if (name_struct->suffixes && *(name_struct->suffixes) != '\0')
+-			gdata_gd_name_set_suffix (name, name_struct->suffixes);
+-		gdata_gd_name_set_full_name (name, e_contact_get (contact, E_CONTACT_FULL_NAME));
+-
+-		gdata_contacts_contact_set_name (GDATA_CONTACTS_CONTACT (entry), name);
+-		g_object_unref (name);
+-	}
+-
+-#if defined(GDATA_CHECK_VERSION)
+-#if GDATA_CHECK_VERSION(0, 11, 0)
+-	/* File as */
+-	file_as = e_contact_get (contact, E_CONTACT_FILE_AS);
+-	if (file_as && *file_as)
+-		gdata_contacts_contact_set_file_as (GDATA_CONTACTS_CONTACT (entry), file_as);
+-	else
+-		gdata_contacts_contact_set_file_as (GDATA_CONTACTS_CONTACT (entry), NULL);
+-#endif
+-#endif
+-
+-	/* NOTE */
+-	note = e_contact_get (contact, E_CONTACT_NOTE);
+-	if (note)
+-		gdata_entry_set_content (entry, note);
+-	else
+-		gdata_entry_set_content (entry, NULL);
+-	g_free (note);
+-
+-	/* Nickname */
+-	nickname = e_contact_get (contact, E_CONTACT_NICKNAME);
+-	gdata_contacts_contact_set_nickname (GDATA_CONTACTS_CONTACT (entry), nickname && *nickname ? nickname : NULL);
+-	g_free (nickname);
+-
+-	/* Clear out all the old attributes */
+-	gdata_contacts_contact_remove_all_email_addresses (GDATA_CONTACTS_CONTACT (entry));
+-	gdata_contacts_contact_remove_all_phone_numbers (GDATA_CONTACTS_CONTACT (entry));
+-	gdata_contacts_contact_remove_all_postal_addresses (GDATA_CONTACTS_CONTACT (entry));
+-	gdata_contacts_contact_remove_all_im_addresses (GDATA_CONTACTS_CONTACT (entry));
+-	gdata_contacts_contact_remove_all_organizations (GDATA_CONTACTS_CONTACT (entry));
+-	gdata_contacts_contact_remove_all_websites (GDATA_CONTACTS_CONTACT (entry));
+-
+-	category_names = gdata_contacts_contact_get_groups (GDATA_CONTACTS_CONTACT (entry));
+-	for (iter = category_names; iter != NULL; iter = g_list_delete_link (iter, iter))
+-		gdata_contacts_contact_remove_group (GDATA_CONTACTS_CONTACT (entry), iter->data);
+-
+-	extended_property_names = g_hash_table_get_keys (gdata_contacts_contact_get_extended_properties (GDATA_CONTACTS_CONTACT (entry)));
+-	for (iter = extended_property_names; iter != NULL; iter = g_list_delete_link (iter, iter)) {
+-		gdata_contacts_contact_set_extended_property (GDATA_CONTACTS_CONTACT (entry), iter->data, NULL);
+-	}
+-
+-	/* We walk them in reverse order, so we can find
+-	 * the correct primaries */
+-	iter = g_list_last (attributes);
+-	for (; iter; iter = iter->prev) {
+-		EVCardAttribute *attr;
+-		const gchar *name;
+-
+-		attr = iter->data;
+-		name = e_vcard_attribute_get_name (attr);
+-
+-		if (0 == g_ascii_strcasecmp (name, EVC_UID) ||
+-		    0 == g_ascii_strcasecmp (name, EVC_REV) ||
+-		    0 == g_ascii_strcasecmp (name, EVC_N) ||
+-		    0 == g_ascii_strcasecmp (name, EVC_FN) ||
+-		    0 == g_ascii_strcasecmp (name, EVC_LABEL) ||
+-		    0 == g_ascii_strcasecmp (name, EVC_VERSION) ||
+-		    0 == g_ascii_strcasecmp (name, EVC_X_FILE_AS) ||
+-		    0 == g_ascii_strcasecmp (name, EVC_TITLE) ||
+-		    0 == g_ascii_strcasecmp (name, EVC_ROLE) ||
+-		    0 == g_ascii_strcasecmp (name, EVC_NOTE) ||
+-		    0 == g_ascii_strcasecmp (name, EVC_CATEGORIES) ||
+-		    0 == g_ascii_strcasecmp (name, EVC_PHOTO) ||
+-		    0 == g_ascii_strcasecmp (name, GOOGLE_SYSTEM_GROUP_ATTR) ||
+-		    0 == g_ascii_strcasecmp (name, e_contact_field_name (E_CONTACT_NICKNAME)) ||
+-		    0 == g_ascii_strcasecmp (name, E_GOOGLE_X_PHOTO_ETAG)) {
+-			/* Ignore attributes which are treated separately */
+-		} else if (0 == g_ascii_strcasecmp (name, EVC_EMAIL)) {
+-			/* EMAIL */
+-			GDataGDEmailAddress *email;
+-
+-			email = gdata_gd_email_address_from_attribute (attr, &have_email_primary);
+-			if (email) {
+-				gdata_contacts_contact_add_email_address (GDATA_CONTACTS_CONTACT (entry), email);
+-				g_object_unref (email);
+-			}
+-		} else if (0 == g_ascii_strcasecmp (name, EVC_TEL)) {
+-			/* TEL */
+-			GDataGDPhoneNumber *number;
+-
+-			number = gdata_gd_phone_number_from_attribute (attr, &have_phone_primary);
+-			if (number) {
+-				gdata_contacts_contact_add_phone_number (GDATA_CONTACTS_CONTACT (entry), number);
+-				g_object_unref (number);
+-			}
+-		} else if (0 == g_ascii_strcasecmp (name, EVC_ADR)) {
+-			/* ADR (we ignore LABEL, since it should be the same as ADR, and ADR is more structured) */
+-			GDataGDPostalAddress *address;
+-
+-			address = gdata_gd_postal_address_from_attribute (attr, &have_postal_primary);
+-			if (address) {
+-				gdata_contacts_contact_add_postal_address (GDATA_CONTACTS_CONTACT (entry), address);
+-				g_object_unref (address);
+-			}
+-		} else if (0 == g_ascii_strcasecmp (name, EVC_ORG)) {
+-			/* ORG */
+-			GDataGDOrganization *org;
+-
+-			org = gdata_gd_organization_from_attribute (attr, &have_org_primary);
+-			if (org) {
+-				gdata_contacts_contact_add_organization (GDATA_CONTACTS_CONTACT (entry), org);
+-				g_object_unref (org);
+-			}
+-		} else if (0 == g_ascii_strncasecmp (name, "X-", 2) && is_known_google_im_protocol (name + 2)) {
+-			/* X-IM */
+-			GDataGDIMAddress *im;
+-
+-			im = gdata_gd_im_address_from_attribute (attr, &have_im_primary);
+-			if (im) {
+-				gdata_contacts_contact_add_im_address (GDATA_CONTACTS_CONTACT (entry), im);
+-				g_object_unref (im);
+-			}
+-		} else if (0 == g_ascii_strcasecmp (name, GDATA_URIS_ATTR)) {
+-			/* X-URIS */
+-			GDataGContactWebsite *website;
+-
+-			website =gdata_gc_contact_website_from_attribute (attr, &have_uri_primary);
+-			if (website) {
+-				gdata_contacts_contact_add_website (GDATA_CONTACTS_CONTACT (entry), website);
+-				g_object_unref (website);
+-			}
+-		} else if (e_vcard_attribute_is_single_valued (attr)) {
+-			gchar *value;
+-
+-			/* Add the attribute as an extended property */
+-			value = e_vcard_attribute_get_value (attr);
+-			gdata_contacts_contact_set_extended_property (GDATA_CONTACTS_CONTACT (entry), name, value);
+-			g_free (value);
+-		} else {
+-			gchar *multi_name;
+-			GList *values, *l;
+-			GString *value;
+-
+-			value = g_string_new ("");
+-			values = e_vcard_attribute_get_values (attr);
+-
+-			for (l = values; l != NULL; l = l->next) {
+-				gchar *escaped = e_vcard_escape_string (l->data);
+-				g_string_append (value, escaped);
+-				if (l->next != NULL)
+-					g_string_append_c (value, ',');
+-				g_free (escaped);
+-			}
+-			multi_name = g_strconcat (name, MULTIVALUE_ATTRIBUTE_SUFFIX, NULL);
+-			gdata_contacts_contact_set_extended_property (GDATA_CONTACTS_CONTACT (entry), multi_name, value->str);
+-			g_free (multi_name);
+-			g_string_free (value, TRUE);
+-		}
+-	}
+-
+-	/* TITLE and ROLE */
+-	title = e_contact_get (contact, E_CONTACT_TITLE);
+-	role = e_contact_get (contact, E_CONTACT_ROLE);
+-	if (title || role) {
+-		GDataGDOrganization *org = NULL;
+-
+-		/* Find an appropriate org: try to add them to the primary organization, but fall back to the first listed organization if none
+-		 * are marked as primary. */
+-		if (have_org_primary) {
+-			org = gdata_contacts_contact_get_primary_organization (GDATA_CONTACTS_CONTACT (entry));
+-		} else {
+-			GList *orgs = gdata_contacts_contact_get_organizations (GDATA_CONTACTS_CONTACT (entry));
+-			if (orgs)
+-				org = orgs->data;
+-		}
+-
+-		/* Set the title and role */
+-		if (org != NULL && title != NULL && *title != '\0')
+-			gdata_gd_organization_set_title (org, title);
+-		if (org != NULL && role != NULL && *role != '\0')
+-			gdata_gd_organization_set_job_description (org, role);
+-	}
+-
+-	g_free (title);
+-	g_free (role);
+-
+-	url = e_contact_get_const (contact, E_CONTACT_HOMEPAGE_URL);
+-	if (url && *url) {
+-		GDataGContactWebsite *website = gdata_gcontact_website_new (url, GDATA_GCONTACT_WEBSITE_HOME_PAGE, NULL, FALSE);
+-		if (website) {
+-			gdata_contacts_contact_add_website (GDATA_CONTACTS_CONTACT (entry), website);
+-			g_object_unref (website);
+-		}
+-	}
+-
+-	url = e_contact_get_const (contact, E_CONTACT_BLOG_URL);
+-	if (url && *url) {
+-		GDataGContactWebsite *website = gdata_gcontact_website_new (url, GDATA_GCONTACT_WEBSITE_BLOG, NULL, FALSE);
+-		if (website) {
+-			gdata_contacts_contact_add_website (GDATA_CONTACTS_CONTACT (entry), website);
+-			g_object_unref (website);
+-		}
+-	}
+-
+-	gdata_contacts_contact_set_birthday (GDATA_CONTACTS_CONTACT (entry), NULL, TRUE);
+-	bdate = e_contact_get (contact, E_CONTACT_BIRTH_DATE);
+-	if (bdate) {
+-		GDate *gdate = g_date_new_dmy (bdate->day, bdate->month, bdate->year);
+-
+-		if (gdate) {
+-			gdata_contacts_contact_set_birthday (GDATA_CONTACTS_CONTACT (entry), gdate, TRUE);
+-			g_date_free (gdate);
+-		}
+-		e_contact_date_free (bdate);
+-	}
+-
+-	remove_anniversary (GDATA_CONTACTS_CONTACT (entry));
+-	bdate = e_contact_get (contact, E_CONTACT_ANNIVERSARY);
+-	if (bdate) {
+-		GDate *gdate = g_date_new_dmy (bdate->day, bdate->month, bdate->year);
+-
+-		if (gdate) {
+-			GDataGContactEvent *anni = gdata_gcontact_event_new (gdate, GDATA_GCONTACT_EVENT_ANNIVERSARY, NULL);
+-
+-			if (anni) {
+-				gdata_contacts_contact_add_event (GDATA_CONTACTS_CONTACT (entry), anni);
+-				g_object_unref (anni);
+-			}
+-
+-			g_date_free (gdate);
+-		}
+-		e_contact_date_free (bdate);
+-	}
+-
+-	/* Map X-GOOGLE-SYSTEM-GROUP-IDS from outside to CATEGORIES.
+-	 * They will be mapped again to system group ids below; this is done
+-	 * so e-d-s / evolution (which use CATEGORIES), folks / gnome-contacts
+-	 * (which use X-GOOGLE-SYSTEM-GROUP-IDS) and google contacts (which
+-	 * uses the GData group IDs) all stay in sync */
+-	{
+-		EVCardAttribute *system_group_attr;
+-		EVCardAttribute *categories_attr;
+-
+-		system_group_attr = e_vcard_get_attribute (E_VCARD (contact), GOOGLE_SYSTEM_GROUP_ATTR);
+-		categories_attr = e_vcard_get_attribute (E_VCARD (contact), EVC_CATEGORIES);
+-
+-		if (system_group_attr) {
+-			GList *system_groups = e_vcard_attribute_get_values (system_group_attr);
+-			GList *sys_group;
+-
+-			for (sys_group = system_groups; sys_group; sys_group = sys_group->next) {
+-				const gchar *category_name;
+-
+-				category_name = e_contact_map_google_with_evo_group (sys_group->data, TRUE);
+-
+-				if (!categories_attr) {
+-					categories_attr = e_vcard_attribute_new (NULL, EVC_CATEGORIES);
+-					e_vcard_append_attribute (E_VCARD (contact), categories_attr);
+-				}
+-
+-				e_vcard_attribute_add_value (categories_attr, category_name);
+-			}
+-		}
+-	}
+-
+-	/* CATEGORIES */
+-	for (category_names = e_contact_get (contact, E_CONTACT_CATEGORY_LIST); category_names != NULL; category_names = category_names->next) {
+-		gchar *category_id = NULL;
+-		const gchar *category_name = category_names->data;
+-		const gchar *system_group_id;
+-
+-		if (category_name == NULL || *category_name == '\0')
+-			continue;
+-
+-		system_group_id = e_contact_map_google_with_evo_group (category_name, FALSE);
+-		if (system_group_id) {
+-			const gchar *group_entry_id = g_hash_table_lookup (system_groups_by_id, system_group_id);
+-
+-			g_warn_if_fail (group_entry_id != NULL);
+-
+-			category_id = g_strdup (group_entry_id);
+-		}
+-
+-		if (category_id == NULL)
+-			category_id = g_strdup (g_hash_table_lookup (groups_by_name, category_name));
+-		if (category_id == NULL) {
+-			GError *local_error = NULL;
+-
+-			category_id = create_group (bbgoogle, category_name, cancellable, &local_error);
+-			if (category_id == NULL) {
+-				g_warning ("Error creating group '%s': %s", category_name, local_error ? local_error->message : "Unknown error");
+-				g_clear_error (&local_error);
+-				continue;
+-			}
+-		}
+-
+-		/* Add the category to Evolution’s category list. */
+-		e_categories_add (category_name, NULL, NULL, TRUE);
+-
+-		gdata_contacts_contact_add_group (GDATA_CONTACTS_CONTACT (entry), category_id);
+-		if (g_strcmp0 (system_group_id, GDATA_CONTACTS_GROUP_CONTACTS) == 0)
+-			ensure_personal_group = FALSE;
+-		g_free (category_id);
+-	}
+-
+-	/* to have contacts shown in My Contacts by default,
+-	 * see https://bugzilla.gnome.org/show_bug.cgi?id=663324
+-	 * for more details */
+-	if (ensure_personal_group) {
+-		const gchar *group_entry_id = g_hash_table_lookup (system_groups_by_id, GDATA_CONTACTS_GROUP_CONTACTS);
+-
+-		g_warn_if_fail (group_entry_id != NULL);
+-
+-		if (group_entry_id)
+-			gdata_contacts_contact_add_group (GDATA_CONTACTS_CONTACT (entry), group_entry_id);
+-	}
+-
+-	/* PHOTO */
+-	photo = e_contact_get (contact, E_CONTACT_PHOTO);
+-
+-	if (photo != NULL && photo->type == E_CONTACT_PHOTO_TYPE_INLINED) {
+-		g_object_set_data_full (G_OBJECT (entry), "photo", photo, (GDestroyNotify) e_contact_photo_free);
+-	} else {
+-		g_object_set_data (G_OBJECT (entry), "photo", NULL);
+-
+-		if (photo != NULL) {
+-			e_contact_photo_free (photo);
+-		}
+-	}
+-
+-	return TRUE;
+-}
+-
+-static void
+-foreach_extended_props_cb (const gchar *name,
+-                           const gchar *value,
+-                           EVCard *vcard)
+-{
+-	EVCardAttribute *attr;
+-	gchar *multi_name;
+-	GString *str;
+-	const gchar *p;
+-
+-	if (g_str_has_suffix (name, MULTIVALUE_ATTRIBUTE_SUFFIX)) {
+-		multi_name = g_strndup (name, strlen (name) - strlen (MULTIVALUE_ATTRIBUTE_SUFFIX));
+-
+-		attr = e_vcard_attribute_new (NULL, multi_name);
+-		g_free (multi_name);
+-		str = g_string_new ("");
+-
+-		/* Unescape a string as described in RFC2426, section 5, breaking at unescaped commas */
+-		for (p = value ? value : ""; *p; p++) {
+-			if (*p == '\\') {
+-				p++;
+-				if (*p == '\0') {
+-					g_string_append_c (str, '\\');
+-					break;
+-				}
+-				switch (*p) {
+-				case 'n':  g_string_append_c (str, '\n'); break;
+-				case 'r':  g_string_append_c (str, '\r'); break;
+-				case ';':  g_string_append_c (str, ';'); break;
+-				case ',':  g_string_append_c (str, ','); break;
+-				case '\\': g_string_append_c (str, '\\'); break;
+-				default:
+-					g_warning ("invalid escape, passing it through");
+-					g_string_append_c (str, '\\');
+-					g_string_append_c (str, *p);
+-					break;
+-				}
+-			} else if (*p == ',') {
+-				if (str->len > 0) {
+-					e_vcard_attribute_add_value (attr, str->str);
+-					g_string_set_size (str, 0);
+-				}
+-			} else {
+-				g_string_append_c (str, *p);
+-			}
+-		}
+-
+-		if (str->len > 0) {
+-			e_vcard_attribute_add_value (attr, str->str);
+-			g_string_set_size (str, 0);
+-		}
+-		g_string_free (str, TRUE);
+-
+-		e_vcard_add_attribute (vcard, attr);
+-
+-	} else {
+-		attr = e_vcard_attribute_new (NULL, name);
+-		e_vcard_add_attribute_with_value (vcard, attr, value);
+-	}
+-}
+-
+-EContact *
+-e_contact_new_from_gdata_entry (GDataEntry *entry,
+-                                GHashTable *groups_by_id,
+-                                GHashTable *system_groups_by_entry_id)
+-{
+-	EVCard *vcard;
+-	EVCardAttribute *attr, *system_group_ids_attr;
+-	GList *email_addresses, *im_addresses, *phone_numbers, *postal_addresses, *orgs, *category_names, *category_ids;
+-	const gchar *uid, *note, *nickname;
+-	GList *itr;
+-	GDataGDName *name;
+-	GDataGDEmailAddress *email;
+-	GDataGDIMAddress *im;
+-	GDataGDPhoneNumber *phone_number;
+-	GDataGDPostalAddress *postal_address;
+-	GDataGDOrganization *org;
+-	GHashTable *extended_props;
+-	GList *websites, *events;
+-	GDate bdate;
+-	GDateTime *dt;
+-	gchar *rev = NULL;
+-	gboolean bdate_has_year;
+-	gboolean have_uri_home = FALSE, have_uri_blog = FALSE;
+-
+-#if defined(GDATA_CHECK_VERSION)
+-#if GDATA_CHECK_VERSION(0, 11, 0)
+-	const gchar *file_as;
+-#endif
+-#endif
+-
+-	g_return_val_if_fail (system_groups_by_entry_id != NULL, NULL);
+-	g_return_val_if_fail (g_hash_table_size (system_groups_by_entry_id) > 0, FALSE);
+-
+-	uid = e_book_google_utils_uid_from_entry (entry);
+-	if (NULL == uid)
+-		return NULL;
+-
+-	vcard = E_VCARD (e_contact_new ());
+-
+-	/* UID */
+-	attr = e_vcard_attribute_new (NULL, EVC_UID);
+-	e_vcard_add_attribute_with_value (vcard, attr, uid);
+-
+-	if (gdata_entry_get_etag (entry))
+-		e_vcard_util_set_x_attribute (vcard, E_GOOGLE_X_ETAG, gdata_entry_get_etag (entry));
+-
+-	/* REV */
+-	attr = e_vcard_attribute_new (NULL, EVC_REV);
+-	dt = g_date_time_new_from_unix_utc (gdata_entry_get_updated (entry));
+-	if (dt) {
+-		rev = g_date_time_format (dt, "%Y-%m-%dT%H:%M:%SZ");
+-		g_date_time_unref (dt);
+-	}
+-
+-	if (!rev)
+-		rev = g_strdup_printf ("%" G_GINT64_FORMAT, gdata_entry_get_updated (entry));
+-
+-	e_vcard_add_attribute_with_value (vcard, attr, rev);
+-
+-	g_free (rev);
+-
+-	/* FN, N */
+-	name = gdata_contacts_contact_get_name (GDATA_CONTACTS_CONTACT (entry));
+-	if (name) {
+-		EContactName name_struct;
+-
+-		/* Set the full name */
+-		e_contact_set (E_CONTACT (vcard), E_CONTACT_FULL_NAME, gdata_gd_name_get_full_name (name));
+-
+-		/* We just need to set the E_CONTACT_NAME field, and all the other name attribute values
+-		 * in the EContact will be populated automatically from that */
+-		name_struct.family = (gchar *) gdata_gd_name_get_family_name (name);
+-		name_struct.given = (gchar *) gdata_gd_name_get_given_name (name);
+-		name_struct.additional = (gchar *) gdata_gd_name_get_additional_name (name);
+-		name_struct.prefixes = (gchar *) gdata_gd_name_get_prefix (name);
+-		name_struct.suffixes = (gchar *) gdata_gd_name_get_suffix (name);
+-
+-		e_contact_set (E_CONTACT (vcard), E_CONTACT_NAME, &name_struct);
+-	}
+-
+-#if defined(GDATA_CHECK_VERSION)
+-#if GDATA_CHECK_VERSION(0, 11, 0)
+-	/* File as */
+-	file_as = gdata_contacts_contact_get_file_as (GDATA_CONTACTS_CONTACT (entry));
+-	if (file_as && *file_as)
+-		e_contact_set (E_CONTACT (vcard), E_CONTACT_FILE_AS, file_as);
+-#endif
+-#endif
+-
+-	/* NOTE */
+-	note = gdata_entry_get_content (entry);
+-	if (note)
+-		e_contact_set (E_CONTACT (vcard), E_CONTACT_NOTE, note);
+-
+-	/* Nickname */
+-	nickname = gdata_contacts_contact_get_nickname (GDATA_CONTACTS_CONTACT (entry));
+-	if (nickname)
+-		e_contact_set (E_CONTACT (vcard), E_CONTACT_NICKNAME, nickname);
+-
+-	/* EMAIL - primary first */
+-	email = gdata_contacts_contact_get_primary_email_address (GDATA_CONTACTS_CONTACT (entry));
+-	add_attribute_from_gdata_gd_email_address (vcard, email);
+-
+-	email_addresses = gdata_contacts_contact_get_email_addresses (GDATA_CONTACTS_CONTACT (entry));
+-	for (itr = email_addresses; itr; itr = itr->next) {
+-		email = itr->data;
+-		if (gdata_gd_email_address_is_primary (email) == TRUE)
+-			continue;
+-		add_attribute_from_gdata_gd_email_address (vcard, email);
+-	}
+-
+-	/* X-IM - primary first */
+-	im = gdata_contacts_contact_get_primary_im_address (GDATA_CONTACTS_CONTACT (entry));
+-	add_attribute_from_gdata_gd_im_address (vcard, im);
+-
+-	im_addresses = gdata_contacts_contact_get_im_addresses (GDATA_CONTACTS_CONTACT (entry));
+-	for (itr = im_addresses; itr; itr = itr->next) {
+-		im = itr->data;
+-		if (gdata_gd_im_address_is_primary (im) == TRUE)
+-			continue;
+-		add_attribute_from_gdata_gd_im_address (vcard, im);
+-	}
+-
+-	/* TEL - primary first */
+-	phone_number = gdata_contacts_contact_get_primary_phone_number (GDATA_CONTACTS_CONTACT (entry));
+-	add_attribute_from_gdata_gd_phone_number (vcard, phone_number);
+-
+-	phone_numbers = gdata_contacts_contact_get_phone_numbers (GDATA_CONTACTS_CONTACT (entry));
+-	for (itr = phone_numbers; itr; itr = itr->next) {
+-		phone_number = itr->data;
+-		if (gdata_gd_phone_number_is_primary (phone_number) == TRUE)
+-			continue;
+-		add_attribute_from_gdata_gd_phone_number (vcard, phone_number);
+-	}
+-
+-	/* LABEL and ADR - primary first */
+-	postal_address = gdata_contacts_contact_get_primary_postal_address (GDATA_CONTACTS_CONTACT (entry));
+-	add_attribute_from_gdata_gd_postal_address (vcard, postal_address);
+-
+-	postal_addresses = gdata_contacts_contact_get_postal_addresses (GDATA_CONTACTS_CONTACT (entry));
+-	for (itr = postal_addresses; itr; itr = itr->next) {
+-		postal_address = itr->data;
+-		if (gdata_gd_postal_address_is_primary (postal_address) == TRUE)
+-			continue;
+-		add_attribute_from_gdata_gd_postal_address (vcard, postal_address);
+-	}
+-
+-	/* TITLE, ROLE and ORG - primary first */
+-	org = gdata_contacts_contact_get_primary_organization (GDATA_CONTACTS_CONTACT (entry));
+-	orgs = gdata_contacts_contact_get_organizations (GDATA_CONTACTS_CONTACT (entry));
+-	add_attribute_from_gdata_gd_organization (vcard, org);
+-
+-	if (org || orgs) {
+-		if (!org)
+-			org = orgs->data;
+-
+-		/* EVC_TITLE and EVC_ROLE from the primary organization (or the first organization in the list if there isn't a primary org) */
+-		attr = e_vcard_attribute_new (NULL, EVC_TITLE);
+-		e_vcard_add_attribute_with_value (vcard, attr, gdata_gd_organization_get_title (org));
+-
+-		attr = e_vcard_attribute_new (NULL, EVC_ROLE);
+-		e_vcard_add_attribute_with_value (vcard, attr, gdata_gd_organization_get_job_description (org));
+-	}
+-
+-	for (itr = orgs; itr; itr = itr->next) {
+-		org = itr->data;
+-		add_attribute_from_gdata_gd_organization (vcard, org);
+-	}
+-
+-	/* CATEGORIES */
+-	category_ids = gdata_contacts_contact_get_groups (GDATA_CONTACTS_CONTACT (entry));
+-	category_names = NULL;
+-	system_group_ids_attr = e_vcard_attribute_new ("", GOOGLE_SYSTEM_GROUP_ATTR);
+-
+-	for (itr = category_ids; itr != NULL; itr = g_list_delete_link (itr, itr)) {
+-		gchar *category_id, *category_name;
+-		const gchar *system_group_id;
+-
+-		category_id = e_contact_sanitise_google_group_id (itr->data);
+-		category_name = g_hash_table_lookup (groups_by_id, category_id);
+-
+-		if (category_name != NULL) {
+-			if (g_list_find_custom (category_names, category_name, (GCompareFunc) g_strcmp0) == NULL) {
+-				category_names = g_list_prepend (category_names, category_name);
+-
+-				/* Add the category to Evolution’s category list. */
+-				e_categories_add (category_name, NULL, NULL, TRUE);
+-			}
+-		} else
+-			g_warning ("Couldn't find name for category with ID '%s'.", category_id);
+-
+-		/* Maintain a list of the IDs of the system groups the contact is in. */
+-		system_group_id = g_hash_table_lookup (system_groups_by_entry_id, category_id);
+-		if (system_group_id != NULL) {
+-			e_vcard_attribute_add_value (system_group_ids_attr, system_group_id);
+-		}
+-
+-		g_free (category_id);
+-	}
+-
+-	e_contact_set (E_CONTACT (vcard), E_CONTACT_CATEGORY_LIST, category_names);
+-	g_list_free (category_names);
+-
+-	/* Expose the IDs of the system groups the contact is in so that libfolks (and other clients) can use the information
+-	 * without having to reverse-engineer it from the (localised) category names on the contact. */
+-	if (e_vcard_attribute_get_values (system_group_ids_attr) != NULL) {
+-		e_vcard_add_attribute (vcard, system_group_ids_attr);
+-	} else {
+-		e_vcard_attribute_free (system_group_ids_attr);
+-	}
+-
+-	/* Extended properties */
+-	extended_props = gdata_contacts_contact_get_extended_properties (GDATA_CONTACTS_CONTACT (entry));
+-	g_hash_table_foreach (extended_props, (GHFunc) foreach_extended_props_cb, vcard);
+-
+-	websites = gdata_contacts_contact_get_websites (GDATA_CONTACTS_CONTACT (entry));
+-	for (itr = websites; itr != NULL; itr = itr->next) {
+-		GDataGContactWebsite *website = itr->data;
+-		const gchar *uri, *reltype;
+-
+-		if (!website)
+-			continue;
+-
+-		uri = gdata_gcontact_website_get_uri (website);
+-		reltype = gdata_gcontact_website_get_relation_type (website);
+-
+-		if (!uri || !*uri || !reltype)
+-			continue;
+-
+-		if (!have_uri_home && g_str_equal (reltype, GDATA_GCONTACT_WEBSITE_HOME_PAGE)) {
+-			e_contact_set (E_CONTACT (vcard), E_CONTACT_HOMEPAGE_URL, uri);
+-			have_uri_home = TRUE;
+-		} else if (!have_uri_blog && g_str_equal (reltype, GDATA_GCONTACT_WEBSITE_BLOG)) {
+-			e_contact_set (E_CONTACT (vcard), E_CONTACT_BLOG_URL, uri);
+-			have_uri_blog = TRUE;
+-		} else {
+-			add_attribute_from_gc_contact_website (vcard, website);
+-		}
+-	}
+-
+-	g_date_clear (&bdate, 1);
+-	bdate_has_year = gdata_contacts_contact_get_birthday (GDATA_CONTACTS_CONTACT (entry), &bdate);
+-	if (!bdate_has_year) {
+-		GTimeVal curr_time = { 0 };
+-		GDate tmp_date;
+-
+-		g_get_current_time (&curr_time);
+-		g_date_clear (&tmp_date, 1);
+-		g_date_set_time_val (&tmp_date, &curr_time);
+-
+-		g_date_set_year (&bdate, g_date_get_year (&tmp_date));
+-	}
+-
+-	if (g_date_valid (&bdate)) {
+-		EContactDate *date = e_contact_date_new ();
+-
+-		if (date) {
+-			date->day = g_date_get_day (&bdate);
+-			date->month = g_date_get_month (&bdate);
+-			date->year = g_date_get_year (&bdate);
+-
+-			e_contact_set (E_CONTACT (vcard), E_CONTACT_BIRTH_DATE, date);
+-			e_contact_date_free (date);
+-		}
+-	}
+-
+-	events = gdata_contacts_contact_get_events (GDATA_CONTACTS_CONTACT (entry));
+-	for (itr = events; itr; itr = itr->next) {
+-		GDataGContactEvent *event = itr->data;
+-
+-		if (!event)
+-			continue;
+-
+-		if (!gdata_gcontact_event_get_relation_type (event) ||
+-		    !g_str_equal (gdata_gcontact_event_get_relation_type (event), GDATA_GCONTACT_EVENT_ANNIVERSARY))
+-			continue;
+-
+-		g_date_clear (&bdate, 1);
+-		gdata_gcontact_event_get_date (event, &bdate);
+-
+-		if (g_date_valid (&bdate)) {
+-			EContactDate *date = e_contact_date_new ();
+-
+-			if (date) {
+-				date->day = g_date_get_day (&bdate);
+-				date->month = g_date_get_month (&bdate);
+-				date->year = g_date_get_year (&bdate);
+-
+-				e_contact_set (E_CONTACT (vcard), E_CONTACT_ANNIVERSARY, date);
+-				e_contact_date_free (date);
+-			}
+-		}
+-
+-		break;
+-	}
+-
+-	return E_CONTACT (vcard);
+-}
+-
+-void
+-e_contact_add_gdata_entry_xml (EContact *contact,
+-                               GDataEntry *entry)
+-{
+-	EVCardAttribute *attr;
+-	gchar *entry_xml;
+-	GDataLink *edit_link;
+-
+-	/* Cache the XML representing the entry */
+-	entry_xml = gdata_parsable_get_xml (GDATA_PARSABLE (entry));
+-	attr = e_vcard_attribute_new ("", GDATA_ENTRY_XML_ATTR);
+-	e_vcard_attribute_add_value (attr, entry_xml);
+-	e_vcard_add_attribute (E_VCARD (contact), attr);
+-	g_free (entry_xml);
+-
+-	/* Also add the update URI for the entry, since that's not serialised by gdata_parsable_get_xml */
+-	edit_link = gdata_entry_look_up_link (entry, GDATA_LINK_EDIT);
+-	if (edit_link != NULL) {
+-		attr = e_vcard_attribute_new ("", GDATA_ENTRY_LINK_ATTR);
+-		e_vcard_attribute_add_value (attr, gdata_link_get_uri (edit_link));
+-		e_vcard_add_attribute (E_VCARD (contact), attr);
+-	}
+-}
+-
+-void
+-e_contact_remove_gdata_entry_xml (EContact *contact)
+-{
+-	e_vcard_remove_attributes (E_VCARD (contact), NULL, GDATA_ENTRY_XML_ATTR);
+-	e_vcard_remove_attributes (E_VCARD (contact), NULL, GDATA_ENTRY_LINK_ATTR);
+-}
+-
+-const gchar *
+-e_contact_get_gdata_entry_xml (EContact *contact,
+-                               const gchar **edit_uri)
+-{
+-	EVCardAttribute *attr;
+-	GList *values = NULL;
+-
+-	/* Return the edit URI if asked */
+-	if (edit_uri != NULL) {
+-		attr = e_vcard_get_attribute (E_VCARD (contact), GDATA_ENTRY_LINK_ATTR);
+-		if (attr != NULL)
+-			values = e_vcard_attribute_get_values (attr);
+-		if (values != NULL)
+-			*edit_uri = values->data;
+-	}
+-
+-	/* Return the entry's XML */
+-	attr = e_vcard_get_attribute (E_VCARD (contact), GDATA_ENTRY_XML_ATTR);
+-	values = e_vcard_attribute_get_values (attr);
+-
+-	return values ? values->data : NULL;
+-}
+-
+-struct RelTypeMap {
+-	const gchar *rel;
+-	const gchar *types[2];
+-};
+-
+-/* NOTE: These maps must be kept ordered with the one-to-many types first */
+-static const struct RelTypeMap rel_type_map_phone[] = {
+-	{ "home", { "HOME", "VOICE" }},
+-	{ "home_fax", { "HOME", "FAX" }},
+-	{ "work", { "WORK", "VOICE" }},
+-	{ "work_fax", { "WORK", "FAX" }},
+-	{ "work_mobile", { "WORK", "CELL" }},
+-	{ "work_pager", { "WORK", "PAGER" }},
+-	{ "assistant", { EVC_X_ASSISTANT, NULL }},
+-	{ "callback", { EVC_X_CALLBACK, NULL }},
+-	{ "car", { "CAR", NULL }},
+-	{ "company_main", {EVC_X_COMPANY, NULL }},
+-	{ "isdn", { "ISDN", NULL }},
+-	{ "main", { "PREF", NULL }},
+-	{ "mobile", { "CELL", NULL }},
+-	{ "other", { "VOICE", NULL }},
+-	{ "other_fax", { "FAX", NULL }},
+-	{ "pager", { "PAGER", NULL }},
+-	{ "radio", { EVC_X_RADIO, NULL }},
+-	{ "telex", { EVC_X_TELEX, NULL }},
+-	{ "tty_tdd", { EVC_X_TTYTDD, NULL }},
+-
+-	/* XXX This has no clear mapping to an EContact field.
+-	 *     It's listed here for completeness, but ordered
+-	 *     last so that "other_fax" is preferred. */
+-	{ "fax", { "FAX", NULL }}
+-};
+-
+-static const struct RelTypeMap rel_type_map_im[] = {
+-	{ "home", { "HOME", NULL }},
+-	{ "netmeeting", { "NETMEETING", NULL }},
+-	{ "other", { "OTHER", NULL }},
+-	{ "work", { "WORK", NULL }},
+-};
+-
+-static const struct RelTypeMap rel_type_map_uris[] = {
+-	{ GDATA_GCONTACT_WEBSITE_HOME_PAGE, { GDATA_URIS_TYPE_HOME_PAGE, NULL }},
+-	{ GDATA_GCONTACT_WEBSITE_BLOG, { GDATA_URIS_TYPE_BLOG, NULL }},
+-	{ GDATA_GCONTACT_WEBSITE_PROFILE, { GDATA_URIS_TYPE_PROFILE, NULL }},
+-	{ GDATA_GCONTACT_WEBSITE_FTP, { GDATA_URIS_TYPE_FTP, NULL }},
+-	{ GDATA_GCONTACT_WEBSITE_HOME, { "HOME", NULL }},
+-	{ GDATA_GCONTACT_WEBSITE_OTHER, { "OTHER", NULL }},
+-	{ GDATA_GCONTACT_WEBSITE_WORK, { "WORK", NULL }},
+-};
+-
+-static const struct RelTypeMap rel_type_map_others[] = {
+-	{ "home", { "HOME", NULL }},
+-	{ "other", { "OTHER", NULL }},
+-	{ "work", { "WORK", NULL }},
+-};
+-
+-static gboolean
+-_add_type_param_from_google_rel (EVCardAttribute *attr,
+-                                 const struct RelTypeMap rel_type_map[],
+-                                 guint map_len,
+-                                 const gchar *rel)
+-{
+-	const gchar * field;
+-	guint i;
+-
+-	field = strstr (rel ? rel : "", "#");
+-	if (NULL == field)
+-		return FALSE;
+-
+-	field++;
+-	for (i = 0; i < map_len; i++) {
+-		if (0 == g_ascii_strcasecmp (rel_type_map[i].rel, field)) {
+-			EVCardAttributeParam *param;
+-			param = e_vcard_attribute_param_new ("TYPE");
+-			e_vcard_attribute_param_add_value (param, rel_type_map[i].types[0]);
+-			if (rel_type_map[i].types[1])
+-				e_vcard_attribute_param_add_value (param, rel_type_map[i].types[1]);
+-			e_vcard_attribute_add_param (attr, param);
+-			return TRUE;
+-		}
+-	}
+-	g_warning ("Unknown relationship '%s'", rel);
+-
+-	return TRUE;
+-}
+-
+-static gboolean
+-add_type_param_from_google_rel_phone (EVCardAttribute *attr,
+-                                      const gchar *rel)
+-{
+-	return _add_type_param_from_google_rel (attr, rel_type_map_phone, G_N_ELEMENTS (rel_type_map_phone), rel);
+-}
+-
+-static gboolean
+-add_type_param_from_google_rel_im (EVCardAttribute *attr,
+-                                   const gchar *rel)
+-{
+-	return _add_type_param_from_google_rel (attr, rel_type_map_im, G_N_ELEMENTS (rel_type_map_im), rel);
+-}
+-
+-static gboolean
+-add_type_param_from_google_rel_uris (EVCardAttribute *attr,
+-                                     const gchar *rel)
+-{
+-	return _add_type_param_from_google_rel (attr, rel_type_map_uris, G_N_ELEMENTS (rel_type_map_uris), rel);
+-}
+-
+-static gboolean
+-add_type_param_from_google_rel (EVCardAttribute *attr,
+-                                const gchar *rel)
+-{
+-	return _add_type_param_from_google_rel (attr, rel_type_map_others, G_N_ELEMENTS (rel_type_map_others), rel);
+-}
+-
+-static void
+-add_label_param (EVCardAttribute *attr,
+-                 const gchar *label)
+-{
+-	if (label && label[0] != '\0') {
+-		EVCardAttributeParam *param;
+-		param = e_vcard_attribute_param_new (GOOGLE_LABEL_PARAM);
+-		e_vcard_attribute_add_param_with_value (attr, param, label);
+-	}
+-}
+-
+-static gchar *
+-_google_rel_from_types (GList *types,
+-                        const struct RelTypeMap rel_type_map[],
+-                        guint map_len,
+-                        gboolean use_prefix)
+-{
+-	const gchar *format = "http://schemas.google.com/g/2005#%s";
+-	guint i;
+-	if (!use_prefix)
+-		format = "%s";
+-
+-	/* For each of the entries in the map... */
+-	for (i = 0; i < map_len; i++) {
+-		GList *cur;
+-		gboolean first_matched = FALSE, second_matched = rel_type_map[i].types[1] ? FALSE : TRUE;
+-
+-		/* ...iterate through all the vCard's types and see if two of them match the types in the current map entry. */
+-		for (cur = types; cur != NULL; cur = cur->next) {
+-			if (0 == g_ascii_strcasecmp (rel_type_map[i].types[0], cur->data))
+-				first_matched = TRUE;
+-			else if (!rel_type_map[i].types[1] || 0 == g_ascii_strcasecmp (rel_type_map[i].types[1], cur->data))
+-				second_matched = TRUE;
+-
+-			/* If they do, return the rel value from that entry... */
+-			if (first_matched && second_matched)
+-				return g_strdup_printf (format, rel_type_map[i].rel);
+-		}
+-	}
+-
+-	/* ...otherwise return an "other" result. */
+-	return g_strdup_printf (format, "other");
+-}
+-
+-static gchar *
+-google_rel_from_types (GList *types)
+-{
+-	return _google_rel_from_types (types, rel_type_map_others, G_N_ELEMENTS (rel_type_map_others), TRUE);
+-}
+-
+-static gchar *
+-google_rel_from_types_phone (GList *types)
+-{
+-	return _google_rel_from_types (types, rel_type_map_phone, G_N_ELEMENTS (rel_type_map_phone), TRUE);
+-}
+-
+-static gchar *
+-google_rel_from_types_uris (GList *types)
+-{
+-	return _google_rel_from_types (types, rel_type_map_uris, G_N_ELEMENTS (rel_type_map_uris), FALSE);
+-}
+-
+-static gboolean
+-is_known_google_im_protocol (const gchar *protocol)
+-{
+-	const gchar *known_protocols[] = {
+-		"AIM", "MSN", "YAHOO", "SKYPE", "QQ",
+-		"GOOGLE-TALK", "ICQ", "JABBER"
+-	};
+-	guint i;
+-
+-	if (NULL == protocol)
+-		return FALSE;
+-
+-	for (i = 0; i < G_N_ELEMENTS (known_protocols); i++) {
+-		if (0 == g_ascii_strcasecmp (known_protocols[i], protocol))
+-			return TRUE;
+-	}
+-
+-	return FALSE;
+-}
+-
+-static gchar *
+-field_name_from_google_im_protocol (const gchar *google_protocol)
+-{
+-	gchar *protocol;
+-	if (!google_protocol)
+-		return NULL;
+-
+-	protocol = g_strrstr (google_protocol, "#");
+-	if (!protocol)
+-		return NULL;
+-
+-	if (strcmp ("#GOOGLE_TALK", protocol) == 0)
+-		return g_strdup (EVC_X_GOOGLE_TALK);
+-	else
+-		return g_strdup_printf ("X-%s", protocol + 1);
+-}
+-
+-static gchar *
+-google_im_protocol_from_field_name (const gchar *field_name)
+-{
+-	const gchar format[] = "http://schemas.google.com/g/2005#%s";
+-
+-	if (!field_name || strlen (field_name) < 3)
+-		return NULL;
+-
+-	if (strcmp (field_name, EVC_X_GOOGLE_TALK) == 0)
+-		return g_strdup_printf (format, "GOOGLE_TALK");
+-	else
+-		return g_strdup_printf (format, field_name + 2);
+-}
+-
+-static void
+-add_primary_param (EVCardAttribute *attr,
+-                   gboolean has_type)
+-{
+-	EVCardAttributeParam *param = e_vcard_attribute_param_new (GOOGLE_PRIMARY_PARAM);
+-	e_vcard_attribute_add_param_with_value (attr, param, "1");
+-
+-	if (!has_type) {
+-		param = e_vcard_attribute_param_new ("TYPE");
+-		e_vcard_attribute_add_param_with_value (attr, param, "PREF");
+-	}
+-}
+-
+-static GList *
+-get_google_primary_type_label (EVCardAttribute *attr,
+-                               gboolean *primary,
+-                               const gchar **label)
+-{
+-	GList *params;
+-	GList *types = NULL;
+-
+-	*primary = FALSE;
+-	*label = NULL;
+-	params = e_vcard_attribute_get_params (attr);
+-
+-	while (params) {
+-		const gchar *name;
+-
+-		name = e_vcard_attribute_param_get_name (params->data);
+-		if (g_ascii_strcasecmp (name, GOOGLE_PRIMARY_PARAM) == 0) {
+-			GList *values;
+-
+-			values = e_vcard_attribute_param_get_values (params->data);
+-			if (values && values->data &&
+-				(((const gchar *) values->data)[0] == '1' ||
+-				 0 == g_ascii_strcasecmp (values->data, "yes"))) {
+-				*primary = TRUE;
+-			}
+-		}
+-
+-		if (g_ascii_strcasecmp (name, GOOGLE_LABEL_PARAM) == 0) {
+-			GList *values;
+-
+-			values = e_vcard_attribute_param_get_values (params->data);
+-			*label = values ? values->data : NULL;
+-		}
+-
+-		if (g_ascii_strcasecmp (name, "TYPE") == 0)
+-			types = e_vcard_attribute_param_get_values (params->data);
+-		params = params->next;
+-	}
+-
+-	return types;
+-}
+-
+-static void
+-add_attribute_from_gdata_gd_email_address (EVCard *vcard,
+-                                           GDataGDEmailAddress *email)
+-{
+-	EVCardAttribute *attr;
+-	gboolean has_type;
+-
+-	if (!email || !gdata_gd_email_address_get_address (email))
+-		return;
+-
+-	attr = e_vcard_attribute_new (NULL, EVC_EMAIL);
+-	has_type = add_type_param_from_google_rel (attr, gdata_gd_email_address_get_relation_type (email));
+-	if (gdata_gd_email_address_is_primary (email))
+-		add_primary_param (attr, has_type);
+-	add_label_param (attr, gdata_gd_email_address_get_label (email));
+-
+-	e_vcard_attribute_add_value (attr, gdata_gd_email_address_get_address (email));
+-
+-	if (attr)
+-		e_vcard_add_attribute (vcard, attr);
+-}
+-
+-static void
+-add_attribute_from_gdata_gd_im_address (EVCard *vcard,
+-                                        GDataGDIMAddress *im)
+-{
+-	EVCardAttribute *attr;
+-	gboolean has_type;
+-	gchar *field_name;
+-
+-	if (!im || !gdata_gd_im_address_get_address (im))
+-		return;
+-
+-	field_name = field_name_from_google_im_protocol (gdata_gd_im_address_get_protocol (im));
+-	if (!field_name)
+-		return;
+-
+-	attr = e_vcard_attribute_new (NULL, field_name);
+-	has_type = add_type_param_from_google_rel_im (attr, gdata_gd_im_address_get_relation_type (im));
+-	if (gdata_gd_im_address_is_primary (im))
+-		add_primary_param (attr, has_type);
+-	add_label_param (attr, gdata_gd_im_address_get_label (im));
+-
+-	e_vcard_attribute_add_value (attr, gdata_gd_im_address_get_address (im));
+-
+-	if (attr)
+-		e_vcard_add_attribute (vcard, attr);
+-}
+-
+-static void
+-add_attribute_from_gdata_gd_phone_number (EVCard *vcard,
+-                                          GDataGDPhoneNumber *number)
+-{
+-	EVCardAttribute *attr;
+-	gboolean has_type;
+-
+-	if (!number || !gdata_gd_phone_number_get_number (number))
+-		return;
+-
+-	attr = e_vcard_attribute_new (NULL, EVC_TEL);
+-	has_type = add_type_param_from_google_rel_phone (attr, gdata_gd_phone_number_get_relation_type (number));
+-	if (gdata_gd_phone_number_is_primary (number))
+-		add_primary_param (attr, has_type);
+-	add_label_param (attr, gdata_gd_phone_number_get_label (number));
+-
+-	e_vcard_attribute_add_value (attr, gdata_gd_phone_number_get_number (number));
+-
+-	if (attr)
+-		e_vcard_add_attribute (vcard, attr);
+-}
+-
+-static void
+-add_attribute_from_gdata_gd_postal_address (EVCard *vcard,
+-                                            GDataGDPostalAddress *address)
+-{
+-	EVCardAttribute *attr;
+-	gboolean has_type;
+-
+-	if (!address || !gdata_gd_postal_address_get_address (address))
+-		return;
+-
+-	/* Add the LABEL */
+-	attr = e_vcard_attribute_new (NULL, EVC_LABEL);
+-	has_type = add_type_param_from_google_rel (attr, gdata_gd_postal_address_get_relation_type (address));
+-	if (gdata_gd_postal_address_is_primary (address))
+-		add_primary_param (attr, has_type);
+-	add_label_param (attr, gdata_gd_postal_address_get_label (address));
+-
+-	e_vcard_attribute_add_value (attr, gdata_gd_postal_address_get_address (address));
+-
+-	if (attr)
+-		e_vcard_add_attribute (vcard, attr);
+-
+-	/* Add the ADR */
+-	attr = e_vcard_attribute_new (NULL, EVC_ADR);
+-	has_type = add_type_param_from_google_rel (attr, gdata_gd_postal_address_get_relation_type (address));
+-	if (gdata_gd_postal_address_is_primary (address))
+-		add_primary_param (attr, has_type);
+-	add_label_param (attr, gdata_gd_postal_address_get_label (address));
+-
+-	e_vcard_attribute_add_value (attr, gdata_gd_postal_address_get_po_box (address));
+-	e_vcard_attribute_add_value (attr, gdata_gd_postal_address_get_house_name (address));
+-	e_vcard_attribute_add_value (attr, gdata_gd_postal_address_get_street (address));
+-	e_vcard_attribute_add_value (attr, gdata_gd_postal_address_get_city (address));
+-	e_vcard_attribute_add_value (attr, gdata_gd_postal_address_get_region (address));
+-	e_vcard_attribute_add_value (attr, gdata_gd_postal_address_get_postcode (address));
+-	e_vcard_attribute_add_value (attr, gdata_gd_postal_address_get_country (address));
+-
+-	/* The following bits of data provided by the Google Contacts API can't be fitted into the vCard format:
+-	 *   gdata_gd_postal_address_get_mail_class
+-	 *   gdata_gd_postal_address_get_usage
+-	 *   gdata_gd_postal_address_get_agent
+-	 *   gdata_gd_postal_address_get_neighborhood
+-	 *   gdata_gd_postal_address_get_subregion
+-	 *   gdata_gd_postal_address_get_country_code */
+-
+-	if (attr)
+-		e_vcard_add_attribute (vcard, attr);
+-}
+-
+-static void
+-add_attribute_from_gdata_gd_organization (EVCard *vcard,
+-                                          GDataGDOrganization *org)
+-{
+-	EVCardAttribute *attr;
+-	gboolean has_type;
+-
+-	if (!org)
+-		return;
+-
+-	/* Add the LABEL */
+-	attr = e_vcard_attribute_new (NULL, EVC_ORG);
+-	has_type = add_type_param_from_google_rel (attr, gdata_gd_organization_get_relation_type (org));
+-	if (gdata_gd_organization_is_primary (org))
+-		add_primary_param (attr, has_type);
+-	add_label_param (attr, gdata_gd_organization_get_label (org));
+-
+-	e_vcard_attribute_add_value (attr, gdata_gd_organization_get_name (org));
+-	e_vcard_attribute_add_value (attr, gdata_gd_organization_get_department (org));
+-
+-	/* The following bits of data provided by the Google Contacts API can't be fitted into the vCard format:
+-	 *   gdata_gd_organization_get_title (handled by TITLE)
+-	 *   gdata_gd_organization_get_job_description (handled by ROLE)
+-	 *   gdata_gd_organization_get_symbol
+-	 *   gdata_gd_organization_get_location */
+-
+-	if (attr)
+-		e_vcard_add_attribute (vcard, attr);
+-}
+-
+-static void
+-add_attribute_from_gc_contact_website (EVCard *vcard,
+-                                       GDataGContactWebsite *website)
+-{
+-	EVCardAttribute *attr;
+-	gboolean has_type;
+-
+-	if (!website || !gdata_gcontact_website_get_uri (website))
+-		return;
+-
+-	attr = e_vcard_attribute_new (NULL, GDATA_URIS_ATTR);
+-	has_type = add_type_param_from_google_rel_uris (attr, gdata_gcontact_website_get_relation_type (website));
+-	if (gdata_gcontact_website_is_primary (website))
+-		add_primary_param (attr, has_type);
+-	add_label_param (attr, gdata_gcontact_website_get_label (website));
+-
+-	e_vcard_attribute_add_value (attr, gdata_gcontact_website_get_uri (website));
+-
+-	e_vcard_add_attribute (vcard, attr);
+-}
+-static GDataGDEmailAddress *
+-gdata_gd_email_address_from_attribute (EVCardAttribute *attr,
+-                                       gboolean *have_primary)
+-{
+-	GDataGDEmailAddress *email = NULL;
+-	GList *values;
+-
+-	values = e_vcard_attribute_get_values (attr);
+-	if (values) {
+-		GList *types;
+-		gchar *rel = NULL;
+-		const gchar *label;
+-		gboolean primary;
+-
+-		types = get_google_primary_type_label (attr, &primary, &label);
+-		if (!*have_primary)
+-			*have_primary = primary;
+-		else
+-			primary = FALSE;
+-
+-		if (label == NULL) /* rel and label are mutually exclusive (bgo#675712) */
+-			rel = google_rel_from_types (types);
+-		email = gdata_gd_email_address_new (values->data, rel, label, primary);
+-		g_free (rel);
+-
+-		__debug__ (
+-			"New %semail entry %s (%s/%s)",
+-			gdata_gd_email_address_is_primary (email) ? "primary " : "",
+-			gdata_gd_email_address_get_address (email),
+-			gdata_gd_email_address_get_relation_type (email),
+-			gdata_gd_email_address_get_label (email));
+-	}
+-
+-	return email;
+-}
+-
+-static GDataGDIMAddress *
+-gdata_gd_im_address_from_attribute (EVCardAttribute *attr,
+-                                    gboolean *have_primary)
+-{
+-	GDataGDIMAddress *im = NULL;
+-	GList *values;
+-	const gchar *name;
+-
+-	name = e_vcard_attribute_get_name (attr);
+-
+-	values = e_vcard_attribute_get_values (attr);
+-	if (values) {
+-		GList *types;
+-		gchar *protocol, *rel;
+-		const gchar *label;
+-		gboolean primary;
+-
+-		types = get_google_primary_type_label (attr, &primary, &label);
+-		if (!*have_primary)
+-			*have_primary = primary;
+-		else
+-			primary = FALSE;
+-
+-		rel = google_rel_from_types (types);
+-		protocol = google_im_protocol_from_field_name (name);
+-		im = gdata_gd_im_address_new (values->data, protocol, rel, label, primary);
+-		g_free (rel);
+-		g_free (protocol);
+-
+-		__debug__ (
+-			"New %s%s entry %s (%s/%s)",
+-			gdata_gd_im_address_is_primary (im) ? "primary " : "",
+-			gdata_gd_im_address_get_protocol (im),
+-			gdata_gd_im_address_get_address (im),
+-			gdata_gd_im_address_get_relation_type (im),
+-			gdata_gd_im_address_get_label (im));
+-	}
+-
+-	return im;
+-}
+-
+-static GDataGDPhoneNumber *
+-gdata_gd_phone_number_from_attribute (EVCardAttribute *attr,
+-                                      gboolean *have_primary)
+-{
+-	GDataGDPhoneNumber *number = NULL;
+-	GList *values;
+-
+-	values = e_vcard_attribute_get_values (attr);
+-	if (values) {
+-		GList *types;
+-		gboolean primary;
+-		gchar *rel = NULL;
+-		const gchar *label;
+-
+-		types = get_google_primary_type_label (attr, &primary, &label);
+-		if (!*have_primary)
+-			*have_primary = primary;
+-		else
+-			primary = FALSE;
+-
+-		if (label == NULL) /* rel and label are mutually exclusive (bgo#675712) */
+-			rel = google_rel_from_types_phone (types);
+-		number = gdata_gd_phone_number_new (values->data, rel, label, NULL, primary);
+-		g_free (rel);
+-
+-		__debug__ (
+-			"New %sphone-number entry %s (%s/%s)",
+-			gdata_gd_phone_number_is_primary (number) ? "primary " : "",
+-			gdata_gd_phone_number_get_number (number),
+-			gdata_gd_phone_number_get_relation_type (number),
+-			gdata_gd_phone_number_get_label (number));
+-	}
+-
+-	return number;
+-}
+-
+-static GDataGDPostalAddress *
+-gdata_gd_postal_address_from_attribute (EVCardAttribute *attr,
+-                                        gboolean *have_primary)
+-{
+-	GDataGDPostalAddress *address = NULL;
+-	GList *values;
+-
+-	values = e_vcard_attribute_get_values (attr);
+-	if (values && values->data) {
+-		GList *types, *value;
+-		gchar *rel = NULL;
+-		const gchar *label;
+-		gboolean primary;
+-
+-		types = get_google_primary_type_label (attr, &primary, &label);
+-		if (!*have_primary)
+-			*have_primary = primary;
+-		else
+-			primary = FALSE;
+-
+-		if (label == NULL) /* rel and label are mutually exclusive (bgo#675712) */
+-			rel = google_rel_from_types (types);
+-		address = gdata_gd_postal_address_new (rel, label, primary);
+-		g_free (rel);
+-
+-		/* Set the components of the address from the vCard's attribute values */
+-		value = values;
+-		gdata_gd_postal_address_set_po_box (address, (*((gchar *) value->data) != '\0') ? value->data : NULL);
+-		value = value->next;
+-		if (!value)
+-			return address;
+-		label = (*((gchar *) value->data) != '\0') ? value->data : NULL;
+-		value = value->next;
+-		if (!value) {
+-			gdata_gd_postal_address_set_street (address, label);
+-			return address;
+-		}
+-		if (label) {
+-			const gchar *value_str = (*((gchar *) value->data) != '\0') ? value->data : NULL;
+-
+-			if (value_str) {
+-				gchar *tmp;
+-
+-				tmp = g_strconcat (value_str, "\n", label, NULL);
+-				gdata_gd_postal_address_set_street (address, tmp);
+-				g_free (tmp);
+-			} else {
+-				gdata_gd_postal_address_set_street (address, label);
+-			}
+-		} else {
+-			gdata_gd_postal_address_set_street (address, (*((gchar *) value->data) != '\0') ? value->data : NULL);
+-		}
+-		value = value->next;
+-		if (!value)
+-			return address;
+-		gdata_gd_postal_address_set_city (address, (*((gchar *) value->data) != '\0') ? value->data : NULL);
+-		value = value->next;
+-		if (!value)
+-			return address;
+-		gdata_gd_postal_address_set_region (address, (*((gchar *) value->data) != '\0') ? value->data : NULL);
+-		value = value->next;
+-		if (!value)
+-			return address;
+-		gdata_gd_postal_address_set_postcode (address, (*((gchar *) value->data) != '\0') ? value->data : NULL);
+-		value = value->next;
+-		if (!value)
+-			return address;
+-		gdata_gd_postal_address_set_country (address, (*((gchar *) value->data) != '\0') ? value->data : NULL, NULL);
+-
+-		/* Throw it away if nothing was set */
+-		if (gdata_gd_postal_address_get_po_box (address) == NULL && gdata_gd_postal_address_get_house_name (address) == NULL &&
+-		    gdata_gd_postal_address_get_street (address) == NULL && gdata_gd_postal_address_get_city (address) == NULL &&
+-		    gdata_gd_postal_address_get_region (address) == NULL && gdata_gd_postal_address_get_postcode (address) == NULL &&
+-		    gdata_gd_postal_address_get_country (address) == NULL) {
+-			g_object_unref (address);
+-			return NULL;
+-		}
+-
+-		__debug__ (
+-			"New %spostal address entry %s (%s/%s)",
+-			gdata_gd_postal_address_is_primary (address) ? "primary " : "",
+-			gdata_gd_postal_address_get_address (address),
+-			gdata_gd_postal_address_get_relation_type (address),
+-			gdata_gd_postal_address_get_label (address));
+-	}
+-
+-	return address;
+-}
+-
+-static GDataGDOrganization *
+-gdata_gd_organization_from_attribute (EVCardAttribute *attr,
+-                                      gboolean *have_primary)
+-{
+-	GDataGDOrganization *org = NULL;
+-	GList *values;
+-
+-	values = e_vcard_attribute_get_values (attr);
+-	if (values) {
+-		GList *types;
+-		gboolean primary;
+-		gchar *rel = NULL;
+-		const gchar *label;
+-
+-		types = get_google_primary_type_label (attr, &primary, &label);
+-		if (!*have_primary)
+-			*have_primary = primary;
+-		else
+-			primary = FALSE;
+-
+-		if (label == NULL) /* rel and label are mutually exclusive (bgo#675712) */
+-			rel = google_rel_from_types (types);
+-		org = gdata_gd_organization_new (values->data, NULL, rel, label, primary);
+-		if (values->next != NULL && values->next->data != NULL && *((gchar *) values->next->data) != '\0')
+-			gdata_gd_organization_set_department (org, values->next->data);
+-		g_free (rel);
+-
+-		/* TITLE and ROLE are dealt with separately in gdata_entry_update_from_e_contact() */
+-
+-		__debug__ (
+-			"New %sorganization entry %s (%s/%s)",
+-			gdata_gd_organization_is_primary (org) ? "primary " : "",
+-			gdata_gd_organization_get_name (org),
+-			gdata_gd_organization_get_relation_type (org),
+-			gdata_gd_organization_get_label (org));
+-	}
+-
+-	return org;
+-}
+-
+-static GDataGContactWebsite *
+-gdata_gc_contact_website_from_attribute (EVCardAttribute *attr,
+-                                         gboolean *have_primary)
+-{
+-	GDataGContactWebsite *website = NULL;
+-	GList *values;
+-
+-	values = e_vcard_attribute_get_values (attr);
+-	if (values) {
+-		GList *types;
+-		gchar *rel;
+-		const gchar *label;
+-		gboolean primary;
+-
+-		types = get_google_primary_type_label (attr, &primary, &label);
+-		if (!*have_primary)
+-			*have_primary = primary;
+-		else
+-			primary = FALSE;
+-
+-		rel = google_rel_from_types_uris (types);
+-		website = gdata_gcontact_website_new (values->data, rel, label, primary);
+-		g_free (rel);
+-
+-		__debug__ (
+-			"New %suri entry %s (%s/%s)",
+-			gdata_gcontact_website_is_primary (website) ? "primary " : "",
+-			gdata_gcontact_website_get_uri (website),
+-			gdata_gcontact_website_get_relation_type (website),
+-			gdata_gcontact_website_get_label (website));
+-	}
+-
+-	return website;
+-}
+-
+-const gchar *
+-e_contact_map_google_with_evo_group (const gchar *group_name,
+-                                     gboolean google_to_evo)
+-{
+-	struct _GroupsMap {
+-		const gchar *google_id;
+-		const gchar *evo_name;
+-	} groups_map[] = {
+-		/* System Group: My Contacts */
+-		{ GDATA_CONTACTS_GROUP_CONTACTS,  N_("Personal") },
+-		/* System Group: Friends */
+-		{ GDATA_CONTACTS_GROUP_FRIENDS,   N_("Friends") },
+-		/* System Group: Family */
+-		{ GDATA_CONTACTS_GROUP_FAMILY,    N_("Family") },
+-		/* System Group: Coworkers */
+-		{ GDATA_CONTACTS_GROUP_COWORKERS, N_("Coworkers") }
+-	};
+-	guint ii;
+-
+-	if (!group_name)
+-		return NULL;
+-
+-	for (ii = 0; ii < G_N_ELEMENTS (groups_map); ii++) {
+-		if (google_to_evo) {
+-			if (g_str_equal (group_name, groups_map[ii].google_id))
+-				return _(groups_map[ii].evo_name);
+-		} else {
+-			if (g_str_equal (group_name, _(groups_map[ii].evo_name)))
+-				return groups_map[ii].google_id;
+-		}
+-	}
+-
+-	return NULL;
+-}
+-
+-gchar *
+-e_contact_sanitise_google_group_id (const gchar *group_id)
+-{
+-	gchar *id, *base;
+-
+-	id = g_strdup (group_id);
+-
+-	/* Fix the ID to refer to the full projection, rather than the base projection, because Google think that returning different IDs for the
+-	 * same object is somehow a good idea. */
+-	if (id != NULL) {
+-		base = strstr (id, "/base/");
+-		if (base != NULL)
+-			memcpy (base, "/full/", 6);
+-	}
+-
+-	return id;
+-}
+-
+-gchar *
+-e_contact_sanitise_google_group_name (GDataEntry *group)
+-{
+-	const gchar *system_group_id = gdata_contacts_group_get_system_group_id (GDATA_CONTACTS_GROUP (group));
+-	const gchar *evo_name;
+-
+-	evo_name = e_contact_map_google_with_evo_group (system_group_id, TRUE);
+-
+-	if (system_group_id == NULL) {
+-		return g_strdup (gdata_entry_get_title (group)); /* Non-system group */
+-	} else if (evo_name) {
+-		return g_strdup (evo_name);
+-	} else {
+-		g_warning ("Unknown system group '%s' for group with ID '%s'.", system_group_id, gdata_entry_get_id (group));
+-		return g_strdup (gdata_entry_get_title (group));
+-	}
+-}
+-
+-/* Makes a non-URL UID from a URL ID; the returned string is owned by @entry */
+-const gchar *
+-e_book_google_utils_uid_from_entry (GDataEntry *entry)
+-{
+-	const gchar *id, *slash;
+-
+-	id = gdata_entry_get_id (entry);
+-	if (!id)
+-		return NULL;
+-
+-	slash = strrchr (id, '/');
+-
+-	if (slash && slash[1])
+-		return slash + 1;
+-
+-	return id;
+-}
+-
+-gchar *
+-e_book_google_utils_time_to_revision (gint64 unix_time)
+-{
+-	struct tm stm;
+-	time_t tt = (time_t) unix_time;
+-	gchar time_string[100] = { 0 };
+-
+-	gmtime_r (&tt, &stm);
+-	strftime (time_string, 100, "%Y-%m-%dT%H:%M:%SZ", &stm);
+-
+-	return g_strdup (time_string);
+-}
+diff --git a/src/addressbook/backends/google/e-book-google-utils.h b/src/addressbook/backends/google/e-book-google-utils.h
+deleted file mode 100644
+index 302731ba5..000000000
+--- a/src/addressbook/backends/google/e-book-google-utils.h
++++ /dev/null
+@@ -1,69 +0,0 @@
+-/* e-book-google-utils.h - Google contact conversion utilities.
+- *
+- * Copyright (C) 2012 Philip Withnall
+- *
+- * This library is free software: you can redistribute it and/or modify it
+- * under the terms of the GNU Lesser General Public License as published by
+- * the Free Software Foundation.
+- *
+- * This library is distributed in the hope that it will be useful, but
+- * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+- * or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License
+- * for more details.
+- *
+- * You should have received a copy of the GNU Lesser General Public License
+- * along with this library. If not, see <http://www.gnu.org/licenses/>.
+- *
+- * Authors: Philip Withnall <philip@tecnocode.co.uk>
+- */
+-
+-#ifndef E_BOOK_GOOGLE_UTILS_H
+-#define E_BOOK_GOOGLE_UTILS_H
+-
+-#include <gdata/gdata.h>
+-
+-#include "e-book-backend-google.h"
+-
+-#define E_GOOGLE_X_ETAG		"X-EVOLUTION-GOOGLE-ETAG"
+-#define E_GOOGLE_X_PHOTO_ETAG	"X-EVOLUTION-GOOGLE-PHOTO-ETAG"
+-
+-G_BEGIN_DECLS
+-
+-typedef gchar *(*EContactGoogleCreateGroupFunc) (EBookBackendGoogle *bbgoogle,
+-						 const gchar *category_name,
+-						 GCancellable *cancellable,
+-						 GError **error);
+-
+-GDataEntry *	gdata_entry_new_from_e_contact	(EContact *contact,
+-						 GHashTable *groups_by_name,
+-						 GHashTable *system_groups_by_id,
+-						 EContactGoogleCreateGroupFunc create_group,
+-						 EBookBackendGoogle *bbgoogle,
+-						 GCancellable *cancellable) G_GNUC_MALLOC G_GNUC_WARN_UNUSED_RESULT;
+-gboolean	gdata_entry_update_from_e_contact
+-						(GDataEntry *entry,
+-						 EContact *contact,
+-						 gboolean ensure_personal_group,
+-						 GHashTable *groups_by_name,
+-						 GHashTable *system_groups_by_id,
+-						 EContactGoogleCreateGroupFunc create_group,
+-						 EBookBackendGoogle *bbgoogle,
+-						 GCancellable *cancellable);
+-
+-EContact *e_contact_new_from_gdata_entry (GDataEntry *entry, GHashTable *groups_by_id,
+-                                          GHashTable *system_groups_by_entry_id) G_GNUC_MALLOC G_GNUC_WARN_UNUSED_RESULT;
+-void e_contact_add_gdata_entry_xml (EContact *contact, GDataEntry *entry);
+-void e_contact_remove_gdata_entry_xml (EContact *contact);
+-const gchar *e_contact_get_gdata_entry_xml (EContact *contact, const gchar **edit_uri);
+-
+-const gchar *e_contact_map_google_with_evo_group (const gchar *group_name, gboolean google_to_evo);
+-
+-gchar *e_contact_sanitise_google_group_id (const gchar *group_id) G_GNUC_MALLOC G_GNUC_WARN_UNUSED_RESULT;
+-gchar *e_contact_sanitise_google_group_name (GDataEntry *group) G_GNUC_MALLOC G_GNUC_WARN_UNUSED_RESULT;
+-
+-const gchar *	e_book_google_utils_uid_from_entry	(GDataEntry *entry);
+-gchar *		e_book_google_utils_time_to_revision	(gint64 unix_time);
+-
+-G_END_DECLS
+-
+-#endif /* E_BOOK_GOOGLE_UTILS_H */
+diff --git a/src/addressbook/backends/google/tests/CMakeLists.txt b/src/addressbook/backends/google/tests/CMakeLists.txt
+deleted file mode 100644
+index dd8280587..000000000
+--- a/src/addressbook/backends/google/tests/CMakeLists.txt
++++ /dev/null
+@@ -1,38 +0,0 @@
+-set(DEPENDENCIES
+-	ebook-google-utils
+-)
+-
+-add_executable(ebookbackendgoogle-phonenumber
+-	phone-numbers.c
+-)
+-
+-add_dependencies(ebookbackendgoogle-phonenumber
+-	${DEPENDENCIES}
+-)
+-
+-target_compile_definitions(ebookbackendgoogle-phonenumber PRIVATE
+-	-DG_LOG_DOMAIN=\"ebookbackendgoogle-phonenumber\"
+-)
+-
+-target_compile_options(ebookbackendgoogle-phonenumber PUBLIC
+-	${ADDRESSBOOK_CFLAGS}
+-	${LIBGDATA_CFLAGS}
+-)
+-
+-target_include_directories(ebookbackendgoogle-phonenumber PUBLIC
+-	${CMAKE_BINARY_DIR}
+-	${CMAKE_BINARY_DIR}/src
+-	${CMAKE_SOURCE_DIR}/src
+-	${CMAKE_SOURCE_DIR}/src/addressbook/backends/google
+-	${CMAKE_CURRENT_SOURCE_DIR}
+-	${ADDRESSBOOK_INCLUDE_DIRS}
+-	${LIBGDATA_INCLUDE_DIRS}
+-)
+-
+-target_link_libraries(ebookbackendgoogle-phonenumber
+-	${DEPENDENCIES}
+-	${ADDRESSBOOK_LDFLAGS}
+-	${LIBGDATA_LDFLAGS}
+-)
+-
+-add_check_test(ebookbackendgoogle-phonenumber)
+diff --git a/src/addressbook/backends/google/tests/phone-numbers.c b/src/addressbook/backends/google/tests/phone-numbers.c
+deleted file mode 100644
+index f2ca12ffd..000000000
+--- a/src/addressbook/backends/google/tests/phone-numbers.c
++++ /dev/null
+@@ -1,125 +0,0 @@
+-/* phone-numbers.c - Phone number tests
+- *
+- * Copyright (C) 2012 Philip Withnall
+- *
+- * This program is free software: you can redistribute it and/or modify it
+- * under the terms of the GNU Lesser General Public License as published by
+- * the Free Software Foundation.
+- *
+- * This program is distributed in the hope that it will be useful, but
+- * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+- * or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License
+- * for more details.
+- *
+- * You should have received a copy of the GNU Lesser General Public License
+- * along with this program. If not, see <http://www.gnu.org/licenses/>.
+- *
+- * Authors: Philip Withnall <philip@tecnocode.co.uk>
+- */
+-
+-#include <libebook/libebook.h>
+-#include <gdata/gdata.h>
+-
+-#include "e-book-google-utils.h"
+-
+-static GHashTable/*<string, string>*/ *
+-build_groups_by_name (void)
+-{
+-	return g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+-}
+-
+-static GHashTable/*<string, string>*/ *
+-build_system_groups_by_id (void)
+-{
+-	GHashTable *table = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
+-	g_hash_table_insert (table, g_strdup (GDATA_CONTACTS_GROUP_CONTACTS), g_strdup ("contacts-group-id"));
+-	return table;
+-}
+-
+-static gchar *
+-create_group_null (EBookBackendGoogle *bbgoogle,
+-		   const gchar *category_name,
+-		   GCancellable *cancellable,
+-		   GError **error)
+-{
+-	/* Must never be reached. */
+-	g_assert_not_reached ();
+-}
+-
+-#define ENTRY_FROM_VCARD(entry, VCARD_PROPS) G_STMT_START { \
+-	EContact *contact; \
+-	GHashTable *groups_by_name, *system_groups_by_id; \
+-\
+-	groups_by_name = build_groups_by_name (); \
+-	system_groups_by_id = build_system_groups_by_id (); \
+-\
+-	contact = e_contact_new_from_vcard ( \
+-		"BEGIN:VCARD" "\n" \
+-		"VERSION:3.0" "\n" \
+-		"UID:foobar-baz" "\n" \
+-		"FN:Foobar Baz" "\n" \
+-		VCARD_PROPS \
+-		"END:VCARD" \
+-	); \
+-\
+-	entry = gdata_entry_new_from_e_contact (contact, groups_by_name, system_groups_by_id, create_group_null, NULL, NULL); \
+-	g_assert (entry != NULL); \
+-\
+-	g_hash_table_unref (system_groups_by_id); \
+-	g_hash_table_unref (groups_by_name); \
+-\
+-	g_object_unref (contact); \
+-} G_STMT_END
+-
+-/* Include both an X-GOOGLE_LABEL and a TYPE attribute in the vCard and test that exactly one of them is copied to the entry. */
+-static void
+-test_label_and_type (void)
+-{
+-	GDataEntry *entry;
+-	GDataGDPhoneNumber *phone_number;
+-
+-	g_test_bug ("675712");
+-
+-	ENTRY_FROM_VCARD (entry, "TEL;X-GOOGLE-LABEL=VOICE;TYPE=PREF;X-EVOLUTION-UI-SLOT=1:+0123456789" "\n");
+-
+-	/* Check that the entry has exactly one phone number, and that it contains exactly one of the rel and label properties. */
+-	phone_number = gdata_contacts_contact_get_primary_phone_number (GDATA_CONTACTS_CONTACT (entry));
+-
+-	g_assert_cmpstr (gdata_gd_phone_number_get_relation_type (phone_number), ==, NULL);
+-	g_assert_cmpstr (gdata_gd_phone_number_get_label (phone_number), ==, "VOICE");
+-
+-	g_object_unref (entry);
+-}
+-
+-/* Include neither an X-GOOGLE_LABEL nor a TYPE attribute in the vCard and test that a suitable default appears in the entry. */
+-static void
+-test_label_nor_type (void)
+-{
+-	GDataEntry *entry;
+-	GDataGDPhoneNumber *phone_number;
+-
+-	g_test_bug ("675712");
+-
+-	ENTRY_FROM_VCARD (entry, "TEL;X-EVOLUTION-UI-SLOT=1:+0123456789" "\n");
+-
+-	/* Check that the entry has exactly one phone number, and that it contains exactly one of the rel and label properties. */
+-	phone_number = gdata_contacts_contact_get_primary_phone_number (GDATA_CONTACTS_CONTACT (entry));
+-
+-	g_assert_cmpstr (gdata_gd_phone_number_get_relation_type (phone_number), ==, GDATA_GD_PHONE_NUMBER_OTHER);
+-	g_assert_cmpstr (gdata_gd_phone_number_get_label (phone_number), ==, NULL);
+-
+-	g_object_unref (entry);
+-}
+-
+-gint
+-main (gint argc,
+-      gchar **argv)
+-{
+-	g_test_init (&argc, &argv, NULL);
+-	g_test_bug_base ("https://bugzilla.gnome.org/");
+-
+-	g_test_add_func ("/phone-numbers/label-and-type", test_label_and_type);
+-	g_test_add_func ("/phone-numbers/label-nor-type", test_label_nor_type);
+-
+-	return g_test_run ();
+-}
+diff --git a/src/modules/google-backend/module-google-backend.c b/src/modules/google-backend/module-google-backend.c
+index 2b1fcf473..01fc05b9b 100644
+--- a/src/modules/google-backend/module-google-backend.c
++++ b/src/modules/google-backend/module-google-backend.c
+@@ -50,11 +50,6 @@
+ #define GOOGLE_SMTP_PORT		465
+ #define GOOGLE_SMTP_SECURITY_METHOD	METHOD (SSL_ON_ALTERNATE_PORT)
+ 
+-/* Contacts Configuration Details */
+-#define GOOGLE_CONTACTS_BACKEND_NAME	"google"
+-#define GOOGLE_CONTACTS_HOST		"www.google.com"
+-#define GOOGLE_CONTACTS_RESOURCE_ID	"Contacts"
+-
+ /* Tasks Configuration Details */
+ #define GOOGLE_TASKS_BACKEND_NAME	"gtasks"
+ 
+@@ -489,6 +484,7 @@ google_backend_authenticate_sync (EBackend *backend,
+ 	GList *sources;
+ 	ENamedParameters *credentials_copy = NULL;
+ 	const gchar *calendar_url;
++	const gchar *contacts_url = NULL;
+ 
+ 	g_return_val_if_fail (collection != NULL, E_SOURCE_AUTHENTICATION_ERROR);
+ 
+@@ -538,8 +534,14 @@ google_backend_authenticate_sync (EBackend *backend,
+ 		}
+ 	}
+ 
+-	if (e_source_collection_get_calendar_enabled (collection_extension) && calendar_url) {
+-		result = e_webdav_collection_backend_discover_sync (E_WEBDAV_COLLECTION_BACKEND (backend), calendar_url, NULL,
++	if (!e_source_collection_get_calendar_enabled (collection_extension))
++		calendar_url = NULL;
++
++	if (e_source_collection_get_contacts_enabled (collection_extension))
++		contacts_url = "https://www.googleapis.com/.well-known/carddav";
++
++	if (calendar_url || contacts_url) {
++		result = e_webdav_collection_backend_discover_sync (E_WEBDAV_COLLECTION_BACKEND (backend), calendar_url, contacts_url,
+ 			credentials, out_certificate_pem, out_certificate_errors, cancellable, error);
+ 	} else {
+ 		result = E_SOURCE_AUTHENTICATION_ACCEPTED;
+@@ -616,78 +618,13 @@ google_backend_authenticate_sync (EBackend *backend,
+ 	return result;
+ }
+ 
+-static void
+-google_backend_add_contacts (ECollectionBackend *backend)
+-{
+-	ESource *source;
+-	ESource *collection_source;
+-	ESourceRegistryServer *server;
+-	ESourceExtension *extension;
+-	ESourceCollection *collection_extension;
+-	const gchar *backend_name;
+-	const gchar *extension_name;
+-	const gchar *resource_id;
+-
+-	collection_source = e_backend_get_source (E_BACKEND (backend));
+-
+-	resource_id = GOOGLE_CONTACTS_RESOURCE_ID;
+-	source = e_collection_backend_new_child (backend, resource_id);
+-	e_source_set_display_name (source, _("Contacts"));
+-
+-	/* Add the address book source to the collection. */
+-	collection_extension = e_source_get_extension (
+-		collection_source, E_SOURCE_EXTENSION_COLLECTION);
+-
+-	/* Configure the address book source. */
+-
+-	backend_name = GOOGLE_CONTACTS_BACKEND_NAME;
+-
+-	extension_name = E_SOURCE_EXTENSION_ADDRESS_BOOK;
+-	extension = e_source_get_extension (source, extension_name);
+-
+-	e_source_backend_set_backend_name (
+-		E_SOURCE_BACKEND (extension), backend_name);
+-
+-	extension_name = E_SOURCE_EXTENSION_AUTHENTICATION;
+-	extension = e_source_get_extension (source, extension_name);
+-
+-	e_source_authentication_set_host (
+-		E_SOURCE_AUTHENTICATION (extension),
+-		GOOGLE_CONTACTS_HOST);
+-
+-	e_binding_bind_property (
+-		collection_extension, "identity",
+-		extension, "user",
+-		G_BINDING_SYNC_CREATE);
+-
+-	server = e_collection_backend_ref_server (backend);
+-	e_source_registry_server_add_source (server, source);
+-	g_object_unref (server);
+-
+-	g_object_unref (source);
+-}
+-
+-static gchar *
+-google_backend_get_resource_id (EWebDAVCollectionBackend *webdav_backend,
+-				ESource *source)
+-{
+-	g_return_val_if_fail (E_IS_SOURCE (source), NULL);
+-
+-	if (e_source_has_extension (source, E_SOURCE_EXTENSION_ADDRESS_BOOK))
+-		return g_strdup (GOOGLE_CONTACTS_RESOURCE_ID);
+-
+-	/* Chain up to parent's method. */
+-	return E_WEBDAV_COLLECTION_BACKEND_CLASS (e_google_backend_parent_class)->get_resource_id (webdav_backend, source);
+-}
+-
+ static gboolean
+ google_backend_is_custom_source (EWebDAVCollectionBackend *webdav_backend,
+ 				 ESource *source)
+ {
+ 	g_return_val_if_fail (E_IS_SOURCE (source), FALSE);
+ 
+-	if (e_source_has_extension (source, E_SOURCE_EXTENSION_ADDRESS_BOOK) ||
+-	    e_source_has_extension (source, E_SOURCE_EXTENSION_TASK_LIST))
++	if (e_source_has_extension (source, E_SOURCE_EXTENSION_TASK_LIST))
+ 		return TRUE;
+ 
+ 	/* Chain up to parent's method. */
+@@ -697,12 +634,10 @@ google_backend_is_custom_source (EWebDAVCollectionBackend *webdav_backend,
+ static void
+ google_backend_populate (ECollectionBackend *backend)
+ {
+-	ESourceCollection *collection_extension;
+ 	ESourceAuthentication *authentication_extension;
+ 	ESource *source;
+ 
+ 	source = e_backend_get_source (E_BACKEND (backend));
+-	collection_extension = e_source_get_extension (source, E_SOURCE_EXTENSION_COLLECTION);
+ 	authentication_extension = e_source_get_extension (source, E_SOURCE_EXTENSION_AUTHENTICATION);
+ 
+ 	/* When the WebDAV extension is created, the auth method can be reset, thus ensure
+@@ -716,15 +651,6 @@ google_backend_populate (ECollectionBackend *backend)
+ 
+ 	/* Chain up to parent's method. */
+ 	E_COLLECTION_BACKEND_CLASS (e_google_backend_parent_class)->populate (backend);
+-
+-	if (e_source_collection_get_contacts_enabled (collection_extension)) {
+-		GList *list;
+-
+-		list = e_collection_backend_list_contacts_sources (backend);
+-		if (list == NULL)
+-			google_backend_add_contacts (backend);
+-		g_list_free_full (list, (GDestroyNotify) g_object_unref);
+-	}
+ }
+ 
+ static gchar *
+@@ -733,12 +659,10 @@ google_backend_dup_resource_id (ECollectionBackend *backend,
+ {
+ 	if (e_source_has_extension (child_source, E_SOURCE_EXTENSION_CALENDAR) ||
+ 	    e_source_has_extension (child_source, E_SOURCE_EXTENSION_MEMO_LIST) ||
+-	    e_source_has_extension (child_source, E_SOURCE_EXTENSION_TASK_LIST))
++	    e_source_has_extension (child_source, E_SOURCE_EXTENSION_TASK_LIST) ||
++	    e_source_has_extension (child_source, E_SOURCE_EXTENSION_ADDRESS_BOOK))
+ 		return E_COLLECTION_BACKEND_CLASS (e_google_backend_parent_class)->dup_resource_id (backend, child_source);
+ 
+-	if (e_source_has_extension (child_source, E_SOURCE_EXTENSION_ADDRESS_BOOK))
+-		return g_strdup (GOOGLE_CONTACTS_RESOURCE_ID);
+-
+ 	return NULL;
+ }
+ 
+@@ -749,7 +673,6 @@ google_backend_child_added (ECollectionBackend *backend,
+ 	ESource *collection_source;
+ 	const gchar *extension_name;
+ 	gboolean is_mail = FALSE;
+-	gboolean has_external_auth = FALSE;
+ 
+ 	/* Chain up to parent's child_added() method. */
+ 	E_COLLECTION_BACKEND_CLASS (e_google_backend_parent_class)->
+@@ -785,8 +708,6 @@ google_backend_child_added (ECollectionBackend *backend,
+ 			child_source, extension_name);
+ 		auth_child_user = e_source_authentication_get_user (
+ 			auth_child_extension);
+-		has_external_auth = e_source_authentication_get_is_external (
+-			auth_child_extension);
+ 
+ 		/* XXX Do not override an existing user name setting.
+ 		 *     The IMAP or (especially) SMTP configuration may
+@@ -846,42 +767,6 @@ google_backend_child_added (ECollectionBackend *backend,
+ 			child_source, "notify::oauth2-support",
+ 			G_CALLBACK (google_backend_contacts_update_auth_method_cb),
+ 			backend);
+-
+-		if (!has_external_auth) {
+-			/* Even the book is part of the collection it can be removed
+-			   separately, if not configured through GOA or UOA. */
+-			e_server_side_source_set_removable (E_SERVER_SIDE_SOURCE (child_source), TRUE);
+-		}
+-	}
+-}
+-
+-static void
+-google_backend_child_removed (ECollectionBackend *backend,
+-			      ESource *child_source)
+-{
+-	ESource *collection_source;
+-	gboolean has_external_auth = FALSE;
+-
+-	/* Chain up to parent's method. */
+-	E_COLLECTION_BACKEND_CLASS (e_google_backend_parent_class)->child_removed (backend, child_source);
+-
+-	collection_source = e_backend_get_source (E_BACKEND (backend));
+-
+-	if (e_source_has_extension (child_source, E_SOURCE_EXTENSION_AUTHENTICATION)) {
+-		ESourceAuthentication *auth_child_extension;
+-
+-		auth_child_extension = e_source_get_extension (child_source, E_SOURCE_EXTENSION_AUTHENTICATION);
+-		has_external_auth = e_source_authentication_get_is_external (auth_child_extension);
+-	}
+-
+-	if (e_source_has_extension (child_source, E_SOURCE_EXTENSION_ADDRESS_BOOK) &&
+-	    e_source_has_extension (collection_source, E_SOURCE_EXTENSION_COLLECTION) &&
+-	    !has_external_auth) {
+-		ESourceCollection *collection_extension;
+-
+-		collection_extension = e_source_get_extension (collection_source, E_SOURCE_EXTENSION_COLLECTION);
+-
+-		e_source_collection_set_contacts_enabled (collection_extension, FALSE);
+ 	}
+ }
+ 
+@@ -914,10 +799,8 @@ e_google_backend_class_init (EGoogleBackendClass *class)
+ 	collection_backend_class->populate = google_backend_populate;
+ 	collection_backend_class->dup_resource_id = google_backend_dup_resource_id;
+ 	collection_backend_class->child_added = google_backend_child_added;
+-	collection_backend_class->child_removed = google_backend_child_removed;
+ 
+ 	webdav_collection_backend_class = E_WEBDAV_COLLECTION_BACKEND_CLASS (class);
+-	webdav_collection_backend_class->get_resource_id = google_backend_get_resource_id;
+ 	webdav_collection_backend_class->is_custom_source = google_backend_is_custom_source;
+ }
+ 
+diff --git a/src/services/evolution-source-registry/evolution-source-registry-migrate-tweaks.c b/src/services/evolution-source-registry/evolution-source-registry-migrate-tweaks.c
+index 82d113d98..6c7b221f5 100644
+--- a/src/services/evolution-source-registry/evolution-source-registry-migrate-tweaks.c
++++ b/src/services/evolution-source-registry/evolution-source-registry-migrate-tweaks.c
+@@ -208,6 +208,56 @@ evolution_source_registry_migrate_webdav_book_to_carddav (ESourceRegistryServer
+ 	return modified;
+ }
+ 
++
++static gboolean
++evolution_source_registry_migrate_google_book_to_carddav (ESourceRegistryServer *server,
++							  GKeyFile *key_file,
++							  const gchar *uid)
++{
++	gboolean modified = FALSE;
++
++	g_return_val_if_fail (key_file != NULL, FALSE);
++
++	if (g_key_file_has_group (key_file, E_SOURCE_EXTENSION_ADDRESS_BOOK) &&
++	    g_key_file_has_key (key_file, E_SOURCE_EXTENSION_ADDRESS_BOOK, "BackendName", NULL)) {
++		gchar *backend_name;
++
++		backend_name = g_key_file_get_string (key_file, E_SOURCE_EXTENSION_ADDRESS_BOOK, "BackendName", NULL);
++		if (g_strcmp0 (backend_name, "google") == 0) {
++			g_key_file_set_string (key_file, E_SOURCE_EXTENSION_ADDRESS_BOOK, "BackendName", "carddav");
++			modified = TRUE;
++		}
++
++		g_free (backend_name);
++	}
++
++	if (modified && g_key_file_has_group (key_file, E_SOURCE_EXTENSION_AUTHENTICATION)) {
++		gchar *user;
++
++		user = g_key_file_get_string (key_file, E_SOURCE_EXTENSION_AUTHENTICATION, "User", NULL);
++
++		if (user && *user) {
++			gchar *path;
++
++			/* Unfortunately no mapping with the default book, thus either drop it or hard code the URL */
++			path = g_strdup_printf ("/carddav/v1/principals/%s/lists/default/", user);
++
++			g_key_file_set_string (key_file, E_SOURCE_EXTENSION_WEBDAV_BACKEND, "ResourcePath", path);
++			g_key_file_set_string (key_file, E_SOURCE_EXTENSION_AUTHENTICATION, "Host", "www.googleapis.com");
++			g_key_file_set_string (key_file, E_SOURCE_EXTENSION_AUTHENTICATION, "Method", "Google");
++			g_key_file_set_integer (key_file, E_SOURCE_EXTENSION_AUTHENTICATION, "Port", 443);
++			g_key_file_set_string (key_file, E_SOURCE_EXTENSION_AUTHENTICATION, "User", user);
++			g_key_file_set_string (key_file, E_SOURCE_EXTENSION_SECURITY, "Method", "tls");
++
++			g_free (path);
++		}
++
++		g_free (user);
++	}
++
++	return modified;
++}
++
+ gboolean
+ evolution_source_registry_migrate_tweak_key_file (ESourceRegistryServer *server,
+ 						  GKeyFile *key_file,
+@@ -218,6 +268,7 @@ evolution_source_registry_migrate_tweak_key_file (ESourceRegistryServer *server,
+ 	modified = evolution_source_registry_migrate_imap_to_imapx (server, key_file, uid);
+ 	modified = evolution_source_registry_migrate_owncloud_to_webdav (server, key_file, uid) || modified;
+ 	modified = evolution_source_registry_migrate_webdav_book_to_carddav (server, key_file, uid) || modified;
++	modified = evolution_source_registry_migrate_google_book_to_carddav (server, key_file, uid) || modified;
+ 
+ 	return modified;
+ }
+-- 
+GitLab
+

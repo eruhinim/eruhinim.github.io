@@ -1,0 +1,160 @@
+From e56a69e2fa3333c8531c9a45008470ca8aa8dd9f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=A9my=20Bobbio?= <lunar@debian.org>
+Date: Tue, 27 Aug 2013 22:38:31 +0200
+Subject: [PATCH 1/4] dpkg-deb: Use a single timestamp for ar headers when
+ building a .deb
+
+In order to make build reproducible in the future, we now use a single
+timestamp in all ar headers when creating a .deb.
+
+Previously, each ar header would have the current time of its creation.
+This level of precision is not really needed and the time of the beginning of
+the build is good enough.
+
+Address: #759999
+---
+ dpkg-deb/build.c   | 10 +++++++---
+ dpkg-split/split.c |  4 ++--
+ lib/dpkg/ar.c      | 13 +++++++------
+ lib/dpkg/ar.h      |  4 ++--
+ 4 files changed, 18 insertions(+), 13 deletions(-)
+
+diff --git a/dpkg-deb/build.c b/dpkg-deb/build.c
+index 8d9f066..117e424 100644
+--- a/dpkg-deb/build.c
++++ b/dpkg-deb/build.c
+@@ -37,6 +37,7 @@
+ #include <stdint.h>
+ #include <stdlib.h>
+ #include <stdio.h>
++#include <time.h>
+ 
+ #include <dpkg/i18n.h>
+ #include <dpkg/c-ctype.h>
+@@ -529,6 +530,7 @@ do_build(const char *const *argv)
+   int arfd;
+   int p1[2], gzfd;
+   pid_t c1, c2;
++  time_t build_timestamp;
+ 
+   /* Decode our arguments. */
+   dir = *argv++;
+@@ -559,6 +561,8 @@ do_build(const char *const *argv)
+   }
+   m_output(stdout, _("<standard output>"));
+ 
++  build_timestamp = time(NULL);
++
+   /* Now that we have verified everything its time to actually
+    * build something. Let's start by making the ar-wrapper. */
+   arfd = creat(debar, 0644);
+@@ -636,8 +640,8 @@ do_build(const char *const *argv)
+             compressor_get_extension(control_compress_params.type));
+ 
+     dpkg_ar_put_magic(debar, arfd);
+-    dpkg_ar_member_put_mem(debar, arfd, DEBMAGIC, deb_magic, strlen(deb_magic));
+-    dpkg_ar_member_put_file(debar, arfd, adminmember, gzfd, -1);
++    dpkg_ar_member_put_mem(debar, arfd, DEBMAGIC, deb_magic, build_timestamp, strlen(deb_magic));
++    dpkg_ar_member_put_file(debar, arfd, adminmember, gzfd, build_timestamp, -1);
+   } else {
+     internerr("unknown deb format version %d.%d", deb_format.major, deb_format.minor);
+   }
+@@ -679,7 +683,7 @@ do_build(const char *const *argv)
+     if (lseek(gzfd, 0, SEEK_SET))
+       ohshite(_("failed to rewind temporary file (%s)"), _("data member"));
+ 
+-    dpkg_ar_member_put_file(debar, arfd, datamember, gzfd, -1);
++    dpkg_ar_member_put_file(debar, arfd, datamember, gzfd, build_timestamp, -1);
+ 
+     close(gzfd);
+   }
+diff --git a/dpkg-split/split.c b/dpkg-split/split.c
+index 8137654..d132e3e 100644
+--- a/dpkg-split/split.c
++++ b/dpkg-split/split.c
+@@ -210,13 +210,13 @@ mksplit(const char *file_src, const char *prefix, off_t maxpartsize,
+ 		              (intmax_t)st.st_size, (intmax_t)partsize,
+ 		              curpart, nparts, pkg->available.arch->name);
+ 		dpkg_ar_member_put_mem(file_dst.buf, fd_dst, PARTMAGIC,
+-		                       partmagic.buf, partmagic.used);
++		                       partmagic.buf, time(NULL), partmagic.used);
+ 		varbuf_reset(&partmagic);
+ 
+ 		/* Write the data part. */
+ 		varbuf_printf(&partname, "data.%d", curpart);
+ 		dpkg_ar_member_put_file(file_dst.buf, fd_dst, partname.buf,
+-		                        fd_src, cur_partsize);
++		                        fd_src, time(NULL), cur_partsize);
+ 		varbuf_reset(&partname);
+ 
+ 		close(fd_dst);
+diff --git a/lib/dpkg/ar.c b/lib/dpkg/ar.c
+index 97eefb6..f31b6a7 100644
+--- a/lib/dpkg/ar.c
++++ b/lib/dpkg/ar.c
+@@ -36,11 +36,12 @@
+ #include <dpkg/ar.h>
+ 
+ static void
+-dpkg_ar_member_init(struct dpkg_ar_member *member, const char *name, off_t size)
++dpkg_ar_member_init(struct dpkg_ar_member *member, const char *name,
++                    time_t timestamp, off_t size)
+ {
+ 	member->name = name;
+ 	member->size = size;
+-	member->time = time(NULL);
++	member->time = timestamp;
+ 	member->mode = 0100644;
+ 	member->uid = 0;
+ 	member->gid = 0;
+@@ -124,11 +125,11 @@ dpkg_ar_member_put_header(const char *ar_name, int ar_fd,
+ 
+ void
+ dpkg_ar_member_put_mem(const char *ar_name, int ar_fd,
+-                       const char *name, const void *data, size_t size)
++                       const char *name, const void *data, time_t timestamp, size_t size)
+ {
+ 	struct dpkg_ar_member member;
+ 
+-	dpkg_ar_member_init(&member, name, size);
++	dpkg_ar_member_init(&member, name, timestamp, size);
+ 	dpkg_ar_member_put_header(ar_name, ar_fd, &member);
+ 
+ 	/* Copy data contents. */
+@@ -142,7 +143,7 @@ dpkg_ar_member_put_mem(const char *ar_name, int ar_fd,
+ 
+ void
+ dpkg_ar_member_put_file(const char *ar_name, int ar_fd,
+-                        const char *name, int fd, off_t size)
++                        const char *name, int fd, time_t timestamp, off_t size)
+ {
+ 	struct dpkg_error err;
+ 	struct dpkg_ar_member member;
+@@ -155,7 +156,7 @@ dpkg_ar_member_put_file(const char *ar_name, int ar_fd,
+ 		size = st.st_size;
+ 	}
+ 
+-	dpkg_ar_member_init(&member, name, size);
++	dpkg_ar_member_init(&member, name, timestamp, size);
+ 	dpkg_ar_member_put_header(ar_name, ar_fd, &member);
+ 
+ 	/* Copy data contents. */
+diff --git a/lib/dpkg/ar.h b/lib/dpkg/ar.h
+index 81a061e..c1b8bed 100644
+--- a/lib/dpkg/ar.h
++++ b/lib/dpkg/ar.h
+@@ -59,9 +59,9 @@ void dpkg_ar_put_magic(const char *ar_name, int ar_fd);
+ void dpkg_ar_member_put_header(const char *ar_name, int ar_fd,
+                                struct dpkg_ar_member *member);
+ void dpkg_ar_member_put_file(const char *ar_name, int ar_fd, const char *name,
+-                             int fd, off_t size);
++                             int fd, time_t timestamp, off_t size);
+ void dpkg_ar_member_put_mem(const char *ar_name, int ar_fd, const char *name,
+-                            const void *data, size_t size);
++                            const void *data, time_t timestamp, size_t size);
+ off_t dpkg_ar_member_get_size(const char *ar_name, struct ar_hdr *arh);
+ 
+ /** @} */
+-- 
+2.1.4
+

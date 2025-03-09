@@ -1,0 +1,257 @@
+diff --git a/scripts/dpkg-checkbuilddeps.pl b/scripts/dpkg-checkbuilddeps.pl
+index 31b7ee6..0c618fd 100755
+--- a/scripts/dpkg-checkbuilddeps.pl
++++ b/scripts/dpkg-checkbuilddeps.pl
+@@ -3,6 +3,7 @@
+ # dpkg-checkbuilddeps
+ #
+ # Copyright © 2001 Joey Hess <joeyh@debian.org>
++# Copyright © 2009 George Danchev <danchev@debian.org>
+ #
+ # This program is free software; you can redistribute it and/or modify
+ # it under the terms of the GNU General Public License as published by
+@@ -47,6 +48,10 @@ sub usage {
+                  retrieving them from control file
+   -c build-conf  use given string for build conflicts instead of
+                  retrieving them from control file
++  -f             show frontend friendly list for build-depends and build-conflicts
++                 indep included, also checking their cache availability (reliable list)
++  -s             show frontend friendly list for build-depends and build-conflicts
++                 indep included, wihtout checking their cache availability (best effort list)
+   --admindir=<directory>
+                  change the administrative directory.
+   -h, --help     show this help message.
+@@ -57,17 +62,47 @@ sub usage {
+ }
+ 
+ my $binary_only=0;
+-my ($bd_value, $bc_value);
++my ($bd_value, $bc_value, $frontend, $frontend_simple);
+ if (!GetOptions('B' => \$binary_only,
+                 'help|h' => sub { usage(); exit(0); },
+                 'version' => \&version,
+                 'd=s' => \$bd_value,
+                 'c=s' => \$bc_value,
++                'f' => \$frontend,
++                's' => \$frontend_simple,
+                 'admindir=s' => \$admindir)) {
+ 	usage();
+ 	exit(2);
+ }
+ 
++# $frontend_simple just spits package names list ORed bdeps included, while 
++# $frontend also checks their availability via AptPkg which is engaged on demand
++if ($frontend and $frontend_simple) {
++    printf STDERR _g("%s: either use -f or -s\n"), $progname;    
++    exit 1;
++}
++
++my @feed_frontend;
++my ($_cache, $_sysver, $_config, $_system);
++if ($frontend) { # engage AptPkg machinery, which could be costly on some arches
++    eval {
++        require AptPkg::Config;
++        require AptPkg::System;
++        require AptPkg::Cache;
++        require AptPkg::Version;
++    };
++    if ( $@ ) {
++        die "-f requires libapt-pkg-perl package to be installed.\n";
++    }
++    $_config = $AptPkg::Config::_config;
++    $_system = $AptPkg::System::_system;
++    $_config->init;
++    $_config->{quiet} = 2;
++    $_system = $_config->system;
++    $_sysver = $_system->versioning;
++    $_cache = AptPkg::Cache->new;
++}
++
+ my $controlfile = shift || "debian/control";
+ 
+ my $control = Dpkg::Control::Info->new($controlfile);
+@@ -101,15 +136,180 @@ if ($bc_value) {
+ 		deps_parse($bc_value, reduce_arch => 1, union => 1), $facts);
+ }
+ 
++# Returns true if VER1 REL VER2 is true
++sub eval_ver_rel($ $ $) {
++    my ($ver1, $rel, $ver2) = @_;
++    my $cmp = $_sysver->compare($ver1, $ver2);
++
++    return 1
++    if (   ( ($rel eq "<=") && ( $cmp <= 0 ) )
++        or ( ($rel eq ">=") && ( $cmp >= 0 ) )
++        or ( ($rel eq "<<") && ( $cmp <  0 ) )
++        or ( ($rel eq ">>") && ( $cmp >  0 ) )
++        or ( ($rel eq "=")  && ( $cmp == 0 ) )
++    );
++    return 0;    
++}
++
++# Process one (versioned) build-dependency. 
++# OR'ed build dependencies are splitted earlier.
++# Returns true if package or package (relation version) is available, false otherwise.
++sub feed_bd_list($) {
++    my $bd = shift;
++    if ( $bd =~ /^(\S+)\s*\(\s*([><=]{1,2})\s*(\S+)\)\s*$/ ) { # package (relation version)
++	my ($pkg, $rel, $ver_control) = ($1, $2, $3);
++	if ($frontend_simple) {
++	    push @feed_frontend, $pkg;
++	    return 1;
++	}
++	my $pc = $_cache->{$pkg};
++	unless ($pc) {
++	    printf STDERR _g("Unknown package %s\n"), $pkg;	
++	    next;
++	}
++	my $current_state = $pc->{CurrentState};
++	my $available     = $pc->{VersionList};
++	if ( $available && ($current_state ne "Installed") ) {
++	    my $found_avail = 0;
++            # now walk the cached avail versions for that package
++	    for my $v (@$available) {
++		if ( eval_ver_rel($v->{VerStr}, $rel, $ver_control) ) {
++		    $found_avail = 1;
++		    last;
++		}
++	    }
++	    if ($found_avail) {
++		push @feed_frontend, $pkg;
++		return 1;
++	    }
++	    else {
++		printf STDERR _g("Can not satisfy build dependency %s %s %s. Maybe apt-get update?\n"), $pkg, $rel, $ver_control;
++		exit 1;
++	    }
++	}
++    }
++    elsif ( $bd =~ /^(\S+)$/ )  { # package without relation and version
++	if ($frontend_simple) {
++	    push @feed_frontend, $_;
++	    return 1;
++	}
++	my $pc = $_cache->{$_};   # = $1
++	unless ($pc) {
++	    printf STDERR _g("Unknown package %s. Maybe apt-get update?\n"), $_;
++	    exit 1;
++	}
++
++	push @feed_frontend, $bd;
++	return 1;
++    }
++    else {
++	printf STDERR _g("Unknown Build-Depends format\n");
++	exit 1;
++    }
++
++    # nothing found
++    return 0;
++}
++
++# Process the whole build-conflicts array at once. 
++# OR'ed conflicts don't make sense, which is checked earlier.
++# STDERRs on unknown packages listed in Build-Conflicts, but keeps going anyway
++# Returns void
++sub feed_bc_list($) {
++    my $rf = shift;
++    my @ar = @$rf;
++    for (@ar) {
++	if ( /^(\S+)\s*\(\s*([><=]{1,2})\s*(\S+)\)\s*$/ ) { # package (relation version)
++	    my ($pkg, $rel, $ver_control) = ($1, $2, $3);
++	    if ($frontend_simple) {
++		push @feed_frontend, $pkg."-";
++		return 1;
++	    }
++	    my $pc = $_cache->{$pkg};
++	    unless ($pc) {
++		printf STDERR _g("Unknown package %s\n"), $pkg;	
++		next;
++	    }
++	    my $current_state = $pc->{CurrentState};
++	    if ($pc->{CurrentVer}) {
++		my $ver_system = $pc->{CurrentVer}{VerStr};
++		push @feed_frontend, $pkg."-" if ( eval_ver_rel($ver_system, $rel, $ver_control)
++		    && ( $current_state ne "NotInstalled" )
++		)
++	    }
++	}
++	elsif ( /^(\S+)$/ )  { # package without relation and version
++	    if ($frontend_simple) {
++		push @feed_frontend, $_."-" ; # = $1
++		return 1;
++	    }
++	    my $pc = $_cache->{$_}; # = $1
++	    unless ($pc) {
++		printf STDERR _g("Unknown package %s\n"), $_;	
++		next;
++	    }
++	    push @feed_frontend, $_."-";
++	}
++	else {
++	    printf STDERR _g("Unknown Build-Conflicts format\n");
++	    exit 1;
++	}	
++    }
++}
++
+ if (@unmet) {
+-	printf STDERR _g("%s: Unmet build dependencies: "), $progname;
+-	print STDERR join(" ", map { $_->output() } @unmet), "\n";
++    if ($frontend || $frontend_simple) {
++	# Build-Depends{-Indep}: a (rel X) | b (rel Y) | c, d, e (rel Z)
++	BD_LIST: 
++	  for (@unmet) {
++	      my @spt = split( '\|', $_);
++	      # process both: single, and several OR'ed build dependencies
++	      # pick the first one available which satisfies the given relation if any
++	      if ( @spt >= 1) {
++		  for (@spt) {
++		      s/^\s*//; s/\s*$//;
++		      next BD_LIST if ( feed_bd_list($_) );
++		  }
++		  (@spt == 1) ? 
++		    printf STDERR _g("%s: Unsatifyable build dependency: %s\n"), $progname, $_ :
++		    printf STDERR _g("%s: Unsatifyable ORed build dependencies: %s\n"), $progname, $_ ;
++		  exit 1;
++	      }
++	      else {
++		  die "Should never happen\n";
++	      }
++	  }
++    }
++    else {
++	printf STDERR _g("%s: Unmet build dependencies: "), $progname;  
++	print STDERR join(" ", map { $_->dump() } @unmet), "\n";
++    }
+ }
++
+ if (@conflicts) {
++    if ($frontend || $frontend_simple) {
++	for (@conflicts) {
++	    my @spt = split( '\|', $_);
++	    if (@spt > 1) {
++		printf STDERR _g("%s: ORed build conflicts are not allowed: %s\n"), $progname, $_ ;
++		exit 1;
++	    }
++	}
++	feed_bc_list(\@conflicts);
++    }
++    else {
+ 	printf STDERR _g("%s: Build conflicts: "), $progname;
+-	print STDERR join(" ", map { $_->output() } @conflicts), "\n";
++	print STDERR join(" ", map { $_->dump() } @conflicts), "\n";
++    }
++}
++
++if ( $frontend || $frontend_simple and scalar @feed_frontend) {
++    print STDOUT join (" ", @feed_frontend), "\n";
++    exit 0;
+ }
+-exit 1 if @unmet || @conflicts;
++else {
++    exit 1 if @unmet || @conflicts;
++};
+ 
+ # Silly little status file parser that returns a Dpkg::Deps::KnownFacts
+ sub parse_status {

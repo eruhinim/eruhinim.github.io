@@ -1,0 +1,734 @@
+From: Modestas Vainius <modestas@vainius.eu>
+Subject: [PATCH] Support parallel building in makefile buildsystem
+
+1) Add routine to Dh_Lib (used by dh and makefile.pm) which is capable of
+detecting make jobserver and job control options from the MAKEFLAGS environment
+variable. It also generates and returns a clean up MAKEFLAGS from these
+options.
+
+2) Add --parallel option to build system framework which allows source packages
+to specify that they support parallel building. Optional value for this option is
+the number of maximum parallel process to allow. However, the actual number of
+parallel process (if any) for the specific build is determined from
+DEB_BUILD_OPTIONS env variable as specified by Debian Policy.
+
+By default (no --parallel option) parallel is neither enabled nor disabled
+(depends on the external environment). However, dh may pass --parallel to
+dh_auto_* implicitly in case 4) described below.
+
+3) Add parallel support for makefile buildsystem. This implementation
+forcefully starts a new make job server (or disables parallel) for the number
+of process requested. If --parallel was not passed to the build system at all,
+the build system will only clean up MAKEFLAGS from stale jobserver options to
+avoid pointless make warnings.
+
+4) If dh detects that it is being run by dpkg-buildpackage -jX and it is NOT
+run with "+" prefix from debian/rules (i.e. jobserver is not reachable), it
+enables --parallel implicitly. This closes: #532805.
+
+Signed-off-by: Modestas Vainius <modestas@vainius.eu>
+
+---
+ Debian/Debhelper/Buildsystem.pm          |   16 ++-
+ Debian/Debhelper/Buildsystem/makefile.pm |   31 +++-
+ Debian/Debhelper/Dh_Buildsystems.pm      |   42 +++++
+ Debian/Debhelper/Dh_Lib.pm               |   42 +++++-
+ debhelper.pod                            |   18 ++
+ dh                                       |   44 +++++-
+ t/buildsystems/buildsystem_tests         |  275 +++++++++++++++++++++++++++++-
+ t/buildsystems/parallel.mk               |   21 +++
+ 8 files changed, 475 insertions(+), 14 deletions(-)
+
+diff --git a/Debian/Debhelper/Buildsystem.pm b/Debian/Debhelper/Buildsystem.pm
+index 62c45b5..677e3bf 100644
+--- a/Debian/Debhelper/Buildsystem.pm
++++ b/Debian/Debhelper/Buildsystem.pm
+@@ -47,7 +47,12 @@ sub DEFAULT_BUILD_DIRECTORY {
+ #                  specified or empty, defaults to the current directory.
+ # - builddir -     specifies build directory to use. Path is relative to the
+ #                  current (top) directory. If undef or empty,
+-#                  DEFAULT_BUILD_DIRECTORY directory will be used. 
++#                  DEFAULT_BUILD_DIRECTORY directory will be used.
++# - parallel -     number of parallel process to be spawned for building
++#                  sources. Parallel building needs to be supported by the
++#                  underlying build system for this option to be effective.
++#                  Defaults to undef (i.e. parallel disabled, but do not try to
++#                  enforce this limit by messing with environment).
+ # Derived class can override the constructor to initialize common object
+ # parameters. Do NOT use constructor to execute commands or otherwise
+ # configure/setup build environment. There is absolutely no guarantee the
+@@ -58,6 +63,7 @@ sub new {
+ 
+ 	my $this = bless({ sourcedir => '.',
+ 	                   builddir => undef,
++	                   parallel => undef,
+ 	                   cwd => Cwd::getcwd() }, $class);
+ 
+ 	if (exists $opts{sourcedir}) {
+@@ -71,6 +77,9 @@ sub new {
+ 	if (exists $opts{builddir}) {
+ 		$this->_set_builddir($opts{builddir});
+ 	}
++	if (defined $opts{parallel} && $opts{parallel} >= 1) {
++		$this->{parallel} = $opts{parallel};
++	}
+ 	return $this;
+ }
+ 
+@@ -243,6 +252,11 @@ sub get_source_rel2builddir {
+ 	return $dir;
+ }
+ 
++sub get_parallel {
++	my $this=shift;
++	return $this->{parallel};
++}
++
+ # When given a relative path to the build directory, converts it
+ # to the path that is relative to the source directory. If $path is
+ # not given, returns a path to the build directory that is relative
+diff --git a/Debian/Debhelper/Buildsystem/makefile.pm b/Debian/Debhelper/Buildsystem/makefile.pm
+index 3809d59..6629d25 100644
+--- a/Debian/Debhelper/Buildsystem/makefile.pm
++++ b/Debian/Debhelper/Buildsystem/makefile.pm
+@@ -7,7 +7,7 @@
+ package Debian::Debhelper::Buildsystem::makefile;
+ 
+ use strict;
+-use Debian::Debhelper::Dh_Lib qw(escape_shell);
++use Debian::Debhelper::Dh_Lib qw(escape_shell get_make_jobserver_status);
+ use base 'Debian::Debhelper::Buildsystem';
+ 
+ sub get_makecmd_C {
+@@ -30,13 +30,38 @@ sub exists_make_target {
+ 	return length($ret);
+ }
+ 
++sub do_make {
++	my $this=shift;
++
++	# Always clean MAKEFLAGS from unavailable jobserver options. If parallel
++	# is enabled, do more extensive clean up from all job control specific
++	# options and start our own jobserver if parallel building (> 1) was
++	# requested.
++	my ($status, $makeflags) = get_make_jobserver_status();
++	if ($status eq "jobserver-unavailable" || defined $this->get_parallel()) {
++		if (defined $makeflags) {
++			$ENV{MAKEFLAGS} = $makeflags;
++		}
++		else {
++			delete $ENV{MAKEFLAGS} if exists $ENV{MAKEFLAGS};
++		}
++	}
++
++	# Start a new jobserver if parallel building was requested
++	if (defined $this->get_parallel()) {
++		unshift @_, "-j" . ($this->get_parallel() > 1 ? $this->get_parallel() : 1);
++	}
++
++	$this->doit_in_builddir($this->{makecmd}, @_);
++}
++
+ sub make_first_existing_target {
+ 	my $this=shift;
+ 	my $targets=shift;
+ 
+ 	foreach my $target (@$targets) {
+ 		if ($this->exists_make_target($target)) {
+-			$this->doit_in_builddir($this->{makecmd}, $target, @_);
++			$this->do_make($target, @_);
+ 			return $target;
+ 		}
+ 	}
+@@ -71,7 +96,7 @@ sub check_auto_buildable {
+ 
+ sub build {
+ 	my $this=shift;
+-	$this->doit_in_builddir($this->{makecmd}, @_);
++	$this->do_make(@_);
+ }
+ 
+ sub test {
+diff --git a/Debian/Debhelper/Dh_Buildsystems.pm b/Debian/Debhelper/Dh_Buildsystems.pm
+index 4986267..3908145 100644
+--- a/Debian/Debhelper/Dh_Buildsystems.pm
++++ b/Debian/Debhelper/Dh_Buildsystems.pm
+@@ -30,6 +30,7 @@ my $opt_buildsys;
+ my $opt_sourcedir;
+ my $opt_builddir;
+ my $opt_list;
++my $opt_parallel;
+ 
+ sub create_buildsystem_instance {
+ 	my $system=shift;
+@@ -47,6 +48,9 @@ sub create_buildsystem_instance {
+ 	if (!exists $bsopts{sourcedir} && defined $opt_sourcedir) {
+ 		$bsopts{sourcedir} = ($opt_sourcedir eq "") ? undef : $opt_sourcedir;
+ 	}
++	if (!exists $bsopts{parallel}) {
++		$bsopts{parallel} = $opt_parallel;
++	}
+ 	return $module->new(%bsopts);
+ }
+ 
+@@ -122,9 +126,47 @@ sub buildsystems_init {
+ 
+ 	    "l" => \$opt_list,
+ 	    "list" => \$opt_list,
++
++	    "j:i" => \$opt_parallel,
++	    "parallel:i" => \$opt_parallel,
+ 	);
+ 	$args{options}{$_} = $options{$_} foreach keys(%options);
+ 	Debian::Debhelper::Dh_Lib::init(%args);
++
++	# Post-process parallel building option. Initially $opt_parallel may have
++	# such values:
++	# * undef - no --parallel option was specified. This tells buildsystem class
++	#   not to mess with MAKEFLAGS (with the exception of cleaning MAKEFLAGS
++	#   from pointless unavailable jobserver options to avoid warnings) nor
++	#   enable parallel.
++	# * 1 - --parallel=1 option was specified, hence the package should never be
++	#   built in parallel mode. Cleans MAKEFLAGS if needed.
++	# * 0 - --parallel was specified without interger argument meaning package
++	#   does not want to enforce limit on maximum number of parallel processes.
++	# * N > 1 - --parallel=N was specified where N is the maximum number parallel
++	#   processes the package wants to enforce.
++	# Taken DEB_BUILD_OPTIONS and all this into account, set $opt_parallel to the
++	# number of parallel processes to be used for *this* build.
++	if (defined $opt_parallel) {
++		if ($opt_parallel >= 0 && exists $ENV{DEB_BUILD_OPTIONS}) {
++			# Parse parallel=n tag
++			my $n;
++			foreach my $opt (split(/\s+/, $ENV{DEB_BUILD_OPTIONS})) {
++				$n = $1 if $opt =~ /^parallel=(\d+)$/;
++			}
++			if (defined $n && $n > 0) {
++				$opt_parallel = $n if $opt_parallel == 0 || $n < $opt_parallel;
++			}
++			else {
++				# Invalid value in the parallel tag. Disable.
++				$opt_parallel = 1;
++			}
++		}
++		else {
++			# In case invalid number was passed
++			$opt_parallel = 1;
++		}
++	}
+ }
+ 
+ sub buildsystems_list {
+diff --git a/Debian/Debhelper/Dh_Lib.pm b/Debian/Debhelper/Dh_Lib.pm
+index 2d1934b..ebf7db7 100644
+--- a/Debian/Debhelper/Dh_Lib.pm
++++ b/Debian/Debhelper/Dh_Lib.pm
+@@ -16,7 +16,7 @@ use vars qw(@ISA @EXPORT %dh);
+ 	    &compat &addsubstvar &delsubstvar &excludefile &package_arch
+ 	    &is_udeb &udeb_filename &debhelper_script_subst &escape_shell
+ 	    &inhibit_log &load_log &write_log &dpkg_architecture_value
+-	    &sourcepackage);
++	    &sourcepackage &get_make_jobserver_status);
+ 
+ my $max_compat=7;
+ 
+@@ -205,6 +205,46 @@ sub _error_exitcode {
+ 	}
+ }
+ 
++# A helper subroutine for detecting (based on MAKEFLAGS) if make jobserver 
++# is enabled, if it is available or MAKEFLAGS contains "jobs" option.
++# It returns current status (jobserver, jobserver-unavailable or jobs-N where
++# N is number of jobs, 0 if infinite) and MAKEFLAGS cleaned up from 
++# job control options.
++sub get_make_jobserver_status {
++	my $jobsre = qr/(?:^|\s)(?:(?:-j\s*|--jobs(?:=|\s+))(\d+)?|--jobs)\b/;
++	my $status = "";
++	my $makeflags;
++
++	if (exists $ENV{MAKEFLAGS}) {
++		$makeflags = $ENV{MAKEFLAGS};
++		if ($makeflags =~ /(?:^|\s)--jobserver-fds=(\d+)/) {
++			$status = "jobserver";
++			if (!open(my $in, "<&", "$1")) {
++				# Job server is unavailable
++				$status .= "-unavailable";
++			}
++			else {
++				close $in;
++			}
++			# Clean makeflags up
++			$makeflags =~ s/(?:^|\s)--jobserver-fds=\S+//g;
++			$makeflags =~ s/(?:^|\s)-j\b//g;
++		}
++		elsif (my @m = ($makeflags =~ /$jobsre/g)) {
++			# Job count is specified in MAKEFLAGS. Whenever make reads it, a new
++			# jobserver will be started. Job count returned is 0 if infinite.
++			$status = "jobs-" . (defined $m[$#m] ? $m[$#m] : "0");
++			# Clean makeflags up from "jobs" option(s)
++			$makeflags =~ s/$jobsre//g;
++		}
++	}
++	if ($status) {
++		# MAKEFLAGS could be unset if it is empty
++		$makeflags = undef if $makeflags =~ /^\s*$/;
++	}
++	return wantarray ? ($status, $makeflags) : $status;
++}
++
+ # Run a command that may have a huge number of arguments, like xargs does.
+ # Pass in a reference to an array containing the arguments, and then other
+ # parameters that are the command and any parameters that should be passed to
+diff --git a/debhelper.pod b/debhelper.pod
+index de39057..8ea3f31 100644
+--- a/debhelper.pod
++++ b/debhelper.pod
+@@ -205,6 +205,24 @@ If the build system prefers out of source tree building but still
+ allows in source building, the latter can be re-enabled by passing a build
+ directory path that is the same as the source directory path.
+ 
++=item B<-j>[I<maximum>], B<--parallel>[I<=maximum>]
++
++Indicate that a source package supports building using multiple parallel
++processes. However, the package will be built in this mode only if the build
++system supports this feature and tag I<parallel=n> is present in the
++DEB_BUILD_OPTIONS environment variable (as per Debian Policy section 4.9.1).
++The number of spawned parallel processes will be the smallest value of I<n>,
++I<maximum> (if specified) or a build system specific limit.
++
++If value of I<maximum> is 1, parallel building will be forcefully disabled.
++Such construct can be used to negate effects of the previously specified
++I<--parallel> option.
++
++If I<--parallel> is not specified, a debhelper build system will neither
++attempt to enforce nor prevent parallel building. This typically means a source
++package does not to support parallel building or enforces it in other ways
++(e.g. by modifying MAKEFLAGS manually).
++
+ =item B<--list>, B<-l>
+ 
+ List all build systems supported by debhelper on this system. The list
+diff --git a/dh b/dh
+index cd2f9f0..9d1fca0 100755
+--- a/dh
++++ b/dh
+@@ -41,6 +41,13 @@ override target can then run the command with additional options, or run
+ entirely different commands instead. (Note that to use this feature,
+ you should Build-Depend on debhelper 7.0.50 or above.)
+ 
++dh passes --parallel to dh_auto_* commands if it detects being run by the
++C<dpkg-buildpackage -jX> command, but a job server of the parent I<make>
++(presumably debian/rules) is not reachable. Nonetheless, it is highly
++recommended to pass --parallel/-j option to dh explicitly to indicate that a
++source package supports parallel building. See L<debhelper(7)/"BUILD SYSTEM
++OPTIONS"> for more information.
++
+ =head1 OPTIONS
+ 
+ =over 4
+@@ -222,9 +229,33 @@ init(options => {
+ 	},
+ 	"l" => \$dh{LIST},
+ 	"list" => \$dh{LIST},
++	"j:i" => \$dh{PARALLEL},
++	"parallel:i" => \$dh{PARALLEL},
+ });
+ inhibit_log();
+ 
++# Parallel defaults to "unset" unless unavailable --jobserver-fds is detected
++# in MAKEFLAGS. This typically means dpkg-buildpackage was called with a -jX
++# option. Then -jX in MAKEFLAGS gets "consumed" by make invocation of
++# debian/rules and "converted" to --jobserver-fds.  If jobserver is
++# unavailable, dh was probably called via debian/rules without "+" prefix (so
++# make has closed jobserver FDs). In such a case, MAKEFLAGS is cleaned from the
++# offending --jobserver-fds option in order to prevent further make invocations
++# from spitting warnings and disabling job support.
++my ($status, $makeflags) = get_make_jobserver_status();
++if ($status eq "jobserver-unavailable") {
++	# Stop make from spitting pointless job control warnings
++	if (defined $makeflags) {
++		$ENV{MAKEFLAGS} = $makeflags;
++	}
++	else {
++		delete $ENV{MAKEFLAGS};
++	}
++	# Enable parallel (no maximum) if the package doesn't since it appears this
++	# dh is called via dpkg-buildpackage -jX.
++	$dh{PARALLEL} = 0 if !defined $dh{PARALLEL};
++}
++
+ # Definitions of sequences.
+ my %sequences;
+ $sequences{build} = [qw{
+@@ -431,7 +462,12 @@ while (@ARGV_orig) {
+ 		shift @ARGV_orig;
+ 		next;
+ 	}
+-	elsif ($opt =~ /^--?(no-act|remaining|(after|until|before|with|without)=)/) {
++	elsif ($opt =~ /^--?(no-act|remaining|(after|until|before|with|without|parallel)=)/) {
++		next;
++	}
++	elsif ($opt =~ /^(-j|--parallel)$/) {
++		# Argument to -j/--parallel is optional.
++		shift @ARGV_orig if @ARGV_orig > 0 && $ARGV_orig[0] =~ /^\d+$/;
+ 		next;
+ 	}
+ 	push @options, $opt;
+@@ -512,6 +548,12 @@ sub run {
+ 	# to prevent them from being acted on.
+ 	push @options, map { "-N$_" } @exclude;
+ 
++	# Pass --parallel to dh_auto_* commands if requested
++	if (defined $dh{PARALLEL} && ($dh{PARALLEL} == 0 || $dh{PARALLEL} > 1)
++	    && $command =~ /^dh_auto_/) {
++		push @options, "--parallel" . ($dh{PARALLEL} > 1 ? "=$dh{PARALLEL}" : "");
++	}
++
+ 	# Check for override targets in debian/rules and
+ 	# run them instead of running the command directly.
+ 	my $override_command;
+diff --git a/t/buildsystems/buildsystem_tests b/t/buildsystems/buildsystem_tests
+index 8f7a275..41c0f97 100755
+--- a/t/buildsystems/buildsystem_tests
++++ b/t/buildsystems/buildsystem_tests
+@@ -1,6 +1,6 @@
+ #!/usr/bin/perl
+ 
+-use Test::More tests => 228;
++use Test::More tests => 273;
+ 
+ use strict;
+ use warnings;
+@@ -49,12 +49,32 @@ sub process_stdout {
+ 	my ($cmdline, $stdin) = @_;
+ 	my ($reader, $writer);
+ 
+-	open2($reader, $writer, $cmdline) or die "Unable to exec $cmdline";
++	my $pid = open2($reader, $writer, $cmdline) or die "Unable to exec $cmdline";
+ 	print $writer $stdin if $stdin;
+ 	close $writer;
++	waitpid($pid, 0);
++	$? = $? >> 8; # exit status
+ 	return readlines($reader);
+ }
+ 
++sub write_debian_rules {
++	my $contents=shift;
++	my $backup;
++
++	if (-f "debian/rules") {
++		(undef, $backup) = tempfile(DIR => ".", OPEN => 0);
++		rename "debian/rules", $backup;
++	}
++	# Write debian/rules if requested
++	if ($contents) {
++		open(my $f, ">", "debian/rules");
++		print $f $contents;;
++		close($f);
++		chmod 0755, "debian/rules";
++	}
++	return $backup;
++}
++
+ ### Test Buildsystem class API methods
+ is( $BS_CLASS->canonpath("path/to/the/./nowhere/../../somewhere"),
+     "path/to/somewhere", "canonpath no1" );
+@@ -384,17 +404,19 @@ EOF
+ }
+ 
+ $tmp = Cwd::getcwd();
+-is_deeply( process_stdout("$^X -- - --builddirectory='autoconf/bld dir' --sourcedirectory autoconf",
++# NOTE: disabling parallel building explicitly (it might get automatically
++# enabled if run under dpkg-buildpackage -jX) to make output deterministic.
++is_deeply( process_stdout("$^X -- - --builddirectory='autoconf/bld dir' --sourcedirectory autoconf --parallel=1",
+                           get_load_bs_source(undef, "configure")),
+-    [ 'NAME=autoconf', 'builddir=autoconf/bld dir', "cwd=$tmp",  'makecmd=make', 'sourcedir=autoconf' ],
++    [ 'NAME=autoconf', 'builddir=autoconf/bld dir', "cwd=$tmp",  'makecmd=make', 'parallel=1', 'sourcedir=autoconf' ],
+     "autoconf autoselection and sourcedir/builddir" );
+ 
+-is_deeply( process_stdout("$^X -- - -Sautoconf -D autoconf", get_load_bs_source("autoconf", "build")),
+-    [ 'NAME=autoconf', 'builddir=undef', "cwd=$tmp", 'makecmd=make', 'sourcedir=autoconf' ],
++is_deeply( process_stdout("$^X -- - -Sautoconf -D autoconf --parallel=1", get_load_bs_source("autoconf", "build")),
++    [ 'NAME=autoconf', 'builddir=undef', "cwd=$tmp", 'makecmd=make', 'parallel=1', 'sourcedir=autoconf' ],
+     "forced autoconf and sourcedir" );
+ 
+-is_deeply( process_stdout("$^X -- - -B -Sautoconf", get_load_bs_source("autoconf", "build")),
+-    [ 'NAME=autoconf', "builddir=$default_builddir", "cwd=$tmp", 'makecmd=make', 'sourcedir=.' ],
++is_deeply( process_stdout("$^X -- - -B -Sautoconf --parallel=1", get_load_bs_source("autoconf", "build")),
++    [ 'NAME=autoconf', "builddir=$default_builddir", "cwd=$tmp", 'makecmd=make', 'parallel=1', 'sourcedir=.' ],
+     "forced autoconf and default build directory" );
+ 
+ # Build the autoconf test package
+@@ -459,6 +481,243 @@ dh_auto_do_autoconf('autoconf');
+ dh_auto_do_autoconf('autoconf', 'bld/dir', configure_args => [ "--extra-autoconf-configure-arg" ]);
+ ok ( ! -e 'bld', "bld got deleted too" );
+ 
++#### Test parallel building and related options / routines
++@tmp = ( $ENV{MAKEFLAGS}, $ENV{DEB_BUILD_OPTIONS} );
++
++# Test get_make_jobserver_status() sub
++
++$ENV{MAKEFLAGS} = "--jobserver-fds=103,104 -j";
++is_deeply( [ get_make_jobserver_status() ], [ "jobserver-unavailable", undef ],
++	"get_make_jobserver_status(): unavailable jobserver, unset makeflags" );
++
++$ENV{MAKEFLAGS} = "-a --jobserver-fds=103,104 -j -b";
++is_deeply( [ get_make_jobserver_status() ], [ "jobserver-unavailable", "-a -b" ],
++	"get_make_jobserver_status(): unavailable jobserver, clean makeflags" );
++
++$ENV{MAKEFLAGS} = " --jobserver-fds=1,2 -j  ";
++is_deeply( [ get_make_jobserver_status() ], [ "jobserver", undef ],
++	"get_make_jobserver_status(): jobserver (available), clean makeflags" );
++
++$ENV{MAKEFLAGS} = "-a -j -b";
++is_deeply( [ get_make_jobserver_status() ], [ "jobs-0", "-a -b" ],
++	"get_make_jobserver_status(): -j" );
++
++$ENV{MAKEFLAGS} = "-a --jobs -b";
++is_deeply( [ get_make_jobserver_status() ], [ "jobs-0", "-a -b" ],
++	"get_make_jobserver_status(): --jobs" );
++
++$ENV{MAKEFLAGS} = "-j6";
++is_deeply( [ get_make_jobserver_status() ], [ "jobs-6", undef ],
++	"get_make_jobserver_status(): -j6" );
++
++$ENV{MAKEFLAGS} = "-a -j6 --jobs=7";
++is_deeply( [ get_make_jobserver_status() ], [ "jobs-7", "-a" ],
++	"get_make_jobserver_status(): -j6 --jobs=7" );
++
++$ENV{MAKEFLAGS} = "-j6 --jobserver-fds=5,6 --jobs=8";
++is_deeply( [ get_make_jobserver_status() ], [ "jobserver-unavailable", "-j6 --jobs=8" ],
++	"get_make_jobserver_status(): mixed jobserver and -j/--jobs" );
++
++# Test parallel building with makefile build system.
++$ENV{MAKEFLAGS} = "";
++$ENV{DEB_BUILD_OPTIONS} = "";
++
++sub do_parallel_mk {
++	my $dh_opts=shift || "";
++	my $make_opts=shift || "";
++	return process_stdout(
++		"LANG=C LC_ALL=C LC_MESSAGES=C $TOPDIR/dh_auto_build -Smakefile $dh_opts " .
++		"-- -s -f parallel.mk $make_opts 2>&1 >/dev/null", "");
++}
++
++sub test_isnt_parallel {
++	my ($got, $desc) = @_;
++	my @makemsgs = grep /^make[\d\[\]]*:/, @$got;
++	if (@makemsgs) {
++		like( $makemsgs[0], qr/Error 10/, $desc );
++	}
++	else {
++		ok( scalar(@makemsgs) > 0, $desc );
++	}
++}
++
++sub test_is_parallel {
++	my ($got, $desc) = @_;
++	is_deeply( $got, [] , $desc );
++	is( $?, 0, "(exit status=0) $desc");
++}
++
++test_isnt_parallel( do_parallel_mk(),
++	"No parallel by default" );
++test_isnt_parallel( do_parallel_mk("--parallel"),
++	"No parallel by default with --parallel" );
++
++$ENV{DEB_BUILD_OPTIONS}="parallel=5";
++test_isnt_parallel( do_parallel_mk(),
++	"DEB_BUILD_OPTIONS=parallel=5 without --parallel" );
++test_is_parallel( do_parallel_mk("--parallel"),
++	"DEB_BUILD_OPTIONS=parallel=5 with --parallel" );
++test_is_parallel( do_parallel_mk("--parallel=2"),
++	"DEB_BUILD_OPTIONS=parallel=5 with --parallel=2" );
++test_isnt_parallel( do_parallel_mk("--parallel=1"),
++	"DEB_BUILD_OPTIONS=parallel=5 with --parallel=1 (off)" );
++
++$ENV{MAKEFLAGS} = "--jobserver-fds=105,106 -j";
++$ENV{DEB_BUILD_OPTIONS}="";
++test_isnt_parallel( do_parallel_mk(),
++	"makefile.pm (no parallel): no make warnings about unavailable jobserver" );
++$ENV{DEB_BUILD_OPTIONS}="parallel=5";
++test_is_parallel( do_parallel_mk("--parallel"),
++	"DEB_BUILD_OPTIONS=parallel=5 with --parallel: no make warnings about unavail parent jobserver" );
++
++$ENV{MAKEFLAGS} = "-j2";
++$ENV{DEB_BUILD_OPTIONS}="";
++test_is_parallel( do_parallel_mk(),
++	"MAKEFLAGS=-j2 without --parallel: dh_auto_build honours MAKEFLAGS" );
++test_isnt_parallel( do_parallel_mk("--parallel=1"),
++	"MAKEFLAGS=-j2 with --parallel=1: dh_auto_build enforces -j1" );
++
++# Test dh dpkg-buildpackage -jX detection
++sub do_rules_for_parallel {
++	my $cmdline=shift || "";
++	my $stdin=shift || "";
++	return process_stdout("LANG=C LC_ALL=C LC_MESSAGES=C PATH=$TOPDIR:\$PATH " .
++		"make -f - $cmdline 2>&1 >/dev/null", $stdin);
++}
++
++# Simulate dpkg-buildpackage -j5
++doit("ln", "-s", "parallel.mk", "Makefile");
++
++sub test_dh_parallel {
++	my $extra_dsc=shift || "";
++	my $debian_rules=shift || "";
++	my $rules;
++	my $tmpfile;
++
++	$ENV{MAKEFLAGS} = "-j5";
++	$ENV{DEB_BUILD_OPTIONS} = "parallel=5";
++
++	# Write debian/rules if requested
++	$tmpfile = write_debian_rules($debian_rules);
++
++	$rules = <<'EOF';
++%:
++	@dh_clean > /dev/null 2>&1
++	@dh --buildsystem=makefile --after=dh_auto_configure --until=dh_auto_build $@
++	@dh_clean > /dev/null 2>&1
++EOF
++	test_is_parallel( do_rules_for_parallel("build", $rules),
++		"dh adds --parallel implicitly under dpkg-buildpackage -j5 $extra_dsc");
++
++	$ENV{MAKEFLAGS} = "";
++	test_isnt_parallel( do_rules_for_parallel("build", $rules),
++		"DEB_BUILD_OPTIONS=parallel=5 without MAKEFLAGS=-jX via dh $extra_dsc" );
++
++	$ENV{MAKEFLAGS} = "-j5";
++	$rules = <<'EOF';
++%:
++	@dh_clean > /dev/null 2>&1
++	@dh -j1 --buildsystem=makefile --after=dh_auto_configure --until=dh_auto_build $@
++	@dh_clean > /dev/null 2>&1
++EOF
++	test_isnt_parallel( do_rules_for_parallel("build", $rules),
++		"dh -j1 disables implicit parallel under dpkg-buildpackage -j5 $extra_dsc");
++
++	$rules = <<'EOF';
++%:
++	@dh_clean > /dev/null 2>&1
++	@dh -j --buildsystem=makefile --after=dh_auto_configure --until=dh_auto_build $@
++	@dh_clean > /dev/null 2>&1
++EOF
++	test_is_parallel( do_rules_for_parallel("build", $rules),
++		"dh -j under dpkg-buildpackage -j5 is parallel $extra_dsc");
++	$ENV{MAKEFLAGS} = "";
++	test_is_parallel( do_rules_for_parallel("build", $rules),
++		"dh -j is parallel only with DEB_BUILD_OPTIONS=parallel=5 $extra_dsc");
++
++	if (defined $tmpfile) {
++		rename($tmpfile, "debian/rules");
++	}
++	elsif ($debian_rules) {
++		unlink("debian/rules");
++	}
++}
++
++# dh should pass the same tests with and without overrides
++test_dh_parallel();
++test_dh_parallel("(with overrides)", <<'EOF');
++#!/usr/bin/make -f
++override_dh_auto_build:
++	@dh_auto_build -- -f parallel.mk
++EOF
++
++# Test if legacy punctuation hacks (+) work as before
++$ENV{MAKEFLAGS} = "-j5";
++$ENV{DEB_BUILD_OPTIONS} = "parallel=5";
++$tmp = write_debian_rules(<<'EOF');
++#!/usr/bin/make -f
++%:
++	@dh_clean > /dev/null 2>&1
++	@+dh --buildsystem=makefile --after=dh_auto_configure --until=dh_auto_build $@
++	@dh_clean > /dev/null 2>&1
++EOF
++test_is_parallel( do_rules_for_parallel("build", "include debian/rules"),
++	"legacy punctuation hacks: +dh, no override" );
++unlink "debian/rules";
++
++write_debian_rules(<<'EOF');
++#!/usr/bin/make -f
++override_dh_auto_build:
++	dh_auto_build
++%:
++	@dh_clean > /dev/null 2>&1
++	@+dh --buildsystem=makefile --after=dh_auto_configure --until=dh_auto_build $@
++	@dh_clean > /dev/null 2>&1
++EOF
++test_isnt_parallel( do_rules_for_parallel("build", "include debian/rules"),
++	"legacy punctuation hacks: +dh, override without +, no parallel, no make warnings" );
++unlink "debian/rules";
++
++write_debian_rules(<<'EOF');
++#!/usr/bin/make -f
++override_dh_auto_build:
++	+dh_auto_build
++%:
++	@dh_clean > /dev/null 2>&1
++	@+dh --buildsystem=makefile --after=dh_auto_configure --until=dh_auto_build $@
++	@dh_clean > /dev/null 2>&1
++EOF
++test_is_parallel( do_rules_for_parallel("build", "include debian/rules"),
++	"legacy punctuation hacks: +dh, override with +" );
++unlink "debian/rules";
++
++write_debian_rules(<<'EOF');
++#!/usr/bin/make -f
++override_dh_auto_build:
++	$(MAKE)
++%:
++	@dh_clean > /dev/null 2>&1
++	@+dh --buildsystem=makefile --after=dh_auto_configure --until=dh_auto_build $@
++	@dh_clean > /dev/null 2>&1
++EOF
++test_is_parallel( do_rules_for_parallel("build", "include debian/rules"),
++	"legacy punctuation hacks: +dh, override with \$(MAKE)" );
++unlink "debian/rules";
++
++if (defined $tmp) {
++	rename($tmp, "debian/rules");
++}
++else {
++	unlink("debian/rules");
++}
++
++# Clean up after parallel testing
++END {
++	system("rm", "-f", "Makefile");
++}
++$ENV{MAKEFLAGS} = $tmp[0] if defined $tmp[0];
++$ENV{DEB_BUILD_OPTIONS} = $tmp[1] if defined $tmp[1];
++
+ END {
+ 	system("rm", "-rf", $tmpdir);
+ 	system("$TOPDIR/dh_clean");
+diff --git a/t/buildsystems/parallel.mk b/t/buildsystems/parallel.mk
+new file mode 100644
+index 0000000..3e0d201
+--- /dev/null
++++ b/t/buildsystems/parallel.mk
+@@ -0,0 +1,21 @@
++all: FIRST SECOND
++
++TMPFILE ?= $(CURDIR)/parallel.mk.lock
++
++rmtmpfile:
++	@rm -f "$(TMPFILE)"
++
++FIRST: rmtmpfile
++	@c=0; \
++    while [ $$c -le 5 ] && \
++          ([ ! -e "$(TMPFILE)" ] || [ "`cat "$(TMPFILE)"`" != "SECOND" ]); do \
++        c=$$(($$c+1)); \
++        sleep 0.1; \
++    done; \
++    rm -f "$(TMPFILE)"; \
++    if [ $$c -gt 5 ]; then exit 10; else exit 0; fi
++
++SECOND: rmtmpfile
++	@echo $@ > "$(TMPFILE)"
++
++.PHONY: all FIRST SECOND rmtmpfile
+-- 
+tg: (f2200dc..) patch/parallel (depends on: master)

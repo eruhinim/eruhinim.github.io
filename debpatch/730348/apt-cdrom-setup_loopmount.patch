@@ -1,0 +1,330 @@
+diff -rupN apt-cdrom-setup.orig/usr/lib/apt-setup/generators/40cdrom apt-cdrom-setup/usr/lib/apt-setup/generators/40cdrom
+--- apt-cdrom-setup.orig/usr/lib/apt-setup/generators/40cdrom	2013-05-12 12:49:10.000000000 +0200
++++ apt-cdrom-setup/usr/lib/apt-setup/generators/40cdrom	2013-10-05 20:17:10.000000000 +0200
+@@ -10,7 +10,9 @@ if ! type chroot_cleanup_localmounts >/d
+ 	# Variant of chroot_cleanup that only cleans up chroot_setup's mounts.
+ 	chroot_cleanup_localmounts () {
+ 		rm -f /target/usr/sbin/policy-rc.d
+-		mv /target/sbin/start-stop-daemon.REAL /target/sbin/start-stop-daemon
++		if [ -f /target/sbin/start-stop-daemon.REAL ]; then
++			mv /target/sbin/start-stop-daemon.REAL /target/sbin/start-stop-daemon
++		fi
+ 		if [ -x /target/sbin/initctl.REAL ]; then
+ 			mv /target/sbin/initctl.REAL /target/sbin/initctl
+ 		fi
+@@ -51,6 +53,23 @@ else
+ 	fi
+ fi
+ 
++# Check whether the boot parameter 'loopmount=' is used
++for arg in $(cat /proc/cmdline); do
++	case $arg in
++	loopmount=*)
++		LOOPMOUNT=${arg#loopmount=}
++		LOOPFILE=${LOOPMOUNT#*:}
++		[ "$LOOPFILE" != "$LOOPMOUNT" ] && LOOPDEV=${LOOPMOUNT%:*}
++		;;
++	esac
++done
++
++# ISOs are used, don't try to (u)mount anything
++if [ "$LOOPMOUNT" ]; then
++	logger -t apt-setup "Booted from ISO; Don't allow apt-cdrom to manage mounting/unmounting CDs in /target"
++	cd_mountable=""
++fi
++
+ remount_cd() {
+ 	if [ "$ROOT" ] && [ "$cd_mountable" ]; then
+ 		fs=iso9660
+@@ -130,6 +149,9 @@ if $logoutput $chroot $ROOT apt-cdrom ad
+ 	if [ "$ROOT" ] && [ "$cd_mountable" ]; then
+ 		save_label
+ 	fi
++	if [ "$ROOT" ] && [ "$LOOPMOUNT" ]; then
++		save_label
++	fi
+ else
+ 	bail_out
+ fi
+diff -rupN apt-cdrom-setup.orig/usr/lib/apt-setup/generators/41cdset apt-cdrom-setup/usr/lib/apt-setup/generators/41cdset
+--- apt-cdrom-setup.orig/usr/lib/apt-setup/generators/41cdset	2011-01-19 05:26:34.000000000 +0100
++++ apt-cdrom-setup/usr/lib/apt-setup/generators/41cdset	2013-10-06 02:57:30.000000000 +0200
+@@ -4,17 +4,22 @@ set -e
+ . /usr/share/debconf/confmodule
+ . /lib/chroot-setup.sh
+ 
++log() {
++	logger -t apt-setup "$@"
++}
++
+ # This code is copied from chroot-setup.sh, and is needed until after a d-i
+ # release whose initrds contain a sufficiently new version of di-utils.
+ if ! type chroot_cleanup_localmounts >/dev/null 2>&1; then
+ 	# Variant of chroot_cleanup that only cleans up chroot_setup's mounts.
+ 	chroot_cleanup_localmounts () {
+ 		rm -f /target/usr/sbin/policy-rc.d
+-		mv /target/sbin/start-stop-daemon.REAL /target/sbin/start-stop-daemon
++		if [ -f /target/sbin/start-stop-daemon.REAL ]; then
++			mv /target/sbin/start-stop-daemon.REAL /target/sbin/start-stop-daemon
++		fi
+ 		if [ -x /target/sbin/initctl.REAL ]; then
+ 			mv /target/sbin/initctl.REAL /target/sbin/initctl
+ 		fi
+-
+ 		# Undo the mounts done by the packages during installation.
+ 		# Reverse sorting to umount the deepest mount points first.
+ 		# Items with count of 1 are new.
+@@ -40,6 +45,7 @@ fi
+ # KDE/Xfce CDs and multi-arch DVDs have '/single' postfix in cd_type
+ # bluray CDs have cd_type 'bluray'
+ cd_type=$(cat /cdrom/.disk/cd_type)
++log "The disk type is: $cd_type"
+ if [ "$cd_type" != full_cd ] && [ "$cd_type" != dvd ]; then
+ 	exit 0
+ fi
+@@ -55,6 +61,8 @@ if [ "$CATCHLOG" ]; then
+ 	logoutput="log-output -t apt-setup"
+ fi
+ 
++log "Starting disk set detection"
++
+ chroot=
+ if [ "$ROOT" ]; then
+ 	chroot=chroot
+@@ -72,21 +80,138 @@ if [ "$ROOT" ]; then
+ 	trap chroot_cleanup_localmounts EXIT HUP INT QUIT TERM
+ fi
+ 
++# Check whether the boot parameter 'loopmount=' is used
++for arg in $(cat /proc/cmdline); do
++	case $arg in
++	loopmount=*)
++		LOOPMOUNT=${arg#loopmount=}
++		LOOPFILE=${LOOPMOUNT#*:}
++		[ "$LOOPFILE" != "$LOOPMOUNT" ] && LOOPDEV=${LOOPMOUNT%:*}
++		;;
++	esac
++done
++
+ tmp=$($chroot $ROOT tempfile)
+ 
+ cd_label=$(tail -n1 /var/lib/install-cd.id)
++
++if [ "$LOOPMOUNT" ]; then
++	run_count=0
++	max_run=0
++	CDFS=iso9660
++	if db_get cdrom-detect/cdrom_fs && [ "$RET" ]; then
++		CDFS="$RET"
++	fi
++	OS=$(udpkg --print-os)
++	case "$OS" in
++		hurd)
++			OPTIONS=ro
++			;;
++		*)
++			OPTIONS=ro,exec
++			;;
++	esac
++fi
++
++log "First installation disk: $cd_label"
++
+ db_subst apt-setup/cdrom/set-first LABEL "$cd_label"
+ db_input high apt-setup/cdrom/set-first || true
+ if ! db_go; then
+-	if [ "$ROOT" ]; then
++	if [ "$ROOT" ] && ! [ "$LOOPMOUNT" ]; then
+ 		load-install-cd "$ROOT"
+ 	fi
+ 	exit 10
+ fi
+ db_get apt-setup/cdrom/set-first
+ 
++log "Start detecting .."
++
+ while [ "$RET" = true ]; do
+-	cd_label=$(get_label)
++	cd_label=""
++	if [ "$LOOPMOUNT" ]; then
++		if [ $run_count -eq 0 ]; then
++			log "Trying to find usable ISOs in the folder, where the boot ISO is..."
++			loopdir=$(dirname /loop/${LOOPMOUNT})
++			ISOname=$(basename ${LOOPMOUNT})
++			if [ "$cd_type" = "dvd" ]; then
++				# DVD
++				ISOstart=${filename%DVD-*}
++				ISOend=${filename#DVD-*}
++				ISOs=$(ls ${loopdir}/ | grep ${ISOstart}DVD-[^1].*[.]iso$)
++			elif [ "$cd_type" = "blueray" ]; then
++				# BD
++				ISOstart=${filename%BD-*}
++				ISOend=${filename#BD-*}
++				ISOs=$(ls ${loopdir}/ | grep ${ISOstart}BD-[^1].*[.]iso$)
++			else
++				# probably CD
++				ISOstart=${filename%CD-*}
++				ISOend=${filename#CD-*}
++				ISOs=$(ls ${loopdir}/ | grep ${ISOstart}CD-[^1].*[.]iso$)
++			fi
++			for iso in $ISOs; do
++				max_run=$(($max_run + 1))
++			done
++			log "Found $max_run ISO(s): $ISOs"
++		fi
++
++		try_iso=0
++		while [ $try_iso -eq 0 ]; do
++			if [ $run_count -lt $max_run ]; then
++				i=0
++				ISO=""
++				# select current ISO file
++				for isofile in $ISOs; do
++					if [ $i -eq $run_count ]; then
++						ISO=$isofile
++						break
++					fi
++					i=$(($i + 1))
++				done
++				j=1
++				# create mount point for the ISO
++				mount_point=/media/cdrom$j
++				while [ -d $ROOT$mount_point ]; do
++					j=$(($j + 1))
++					mount_point=/media/cdrom$j
++				done
++				mkdir $ROOT$mount_point
++
++				log "Try to loop mount file=$loopdir/$ISO, fstype=$CDFS to $ROOT$mount_point"
++				if mount -t $CDFS -o loop,$OPTIONS $loopdir/$ISO $ROOT$mount_point; then
++					log "CD-ROM mount succeeded: file=$loopdir/$ISO fstype=$CDFS"
++					if [ -e $ROOT$mount_point/.disk/info ]; then
++						CDNAME=$(cat $ROOT$mount_point/.disk/info | tr '"' '_')
++						log "Detected disk '$CDNAME'"
++						# Load the codename (e.g. jessie) from the database
++						db_get cdrom/codename
++						codename=$RET
++						RET=""
++						log "Detected codename: $codename"
++						try_iso=1
++					else
++						log "The disk in $loopdir/$ISO is not a Debian disk!"
++						umount $ROOT$mount_point 2>/dev/null || true
++					fi
++				else
++					log "Mount failed: file=$loopdir/$ISO fstype=$CDFS"
++					umount $ROOT$mount_point 2>/dev/null || true
++				fi
++			else
++				log "No more ISOs found"
++				break
++			fi
++			run_count=$(($run_count + 1))
++		done
++	fi
++	
++	if [ "$LOOPMOUNT" ] && [ $try_iso -eq 1 ]; then
++		cd_label=$CDNAME
++	else
++		cd_label=$(get_label)
++	fi
++
+ 	# Hmm. The greps could fail if a label contains regexp control chars...
+ 	if [ "$cd_label" ] && \
+ 	   (grep "^deb cdrom:\[$cd_label\]" $file || \
+@@ -94,25 +219,39 @@ while [ "$RET" = true ]; do
+ 		template=apt-setup/cdrom/set-double
+ 		db_subst $template LABEL "$cd_label"
+ 	else
+-		# apt-cdrom can be interactive, avoid that
+-		if $logoutput $chroot $ROOT apt-cdrom add \
+-		   -o Dir::Etc::SourceList=$tmp \
+-		   </dev/null; then
+-			cat $ROOT$tmp >> $file
++		if [ "$LOOPMOUNT" ] && [ $try_iso -eq 1 ]; then
++			# Add an entry for the mount point of the ISO
++			printf "\ndeb file:$mount_point $codename main" >> $file
++			log "added log entry: 'deb file:$mount_point $codename main'"
++
++			# Make apt aware of the file
++			$logoutput $chroot $ROOT apt-cdrom -d $mount_point  add \
++			   -o Dir::Etc::SourceList=/dev/null \
++			   </dev/null;
+ 
+-			# Label is assigned by apt-cdrom add, so get again
+-			cd_label=$(get_label)
+ 			template=apt-setup/cdrom/set-next
+ 			db_subst $template LABEL "$cd_label"
+ 		else
+-			template=apt-setup/cdrom/set-failed
++			# apt-cdrom can be interactive, avoid that
++			if $logoutput $chroot $ROOT apt-cdrom add \
++			   -o Dir::Etc::SourceList=$tmp \
++			   </dev/null; then
++				cat $ROOT$tmp >> $file
++
++				# Label is assigned by apt-cdrom add, so get again
++				cd_label=$(get_label)
++				template=apt-setup/cdrom/set-next
++				db_subst $template LABEL "$cd_label"
++			else
++				template=apt-setup/cdrom/set-failed
++			fi
++			rm -f $ROOT$tmp $ROOT$tmp~
+ 		fi
+-		rm -f $ROOT$tmp $ROOT$tmp~
+ 	fi
+ 
+ 	db_input critical $template || true
+ 	if ! db_go; then
+-		if [ "$ROOT" ]; then
++		if [ "$ROOT" ] && ! [ "$LOOPMOUNT" ]; then
+ 			load-install-cd "$ROOT"
+ 		fi
+ 		exit 10
+@@ -121,6 +260,6 @@ while [ "$RET" = true ]; do
+ done
+ 
+ # Make sure the installation CD is loaded again
+-if [ "$ROOT" ]; then
++if [ "$ROOT" ] && ! [ "$LOOPMOUNT" ]; then
+ 	load-install-cd "$ROOT"
+ fi
+diff -rupN apt-cdrom-setup.orig/usr/lib/finish-install.d/10apt-cdrom-setup apt-cdrom-setup/usr/lib/finish-install.d/10apt-cdrom-setup
+--- apt-cdrom-setup.orig/usr/lib/finish-install.d/10apt-cdrom-setup	2011-01-19 05:26:34.000000000 +0100
++++ apt-cdrom-setup/usr/lib/finish-install.d/10apt-cdrom-setup	2013-10-06 04:01:12.000000000 +0200
+@@ -1,6 +1,34 @@
+ #! /bin/sh
+ set -e
+ 
++# Check whether the boot parameter 'loopmount=' is used
++for arg in $(cat /proc/cmdline); do
++	case $arg in
++	loopmount=*)
++		LOOPMOUNT=${arg#loopmount=}
++		LOOPFILE=${LOOPMOUNT#*:}
++		[ "$LOOPFILE" != "$LOOPMOUNT" ] && LOOPDEV=${LOOPMOUNT%:*}
++		;;
++	esac
++done
++
++if [ "$LOOPMOUNT" ]; then
++	# Remove additional CD-Set mount points
++	j=1
++	while [ -d /target/media/cdrom/$j ]; do
++		logger -t finish-install "unmount /target/media/cdrom/$j"
++		umount /target/media/cdrom/$j 2>/dev/null || true
++		rmdir /target/media/cdrom/$j
++		j=$(($j + 1))
++	done
++
++	if grep -q "^deb file:" /target/etc/apt/sources.list; then
++		logger -t finish-install "Removing additional ISOs from sources.list"
++		sed -i "s/^deb file:.*//g" /target/etc/apt/sources.list
++	fi
++	log-output -t finish-install chroot /target apt-get update
++fi
++
+ # Disable netinst CD image in sources.list if any other sources are present
+ if [ -e /cdrom/.disk/base_installable ] && \
+    [ -e /cdrom/.disk/cd_type ] && \

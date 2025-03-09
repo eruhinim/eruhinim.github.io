@@ -1,0 +1,205 @@
+From a0af89f9476ad6c28751c76daa78292650bbdf36 Mon Sep 17 00:00:00 2001
+From: Bill Allombert <Bill.Allombert@math.u-bordeaux.fr>
+Date: Sun, 6 Sep 2009 13:18:50 +0200
+Subject: [PATCH] Add support for Build-Options: build-arch.
+
+New module Build-Opts.
+Closes #229357
+---
+ debian/changelog               |    4 ++
+ scripts/Dpkg/BuildOpts.pm      |   91 ++++++++++++++++++++++++++++++++++++++++
+ scripts/Dpkg/Control/Fields.pm |    3 +
+ scripts/Makefile.am            |    1 +
+ scripts/dpkg-buildpackage.pl   |    9 ++++-
+ 5 files changed, 107 insertions(+), 1 deletions(-)
+ create mode 100644 scripts/Dpkg/BuildOpts.pm
+
+diff --git a/debian/changelog b/debian/changelog
+index 16ddb25..b309167 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -34,6 +34,10 @@ dpkg (1.15.8) UNRELEASED; urgency=low
+     - Add versioned Build-Depends.
+   * Fix variable usage after delete in dselect.
+ 
++  [ Bill Allombert]
++  * Add support for Build-Options: build-arch. Closes: #229357
++    - New module Dpkg::BuildOpts.
++
+   [ Updated programs translations ]
+   * Russian (Yuri Kozlov). Closes: #579149
+   * Swedish (Peter Krefting).
+diff --git a/scripts/Dpkg/BuildOpts.pm b/scripts/Dpkg/BuildOpts.pm
+new file mode 100644
+index 0000000..29169b8
+--- /dev/null
++++ b/scripts/Dpkg/BuildOpts.pm
+@@ -0,0 +1,91 @@
++# Copyright © 2007 Frank Lichtenheld <djpig@debian.org>
++# Copyright © 2010 Raphaël Hertzog <hertzog@debian.org>
++# Copyright © 2010 Bill Allombert    <ballombe@debian.org>
++#
++# This program is free software; you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation; either version 2 of the License, or
++# (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++# This package is temporarily named BuildOpts until BuildOptions get
++# renamed to DEB_BUILD_OPTIONS
++
++package Dpkg::BuildOpts;
++
++use strict;
++use warnings;
++
++our $VERSION = "1.00";
++
++use Dpkg::Control::Info;
++
++=encoding utf8
++
++=head1 NAME
++
++Dpkg::BuildOpts - parse the Build-Options control field
++
++=head1 DESCRIPTION
++
++The Dpkg::BuildOpts object can be used to query the options
++stored in the Build-Options control field
++
++=head1 FUNCTIONS
++
++=over 4
++
++=item my $bo = Dpkg::BuildOpts->new($controlfile)
++
++Create a new Dpkg::BuildOpts object. It will be initialized based
++on the value of the Build-Options control field.
++
++=cut
++
++sub new {
++    my ($this, $controlfile) = @_;
++    my $class = ref($this) || $this;
++    my $control = Dpkg::Control::Info->new($controlfile);
++    my $src_fields = $control->get_source();
++    my %buildopts;
++    if (defined($src_fields->{'Build-Options'}))
++    {
++      my @buildopts= split(/\s*,\s*/m, $src_fields->{'Build-Options'});
++      print "@buildopts\n";
++      %buildopts = map { $_ => 1 } @buildopts;
++    } else
++    { 
++      %buildopts=();
++    }
++    my $self = { options => \%buildopts }; 
++    bless $self, $class;
++    return $self;
++}
++=item $bo->has($option)
++
++Returns a boolean indicating whether the option is stored in the object.
++
++=cut
++
++sub has {
++    my ($self, $key) = @_;
++    print "$key\n";
++    return exists $self->{'options'}{$key};
++}
++
++=back
++
++=head1 AUTHOR
++
++Bill Allombert <ballombe@debian.org>
++
++=cut
++
++1;
+diff --git a/scripts/Dpkg/Control/Fields.pm b/scripts/Dpkg/Control/Fields.pm
+index ea7d800..027cd9f 100644
+--- a/scripts/Dpkg/Control/Fields.pm
++++ b/scripts/Dpkg/Control/Fields.pm
+@@ -78,6 +78,9 @@ our %FIELDS = (
+         dependency => 'normal',
+         dep_order => 2,
+     },
++    'Build-Options' => {
++        allowed => ALL_SRC,
++    },
+     'Changed-By' => {
+         allowed => CTRL_FILE_CHANGES,
+     },
+diff --git a/scripts/Makefile.am b/scripts/Makefile.am
+index 0296360..c5f3702 100644
+--- a/scripts/Makefile.am
++++ b/scripts/Makefile.am
+@@ -64,6 +64,7 @@ nobase_dist_perllib_DATA = \
+ 	Dpkg/Arch.pm \
+ 	Dpkg/BuildFlags.pm \
+ 	Dpkg/BuildOptions.pm \
++	Dpkg/BuildOpts.pm \
+ 	Dpkg/Changelog.pm \
+ 	Dpkg/Changelog/Debian.pm \
+ 	Dpkg/Changelog/Entry.pm \
+diff --git a/scripts/dpkg-buildpackage.pl b/scripts/dpkg-buildpackage.pl
+index 0ac64e5..98d2fe5 100755
+--- a/scripts/dpkg-buildpackage.pl
++++ b/scripts/dpkg-buildpackage.pl
+@@ -27,6 +27,7 @@ use Dpkg::Gettext;
+ use Dpkg::ErrorHandling;
+ use Dpkg::BuildFlags;
+ use Dpkg::BuildOptions;
++use Dpkg::BuildOpts;
+ use Dpkg::Compression;
+ use Dpkg::Version;
+ use Dpkg::Changelog::Parse;
+@@ -99,6 +100,8 @@ Options:
+       --version  show the version.
+ "), $progname;
+ }
++my $controlfile = "debian/control";
++my $buildopts   = Dpkg::BuildOpts->new($controlfile);
+ 
+ my @debian_rules = ("debian/rules");
+ my @rootcommand = ();
+@@ -118,6 +121,7 @@ my $checkbuilddep = 1;
+ my $signsource = 1;
+ my $signchanges = 1;
+ my $binarytarget = 'binary';
++my $buildtarget  = 'build';
+ my $targetarch = my $targetgnusystem = '';
+ my $call_target = '';
+ my $call_target_as_root = 0;
+@@ -222,6 +226,9 @@ if ($noclean) {
+     $binaryonly = '-b' unless ($binaryonly or $sourceonly);
+ }
+ 
++$buildtarget='build-arch' if ( $binarytarget eq 'binary-arch' &&
++                               $buildopts->has('build-arch'));
++
+ if ($< == 0) {
+     warning(_g("using a gain-root-command while being root")) if (@rootcommand);
+ } else {
+@@ -378,7 +385,7 @@ unless ($binaryonly) {
+     chdir($dir) or syserr("chdir $dir");
+ }
+ unless ($sourceonly) {
+-    withecho(@debian_rules, 'build');
++    withecho(@debian_rules, $buildtarget);
+     withecho(@rootcommand, @debian_rules, $binarytarget);
+ }
+ if ($usepause &&
+-- 
+1.7.1
+

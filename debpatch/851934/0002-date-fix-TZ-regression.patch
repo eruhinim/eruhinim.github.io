@@ -1,0 +1,106 @@
+From 8b1bb0fa4859ff8460c9f7ecb94ce411d9baa9b3 Mon Sep 17 00:00:00 2001
+From: Paul Eggert <eggert@cs.ucla.edu>
+Date: Fri, 20 Jan 2017 18:24:02 -0800
+Subject: [PATCH 2/2] date: fix TZ= regression
+
+Problem reported by Paul Wise for Debian, in:
+https://bugs.debian.org/851934
+This is fallout from the fix for GNU Bug#23035.
+* src/date.c (batch_convert): New args TZ and TZSTRING.
+All uses changed.
+(batch_convert, main): Adjust to parse_datetime2 API change.
+(main): Allocate time zone object.
+* tests/misc/date-debug.sh: Fix incorrect test case,
+caught by the fix.
+* tests/misc/date.pl: Test the fix.
+---
+ src/date.c               | 14 +++++++++-----
+ tests/misc/date-debug.sh |  4 ++--
+ tests/misc/date.pl       |  6 ++++++
+ 3 files changed, 17 insertions(+), 7 deletions(-)
+
+diff --git a/src/date.c b/src/date.c
+index eed0901..eb7c624 100644
+--- a/src/date.c
++++ b/src/date.c
+@@ -286,7 +286,8 @@ Show the local time for 9AM next Friday on the west coast of the US\n\
+    Return true if successful.  */
+ 
+ static bool
+-batch_convert (const char *input_filename, const char *format, timezone_t tz)
++batch_convert (const char *input_filename, const char *format,
++               timezone_t tz, char const *tzstring)
+ {
+   bool ok;
+   FILE *in_stream;
+@@ -320,7 +321,8 @@ batch_convert (const char *input_filename, const char *format, timezone_t tz)
+           break;
+         }
+ 
+-      if (! parse_datetime2 (&when, line, NULL, parse_datetime_flags))
++      if (! parse_datetime2 (&when, line, NULL,
++                             parse_datetime_flags, tz, tzstring))
+         {
+           if (line[line_length - 1] == '\n')
+             line[line_length - 1] = '\0';
+@@ -502,10 +504,11 @@ main (int argc, char **argv)
+         }
+     }
+ 
+-  timezone_t tz = tzalloc (getenv ("TZ"));
++  char const *tzstring = getenv ("TZ");
++  timezone_t tz = tzalloc (tzstring);
+ 
+   if (batch_file != NULL)
+-    ok = batch_convert (batch_file, format, tz);
++    ok = batch_convert (batch_file, format, tz, tzstring);
+   else
+     {
+       bool valid_date = true;
+@@ -545,7 +548,8 @@ main (int argc, char **argv)
+               if (set_datestr)
+                 datestr = set_datestr;
+               valid_date = parse_datetime2 (&when, datestr, NULL,
+-                                            parse_datetime_flags);
++                                            parse_datetime_flags,
++                                            tz, tzstring);
+             }
+         }
+ 
+diff --git a/tests/misc/date-debug.sh b/tests/misc/date-debug.sh
+index 06de8dd..48f4605 100755
+--- a/tests/misc/date-debug.sh
++++ b/tests/misc/date-debug.sh
+@@ -48,10 +48,10 @@ date:     new date/time = '(Y-M-D) 1990-12-14 00:00:00 TZ=+09:00'
+ date: '(Y-M-D) 1990-12-14 00:00:00 TZ=+09:00' = 661100400 epoch-seconds
+ date: after time adjustment (+0 hours, -90 minutes, +0 seconds, +0 ns),
+ date:     new time = 661095000 epoch-seconds
+-date: output timezone: -06:00 (set from TZ="America/Belize" environment value)
++date: output timezone: +09:00 (set from TZ="Asia/Tokyo" environment value)
+ date: final: 661095000.000000000 (epoch-seconds)
+ date: final: (Y-M-D) 1990-12-13 13:30:00 (UTC0)
+-date: final: (Y-M-D) 1990-12-13 07:30:00 (output timezone TZ=-06:00)
++date: final: (Y-M-D) 1990-12-13 22:30:00 (output timezone TZ=+09:00)
+ Thu Dec 13 07:30:00 CST 1990
+ EOF
+ 
+diff --git a/tests/misc/date.pl b/tests/misc/date.pl
+index 519c247..f026909 100755
+--- a/tests/misc/date.pl
++++ b/tests/misc/date.pl
+@@ -291,6 +291,12 @@ my @Tests =
+       {ERR => "date: invalid date 'TZ=\"\"\"'\n"},
+       {EXIT => 1},
+      ],
++
++     # https://bugs.debian.org/851934#10
++     ['cross-TZ-mishandled', "-d 'TZ=\"EST5\" 1970-01-01 00:00'",
++      {ENV => 'TZ=PST8'},
++      {OUT => 'Wed Dec 31 21:00:00 PST 1969'},
++     ],
+     );
+ 
+ # Repeat the cross-dst test, using Jan 1, 2005 and every interval from 1..364.
+-- 
+2.9.3
+

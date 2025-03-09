@@ -1,0 +1,157 @@
+From 2ec28de66cdcb7ffb73451a9bf5069b785ea19a9 Mon Sep 17 00:00:00 2001
+From: Michael Stapelberg <stapelberg@debian.org>
+Date: Mon, 15 May 2017 19:00:10 +0200
+Subject: [PATCH] include present/wanted architecture in error message
+
+---
+ Debian/Debhelper/Dh_Getopt.pm |  6 +++++-
+ Debian/Debhelper/Dh_Lib.pm    | 37 +++++++++++++++++++++++++++++++++++--
+ dh                            |  2 +-
+ dh_installchangelogs          |  2 +-
+ dh_installdocs                |  2 +-
+ dh_strip                      |  2 +-
+ 6 files changed, 44 insertions(+), 7 deletions(-)
+
+diff --git a/Debian/Debhelper/Dh_Getopt.pm b/Debian/Debhelper/Dh_Getopt.pm
+index a578edbd..efcfd603 100644
+--- a/Debian/Debhelper/Dh_Getopt.pm
++++ b/Debian/Debhelper/Dh_Getopt.pm
+@@ -277,7 +277,11 @@ sub parseopts {
+ 
+ 	if (! defined $dh{DOPACKAGES} || ! @{$dh{DOPACKAGES}}) {
+ 		if (! $dh{BLOCK_NOOP_WARNINGS}) {
+-			warning("No packages to build.");
++			my %archs;
++			for my $pkg (getpackages()) {
++				$archs{package_declared_arch($pkg)} = 1;
++			}
++			warning("No packages to build. Architecture mismatch: " . buildarch() . ", want: " . join(" ", keys %archs));
+ 		}
+ 		exit(0);
+ 	}
+diff --git a/Debian/Debhelper/Dh_Lib.pm b/Debian/Debhelper/Dh_Lib.pm
+index 380a14d2..3cacd62b 100644
+--- a/Debian/Debhelper/Dh_Lib.pm
++++ b/Debian/Debhelper/Dh_Lib.pm
+@@ -39,6 +39,7 @@ use vars qw(@EXPORT %dh);
+ 	    &autoscript &filearray &filedoublearray
+ 	    &getpackages &basename &dirname &xargs %dh
+ 	    &compat &addsubstvar &delsubstvar &excludefile &package_arch
++	    &package_is_arch_all &package_binary_arch &package_declared_arch
+ 	    &is_udeb &debhelper_script_subst &escape_shell
+ 	    &inhibit_log &load_log &write_log &commit_override_log
+ 	    &dpkg_architecture_value &sourcepackage &make_symlink
+@@ -50,7 +51,7 @@ use vars qw(@EXPORT %dh);
+ 	    &generated_file &autotrigger &package_section
+ 	    &restore_file_on_clean &restore_all_files
+ 	    &open_gz &reset_perm_and_owner &deprecated_functionality
+-	    &log_installed_files
++	    &log_installed_files &buildarch
+ );
+ 
+ # The Makefile changes this if debhelper is installed in a PREFIX.
+@@ -1095,9 +1096,19 @@ sub getpackages {
+ }
+ 
+ # Returns the arch a package will build for.
++#
++# Deprecated: please switch to the more descriptive
++# package_binary_arch function instead.
+ sub package_arch {
+ 	my $package=shift;
+-	
++	return package_binary_arch($package);
++}
++
++# Returns the architecture going into the resulting .deb, i.e. the
++# host architecture or "all".
++sub package_binary_arch {
++	my $package=shift;
++
+ 	if (! exists $package_arches{$package}) {
+ 		warning "package $package is not in control info";
+ 		return buildarch();
+@@ -1105,6 +1116,28 @@ sub package_arch {
+ 	return $package_arches{$package} eq 'all' ? "all" : buildarch();
+ }
+ 
++# Returns the Architecture: value which the package declared.
++sub package_declared_arch {
++	my $package=shift;
++	
++	if (! exists $package_arches{$package}) {
++		warning "package $package is not in control info";
++		return buildarch();
++	}
++	return $package_arches{$package};
++}
++
++# Returns whether the package specified Architecture: all
++sub package_is_arch_all {
++	my $package=shift;
++
++	if (! exists $package_arches{$package}) {
++		warning "package $package is not in control info";
++		return buildarch();
++	}
++	return $package_arches{$package} eq 'all';
++}
++
+ # Returns the multiarch value of a package.
+ sub package_multiarch {
+ 	my $package=shift;
+diff --git a/dh b/dh
+index bd1591bf..e6404fcc 100755
+--- a/dh
++++ b/dh
+@@ -825,7 +825,7 @@ sub run_override {
+ 	if (defined $override_type) {
+ 		if ($has_explicit_target) {
+ 			foreach my $package (@{$packages}) {
+-				my $isall=package_arch($package) eq 'all';
++				my $isall=package_is_arch_all($package);
+ 				if (($override_type eq 'indep' && $isall) ||
+ 					($override_type eq 'arch' && !$isall)) {
+ 					push @todo, $package;
+diff --git a/dh_installchangelogs b/dh_installchangelogs
+index 4aaef0b1..9dc2c96f 100755
+--- a/dh_installchangelogs
++++ b/dh_installchangelogs
+@@ -97,7 +97,7 @@ sub install_binNMU_changelog {
+ 		my $output_fn="$tmp/usr/share/doc/$package/$changelog_name";
+ 		open my $output, ">", $output_fn
+ 			or error("could not open $output_fn for writing: $!");
+-		my $arch=package_arch($package);
++		my $arch=package_binary_arch($package);
+ 		my $output_fn_binary="$output_fn.$arch";
+ 		open my $output_binary, ">", $output_fn_binary
+ 			or error("could not open $output_fn_binary for writing: $!");
+diff --git a/dh_installdocs b/dh_installdocs
+index 42e49a44..5d82ea5f 100755
+--- a/dh_installdocs
++++ b/dh_installdocs
+@@ -192,7 +192,7 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 	if ($link_doc) {
+ 		getpackages('both') unless $called_getpackages++;
+ 
+-		if (package_arch($package) ne package_arch($dh{LINK_DOC})) {
++		if (package_binary_arch($package) ne package_binary_arch($dh{LINK_DOC})) {
+ 			if (compat(9)) {
+ 				warning("WARNING: --link-doc between architecture all and not all packages breaks binNMUs");
+ 			} else {
+diff --git a/dh_strip b/dh_strip
+index d776068f..f37fc993 100755
+--- a/dh_strip
++++ b/dh_strip
+@@ -313,7 +313,7 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 	# Temporary workaround: Do not build dbgsym packages for udebs as
+ 	# dpkg-gencontrol and dpkg-deb does not agree on the file
+ 	# extension.
+-	if ($dh{ENABLE_DBGSYM} and not $keep_debug and package_arch($package) ne 'all' and not is_udeb($package)) {
++	if ($dh{ENABLE_DBGSYM} and not $keep_debug and !package_is_arch_all($package) and not is_udeb($package)) {
+ 		# Avoid creating a dbgsym that would clash with a registered
+ 		# package or looks like a manual -dbg package.
+ 		if (not $all_packages{"${package}-dbgsym"} and $package !~ m/-dbg(?:sym)?$/) {
+-- 
+2.11.0
+

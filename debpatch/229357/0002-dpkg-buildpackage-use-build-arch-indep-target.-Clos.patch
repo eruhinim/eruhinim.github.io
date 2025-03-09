@@ -1,0 +1,162 @@
+From de4a0d2935201352f3b24382a18b8893d9ae2bdf Mon Sep 17 00:00:00 2001
+From: Raphael Hertzog <hertzog@debian.org>
+Date: Wed, 9 Jul 2008 22:29:11 +0200
+Subject: [PATCH] dpkg-buildpackage: use build-arch/indep target. Closes: #229357
+
+* scripts/Dpkg/BuildOptions.pm: Add the new build-arch Build-Options.
+* scripts/dpkg-buildpackage.pl: Call the build-arch/build-indep
+target instead of the build target when possible.
+* man/dpkg-buildpackage.1: Document the above changes.
+---
+ man/dpkg-buildpackage.1      |   49 +++++++++++++++++++++++++++++++++++++++--
+ scripts/Dpkg/BuildOptions.pm |    5 ++++
+ scripts/dpkg-buildpackage.pl |    9 ++++++-
+ 3 files changed, 58 insertions(+), 5 deletions(-)
+
+diff --git a/man/dpkg-buildpackage.1 b/man/dpkg-buildpackage.1
+index 6ffc5cb..cf49a53 100644
+--- a/man/dpkg-buildpackage.1
++++ b/man/dpkg-buildpackage.1
+@@ -24,12 +24,16 @@ It calls \fBdpkg-source\fP to generate the source package (unless
+ a binary-only build has been requested with \fB\-b\fP, \fB\-B\fP or
+ \fB\-A\fP).
+ .IP \fB5.\fP 3
+-It calls \fBdebian/rules\fP \fBbuild\fP followed by
++It calls \fBdebian/rules\fP \fIbuild-target\fP followed by
+ \fBfakeroot debian/rules\fP \fIbinary-target\fP (unless a source-only
+ build has been requested with \fB\-S\fP). Note that \fIbinary-target\fR is
+-either \fBbuild\fP (default case, or if \fB\-b\fP is specified)
++either \fBbinary\fP (default case, or if \fB\-b\fP is specified)
+ or \fBbinary-arch\fP (if \fB\-B\fP is specified) or \fBbinary-indep\fP
+-(if \fB\-A\fP is specified).
++(if \fB\-A\fP is specified). \fIbuild-target\fP is usually \fBbuild\fP
++(default case, or if \fB\-b\fP is specified) but it can also be
++\fBbuild-arch\fP (with \fB\-B\fP) or \fBbuild-indep\fP (with \fB\-A\fP)
++if the package advertises \fBbuild-arch\fP in its \fIBuild-Options\fP
++field (see \fBBUILD OPTIONS\fP).
+ .IP \fB6.\fP 3
+ It calls \fBgpg\fP to sign the \fB.dsc\fP file (if any, unless
+ \fB\-us\fP is specified).
+@@ -197,6 +201,45 @@ Show the usage message and exit.
+ .BR \-\-version
+ Show the version and exit.
+ .
++.SH BUILD OPTIONS
++Build options can be set:
++.IP . 2
++by the package maintainer using the \fIBuild-Options\fP field in the
++source stanza of \fBdebian/control\fP;
++.IP . 2
++by the caller with the DEB_BUILD_OPTIONS environment variable.
++.P
++Both methods share a common syntax; options are space separated,
++they can have an optional value appended with an equal sign
++(\fIoption-name\fP\fB=\fP\fIvalue\fP) and their names are composed of
++lower-case alphanumeric characters, dashes and underscores. The first
++character must be a letter.
++.P
++The options are evaluated in the order given above, and it's
++possible to remove an option previously set by adding an option
++\fBno-\fP\fIoption-name\fP.
++.P
++The following options are commonly used:
++.TP
++.B build-arch
++Indicates that the rules file supports the \fBbuild-arch\fP and
++\fBbuild-indep\fP targets.
++.TP
++.BR nocheck " (*)"
++Disable test-suite and other runtime checks run during the build.
++.TP
++.BR noopt " (*)"
++Disable compiler optimizations.
++.TP
++.BR nostrip " (*)"
++Disable stripping of compiled binaries.
++.TP
++.BI parallel= value "\fR (*)\fP"
++Let the build-system run up to \fIvalue\fP concurrent jobs during build.
++.P
++The options marked with (*), when set, are always exported in the
++DEB_BUILD_OPTIONS environment variable.
++.
+ .SH ENVIRONMENT VARIABLES
+ .SS Vendor identification
+ The variable \fBDEB_VENDOR\fR will be set to the name of the current vendor
+diff --git a/scripts/Dpkg/BuildOptions.pm b/scripts/Dpkg/BuildOptions.pm
+index 5b2acdd..0580e00 100644
+--- a/scripts/Dpkg/BuildOptions.pm
++++ b/scripts/Dpkg/BuildOptions.pm
+@@ -33,6 +33,11 @@ our %OPTIONS = (
+         valued => 1,
+         check_value_rx => qr/^-?\d+$/,
+     },
++    'build-arch' => {
++        export => 0,
++        valued => 0,
++        min_standards_version => undef,
++    },
+ );
+ 
+ =head1 NAME
+diff --git a/scripts/dpkg-buildpackage.pl b/scripts/dpkg-buildpackage.pl
+index f335477..2009716 100755
+--- a/scripts/dpkg-buildpackage.pl
++++ b/scripts/dpkg-buildpackage.pl
+@@ -101,9 +101,12 @@ my $checkbuilddep = 1;
+ my $signsource = 1;
+ my $signchanges = 1;
+ my $diffignore = '';
++my $buildtarget = 'build';
+ my $binarytarget = 'binary';
+ my $targetarch = my $targetgnusystem = '';
+ 
++my $build_opts = Dpkg::BuildOptions->new();
++
+ while (@ARGV) {
+     $_ = shift @ARGV;
+ 
+@@ -162,6 +165,7 @@ while (@ARGV) {
+ 	$binaryonly = '-b';
+ 	@checkbuilddep_args = ();
+ 	$binarytarget = 'binary';
++        $buildtarget = 'build';
+ 	if ($sourceonly) {
+ 	    usageerr(_g("cannot combine %s and %s"), '-b', '-S');
+ 	}
+@@ -169,6 +173,7 @@ while (@ARGV) {
+ 	$binaryonly = '-B';
+ 	@checkbuilddep_args = ('-B');
+ 	$binarytarget = 'binary-arch';
++        $buildtarget = 'build-arch' if $build_opts->has("build-arch");
+ 	if ($sourceonly) {
+ 	    usageerr(_g("cannot combine %s and %s"), '-B', '-S');
+ 	}
+@@ -176,6 +181,7 @@ while (@ARGV) {
+ 	$binaryonly = '-A';
+ 	@checkbuilddep_args = ();
+ 	$binarytarget = 'binary-indep';
++        $buildtarget = 'build-indep' if $build_opts->has("build-arch");
+ 	if ($sourceonly) {
+ 	    usageerr(_g("cannot combine %s and %s"), '-A', '-S');
+ 	}
+@@ -244,7 +250,6 @@ if ($signcommand) {
+     }
+ }
+ 
+-my $build_opts = Dpkg::BuildOptions->new();
+ if ($parallel) {
+     $parallel = $build_opts->get("parallel") if $build_opts->has("parallel");
+     $ENV{MAKEFLAGS} ||= '';
+@@ -369,7 +374,7 @@ unless ($binaryonly) {
+     chdir($dir) or failure("chdir $dir");
+ }
+ unless ($sourceonly) {
+-    withecho(@debian_rules, 'build');
++    withecho(@debian_rules, $buildtarget);
+     withecho(@rootcommand, @debian_rules, $binarytarget);
+ }
+ if ($usepause &&
+-- 
+1.5.6.2
+

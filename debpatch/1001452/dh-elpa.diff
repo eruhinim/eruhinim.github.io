@@ -1,0 +1,360 @@
+diff --git a/debian/copyright b/debian/copyright
+index af76dd9..ed80c0e 100644
+--- a/debian/copyright
++++ b/debian/copyright
+@@ -4,6 +4,12 @@ Files: *
+ Copyright: © 2007-2015 Free Software Foundation Inc,
+ 	   © 2015 David Bremner <bremner@debian.org>
+ 	   © 2016 Sean Whitton <spwhitton@spwhitton.name>
++License: GPL-3+
++
++Files: debian/tests/elpa-test/all.el
++Copyright: © 1985-2020 Free Software Foundation, Inc.
++License: GPL-3+
++
+ License: GPL-3+
+  dh-elpa  is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+diff --git a/debian/tests/build-deb b/debian/tests/build-deb
+new file mode 100755
+index 0000000..f79a43b
+--- /dev/null
++++ b/debian/tests/build-deb
+@@ -0,0 +1,13 @@
++#!/bin/sh
++#
++# Build an elpa package according to:
++# https://wiki.debian.org/Teams/DebianEmacsenTeam/elpa-hello
++#
++set -eu
++
++cd debian/tests/elpa-test
++# Create a dummy .orig.tar.gz
++tar czvf ../elpa-test_1.0.orig.tar.gz all.el
++dpkg-buildpackage
++# Make sure the ${elpa:Depends} were picked up
++dpkg-deb --info ../elpa-all_1.0-1_all.deb | grep Depends | grep dh-elpa-helper
+diff --git a/debian/tests/control b/debian/tests/control
+new file mode 100644
+index 0000000..42018db
+--- /dev/null
++++ b/debian/tests/control
+@@ -0,0 +1,4 @@
++Tests: build-deb
++Restrictions: allow-stderr
++Depends: @, build-essential, dpkg, dpkg-dev, emacs-nox
++
+diff --git a/debian/tests/elpa-test/all.el b/debian/tests/elpa-test/all.el
+new file mode 100644
+index 0000000..79dcea5
+--- /dev/null
++++ b/debian/tests/elpa-test/all.el
+@@ -0,0 +1,203 @@
++;;; all.el --- Edit all lines matching a given regexp  -*- lexical-binding: t; -*-
++
++;; Copyright (C) 1985-2020  Free Software Foundation, Inc.
++
++;; Author: Per Abrahamsen <per.abrahamsen@gmail.com>
++;; Version: 1.0
++;; Keywords: matching
++
++;; LCD Archive Entry:
++;; all|Per Abrahamsen|abraham@dina.kvl.dk|
++;; Edit all lines matching a given regexp|
++;; $Date: 1997/03/04 10:29:42 $|$Revision: 5.2 $|~/misc/all.Z|
++
++;; This program is free software; you can redistribute it and/or modify
++;; it under the terms of the GNU General Public License as published by
++;; the Free Software Foundation; either version 3, or (at your option)
++;; any later version.
++;;
++;; This program is distributed in the hope that it will be useful,
++;; but WITHOUT ANY WARRANTY; without even the implied warranty of
++;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++;; GNU General Public License for more details.
++;;
++;; You should have received a copy of the GNU General Public License
++;; along with this program.  If not, see <http://www.gnu.org/licenses/>.
++
++;;; Commentary:
++
++;; Just like occur, except that changes in the *All* buffer are
++;; propagated to the original buffer.
++
++;; You can no longer use mouse-2 to find a match in the original file,
++;; since the default definition of mouse is too useful.
++;; However, `C-c C-c' still works.
++
++;; Line numbers are not listed in the *All* buffer.
++
++;; Ok, it is _not_ just like occur.
++
++;; Some limitations:
++
++;; - Undo in the *All* buffer is an ordinary change in the original.
++;; - Changes to the original buffer are not reflected in the *All* buffer.
++;; - A single change in the *All* buffer must be limited to a single match.
++
++;;; Code:
++
++(defvar all-mode-map
++  (let ((map (make-sparse-keymap)))
++    (define-key map "\C-c\C-c" #'all-mode-goto)
++    map))
++
++(defvar all-buffer nil)
++(make-variable-buffer-local 'all-buffer)
++
++(define-derived-mode all-mode fundamental-mode "All"
++  "Major mode for output from \\[all].
++
++All changes made in this buffer will be propagated to the buffer where
++you ran \\[all].
++
++Press \\[all-mode-goto] to go to the same spot in the original buffer."
++  (add-hook 'before-change-functions #'all-before-change-function nil 'local)
++  (add-hook 'after-change-functions #'all-after-change-function nil 'local))
++
++(defun all-mode-find (pos)
++  ;; Find position in original buffer corresponding to POS.
++  (let ((overlay (all-mode-find-overlay pos)))
++    (if overlay
++	(+ (marker-position (overlay-get overlay 'all-marker))
++	   (- pos (overlay-start overlay))))))
++
++(defun all-mode-find-overlay (pos)
++  ;; Find the overlay containing POS.
++  (let ((overlays (overlays-at pos)))
++    (while (and overlays (null (overlay-get (car overlays) 'all-marker)))
++      (setq overlays (cdr overlays)))
++    (car-safe overlays)))
++
++(defun all-mode-goto ()
++  "Move point to the corresponding position in the original buffer."
++  (interactive)
++  (let ((pos (all-mode-find (point))))
++    (if pos
++	(pop-to-buffer all-buffer)
++      (error "This text is not from the original buffer"))
++    (goto-char pos)))
++
++(defvar all-initialization-p nil)
++
++(defun all-before-change-function (from to)
++  ;; Check that change is legal.
++  (and all-buffer
++       (not all-initialization-p)
++       (let ((start (all-mode-find-overlay from))
++	     (end (all-mode-find-overlay to)))
++	 (not (and start (eq start end))))
++       (error "Changes should be limited to a single text piece")))
++
++(defun all-after-change-function (from to length)
++  ;; Propagate changes from *All* buffer.
++  (and all-buffer
++       (null all-initialization-p)
++       (let ((buffer (current-buffer))
++	     (pos (all-mode-find from)))
++	 (if pos
++	     (with-current-buffer all-buffer
++	       (save-excursion
++		 (goto-char pos)
++                 (delete-region pos (+ pos length))
++		 (insert-buffer-substring buffer from to)))))))
++
++;;;###autoload
++(defun all (regexp &optional nlines)
++  "Show all lines in the current buffer containing a match for REGEXP.
++
++If a match spreads across multiple lines, all those lines are shown.
++
++Each line is displayed with NLINES lines before and after, or -NLINES
++before if NLINES is negative.
++NLINES defaults to `list-matching-lines-default-context-lines'.
++Interactively it is the prefix arg.
++
++The lines are shown in a buffer named `*All*'.
++Any changes made in that buffer will be propagated to this buffer."
++  (interactive
++   (list (let* ((default (car regexp-history)))
++           (read-regexp
++            (if default
++                (format
++                 "Edit lines matching regexp (default `%s'): " default)
++              "Edit lines matching regexp: ")
++            default))
++         current-prefix-arg))
++  (setq nlines (if nlines (prefix-numeric-value nlines)
++		 list-matching-lines-default-context-lines))
++  (let ((all-initialization-p t)
++        (buffer (current-buffer))
++	(prevend nil)
++	(prevstart nil)
++	(prevpos (point-min)))
++    (with-output-to-temp-buffer "*All*"
++      (with-current-buffer standard-output
++	(all-mode)
++	(setq all-buffer buffer)
++	(insert "Lines matching ")
++	(prin1 regexp)
++	(insert " in buffer " (buffer-name buffer) ?. ?\n)
++	(insert "--------\n"))
++      (if (eq buffer standard-output)
++	  (goto-char (point-max)))
++      (save-excursion
++	(goto-char (point-min))
++	;; Find next match, but give up if prev match was at end of buffer.
++	(while (and (not (= prevpos (point-max)))
++		    (re-search-forward regexp nil t))
++	  (goto-char (match-beginning 0))
++	  (beginning-of-line)
++	  (setq prevpos (point))
++	  (goto-char (match-end 0))
++	  (let* ((start (save-excursion
++			  (goto-char (match-beginning 0))
++			  (forward-line (if (< nlines 0) nlines (- nlines)))
++			  (point)))
++		 (end (save-excursion
++			(goto-char (match-end 0))
++			(if (> nlines 0)
++			    (forward-line (1+ nlines))
++			    (forward-line 1))
++			(point))))
++	    (cond ((null prevend)
++		   (setq prevstart start
++			prevend end))
++		  ((> start prevend)
++		   (all-insert prevstart prevend regexp nlines)
++		   (setq prevstart start
++			 prevend end))
++		  (t
++		   (setq prevend end)))))
++	(if prevend
++	    (all-insert prevstart prevend regexp nlines))))))
++
++(defun all-insert (start end regexp nlines)
++  ;; Insert match.
++  (let ((marker (copy-marker start))
++        (buffer (current-buffer)))
++    (with-current-buffer standard-output
++      (let ((from (point))
++            to)
++        (insert-buffer-substring buffer start end)
++        (setq to (point))
++        (overlay-put (make-overlay from to) 'all-marker marker)
++        (goto-char from)
++        (while (re-search-forward regexp to t)
++          (put-text-property (match-beginning 0) (match-end 0)
++                             'face 'match))
++        (goto-char to)
++        (if (> nlines 0)
++            (insert "--------\n"))))))
++
++(provide 'all)
++
++;;; all.el ends here
+diff --git a/debian/tests/elpa-test/debian/changelog b/debian/tests/elpa-test/debian/changelog
+new file mode 100644
+index 0000000..d2228f3
+--- /dev/null
++++ b/debian/tests/elpa-test/debian/changelog
+@@ -0,0 +1,5 @@
++elpa-test (1.0-1) unstable; urgency=medium
++
++  * Initial release.
++
++ -- Lukas Märdian <slyon@ubuntu.com>  Tue, 7 Dec 2021 12:05:48 +0100
+diff --git a/debian/tests/elpa-test/debian/control b/debian/tests/elpa-test/debian/control
+new file mode 100644
+index 0000000..d0455f3
+--- /dev/null
++++ b/debian/tests/elpa-test/debian/control
+@@ -0,0 +1,31 @@
++Source: elpa-test
++Section: editors
++Priority: optional
++Maintainer: Lukas Märdian <slyon@ubuntu.com>
++Build-Depends: debhelper-compat (= 13),
++ dh-elpa
++Standards-Version: 4.5.1
++Rules-Requires-Root: no
++
++Package: elpa-all
++Architecture: all
++Depends: ${elpa:Depends}, ${misc:Depends}
++Recommends: emacs (>= 46.0)
++Enhances: emacs
++Description: Edit all lines matching a given regexp  
++ Just like occur, except that changes in the *All* buffer are
++ propagated to the original buffer.
++ .
++ You can no longer use mouse-2 to find a match in the original file,
++ since the default definition of mouse is too useful.
++ However, `C-c C-c' still works.
++ .
++ Line numbers are not listed in the *All* buffer.
++ .
++ Ok, it is _not_ just like occur.
++ .
++ Some limitations:
++ .
++ - Undo in the *All* buffer is an ordinary change in the original.
++ - Changes to the original buffer are not reflected in the *All* buffer.
++ - A single change in the *All* buffer must be limited to a single match.
+diff --git a/debian/tests/elpa-test/debian/copyright b/debian/tests/elpa-test/debian/copyright
+new file mode 100644
+index 0000000..373f3d9
+--- /dev/null
++++ b/debian/tests/elpa-test/debian/copyright
+@@ -0,0 +1,27 @@
++Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
++Upstream-Name: elpa-test
++
++Files: *
++Copyright: (C) 1985-2020 Free Software Foundation, Inc.
++License: GPL-3+
++
++Files: debian/*
++Copyright: (C) 2021 Lukas Märdian <slyon@ubuntu.com>
++License: GPL-3+
++
++License: GPL-3+
++ This program is free software: you can redistribute it and/or modify
++ it under the terms of the GNU General Public License as published by
++ the Free Software Foundation, either version 3 of the License, or
++ (at your option) any later version.
++ .
++ This program is distributed in the hope that it will be useful,
++ but WITHOUT ANY WARRANTY; without even the implied warranty of
++ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ GNU General Public License for more details.
++ .
++ You should have received a copy of the GNU General Public License
++ along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ .
++ On Debian systems, the complete text of the GNU General
++ Public License version 3 can be found in `/usr/share/common-licenses/GPL-3'
+diff --git a/debian/tests/elpa-test/debian/elpa b/debian/tests/elpa-test/debian/elpa
+new file mode 100644
+index 0000000..abf136d
+--- /dev/null
++++ b/debian/tests/elpa-test/debian/elpa
+@@ -0,0 +1 @@
++*.el
+diff --git a/debian/tests/elpa-test/debian/rules b/debian/tests/elpa-test/debian/rules
+new file mode 100755
+index 0000000..e8e22ba
+--- /dev/null
++++ b/debian/tests/elpa-test/debian/rules
+@@ -0,0 +1,4 @@
++#!/usr/bin/make -f
++
++%:
++	dh $@ --with elpa
+diff --git a/debian/tests/elpa-test/debian/source/format b/debian/tests/elpa-test/debian/source/format
+new file mode 100644
+index 0000000..163aaf8
+--- /dev/null
++++ b/debian/tests/elpa-test/debian/source/format
+@@ -0,0 +1 @@
++3.0 (quilt)

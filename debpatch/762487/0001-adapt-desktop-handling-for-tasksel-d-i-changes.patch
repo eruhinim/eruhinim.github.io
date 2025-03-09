@@ -1,0 +1,209 @@
+From 723ae4c5fb37461863d2312cfb25a201e7594cfd Mon Sep 17 00:00:00 2001
+From: Joey Hess <joey@kitenet.net>
+Date: Mon, 22 Sep 2014 15:14:47 -0400
+Subject: [PATCH] adapt desktop handling for tasksel/d-i changes
+
+tasksel now allows selecting the desktop, and d-i has dropped the boot menu
+desktop selection. This patch attempts to update debian-cd for these
+changes, removing the desktop boot menus from the CDs.
+
+CD images for specific desktops (xfce/kde/mate/etc) should still override
+the default tasksel desktop.
+
+untested
+---
+ tools/boot/jessie/boot-x86       |  14 +----
+ tools/boot/jessie/common.sh      |   4 +-
+ tools/boot/jessie/x86-desktop.sh | 109 +--------------------------------------
+ 3 files changed, 5 insertions(+), 122 deletions(-)
+
+diff --git a/tools/boot/jessie/boot-x86 b/tools/boot/jessie/boot-x86
+index df42c96..e42dee0 100644
+--- a/tools/boot/jessie/boot-x86
++++ b/tools/boot/jessie/boot-x86
+@@ -150,19 +150,16 @@ extra_image () {
+ 	done
+ }
+ 
+-# If multiple desktops are to be supported, set the default one
+-ORIG_DESKTOP=
+ case "$DESKTOP" in
+     $UNSPEC_DESKTOP_DEFAULT)
+ 	# default from tasksel 
+ 	DESKTOP=
+ 	;;
+     all)
+-	ORIG_DESKTOP=$DESKTOP
++	# default from tasksel 
+ 	DESKTOP=
+ 	;;
+     light)
+-	ORIG_DESKTOP=$DESKTOP
+ 	DESKTOP=xfce
+ 	;;
+ esac
+@@ -377,14 +374,7 @@ if [ -n "$KERNEL_PARAMS" ]; then
+ 	done
+ fi
+ 
+-case "$ORIG_DESKTOP" in
+-	all)
+-		modify_for_all_desktop ;;
+-	light)
+-		modify_for_light_desktop ;;
+-	*)
+-		modify_for_single_desktop ;;
+-esac
++set_default_desktop
+ 
+ # Add autorun
+ if [ -f boot$N/setup.exe ]; then
+diff --git a/tools/boot/jessie/common.sh b/tools/boot/jessie/common.sh
+index a09c8af..8a38b09 100644
+--- a/tools/boot/jessie/common.sh
++++ b/tools/boot/jessie/common.sh
+@@ -27,8 +27,8 @@ UNSPEC_DESKTOP_DEFAULT="$($BASEDIR/tools/apt-selection cache depends task-deskto
+         exit
+     }')"
+ 
+-# Only i386 and amd64 support desktop selection with the 'light' and 'all'
+-# desktops; make sure other arches get a working config
++# Only i386 and amd64 use DESKTOP to set the default desktop;
++# make sure other arches get a working config
+ if [ "$ARCH" != i386 ] && [ "$ARCH" != amd64 ]; then
+     if [ "$DESKTOP" = all ] || [ "$DESKTOP" = "$UNSPEC_DESKTOP_DEFAULT" ] ; then
+         DESKTOP=
+diff --git a/tools/boot/jessie/x86-desktop.sh b/tools/boot/jessie/x86-desktop.sh
+index 8560d67..707c0f8 100644
+--- a/tools/boot/jessie/x86-desktop.sh
++++ b/tools/boot/jessie/x86-desktop.sh
+@@ -26,10 +26,6 @@ multiarch_workaround() {
+ 		boot$N/isolinux/amdtxt.cfg || true
+ 	sed -i "/^include menu.cfg/ a\include instsel.cfg" \
+ 		boot$N/isolinux/prompt.cfg
+-	if [ -e boot$N/isolinux/desktop/prompt.cfg ]; then
+-		sed -i "/^default install/ a\include instsel.cfg" \
+-			boot$N/isolinux/desktop/prompt.cfg
+-	fi
+ 	cat >boot$N/isolinux/instsel.cfg <<EOF
+ default install-select
+ label install-select
+@@ -38,26 +34,7 @@ label install-select
+ EOF
+ }
+ 
+-create_desktop_dir() {
+-	local desktop=$1 title
+-
+-	case $desktop in
+-		kde)	title=KDE ;;
+-		xfce)	title=Xfce ;;
+-		lxde)	title=LXDE ;;
+-		gnome)	title=Gnome ;;
+-	esac
+-
+-	cp -r boot$N/isolinux/desktop boot$N/isolinux/$desktop
+-	sed -i "s:%desktop%:$desktop:
+-		s:%dt-name%:$title:" boot$N/isolinux/$desktop/*.cfg
+-}
+-
+-modify_for_single_desktop() {
+-	# Cleanup
+-	rm -f boot$N/isolinux/dtmenu.cfg
+-	rm -fr boot$N/isolinux/desktop
+-
++set_default_desktop() {
+ 	# Set default desktop, or remove if not applicable
+ 	if [ "$DESKTOP" ]; then
+ 		sed -i "s:%desktop%:$DESKTOP:g" boot$N/isolinux/*.cfg
+@@ -65,87 +42,3 @@ modify_for_single_desktop() {
+ 		sed -i "s/desktop=%desktop% //" boot$N/isolinux/*.cfg
+ 	fi
+ }
+-
+-modify_for_light_desktop() {
+-	local desktop
+-
+-	for file in boot$N/isolinux/{,amd}{,ad}{txt,gtk}.cfg; do
+-		if [ -e $file ]; then
+-			mv $file boot$N/isolinux/desktop
+-		fi
+-	done
+-	sed -i "s/desktop=%desktop% //" boot$N/isolinux/*.cfg
+-
+-	for desktop in xfce lxde; do
+-		create_desktop_dir $desktop
+-	done
+-
+-	# Cleanup
+-	rm -r boot$N/isolinux/desktop
+-	rm boot$N/isolinux/prompt.cfg boot$N/isolinux/dtmenu.cfg
+-
+-	# Create new "top level" menu file
+-	cat >boot$N/isolinux/menu.cfg <<EOF
+-menu hshift 13
+-menu width 49
+-
+-include stdmenu.cfg
+-menu title Desktop environment menu
+-menu begin lxde-desktop
+-    include stdmenu.cfg
+-    menu label ^LXDE
+-    menu title LXDE desktop boot menu
+-    text help
+-   Select the 'Lightweight X11 Desktop Environment' for the Desktop task
+-    endtext
+-    label mainmenu-lxde
+-        menu label ^Back..
+-        menu exit
+-    include lxde/menu.cfg
+-menu end
+-menu begin xfce-desktop
+-    include stdmenu.cfg
+-    menu label ^Xfce
+-    menu title Xfce desktop boot menu
+-    text help
+-   Select the 'Xfce lightweight desktop environment' for the Desktop task
+-    endtext
+-    label mainmenu-xfce
+-        menu label ^Back..
+-        menu exit
+-    include xfce/menu.cfg
+-menu end
+-menu begin rescue
+-    include stdmenu.cfg
+-    menu label ^System rescue
+-    menu title System rescue boot menu
+-    label mainmenu-rescue
+-        menu label ^Back..
+-        menu exit
+-    include rqtxt.cfg
+-    include amdrqtxt.cfg
+-    include rqgtk.cfg
+-    include amdrqgtk.cfg
+-menu end
+-EOF
+-}
+-
+-modify_for_all_desktop() {
+-	local desktop
+-
+-	for file in boot$N/isolinux/{,amd}{,ad}{txt,gtk}.cfg; do
+-		if [ -e $file ]; then
+-			cp $file boot$N/isolinux/desktop
+-		fi
+-	done
+-	sed -i "s/desktop=%desktop% //" boot$N/isolinux/*.cfg
+-
+-	for desktop in kde xfce lxde gnome; do
+-		if [ $desktop != $UNSPEC_DESKTOP_DEFAULT ] ; then
+-			create_desktop_dir $desktop
+-		fi
+-	done
+-
+-	# Cleanup
+-	rm -r boot$N/isolinux/desktop
+-}
+-- 
+2.1.0
+

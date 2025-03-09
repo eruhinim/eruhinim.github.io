@@ -1,0 +1,577 @@
+From 888c7dfbaafe7c5a7731afcb96ea5083a0550aa4 Mon Sep 17 00:00:00 2001
+From: Simon McVittie <smcv@debian.org>
+Date: Fri, 7 May 2021 09:38:54 +0100
+Subject: [PATCH] gtkcontainer: Add extra debugging for #987587
+
+---
+ gtk/gtkcontainer.c  | 93 ++++++++++++++++++++++++++++++++++++++++++---
+ gtk/gtksizegroup.c  | 61 +++++++++++++++++++++++++++--
+ gtk/gtktextlayout.c | 78 ++++++++++++++++++++++++++++++++++---
+ gtk/gtktextview.c   | 88 ++++++++++++++++++++++++++++++++++++++----
+ 4 files changed, 299 insertions(+), 21 deletions(-)
+
+diff --git a/gtk/gtkcontainer.c b/gtk/gtkcontainer.c
+index c6cd16b273..3cecf2abba 100644
+--- a/gtk/gtkcontainer.c
++++ b/gtk/gtkcontainer.c
+@@ -1353,6 +1353,13 @@ gtk_container_idle_sizer (gpointer data)
+       widget = slist->data;
+       g_slist_free_1 (slist);
+ 
++#ifdef DEBIAN_INSTALLER
++      g_debug ("%s: Dequeued %s %p, %u callbacks remaining",
++               G_STRFUNC,
++               G_OBJECT_TYPE_NAME (widget),
++               widget,
++               g_slist_length (container_resize_queue));
++#endif
+       GTK_PRIVATE_UNSET_FLAG (widget, GTK_RESIZE_PENDING);
+       gtk_container_check_resize (GTK_CONTAINER (widget));
+     }
+@@ -1401,10 +1408,24 @@ _gtk_container_queue_resize (GtkContainer *container)
+ 				     gtk_container_idle_sizer,
+ 				     NULL, NULL);
+ 		  container_resize_queue = g_slist_prepend (container_resize_queue, resize_container);
++
++#ifdef DEBIAN_INSTALLER
++                  g_debug ("%s: Enqueued %s %p, %u callbacks remaining",
++                           G_STRFUNC,
++                           G_OBJECT_TYPE_NAME (widget),
++                           widget,
++                           g_slist_length (container_resize_queue));
++#endif
+ 		}
+ 	      break;
+ 
+ 	    case GTK_RESIZE_IMMEDIATE:
++#ifdef DEBIAN_INSTALLER
++              g_debug ("%s: Resizing %s %p immediately",
++                       G_STRFUNC,
++                       G_OBJECT_TYPE_NAME (widget),
++                       widget);
++#endif
+ 	      gtk_container_check_resize (resize_container);
+ 	      break;
+ 
+@@ -1429,7 +1450,13 @@ gtk_container_check_resize (GtkContainer *container)
+ {
+   g_return_if_fail (GTK_IS_CONTAINER (container));
+   
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: Enter: %s %p", G_STRFUNC, G_OBJECT_TYPE_NAME (container), container);
++#endif
+   g_signal_emit (container, container_signals[CHECK_RESIZE], 0);
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: Leave: %s %p", G_STRFUNC, G_OBJECT_TYPE_NAME (container), container);
++#endif
+ }
+ 
+ static void
+@@ -1437,22 +1464,67 @@ gtk_container_real_check_resize (GtkContainer *container)
+ {
+   GtkWidget *widget = GTK_WIDGET (container);
+   GtkRequisition requisition;
+-  
++
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: Enter: %s %p", G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget);
++#endif
++
+   gtk_widget_size_request (widget, &requisition);
+-  
++
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: %s %p requested %dx%d px",
++           G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget,
++           requisition.width, requisition.height);
++  g_debug ("%s: %s %p currently %dx%d px at (%d,%d)",
++           G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget,
++           widget->allocation.width, widget->allocation.height,
++           widget->allocation.x, widget->allocation.y);
++#endif
++
+   if (requisition.width > widget->allocation.width ||
+       requisition.height > widget->allocation.height)
+     {
++#ifdef DEBIAN_INSTALLER
++      g_debug ("%s: %s %p needs more space!",
++               G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget);
++#endif
++
+       if (GTK_IS_RESIZE_CONTAINER (container))
+-	gtk_widget_size_allocate (GTK_WIDGET (container),
+-				  &GTK_WIDGET (container)->allocation);
++        {
++#ifdef DEBIAN_INSTALLER
++          g_debug ("%s: %s %p is RESIZE_CONTAINER",
++                   G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget);
++#endif
++          gtk_widget_size_allocate (GTK_WIDGET (container),
++                                    &GTK_WIDGET (container)->allocation);
++#ifdef DEBIAN_INSTALLER
++          g_debug ("%s: %s %p allocated %dx%d px at (%d,%d)",
++                   G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget,
++                   widget->allocation.width, widget->allocation.height,
++                   widget->allocation.x, widget->allocation.y);
++#endif
++        }
+       else
+-	gtk_widget_queue_resize (widget);
++        {
++#ifdef DEBIAN_INSTALLER
++          g_debug ("%s: %s %p is not RESIZE_CONTAINER",
++                   G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget);
++#endif
++          gtk_widget_queue_resize (widget);
++        }
+     }
+   else
+     {
++#ifdef DEBIAN_INSTALLER
++      g_debug ("%s: %s %p has enough space, resizing children...",
++               G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget);
++#endif
+       gtk_container_resize_children (container);
+     }
++
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: Leave: %s %p", G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget);
++#endif
+ }
+ 
+ /* The container hasn't changed size but one of its children
+@@ -1474,8 +1546,19 @@ gtk_container_resize_children (GtkContainer *container)
+    */
+   g_return_if_fail (GTK_IS_CONTAINER (container));
+ 
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: Enter: %s %p", G_STRFUNC, G_OBJECT_TYPE_NAME (container), container);
++#endif
++
+   widget = GTK_WIDGET (container);
+   gtk_widget_size_allocate (widget, &widget->allocation);
++
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: Leave: %s %p allocated %dx%d px at (%d,%d)",
++           G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget,
++           widget->allocation.width, widget->allocation.height,
++           widget->allocation.x, widget->allocation.y);
++#endif
+ }
+ 
+ /**
+diff --git a/gtk/gtksizegroup.c b/gtk/gtksizegroup.c
+index a6bd13b328..ad119c12cf 100644
+--- a/gtk/gtksizegroup.c
++++ b/gtk/gtksizegroup.c
+@@ -621,14 +621,32 @@ get_base_dimension (GtkWidget        *widget,
+ static void
+ do_size_request (GtkWidget *widget)
+ {
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: Enter: %s %p", G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget);
++#endif
++
+   if (GTK_WIDGET_REQUEST_NEEDED (widget))
+     {
++#ifdef DEBIAN_INSTALLER
++      g_debug ("%s: before: %s %p %dx%d px",
++               G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget,
++               widget->requisition.width, widget->requisition.height);
++#endif
+       gtk_widget_ensure_style (widget);      
+       GTK_PRIVATE_UNSET_FLAG (widget, GTK_REQUEST_NEEDED);
+       g_signal_emit_by_name (widget,
+ 			     "size-request",
+ 			     &widget->requisition);
++#ifdef DEBIAN_INSTALLER
++      g_debug ("%s: after: %s %p %dx%d px",
++               G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget,
++               widget->requisition.width, widget->requisition.height);
++#endif
+     }
++
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: Leave: %s %p", G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget);
++#endif
+ }
+ 
+ static gint
+@@ -752,17 +770,35 @@ static void
+ get_fast_child_requisition (GtkWidget      *widget,
+ 			    GtkRequisition *requisition)
+ {
+-  GtkWidgetAuxInfo *aux_info = _gtk_widget_get_aux_info (widget, FALSE);
++  GtkWidgetAuxInfo *aux_info;
++
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: Enter: %s %p", G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget);
++#endif
++
++  aux_info = _gtk_widget_get_aux_info (widget, FALSE);
+   
+   *requisition = widget->requisition;
+-  
++
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: %dx%d", G_STRFUNC, requisition->width, requisition->height);
++#endif
++
+   if (aux_info)
+     {
+       if (aux_info->width > 0)
+ 	requisition->width = aux_info->width;
+       if (aux_info && aux_info->height > 0)
+ 	requisition->height = aux_info->height;
++
++#ifdef DEBIAN_INSTALLER
++      g_debug ("%s: After applying aux info: %dx%d", G_STRFUNC, requisition->width, requisition->height);
++#endif
+     }
++
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: Leave: %s %p", G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget);
++#endif
+ }
+ 
+ /**
+@@ -808,15 +844,30 @@ _gtk_size_group_compute_requisition (GtkWidget      *widget,
+   gint width;
+   gint height;
+ 
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: Enter: %s %p", G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget);
++#endif
++
+   initialize_size_group_quarks ();
+ 
+   if (get_size_groups (widget))
+     {
+       /* Only do the full computation if we actually have size groups */
+-      
++
++#ifdef DEBIAN_INSTALLER
++      g_debug ("%s: %s %p actually has size groups",
++               G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget);
++#endif
++
+       width = compute_dimension (widget, GTK_SIZE_GROUP_HORIZONTAL);
+       height = compute_dimension (widget, GTK_SIZE_GROUP_VERTICAL);
+ 
++#ifdef DEBIAN_INSTALLER
++      g_debug ("%s: %s %p -> %dx%d",
++               G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget,
++               width, height);
++#endif
++
+       if (requisition)
+ 	{
+ 	  requisition->width = width;
+@@ -830,6 +881,10 @@ _gtk_size_group_compute_requisition (GtkWidget      *widget,
+       if (requisition)
+ 	get_fast_child_requisition (widget, requisition);
+     }
++
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: Leave: %s %p", G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget);
++#endif
+ }
+ 
+ /**
+diff --git a/gtk/gtktextlayout.c b/gtk/gtktextlayout.c
+index 31139d739e..f1de686429 100644
+--- a/gtk/gtktextlayout.c
++++ b/gtk/gtktextlayout.c
+@@ -629,6 +629,11 @@ gtk_text_layout_emit_changed (GtkTextLayout *layout,
+ 			      gint           old_height,
+ 			      gint           new_height)
+ {
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: %s %p changed: y=%d, old_height=%d, new_height=%d",
++           G_STRFUNC, G_OBJECT_TYPE_NAME (layout), layout,
++           y, old_height, new_height);
++#endif
+   g_signal_emit (layout, signals[CHANGED], 0, y, old_height, new_height);
+ }
+ 
+@@ -1027,6 +1032,12 @@ gtk_text_layout_validate_yrange (GtkTextLayout *layout,
+ 
+   g_return_if_fail (GTK_IS_TEXT_LAYOUT (layout));
+ 
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: %s %p: validating near anchor %p from %dpx to %dpx",
++           G_STRFUNC, G_OBJECT_TYPE_NAME (layout), layout,
++           anchor, y0, y1);
++#endif
++
+   if (y0 > 0)
+     y0 = 0;
+   if (y1 < 0)
+@@ -1035,6 +1046,10 @@ gtk_text_layout_validate_yrange (GtkTextLayout *layout,
+   /* Validate backwards from the anchor line to y0
+    */
+   line = _gtk_text_iter_get_text_line (anchor);
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: anchor %p is in line %d", G_STRFUNC, anchor,
++           _gtk_text_line_get_number (line));
++#endif
+   line = _gtk_text_line_previous (line);
+   seen = 0;
+   while (line && seen < -y0)
+@@ -1042,15 +1057,36 @@ gtk_text_layout_validate_yrange (GtkTextLayout *layout,
+       GtkTextLineData *line_data = _gtk_text_line_get_data (line, layout);
+       if (!line_data || !line_data->valid)
+         {
+-          gint old_height, new_height;
++          gint old_height, old_width, new_height, new_width;
++          GtkTextBTree *btree;
++          GtkTextIter line_iter;
++          GtkTextIter eol_iter;
++          gchar *content;
+ 	  
+ 	  old_height = line_data ? line_data->height : 0;
+-
++#ifdef DEBIAN_INSTALLER
++	  old_width = line_data ? line_data->width : 0;
++
++          g_debug ("%s: validating a previous line %d", G_STRFUNC,
++                   _gtk_text_line_get_number (line));
++          btree = _gtk_text_buffer_get_btree (layout->buffer);
++          _gtk_text_btree_get_iter_at_line (btree, &line_iter, line, 0);
++          _gtk_text_btree_get_iter_at_line (btree, &eol_iter, line, 0);
++          gtk_text_iter_forward_line (&eol_iter);
++          content = _gtk_text_btree_get_text (&line_iter, &eol_iter, TRUE, TRUE);
++          g_debug ("%s: line content: %s", G_STRFUNC, content);
++          g_free (content);
++          g_debug ("%s: was %dx%dpx", G_STRFUNC, old_width, old_height);
++#endif
+           _gtk_text_btree_validate_line (_gtk_text_buffer_get_btree (layout->buffer),
+                                          line, layout);
+           line_data = _gtk_text_line_get_data (line, layout);
+ 
+ 	  new_height = line_data ? line_data->height : 0;
++#ifdef DEBIAN_INSTALLER
++	  new_width = line_data ? line_data->width : 0;
++          g_debug ("%s: now %dx%dpx", G_STRFUNC, new_width, new_height);
++#endif
+ 
+           delta_height += new_height - old_height;
+           
+@@ -1075,14 +1111,34 @@ gtk_text_layout_validate_yrange (GtkTextLayout *layout,
+       GtkTextLineData *line_data = _gtk_text_line_get_data (line, layout);
+       if (!line_data || !line_data->valid)
+         {
+-          gint old_height, new_height;
++          gint old_height, old_width, new_height, new_width;
++          GtkTextBTree *btree;
++          GtkTextIter line_iter;
++          GtkTextIter eol_iter;
++          gchar *content;
+ 	  
+ 	  old_height = line_data ? line_data->height : 0;
+-
++#ifdef DEBIAN_INSTALLER
++	  old_width = line_data ? line_data->width : 0;
++          g_debug ("%s: validating a subsequent line %d", G_STRFUNC,
++                   _gtk_text_line_get_number (line));
++          btree = _gtk_text_buffer_get_btree (layout->buffer);
++          _gtk_text_btree_get_iter_at_line (btree, &line_iter, line, 0);
++          _gtk_text_btree_get_iter_at_line (btree, &eol_iter, line, 0);
++          gtk_text_iter_forward_line (&eol_iter);
++          content = _gtk_text_btree_get_text (&line_iter, &eol_iter, TRUE, TRUE);
++          g_debug ("%s: line content: %s", G_STRFUNC, content);
++          g_free (content);
++          g_debug ("%s: was %dx%dpx", G_STRFUNC, old_width, old_height);
++#endif
+           _gtk_text_btree_validate_line (_gtk_text_buffer_get_btree (layout->buffer),
+                                          line, layout);
+           line_data = _gtk_text_line_get_data (line, layout);
+ 	  new_height = line_data ? line_data->height : 0;
++#ifdef DEBIAN_INSTALLER
++	  new_width = line_data ? line_data->width : 0;
++          g_debug ("%s: now %dx%dpx", G_STRFUNC, new_width, new_height);
++#endif
+ 
+           delta_height += new_height - old_height;
+           
+@@ -1106,11 +1162,23 @@ gtk_text_layout_validate_yrange (GtkTextLayout *layout,
+     {
+       gint line_top;
+ 
++#ifdef DEBIAN_INSTALLER
++      g_debug ("%s: Revalidated invalid lines from %d to %d",
++               G_STRFUNC,
++               _gtk_text_line_get_number (first_line),
++               _gtk_text_line_get_number (last_line));
++#endif
++
+       update_layout_size (layout);
+ 
+       line_top = _gtk_text_btree_find_line_top (_gtk_text_buffer_get_btree (layout->buffer),
+                                                 first_line, layout);
+-
++#ifdef DEBIAN_INSTALLER
++      g_debug ("%s: Top of first line y=%d", G_STRFUNC, line_top);
++      g_debug ("%s: First line %d, y=%d", G_STRFUNC, _gtk_text_line_get_number (first_line), first_line_y);
++      g_debug ("%s: Last line %d, y=%d", G_STRFUNC, _gtk_text_line_get_number (last_line), last_line_y);
++      g_debug ("%s: Delta height %d", G_STRFUNC, delta_height);
++#endif
+       gtk_text_layout_emit_changed (layout,
+ 				    line_top,
+ 				    last_line_y - first_line_y - delta_height,
+diff --git a/gtk/gtktextview.c b/gtk/gtktextview.c
+index a258b11661..26156a0d49 100644
+--- a/gtk/gtktextview.c
++++ b/gtk/gtktextview.c
+@@ -3135,11 +3135,20 @@ gtk_text_view_size_request (GtkWidget      *widget,
+   
+   text_view = GTK_TEXT_VIEW (widget);
+ 
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: Enter: %s %p", G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget);
++#endif
++
+   gtk_widget_style_get (widget,
+ 			"interior-focus", &interior_focus,
+ 			"focus-line-width", &focus_width,
+ 			NULL);
+ 
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: interior-focus=%d focus-line-width=%d",
++           G_STRFUNC, interior_focus, focus_width);
++#endif
++
+   if (interior_focus)
+     focus_edge_width = 0;
+   else
+@@ -3147,6 +3156,11 @@ gtk_text_view_size_request (GtkWidget      *widget,
+ 
+   if (text_view->layout)
+     {
++#ifdef DEBIAN_INSTALLER
++      g_debug ("%s: layout %dx%d",
++               G_STRFUNC, text_view->layout->width, text_view->layout->height);
++#endif
++
+       text_view->text_window->requisition.width = text_view->layout->width;
+       text_view->text_window->requisition.height = text_view->layout->height;
+     }
+@@ -3160,21 +3174,56 @@ gtk_text_view_size_request (GtkWidget      *widget,
+   requisition->height = text_view->text_window->requisition.height + focus_edge_width * 2;
+ 
+   if (text_view->left_window)
+-    requisition->width += text_view->left_window->requisition.width;
++    {
++#ifdef DEBIAN_INSTALLER
++      g_debug ("%s: left window +%dx0",
++               G_STRFUNC, text_view->left_window->requisition.width);
++#endif
++
++      requisition->width += text_view->left_window->requisition.width;
++    }
+ 
+   if (text_view->right_window)
+-    requisition->width += text_view->right_window->requisition.width;
++    {
++#ifdef DEBIAN_INSTALLER
++      g_debug ("%s: right window +%dx0",
++               G_STRFUNC, text_view->right_window->requisition.width);
++#endif
++
++      requisition->width += text_view->right_window->requisition.width;
++    }
+ 
+   if (text_view->top_window)
+-    requisition->height += text_view->top_window->requisition.height;
++    {
++#ifdef DEBIAN_INSTALLER
++      g_debug ("%s: top window +0x%d",
++               G_STRFUNC, text_view->top_window->requisition.height);
++#endif
++
++      requisition->height += text_view->top_window->requisition.height;
++    }
+ 
+   if (text_view->bottom_window)
+-    requisition->height += text_view->bottom_window->requisition.height;
++    {
++#ifdef DEBIAN_INSTALLER
++      g_debug ("%s: bottom window +0x%d",
++               G_STRFUNC, text_view->bottom_window->requisition.height);
++#endif
++
++      requisition->height += text_view->bottom_window->requisition.height;
++    }
+ 
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: border width +%dx%d",
++           G_STRFUNC,
++           GTK_CONTAINER (text_view)->border_width * 2,
++           GTK_CONTAINER (text_view)->border_width * 2);
++#endif
+   requisition->width += GTK_CONTAINER (text_view)->border_width * 2;
+   requisition->height += GTK_CONTAINER (text_view)->border_width * 2;
+   
+   tmp_list = text_view->children;
++  int i = 0;
+   while (tmp_list != NULL)
+     {
+       GtkTextViewChild *child = tmp_list->data;
+@@ -3185,27 +3234,50 @@ gtk_text_view_size_request (GtkWidget      *widget,
+           GtkRequisition old_req;
+ 
+           gtk_widget_get_child_requisition (child->widget, &old_req);
+-          
++
++#ifdef DEBIAN_INSTALLER
++          g_debug ("%s: child %d before: %dx%d",
++                   G_STRFUNC, i, old_req.width, old_req.height);
++#endif
++
+           gtk_widget_size_request (child->widget, &child_req);
+ 
+           gtk_widget_get_child_requisition (child->widget, &child_req);
+ 
++#ifdef DEBIAN_INSTALLER
++          g_debug ("%s: child %d after: %dx%d",
++                   G_STRFUNC, i, child_req.width, child_req.height);
++#endif
++
+           /* Invalidate layout lines if required */
+           if (text_view->layout &&
+               (old_req.width != child_req.width ||
+                old_req.height != child_req.height))
+-            gtk_text_child_anchor_queue_resize (child->anchor,
+-                                                text_view->layout);
++            {
++#ifdef DEBIAN_INSTALLER
++              g_debug ("%s: child %d queue resize", G_STRFUNC, i);
++#endif
++              gtk_text_child_anchor_queue_resize (child->anchor,
++                                                  text_view->layout);
++            }
+         }
+       else
+         {
+           GtkRequisition child_req;
+-          
++
++#ifdef DEBIAN_INSTALLER
++          g_debug ("%s: child %d size request but ignore?", G_STRFUNC, i);
++#endif
+           gtk_widget_size_request (child->widget, &child_req);
+         }
+ 
+       tmp_list = g_slist_next (tmp_list);
++      i += 1;
+     }
++
++#ifdef DEBIAN_INSTALLER
++  g_debug ("%s: Leave: %s %p", G_STRFUNC, G_OBJECT_TYPE_NAME (widget), widget);
++#endif
+ }
+ 
+ static void
+-- 
+2.31.1
+

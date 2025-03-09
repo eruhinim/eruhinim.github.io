@@ -1,0 +1,55 @@
+From 412ba9f81dbe237d7d81f71a5f9d806368c61612 Mon Sep 17 00:00:00 2001
+From: Julian Andres Klode <jak@debian.org>
+Date: Wed, 26 Aug 2015 23:26:54 +0200
+Subject: [PATCH] pkgcachegen: Account for remapping when parsing depends from
+ NewPackage
+
+In both the Ver and Dep variables, we need to account for remapping,
+as otherwise we would still reference the old bug.
+
+Reproduction environment:
+
+* An i386 system with amd64 foreign architecture
+* A sources.list with
+deb http://snapshot.debian.org/archive/debian/20150826T102846Z/ unstable main
+deb http://snapshot.debian.org/archive/debian/20150826T102846Z/ experimental main
+
+Thanks: Jakub Wilk for the bug report and the backtraces
+Closes: #796999
+---
+ apt-pkg/pkgcachegen.cc | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/apt-pkg/pkgcachegen.cc b/apt-pkg/pkgcachegen.cc
+index 6daebbc..3cbb96a 100644
+--- a/apt-pkg/pkgcachegen.cc
++++ b/apt-pkg/pkgcachegen.cc
+@@ -594,8 +594,10 @@ bool pkgCacheGenerator::NewPackage(pkgCache::PkgIterator &Pkg,const string &Name
+       // and negative dependencies, don't forget negative dependencies
+       {
+ 	 pkgCache::PkgIterator const M = Grp.FindPreferredPkg(false);
+-	 if (M.end() == false)
+-	    for (pkgCache::DepIterator Dep = M.RevDependsList(); Dep.end() == false; ++Dep)
++	 if (M.end() == false) {
++	    pkgCache::DepIterator Dep;
++	    Dynamic<pkgCache::DepIterator> DynDep(Dep);
++	    for (Dep = M.RevDependsList(); Dep.end() == false; ++Dep)
+ 	    {
+ 	       if ((Dep->CompareOp & (pkgCache::Dep::ArchSpecific | pkgCache::Dep::MultiArchImplicit)) != 0)
+ 		  continue;
+@@ -603,10 +605,12 @@ bool pkgCacheGenerator::NewPackage(pkgCache::PkgIterator &Pkg,const string &Name
+ 		     Dep->Type != pkgCache::Dep::Replaces)
+ 		  continue;
+ 	       pkgCache::VerIterator Ver = Dep.ParentVer();
++	       Dynamic<pkgCache::VerIterator> DynVer(Ver);
+ 	       map_pointer_t * unused = NULL;
+ 	       if (NewDepends(Pkg, Ver, Dep->Version, Dep->CompareOp, Dep->Type, unused) == false)
+ 		  return false;
+ 	    }
++	 }
+       }
+ 
+       // this package is the new last package
+-- 
+2.5.0
+

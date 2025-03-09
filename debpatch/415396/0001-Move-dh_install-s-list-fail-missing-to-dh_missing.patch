@@ -1,0 +1,452 @@
+From 4e8eedfd369fdfc3e4f194e2aff2e17dd73ed706 Mon Sep 17 00:00:00 2001
+From: Michael Stapelberg <stapelberg@debian.org>
+Date: Sun, 26 Mar 2017 14:20:02 +0200
+Subject: [PATCH] =?UTF-8?q?Move=20dh=5Finstall=E2=80=99s=20--{list,fail}-m?=
+ =?UTF-8?q?issing=20to=20dh=5Fmissing?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This commit splits dh_install’s --list-missing and --fail-missing
+functionality into the separate helper dh_missing.
+
+To make this work, dh_install logs its source patterns and dh_missing
+reads these patterns, treating them as installed. This allows us to
+address #415396, i.e. recognize files installed by other helpers (e.g.
+dh_installman) as installed.
+---
+ Debian/Debhelper/Dh_Lib.pm      |  14 ++++
+ dh_install                      |  54 +++------------
+ dh_missing                      | 148 ++++++++++++++++++++++++++++++++++++++++
+ doc/PROGRAMMING                 |   4 ++
+ t/dh_missing/Makefile           |   6 ++
+ t/dh_missing/debian/changelog   |   5 ++
+ t/dh_missing/debian/compat      |   1 +
+ t/dh_missing/debian/control     |  20 ++++++
+ t/dh_missing/debian/foo.install |   1 +
+ t/dh_missing/dh_missing.t       |  50 ++++++++++++++
+ t/dh_missing/file-for-foo       |   1 +
+ 11 files changed, 261 insertions(+), 43 deletions(-)
+ create mode 100755 dh_missing
+ create mode 100644 t/dh_missing/Makefile
+ create mode 100644 t/dh_missing/debian/changelog
+ create mode 100644 t/dh_missing/debian/compat
+ create mode 100644 t/dh_missing/debian/control
+ create mode 100644 t/dh_missing/debian/foo.install
+ create mode 100755 t/dh_missing/dh_missing.t
+ create mode 100644 t/dh_missing/file-for-foo
+
+diff --git a/Debian/Debhelper/Dh_Lib.pm b/Debian/Debhelper/Dh_Lib.pm
+index f4b9ca26..72448058 100644
+--- a/Debian/Debhelper/Dh_Lib.pm
++++ b/Debian/Debhelper/Dh_Lib.pm
+@@ -50,6 +50,7 @@ use vars qw(@EXPORT %dh);
+ 	    &generated_file &autotrigger &package_section
+ 	    &restore_file_on_clean &restore_all_files
+ 	    &open_gz &reset_perm_and_owner &deprecated_functionality
++	    &log_installed_files
+ );
+ 
+ # The Makefile changes this if debhelper is installed in a PREFIX.
+@@ -1455,6 +1456,19 @@ sub deprecated_functionality {
+ 	return 1;
+ }
+ 
++sub log_installed_files {
++	my ($name, $package, @patterns) = @_;
++
++	my $log = generated_file($package, 'installed-by-' . $name);
++	open(my $fh, '>', $log);
++	for my $src (@patterns) {
++		print $fh "$src\n";
++	}
++	close($fh);
++
++	return 1;
++}
++
+ 1
+ 
+ # Local Variables:
+diff --git a/dh_install b/dh_install
+index 205d4701..23783e19 100755
+--- a/dh_install
++++ b/dh_install
+@@ -133,8 +133,6 @@ init(options => {
+ 	"sourcedir=s" => \$dh{SOURCEDIR},	
+ });
+ 
+-my @installed;
+-
+ my $srcdir = '.';
+ $srcdir = $dh{SOURCEDIR} if defined $dh{SOURCEDIR};
+ 
+@@ -143,6 +141,8 @@ my $missing_files = 0;
+ # PROMISE: DH NOOP WITHOUT install
+ 
+ foreach my $package (getpackages()) {
++	my @installed;
++
+ 	# Look at the install files for all packages to handle
+ 	# list-missing/fail-missing, but skip really installing for
+ 	# packages that are not being acted on.
+@@ -252,50 +252,18 @@ foreach my $package (getpackages()) {
+ 			}
+ 		}
+ 	}
+-}
+ 
+-if ($dh{LIST_MISSING} || $dh{FAIL_MISSING}) {
+-	# . as srcdir makes no sense, so this is a special case.
+-	if ($srcdir eq '.') {
+-		$srcdir='debian/tmp';
+-	}
+-	
+-	my @missing;
+-	if ( -f 'debian/not-installed') {
+-		my @not_installed = filearray('debian/not-installed');
+-		foreach (@not_installed) {
+-		  s:^\s*:debian/tmp/: unless m:^\s*debian/tmp/:;
+-		}
+-		# Pretend that these are also installed.
+-		push(@installed, @not_installed);
+-	}
+-	my $installed=join("|", map {
+-		# Kill any extra slashes, for robustness.
+-		y:/:/:s;
+-		s:/+$::;
+-		s:^(\./)*::;
+-		"\Q$_\E\/.*|\Q$_\E";
+-	} @installed);
+-	$installed=qr{^($installed)$};
+-	find(sub {
+-		-f || -l || return;
+-		$_="$File::Find::dir/$_";
+-		if (! /$installed/ && ! excludefile($_)) {
+-			my $file=$_;
+-			$file=~s/^\Q$srcdir\E\///;
+-			push @missing, $file;
+-		}
+-	}, $srcdir);
+-	if (@missing) {
+-		warning "$_ exists in $srcdir but is not installed to anywhere" foreach @missing;
+-		if ($dh{FAIL_MISSING}) {
+-			error("missing files, aborting");
+-		}
+-	}
++	log_installed_files('dh_install', $package, @installed);
+ }
+ 
+-if ($missing_files) {
+-	error("missing files, aborting");
++my @options;
++push @options, "--list-missing" if $dh{LIST_MISSING};
++push @options, "--fail-missing" if $dh{FAIL_MISSING};
++my $ret = system("dh_missing", @options);
++if ($ret >> 8 != 0) {
++	exit $ret >> 8;
++} elsif ($ret) {
++	exit 1;
+ }
+ 
+ =head1 LIMITATIONS
+diff --git a/dh_missing b/dh_missing
+new file mode 100755
+index 00000000..2808f7ba
+--- /dev/null
++++ b/dh_missing
+@@ -0,0 +1,148 @@
++#!/usr/bin/perl
++
++=head1 NAME
++
++dh_missing - check for missing files
++
++=cut
++
++use strict;
++use warnings;
++use File::Find;
++use Debian::Debhelper::Dh_Lib;
++
++=head1 SYNOPSIS
++
++B<dh_missing> [B<-X>I<item>] [B<--sourcedir=>I<dir>] [S<I<debhelper options>>]
++
++=head1 DESCRIPTION
++
++B<dh_missing> compares the list of installed files with the files in
++the source directory. If any of the files (and symlinks) in the source
++directory were not installed to somewhere, it will warn on stderr
++about that (B<--list-missing>) or fail (B<--fail-missing>).
++
++This may be useful if you have a large package and want to make sure that
++you don't miss installing newly added files in new upstream releases.
++
++=head1 FILES
++
++=over 4
++
++=item debian/not-installed
++
++List the files that are deliberately not installed in I<any> binary
++package.  Paths listed in this file are ignored by B<dh_missing>.
++However, it is B<not> a method to exclude files from being installed
++by B<dh_install>. Please use the B<--exclude> B<dh_install> option for
++that.
++
++Please keep in mind that B<dh_missing> will B<not> expand wildcards in
++this file.
++
++=back
++
++=head1 OPTIONS
++
++=over 4
++
++=item B<--list-missing>
++
++Warn on stderr about source files not installed to somewhere.
++
++Note that files that are excluded from being moved via the B<-X> option are not
++warned about.
++
++=item B<--fail-missing>
++
++This option is like B<--list-missing>, except if a file was missed, it will
++not only list the missing files, but also fail with a nonzero exit code.
++
++=back
++
++=cut
++
++init(options => {
++	"list-missing" => \$dh{LIST_MISSING},
++	"fail-missing" => \$dh{FAIL_MISSING},
++});
++
++my @installed;
++
++my $srcdir = '.';
++$srcdir = $dh{SOURCEDIR} if defined $dh{SOURCEDIR};
++
++my $missing_files = 0;
++
++if (!$dh{LIST_MISSING} && !$dh{FAIL_MISSING}) {
++	exit 0;
++}
++
++# . as srcdir makes no sense, so this is a special case.
++if ($srcdir eq '.') {
++	$srcdir='debian/tmp';
++}
++
++for my $file (<debian/.debhelper/generated/*/installed-by-*>) {
++	local $/ = undef;
++	open(my $fh, '<', $file) or die "could not open $file: $!";
++	for my $line (split(/\n/, <$fh>)) {
++		push(@installed, $line);
++	}
++	close($fh);
++}
++
++my @missing;
++if ( -f 'debian/not-installed') {
++	my @not_installed = filearray('debian/not-installed');
++	foreach (@not_installed) {
++		s:^\s*:debian/tmp/: unless m:^\s*debian/tmp/:;
++	}
++	# Pretend that these are also installed.
++	push(@installed, @not_installed);
++}
++my $installed=join("|", map {
++	# Kill any extra slashes, for robustness.
++	y:/:/:s;
++	s:/+$::;
++	s:^(\./)*::;
++	"\Q$_\E\/.*|\Q$_\E";
++} @installed);
++$installed=qr{^($installed)$};
++find(sub {
++	-f || -l || return;
++	$_="$File::Find::dir/$_";
++	if (! /$installed/ && ! excludefile($_)) {
++		my $file=$_;
++		$file=~s/^\Q$srcdir\E\///;
++		push @missing, $file;
++	}
++}, $srcdir);
++if (@missing) {
++	warning "$_ exists in $srcdir but is not installed to anywhere" foreach @missing;
++	if ($dh{FAIL_MISSING}) {
++		error("missing files, aborting");
++	}
++}
++
++if ($missing_files) {
++	error("missing files, aborting");
++}
++
++=head1 SEE ALSO
++
++L<debhelper(7)>
++
++This program is a part of debhelper.
++
++=head1 AUTHOR
++
++Michael Stapelberg <stapelberg@debian.org>
++
++=cut
++
++# Local Variables:
++# indent-tabs-mode: t
++# tab-width: 4
++# cperl-indent-level: 4
++# End:
+diff --git a/doc/PROGRAMMING b/doc/PROGRAMMING
+index 7d12b728..ceffa808 100644
+--- a/doc/PROGRAMMING
++++ b/doc/PROGRAMMING
+@@ -348,6 +348,10 @@ deprecated_functionality($warn_msg[, $rm_compat[, $rm_msg]])
+ 	The function will provide a separate diagnostic about which compat
+ 	level that will remove/removed the functionality if $rm_compat is
+ 	given.
++log_installed_files($name, $package, @patterns)
++	Creates a logfile (in debian/.debhelper/generated) for helper
++	$name’s processing of $package, which installed the files listed in
++	@patterns. This logfile will later be used by the dh_missing helper.
+ 
+ Sequence Addons:
+ ---------------
+diff --git a/t/dh_missing/Makefile b/t/dh_missing/Makefile
+new file mode 100644
+index 00000000..679592a7
+--- /dev/null
++++ b/t/dh_missing/Makefile
+@@ -0,0 +1,6 @@
++install:
++	install -m 755 -d debian/tmp/usr/bin
++	install -m 644 file-for-foo debian/tmp/usr/bin/file-for-foo
++
++installmore: install
++	install -m 644 file-for-foo debian/tmp/usr/bin/file-for-foo-more
+diff --git a/t/dh_missing/debian/changelog b/t/dh_missing/debian/changelog
+new file mode 100644
+index 00000000..5850f0e2
+--- /dev/null
++++ b/t/dh_missing/debian/changelog
+@@ -0,0 +1,5 @@
++foo (1.0-1) unstable; urgency=low
++
++  * Initial release. (Closes: #XXXXXX)
++
++ -- Test <testing@nowhere>  Mon, 11 Jul 2016 18:10:59 +0200
+diff --git a/t/dh_missing/debian/compat b/t/dh_missing/debian/compat
+new file mode 100644
+index 00000000..f599e28b
+--- /dev/null
++++ b/t/dh_missing/debian/compat
+@@ -0,0 +1 @@
++10
+diff --git a/t/dh_missing/debian/control b/t/dh_missing/debian/control
+new file mode 100644
+index 00000000..48d4de2f
+--- /dev/null
++++ b/t/dh_missing/debian/control
+@@ -0,0 +1,20 @@
++Source: foo
++Section: misc
++Priority: optional
++Maintainer: Test <testing@nowhere>
++Standards-Version: 3.9.8
++
++Package: foo
++Architecture: all
++Description: package foo
++ Package foo
++
++Package: bar
++Architecture: all
++Description: package bar
++ Package bar
++
++Package: baz
++Architecture: all
++Description: package baz
++ Package baz
+diff --git a/t/dh_missing/debian/foo.install b/t/dh_missing/debian/foo.install
+new file mode 100644
+index 00000000..eddea57c
+--- /dev/null
++++ b/t/dh_missing/debian/foo.install
+@@ -0,0 +1 @@
++usr/bin/*-for-foo
+\ No newline at end of file
+diff --git a/t/dh_missing/dh_missing.t b/t/dh_missing/dh_missing.t
+new file mode 100755
+index 00000000..d7357660
+--- /dev/null
++++ b/t/dh_missing/dh_missing.t
+@@ -0,0 +1,50 @@
++#!/usr/bin/perl
++use strict;
++use Test::More;
++use File::Basename ();
++
++# Let the tests be run from anywhere, but current directory
++# is expected to be the one where this test lives in.
++chdir File::Basename::dirname($0) or die "Unable to chdir to ".File::Basename::dirname($0);
++
++my $TOPDIR = "../..";
++my $rootcmd;
++
++if ($< == 0) {
++	$rootcmd = '';
++}
++else {
++	system("fakeroot true 2>/dev/null");
++	$rootcmd = $? ? undef : 'fakeroot';
++}
++
++if (not defined($rootcmd)) {
++	plan skip_all => 'fakeroot required';
++}
++else {
++	plan(tests => 4);
++}
++
++# Verify dh_missing does not fail when all files are installed.
++system("$TOPDIR/dh_clean");
++system("$rootcmd make install");
++system("PATH=$TOPDIR:\$PATH $rootcmd $TOPDIR/dh_install");
++is(system("$rootcmd $TOPDIR/dh_missing --fail-missing"), 0, 'dh_missing failed');
++
++# Verify dh_missing does fail when not all files are installed.
++system("$rootcmd $TOPDIR/dh_clean");
++system("$rootcmd make installmore");
++system("PATH=$TOPDIR:\$PATH $rootcmd $TOPDIR/dh_install");
++system("$rootcmd $TOPDIR/dh_missing --fail-missing");
++isnt($?, -1, 'dh_missing was executed');
++ok(! ($? & 127), 'dh_missing did not die due to a signal');
++my $exitcode = ($? >> 8);
++is($exitcode, 2, 'dh_missing exited with exit code 2');
++
++system("$rootcmd $TOPDIR/dh_clean");
++
++# Local Variables:
++# indent-tabs-mode: t
++# tab-width: 4
++# cperl-indent-level: 4
++# End:
+diff --git a/t/dh_missing/file-for-foo b/t/dh_missing/file-for-foo
+new file mode 100644
+index 00000000..8773f398
+--- /dev/null
++++ b/t/dh_missing/file-for-foo
+@@ -0,0 +1 @@
++file content
+\ No newline at end of file
+-- 
+2.11.0
+

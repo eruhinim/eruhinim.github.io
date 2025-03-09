@@ -1,0 +1,264 @@
+commit fabae2a34000f6d80ff6827acee5d1288c8794a4
+Author: Andy Beverley <andy@andybev.com>
+Date:   Sat Sep 26 11:14:06 2015 +0100
+
+    Ensure recursive option checks version of existing packages
+
+diff --git a/lib/Debian/Control/FromCPAN.pm b/lib/Debian/Control/FromCPAN.pm
+index 1749cc1..b0895e1 100644
+--- a/lib/Debian/Control/FromCPAN.pm
++++ b/lib/Debian/Control/FromCPAN.pm
+@@ -23,7 +23,7 @@ use Carp qw(croak);
+ use base 'Debian::Control';
+ 
+ use CPAN ();
+-use DhMakePerl::Utils qw( is_core_module find_cpan_module nice_perl_ver split_version_relation );
++use DhMakePerl::Utils qw( is_core_module find_cpan_module nice_perl_ver split_version_relation apt_cache );
+ use File::Spec qw( catfile );
+ use Module::Depends ();
+ 
+@@ -47,6 +47,13 @@ Options:
+ An instance of L<Debian::AptContents> to be used when locating to which package
+ a required module belongs.
+ 
++=item dpkg_available
++An instance of L<DPKG::Parse::Available> to be used when checking whether
++the locally available package is the required version. For example:
++
++    my $available = DPKG::Parse::Available->new;
++    $available->parse;
++
+ =item dir
+ 
+ The directory where the cpan distribution was unpacked.
+@@ -85,6 +92,7 @@ sub discover_dependencies {
+     ref($opts) and ref($opts) eq 'HASH'
+         or die 'Usage: $obj->{ [ { opts hash } ] )';
+     my $apt_contents = delete $opts->{apt_contents};
++    my $dpkg_available = delete $opts->{dpkg_available};
+     my $dir = delete $opts->{dir};
+     my $intrusive = delete $opts->{intrusive};
+     my $require_deps = delete $opts->{require_deps};
+@@ -163,7 +171,8 @@ sub discover_dependencies {
+ 
+     # run-time
+     my ( $debs, $missing )
+-        = $self->find_debs_for_modules( $deps->{requires}, $apt_contents, $verbose );
++        = $self->find_debs_for_modules( $deps->{requires}, $apt_contents,
++            $verbose, $dpkg_available );
+ 
+     if (@$debs) {
+         if ($verbose) {
+@@ -187,7 +196,8 @@ sub discover_dependencies {
+             %{ $deps->{configure_requires} || {} }
+         },
+         $apt_contents,
+-        $verbose
++        $verbose,
++        $dpkg_available,
+     );
+ 
+     if (@$b_debs) {
+@@ -254,7 +264,7 @@ EOF
+     return @$missing;
+ }
+ 
+-=item find_debs_for_modules I<dep hash>[, APT contents[, verbose ]]
++=item find_debs_for_modules I<dep hash>[, APT contents[, verbose[, DPKG available]]]
+ 
+ Scans the given hash of dependencies ( module => version ) and returns
+ matching Debian package dependency specification (as an instance of
+@@ -262,13 +272,16 @@ L<Debian::Dependencies> class) and a list of missing modules.
+ 
+ Perl core is searched first, then installed packages, then the APT contents.
+ 
++If a DPKG::Parse::Available object is passed, also check the available package version
++
+ =cut
+ 
+ sub find_debs_for_modules {
+ 
+-    my ( $self, $dep_hash, $apt_contents, $verbose ) = @_;
++    my ( $self, $dep_hash, $apt_contents, $verbose, $dpkg_available ) = @_;
+ 
+     my $debs = Debian::Dependencies->new();
++    my $aptpkg_cache = apt_cache();
+ 
+     my @missing;
+ 
+@@ -292,9 +305,52 @@ sub find_debs_for_modules {
+                 ? [ map { { pkg => $_, ver => $version } } @pkgs ]
+                 : ( $pkgs[0], $version )
+             );
++
++            # Check the actual version available, if we've been passed
++            # a DPKG::Parse::Available object
++            if ( $dpkg_available ) {
++                my @available;
++                my @satisfied = grep {
++                    if ( my $pkg = $dpkg_available->get_package('name' => $_) ) {
++                        my $have_pkg = Debian::Dependency->new( $_, '=', $pkg->version );
++                        push @available, $have_pkg;
++                        $have_pkg->satisfies($dep);
++                    }
++                    else {
++                        warn qq(Unable to obtain version information for $module. You may need to )
++                            .qq(install and run "dselect update");
++                    }
++                } @pkgs;
++                unless ( @satisfied ) {
++                    print "$module is available locally as @available, but does not satisify $version"
++                        if $verbose;
++                    push @missing, $module;
++                }
++            }
++            else {
++                warn "DPKG::Parse not available. Not checking version of $module.";
++            }
+         }
+-        elsif ($apt_contents) {
++
++        if (!$dep && $apt_contents) {
+             $dep = $apt_contents->find_perl_module_package( $module, $version );
++
++            # Check the actual version in APT, if we've got
++            # a AptPkg::Cache object to search
++            if ( $dep && $aptpkg_cache ) {
++                my $pkg = $aptpkg_cache->{$dep->pkg};
++                if ( my $available = $pkg->{VersionList} ) {
++                    for my $v ( @$available ) {
++                        my $d = Debian::Dependency->new( $dep->pkg, '=', $v->{VerStr} );
++                        unless ( $d->satisfies($dep) )
++                        {
++                            push @missing, $module;
++                            print "$module package in APT ($d) does not satisfy $dep"
++                                if $verbose;
++                        }
++                    }
++                }
++            }
+         }
+ 
+ 
+diff --git a/lib/DhMakePerl/Command/Packaging.pm b/lib/DhMakePerl/Command/Packaging.pm
+index 0fce448..8d96dd9 100644
+--- a/lib/DhMakePerl/Command/Packaging.pm
++++ b/lib/DhMakePerl/Command/Packaging.pm
+@@ -1391,13 +1391,28 @@ sub discover_dependencies {
+         # control->discover_dependencies needs configured CPAN
+         $self->configure_cpan;
+ 
++        # Attempt to get an instance of DPKG::Parse::Available. If this
++        # isn't available, warn the user, as versions of packages cannot
++        # be checked.
++        # Don't cache this in case we've built and installed a
++        # module in this instance.
++        my $dpkg_available;
++        if ( eval { require DPKG::Parse::Available } && DPKG::Parse->VERSION >= 0.02 ) {
++            $dpkg_available = DPKG::Parse::Available->new;
++            $dpkg_available->parse;
++        } else {
++            warn "DPKG::Parse v0.02 or higher not found.";
++            warn "Versions of required packages will not be checked.";
++        }
++
+         return $self->control->discover_dependencies(
+-            {   dir          => $self->main_dir,
+-                verbose      => $self->cfg->verbose,
+-                apt_contents => $self->apt_contents,
+-                require_deps => $self->cfg->requiredeps,
+-                wnpp_query   => $wnpp_query,
+-                intrusive    => $self->cfg->intrusive,
++            {   dir            => $self->main_dir,
++                verbose        => $self->cfg->verbose,
++                apt_contents   => $self->apt_contents,
++                dpkg_available => $dpkg_available,
++                require_deps   => $self->cfg->requiredeps,
++                wnpp_query     => $wnpp_query,
++                intrusive      => $self->cfg->intrusive,
+             }
+         );
+     }
+diff --git a/lib/DhMakePerl/Command/make.pm b/lib/DhMakePerl/Command/make.pm
+index c2c9fa6..22bb318 100644
+--- a/lib/DhMakePerl/Command/make.pm
++++ b/lib/DhMakePerl/Command/make.pm
+@@ -6,6 +6,7 @@ our $VERSION = '0.84';
+ use 5.010;    # we use smart matching
+ 
+ use base 'DhMakePerl::Command::Packaging';
++use DhMakePerl::Utils qw(apt_cache);
+ 
+ __PACKAGE__->mk_accessors(
+     qw(
+@@ -38,7 +39,6 @@ TO BE FILLED
+ 
+ =cut
+ 
+-use AptPkg::Cache ();
+ use CPAN ();
+ use Cwd qw( realpath );
+ use Debian::Dependencies      ();
+@@ -600,14 +600,10 @@ sub package_already_exists {
+     my( $self, $apt_contents ) = @_;
+ 
+     my $found;
+-
+-    eval {
+-        my $apt_cache = AptPkg::Cache->new;
+-        $found = $apt_cache->packages->lookup( $self->pkgname )
+-            if $apt_cache;
+-    };
+-
+-    warn "Error initializing AptPkg::Cache: $@" if $@;
++    if (my $apt_cache = apt_cache())
++    {
++        $found = $apt_cache->packages->lookup( $self->pkgname );
++    }
+ 
+     if ($found) {
+         warn "**********\n";
+diff --git a/lib/DhMakePerl/Utils.pm b/lib/DhMakePerl/Utils.pm
+index 53b0cd2..607fccb 100644
+--- a/lib/DhMakePerl/Utils.pm
++++ b/lib/DhMakePerl/Utils.pm
+@@ -20,6 +20,7 @@ DhMakePerl::Utils - helper routines for dh-make-perl and alike
+ 
+ our @EXPORT_OK = qw(
+     find_core_perl_dependency
++    apt_cache
+     find_cpan_module find_cpan_distribution
+     is_core_module
+     nice_perl_ver
+@@ -30,6 +31,7 @@ use base 'Exporter';
+ 
+ use 5.10.0;
+ 
++use AptPkg::Cache;
+ use Module::CoreList ();
+ use Debian::Dependency;
+ 
+@@ -39,6 +41,23 @@ None of he following functions is exported by default.
+ 
+ =over
+ 
++=item apt_cache
++
++Evaluate the creation of an AptPkg::Cache, and return it on success
++
++=cut
++
++sub apt_cache {
++    my $apt_cache;
++
++    eval {
++        $apt_cache = AptPkg::Cache->new;
++    };
++
++    warn "Error initializing AptPkg::Cache: $@" if $@;
++    $apt_cache;
++}
++
+ =item find_cpan_module
+ 
+ Returns CPAN::Module object that corresponds to the supplied argument. Returns

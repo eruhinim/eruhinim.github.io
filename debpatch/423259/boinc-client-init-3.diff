@@ -1,0 +1,105 @@
+--- boinc-client.dpkg-dist	2007-05-30 05:56:36.000000000 -0700
++++ boinc-client	2007-07-17 11:35:42.000000000 -0700
+@@ -71,6 +71,8 @@
+   log_begin_msg "Starting $DESC: $NAME"
+   if is_running; then
+     log_progress_msg "already running"
++    log_end_msg 0
++    return 1
+   else
+     start-stop-daemon --start --quiet --background --pidfile $PIDFILE \
+       --make-pidfile --user $BOINC_USER --chuid $BOINC_USER --chdir $BOINC_DIR \
+@@ -94,11 +96,62 @@
+   log_end_msg 0
+ }
+ 
++schedule()
++{
++  log_begin_msg "Setting up scheduling for $DESC and children:"
++
++  if ! is_running; then
++    log_progress_msg "not running"
++    log_end_msg 0
++  else
++    if [ -z $pid ]; then
++      log_failure_msg "unable to find pid to do scheduling."
++      return 1
++    fi
++
++    if ! which ionice >/dev/null; then
++      log_progress_msg "no ionice in the path,"
++    else
++      ionice -n 4 -c 3 -p $pid
++      log_progress_msg "ioniced,"
++    fi
++
++    if ! which schedtool >/dev/null; then
++      log_progress_msg "no schedtool in the path"
++    else
++      max=5
++      while [ "x$children" = "x" ] && [ $max -ge 0 ]; do
++        children=$(ps --ppid $pid -opid= | tr '\n' ' ' || true)
++        [ "x$children" = "x" ] && sleep 1
++        max=$(expr $max - 1)
++      done
++
++      if [ "x$children" != "x" ]; then
++        ( schedtool -n 19 -D $pid $children >/dev/null && log_progress_msg "idleprio") || \
++         (schedtool -n 19 -B $pid $children >/dev/null && log_progress_msg "batch" ) || \
++         (schedtool -n 19    $pid $children            && log_progress_msg "only niced")
++      else
++        log_progress_msg "unable to find any children"
++      fi
++    fi
++
++    log_end_msg 0
++  fi
++}
++
+ status()
+ {
+   STATUS="Status of $DESC:"
+   if is_running; then
+     log_success_msg "$STATUS running."
++    if which schedtool >/dev/null; then
++      log_success_msg ""
++      log_success_msg "Scheduling of $DESC:"
++      schedtool -v $pid
++      log_success_msg ""
++      log_success_msg "Scheduling of $DESC's children:"
++      schedtool -v $(ps --ppid $pid -opid=)
++    fi
+   else
+     log_success_msg "$STATUS stopped."
+   fi
+@@ -106,7 +159,11 @@
+ 
+ case "$1" in
+   start)
+-    start
++    start && schedule
++    ;;
++
++  schedule)
++    schedule
+     ;;
+ 
+   stop)
+@@ -116,7 +173,7 @@
+   restart|force-reload)
+     stop
+     sleep 1
+-    start
++    start && schedule
+     ;;
+ 
+   status)
+@@ -124,7 +181,7 @@
+     ;;
+ 
+   *)
+-    log_success_msg "Usage: $0 {start|stop|restart|force-reload|status}" >&2
++    log_success_msg "Usage: $0 {start|stop|restart|force-reload|status|schedule}" >&2
+     exit 1
+     ;;
+ esac

@@ -1,0 +1,363 @@
+diff -ur ./interface/gtk/gladesrc.cpp ../alsaplayer-0.99.76.vik/interface/gtk/gladesrc.cpp
+--- ./interface/gtk/gladesrc.cpp	2003-06-07 10:29:43.000000000 +0200
++++ ../alsaplayer-0.99.76.vik/interface/gtk/gladesrc.cpp	2005-04-28 09:18:01.000000000 +0200
+@@ -313,11 +313,12 @@
+   GtkWidget *load_button;
+   GtkWidget *save_button;
+   GtkWidget *clear_button;
++  GtkWidget *loop_button;
+   GtkWidget *playlist_status;
+ 
+   playlist_window = gtk_window_new (GTK_WINDOW_TOPLEVEL);
+   gtk_object_set_data (GTK_OBJECT (playlist_window), "playlist_window", playlist_window);
+-  gtk_widget_set_usize (playlist_window, 480, 300);
++  gtk_widget_set_usize (playlist_window, 480, 390);
+   gtk_window_set_title (GTK_WINDOW (playlist_window), "Queue");
+ 
+   vbox5 = gtk_vbox_new (FALSE, 0);
+@@ -457,6 +458,13 @@
+   gtk_box_pack_start (GTK_BOX (vbox24), clear_button, FALSE, FALSE, 0);
+   gtk_widget_set_usize (clear_button, 70, -2);
+ 
++  loop_button = gtk_button_new_with_label ("Loop");
++  gtk_widget_ref (loop_button);
++  gtk_object_set_data_full (GTK_OBJECT (playlist_window), "loop_button", loop_button,
++                            (GtkDestroyNotify) gtk_widget_unref);
++  gtk_widget_show (loop_button);
++  gtk_box_pack_start (GTK_BOX (vbox6), loop_button, FALSE, FALSE, 0);
++
+   playlist_status = gtk_vbox_new (FALSE, 0);
+   gtk_widget_ref (playlist_status);
+   gtk_object_set_data_full (GTK_OBJECT (playlist_window), "playlist_status", playlist_status,
+diff -ur ./interface/gtk/gtk_interface.cpp ../alsaplayer-0.99.76.vik/interface/gtk/gtk_interface.cpp
+--- ./interface/gtk/gtk_interface.cpp	2006-03-27 22:40:19.000000000 +0200
++++ ../alsaplayer-0.99.76.vik/interface/gtk/gtk_interface.cpp	2005-06-06 23:56:18.000000000 +0200
+@@ -23,8 +23,10 @@
+ #include <unistd.h>
+ #include <sys/types.h>
+ #include <assert.h>
++#include <math.h>
+ //#define NEW_SCALE
+ //#define SUBSECOND_DISPLAY 
++#include <assert.h>
+ 
+ #include <algorithm>
+ #include "utilities.h"
+@@ -35,6 +37,7 @@
+ 
+ #include "support.h"
+ #include "gladesrc.h"
++#include "gtk_interface.h"
+ #include "pixmaps/f_play.xpm"
+ #include "pixmaps/r_play.xpm"
+ #include "pixmaps/pause.xpm"
+@@ -72,6 +75,8 @@
+ #define MIN_BAL_TRESH   BAL_CENTER-10   // Center is a special case
+ #define MAX_BAL_TRESH   BAL_CENTER+10   // so we build in some slack
+ #define ZERO_PITCH_TRESH 2
++#define EQ_TEMP_STEP(freq, step)        freq * pow(2.0000, (float) step / 12.0)
++#define FPS_HACK	32	// number of audio frames
+ 
+ // Global variables (get rid of these too... ;-) )
+ int global_update = 1;
+@@ -100,10 +105,24 @@
+ 	GtkWidget *bal_scale;
+ 	GtkWidget *pos_scale;
+ 	GtkWidget *speed_scale;
++	float speed;
+ } update_struct;
+ 
+ static update_struct global_ustr;
+ 
++#define LOOP_OFF	0
++#define LOOP_START_SET	1
++#define LOOP_ON		2
++
++typedef struct  _loop_struct {
++	int state;
++	gfloat start;
++	gfloat end;
++	unsigned int track; // used to exit loop mode when a new song is played
++} loop_struct;
++
++static loop_struct global_loop;
++
+ // Static variables  (to be moved into a class, at some point)
+ static GtkWidget *play_dialog;
+ static int vol_scale[] = {
+@@ -127,6 +146,14 @@
+ void position_notify(void *data, int pos);
+ void notifier_lock();
+ void notifier_unlock();
++void play_cb(GtkWidget *widget, gpointer data);
++void pause_cb(GtkWidget *, gpointer data);
++void stop_cb(GtkWidget *, gpointer data);
++void loop_cb(GtkWidget *, gpointer data);
++void forward_skip_cb(GtkWidget *, gpointer data);
++void reverse_skip_cb(GtkWidget *, gpointer data);
++void forward_play_cb(GtkWidget *, gpointer data);
++void reverse_play_cb(GtkWidget *, gpointer data);
+ 
+ void speed_changed(void *, float speed)
+ {
+@@ -386,7 +413,7 @@
+ 	adj = GTK_RANGE(ustr->speed_scale)->adjustment;
+ 
+ 	//speed_val = (int)GTK_ADJUSTMENT(adj)->value;
+-	speed_val = (int)(speed * 100.0); // We need percentages
++	speed_val = (int) round(speed * 100.0); // We need percentages
+ 	if (speed_val < ZERO_PITCH_TRESH && speed_val > -ZERO_PITCH_TRESH) {
+ 		sprintf(str, "Speed: pause");
+ 	}
+@@ -518,6 +545,147 @@
+ 	pthread_exit(NULL);
+ }
+ 
++pthread_t looper_thread;
++pthread_mutex_t looper_mutex = PTHREAD_MUTEX_INITIALIZER;
++
++void looper(void *data)
++{
++	// GtkAdjustment *adj = (GtkAdjustment *)data;
++	loop_struct *loop = &global_loop;
++	update_struct *ustr = &global_ustr;
++	Playlist *pl = (Playlist *)ustr->data;
++	unsigned int track = pl->GetCurrent();
++	CorePlayer *p = pl->GetCorePlayer();
++
++	if (pthread_mutex_trylock(&looper_mutex) != 0) {
++		pthread_exit(NULL);
++	}
++	
++	nice(5);
++	
++	while (loop->state == LOOP_ON && loop->track == track) {
++		if (loop->track != track) {
++			loop->state = LOOP_OFF;
++		} else if(p->GetPosition() >= loop->end) {
++			p->Seek(loop->start);
++			// global_update = 1;	
++		} 
++
++		dosleep(10000);
++	}
++	pthread_mutex_unlock(&looper_mutex);
++	pthread_exit(NULL);
++}
++
++gboolean key_press_cb (GtkWidget *widget, GdkEventKey *event, gpointer data)
++{
++	GtkAdjustment *adj;
++	update_struct *ustr = &global_ustr;
++	
++	/* key definitions are from enum gtk_keymap */
++	switch(event->keyval) {
++		case STOP_KEY:
++			stop_cb(NULL, ustr->data);
++			break;
++		case PLAY_KEY:
++			play_cb(NULL, ustr->data);
++			break;
++		case PAUSE_KEY:
++			pause_cb(NULL, ustr->speed_scale);
++			break;
++		case NEXT_KEY:
++			playlist_window_gtk_next(NULL, ustr->data);
++			break;
++		case PREV_KEY:
++			playlist_window_gtk_prev(NULL, ustr->data);
++			break;
++		case FWD_KEY:
++			forward_skip_cb(NULL, ustr->pos_scale);
++			break;
++		case BACK_KEY:
++			reverse_skip_cb(NULL, ustr->pos_scale);
++			break;
++		case FWD_PLAY_KEY:
++			forward_play_cb(NULL, ustr->speed_scale);
++			break;
++		case REV_PLAY_KEY:
++			reverse_play_cb(NULL, ustr->speed_scale);
++			break;
++		case SPEED_UP_KEY:
++			adj = GTK_RANGE(ustr->speed_scale)->adjustment;
++			gtk_adjustment_set_value(adj, EQ_TEMP_STEP(adj->value, 1));
++			break;
++		case SPEED_DOWN_KEY:
++			adj = GTK_RANGE(ustr->speed_scale)->adjustment;
++			gtk_adjustment_set_value(adj, EQ_TEMP_STEP(adj->value, -1));
++			break;
++		case VOL_UP_KEY:
++			break;
++		case VOL_DOWN_KEY:
++			break;
++		case LOOP_KEY:
++			loop_cb(NULL, ustr->pos_scale);
++			break;
++		default:
++			// printf("Unknown key pressed: %c\n", key);
++			break;
++	}
++	
++	return FALSE;
++}
++
++void loop_cb(GtkWidget *, gpointer data)
++{
++	GtkAdjustment *adj = GTK_RANGE(data)->adjustment;
++	update_struct *ustr = &global_ustr;
++	Playlist *pl = (Playlist *)ustr->data;
++	loop_struct *loop = &global_loop;
++	
++	switch(loop->state) {
++		case LOOP_OFF:
++			loop->track = pl->GetCurrent();
++			loop->start = adj->value;
++			loop->state = LOOP_START_SET;
++			break;
++		case LOOP_START_SET:
++			loop->end = adj->value;
++			loop->state = LOOP_ON;
++			pthread_create(&looper_thread, NULL,
++					(void * (*)(void *))looper, adj);
++			pthread_detach(looper_thread);
++			break;
++		case LOOP_ON:
++			loop->state = LOOP_OFF;
++			break;
++		default:
++			break;
++	}
++
++}
++
++void forward_skip_cb(GtkWidget *, gpointer data)
++{
++	GtkAdjustment *adj;
++	update_struct *ustr = &global_ustr;
++	Playlist *pl = (Playlist *)ustr->data;
++	CorePlayer *p = pl->GetCorePlayer();
++
++	adj = GTK_RANGE(data)->adjustment;
++	p->Seek((int)adj->value + 5 * FPS_HACK);
++	global_update = 1;	
++}
++
++void reverse_skip_cb(GtkWidget *, gpointer data)
++{
++	GtkAdjustment *adj;
++	update_struct *ustr = &global_ustr;
++	Playlist *pl = (Playlist *)ustr->data;
++	CorePlayer *p = pl->GetCorePlayer();
++
++	adj = GTK_RANGE(data)->adjustment;
++	p->Seek((int)adj->value - 5 * FPS_HACK);
++	global_update = 1;	
++}
+ 
+ void forward_play_cb(GtkWidget *, gpointer data)
+ {
+@@ -562,6 +730,7 @@
+ {
+ 	GtkAdjustment *adj;
+ 	int smooth_trans;
++	update_struct *ustr = &global_ustr;
+ 
+ 	adj = GTK_RANGE(data)->adjustment;
+ 
+@@ -569,18 +738,20 @@
+ 		
+ 	if (smooth_trans) {
+ 		if (destination <= adj->value && destination != 0.0) {
++			ustr->speed = adj->value;
+ 			destination = 0.0;
+ 		} else {
+-			destination = 100.0;
++			destination = ustr->speed;
+ 		}	
+ 		pthread_create(&smoother_thread, NULL,
+ 			(void * (*)(void *))smoother, adj);
+ 		pthread_detach(smoother_thread);
+ 	} else {
+ 		if (adj->value != 0.0) {
++			ustr->speed = adj->value;
+ 			gtk_adjustment_set_value(adj, 0.0);
+ 		} else {
+-			gtk_adjustment_set_value(adj, 100.0);
++			gtk_adjustment_set_value(adj, ustr->speed);
+ 		}
+ 	}	
+ }
+@@ -607,15 +778,21 @@
+ {
+ 	Playlist *pl = (Playlist *)data;
+ 	CorePlayer *p = pl->GetCorePlayer();
+-	if (p) {
+-		pl->UnPause();
+-		if (p->IsPlaying() || !pl->Length()) {
+-			eject_cb(widget, data);
+-		} else if (!p->IsPlaying() && pl->Length()) {
+-			GDK_THREADS_LEAVE();
+-			pl->Play(pl->GetCurrent());
+-			GDK_THREADS_ENTER();
+-		}	
++	if (!p) {
++		return;
++	}
++	pl->UnPause();
++		
++	if (p->IsPlaying()) {
++	/* pressing Play when playing goes to the start of the song */
++		p->Seek(0); 
++	} else if (!pl->Length()) {
++	/* if playlist is empty, prompt for something to play */
++		eject_cb(widget, data);
++	} else if (!p->IsPlaying() && pl->Length()) {
++		GDK_THREADS_LEAVE();
++		pl->Play(pl->GetCurrent());
++		GDK_THREADS_ENTER();
+ 	}	
+ }
+ 
+@@ -694,7 +871,7 @@
+ 	adj = GTK_RANGE(ustr->pos_scale)->adjustment;
+ 	if (p->CanSeek()) {
+ 		adj->lower = 0;
+-		adj->upper = p->GetFrames() - 32; // HACK!!
++		adj->upper = p->GetFrames() - FPS_HACK; // HACK!!
+ 		if (locking)
+ 			GDK_THREADS_ENTER();
+ 		gtk_widget_set_sensitive(GTK_WIDGET(ustr->pos_scale), true);
+diff -ur ./interface/gtk/gtk_interface.h ../alsaplayer-0.99.76.vik/interface/gtk/gtk_interface.h
+--- ./interface/gtk/gtk_interface.h	2002-06-05 19:56:09.000000000 +0200
++++ ../alsaplayer-0.99.76.vik/interface/gtk/gtk_interface.h	2005-05-06 15:25:05.000000000 +0200
+@@ -22,10 +22,29 @@
+ #include "CorePlayer.h"
+ #include "Playlist.h"
+ 
++#include <gdk/gdkkeysyms.h>
++
+ extern gint windows_x_offset;
+ extern gint windows_y_offset;
+ extern int global_update;
+ 
+ void init_main_window(Playlist *);
+ 
++enum gtk_keymap {
++	STOP_KEY = GDK_v,
++	PLAY_KEY = GDK_x,
++	PAUSE_KEY = GDK_c,
++	NEXT_KEY = GDK_b,
++	PREV_KEY = GDK_z,
++	FWD_KEY = GDK_g,
++	BACK_KEY = GDK_a,
++	FWD_PLAY_KEY = GDK_f,
++	REV_PLAY_KEY = GDK_s,
++	SPEED_UP_KEY = GDK_t,
++	SPEED_DOWN_KEY = GDK_q,
++	VOL_UP_KEY = GDK_r,
++	VOL_DOWN_KEY = GDK_w,
++	LOOP_KEY = GDK_l
++};
++
+ #endif /* _gtk_interface_h_ */

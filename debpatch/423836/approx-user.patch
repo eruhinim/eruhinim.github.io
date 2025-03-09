@@ -1,0 +1,152 @@
+diff -u -r approx-2.8.0.debian/approx.ml approx-2.8.0/approx.ml
+--- approx-2.8.0.debian/approx.ml	2007-05-14 16:04:19.000000000 +0400
++++ approx-2.8.0/approx.ml	2007-05-14 16:35:58.000000000 +0400
+@@ -52,6 +52,8 @@
+   info_message "Interval:%s%s"
+     (units "hour" (interval / 60)) (units "minute" (interval mod 60));
+   info_message "Max wait: %d" max_wait;
++  info_message "Username: %s" user;
++  info_message "Groupname: %s" group;
+   info_message "Debug: %B" debug
+ 
+ let http_time t =
+@@ -514,7 +516,7 @@
+   try
+     Sys.chdir cache_dir;
+     print_config ();
+-    Server.main ~user: "approx" ~interface port proxy_service
++    Server.main ~user ~group ~interface port proxy_service
+   with e ->
+     exception_message e;
+     exit 1
+diff -u -r approx-2.8.0.debian/debian/changelog approx-2.8.0/debian/changelog
+--- approx-2.8.0.debian/debian/changelog	2007-05-14 16:04:19.000000000 +0400
++++ approx-2.8.0/debian/changelog	2007-05-14 16:09:33.000000000 +0400
+@@ -1,3 +1,9 @@
++approx (2.8.0-ol1) unstable; urgency=low
++
++  * Allow username specification via config.
++
++ -- Alexandra N. Kossovsky <sasha@oktetlabs.ru>  Mon, 14 May 2007 16:09:03 +0400
++
+ approx (2.8.0) unstable; urgency=low
+ 
+   * Make sure syslog messages are newline-terminated for syslog-ng
+diff -u -r approx-2.8.0.debian/default_config.ml approx-2.8.0/default_config.ml
+--- approx-2.8.0.debian/default_config.ml	2007-05-14 16:04:19.000000000 +0400
++++ approx-2.8.0/default_config.ml	2007-05-14 16:26:20.000000000 +0400
+@@ -14,4 +14,6 @@
+ let interval = get_int "interval" ~default: 720 (* minutes *)
+ let max_wait = get_int "max_wait" ~default: 10 (* seconds *)
+ let max_rate = get "max_rate" ~default: "unlimited"
++let user = get "user" ~default: "approx"
++let group = get "group" ~default: "approx"
+ let debug = get_bool "debug" ~default: false
+diff -u -r approx-2.8.0.debian/default_config.mli approx-2.8.0/default_config.mli
+--- approx-2.8.0.debian/default_config.mli	2007-05-14 16:04:19.000000000 +0400
++++ approx-2.8.0/default_config.mli	2007-05-14 16:26:01.000000000 +0400
+@@ -10,4 +10,6 @@
+ val interval : int  (* minutes *)
+ val max_wait : int  (* seconds *)
+ val max_rate : string  (* bytes/second with optional K, M, or G suffix *)
++val user : string
++val group : string
+ val debug : bool
+diff -u -r approx-2.8.0.debian/doc/approx.conf.5 approx-2.8.0/doc/approx.conf.5
+--- approx-2.8.0.debian/doc/approx.conf.5	2007-05-14 16:04:19.000000000 +0400
++++ approx-2.8.0/doc/approx.conf.5	2007-05-14 17:06:32.000000000 +0400
+@@ -41,6 +41,9 @@
+ in bytes per second (default: unlimited).
+ The value may be suffixed with "K", "M", or "G"
+ to indicate kilobytes, megabytes, or gigabytes per second, respectively.
++.IP user/group
++Specifies the username and groupname to use after privileges drop. "approx" user 
++and "approx" group is used by default.
+ .IP debug
+ Specifies whether debugging messages should be printed
+ (default:
+diff -u -r approx-2.8.0.debian/etc/approx.conf approx-2.8.0/etc/approx.conf
+--- approx-2.8.0.debian/etc/approx.conf	2007-05-14 16:04:19.000000000 +0400
++++ approx-2.8.0/etc/approx.conf	2007-05-14 16:25:50.000000000 +0400
+@@ -7,6 +7,8 @@
+ #interval	720
+ #max_wait	10
+ #max_rate	unlimited
++#user		approx
++#group		approx
+ #debug		false
+ 
+ # Here are some examples of remote repository mappings.
+diff -u -r approx-2.8.0.debian/gc.ml approx-2.8.0/gc.ml
+--- approx-2.8.0.debian/gc.ml	2007-05-14 16:04:19.000000000 +0400
++++ approx-2.8.0/gc.ml	2007-05-14 16:30:46.000000000 +0400
+@@ -188,7 +188,7 @@
+   iter_status gc
+ 
+ let garbage_collect () =
+-  drop_privileges "approx";
++  drop_privileges user group;
+   mark ();
+   sweep ()
+ 
+diff -u -r approx-2.8.0.debian/server.ml approx-2.8.0/server.ml
+--- approx-2.8.0.debian/server.ml	2007-05-14 16:04:19.000000000 +0400
++++ approx-2.8.0/server.ml	2007-05-14 16:27:44.000000000 +0400
+@@ -34,7 +34,7 @@
+     method config_reactor_synch = `Write
+   end
+ 
+-let main ~user ~interface port service =
++let main ~user ~group ~interface port service =
+   let sock = socket PF_INET SOCK_STREAM 0 in
+   setsockopt sock SO_REUSEADDR true;
+   let addr =
+@@ -43,7 +43,7 @@
+   in
+   bind sock (ADDR_INET (addr, port));
+   listen sock 10;
+-  drop_privileges user;
++  drop_privileges user group;
+   while true do
+     let fd, _ = accept sock in
+     set_nonblock fd;
+diff -u -r approx-2.8.0.debian/server.mli approx-2.8.0/server.mli
+--- approx-2.8.0.debian/server.mli	2007-05-14 16:04:19.000000000 +0400
++++ approx-2.8.0/server.mli	2007-05-14 16:32:38.000000000 +0400
+@@ -2,4 +2,4 @@
+    Copyright (C) 2006  Eric C. Cooper <ecc@cmu.edu>
+    Released under the GNU General Public License *)
+ 
+-val main : user:string -> interface:string -> int -> 'a Nethttpd_types.http_service -> unit
++val main : user:string -> group:string -> interface:string -> int -> 'a Nethttpd_types.http_service -> unit
+diff -u -r approx-2.8.0.debian/util.ml approx-2.8.0/util.ml
+--- approx-2.8.0.debian/util.ml	2007-05-14 16:04:19.000000000 +0400
++++ approx-2.8.0/util.ml	2007-05-14 16:28:09.000000000 +0400
+@@ -143,9 +143,9 @@
+ let file_sha1sum = let module F = FileDigest(Sha1) in F.sum
+ let file_sha256sum = let module F = FileDigest(Sha256) in F.sum
+ 
+-let drop_privileges name =
+-  setgid (getgrnam name).gr_gid;
+-  setuid (getpwnam name).pw_uid
++let drop_privileges user group =
++  setgid (getgrnam group).gr_gid;
++  setuid (getpwnam user).pw_uid
+ 
+ let packages_variants = [ "Packages"; "Packages.gz"; "Packages.bz2" ]
+ 
+diff -u -r approx-2.8.0.debian/util.mli approx-2.8.0/util.mli
+--- approx-2.8.0.debian/util.mli	2007-05-14 16:04:19.000000000 +0400
++++ approx-2.8.0/util.mli	2007-05-14 17:05:05.000000000 +0400
+@@ -94,9 +94,9 @@
+ 
+ val file_sha256sum : string -> string
+ 
+-(* Drop privileges (user and group ID) to those of the specified name *)
++(* Drop privileges (user and group ID) to those of the specified names *)
+ 
+-val drop_privileges : string -> unit
++val drop_privileges : string -> string -> unit
+ 
+ (* Check whether a file is a Sources file *)
+ 

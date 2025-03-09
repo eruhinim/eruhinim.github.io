@@ -1,0 +1,119 @@
+>From e68198332d3f98faa05f3f49cb0f22ad60cd1e74 Mon Sep 17 00:00:00 2001
+From: Chris Lamb <lamby@debian.org>
+Date: Wed, 9 May 2018 18:00:23 -0700
+Subject: [PATCH] Add (failing) testcase for inode numbering.
+
+---
+ tests/inodes | 100 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 100 insertions(+)
+ create mode 100755 tests/inodes
+
+diff --git a/tests/inodes b/tests/inodes
+new file mode 100755
+index 0000000..86df627
+--- /dev/null
++++ b/tests/inodes
+@@ -0,0 +1,100 @@
++#!/bin/sh
++
++. ./common
++
++TEMPDIR="$(mktemp -d)"
++
++Setup () {
++	cat >${TEMPDIR}/inodes.cpp <<EOF
++#include <dirent.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <unistd.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <sys/syscall.h>
++
++#include <map>
++#include <iostream>
++
++struct linux_dirent {
++	unsigned long 	d_ino;
++	off_t		d_off;
++	unsigned short	d_reclen;
++	char		d_name[];
++};
++
++#define BUF_SIZE 1024
++
++int
++main(int argc, char *argv[])
++{
++	int fd, nread, ret = EXIT_SUCCESS;
++	char buf[BUF_SIZE];
++	char filename[PATH_MAX];
++	struct linux_dirent *d;
++	int bpos;
++	struct stat st;
++	const char* dirname = argc > 1 ? argv[1] : ".";
++
++	std::map<int, std::string> inodes;
++
++	fd = open(dirname, O_RDONLY | O_DIRECTORY);
++	if (fd == -1) {
++		perror("open");
++		exit(EXIT_FAILURE);
++	}
++
++	for (;;) {
++		nread = syscall(SYS_getdents, fd, buf, BUF_SIZE);
++
++		if (nread == -1) {
++			perror("getdents");
++			exit(EXIT_FAILURE);
++		}
++
++		if (nread == 0)
++			break;
++
++		for (bpos = 0; bpos < nread; bpos += d->d_reclen) {
++			d = (struct linux_dirent *) (buf + bpos);
++
++			if (strcmp(d->d_name, "..") == 0)
++				continue;
++
++			snprintf(filename, sizeof filename, "%s/%s", dirname, d->d_name);
++			if (stat(filename, &st) == -1) {
++				perror("stat");
++				exit(EXIT_FAILURE);
++			}
++
++			if (d->d_ino != st.st_ino) {
++				std::cerr << filename
++					<< ": inode from getdents does not match stat ("
++					<< d->d_ino << " != " << st.st_ino << ")" << std::endl;
++				ret = EXIT_FAILURE;
++			}
++
++			if (inodes.find(d->d_ino) != inodes.end()) {
++				std::cerr << filename << ": duplicate inode ("
++					<< d->d_ino << " already used by " << inodes[d->d_ino]
++					<<  ")" << std::endl;
++				ret = EXIT_FAILURE;
++			}
++
++			inodes[d->d_ino] = filename;
++		}
++	}
++
++	exit(ret);
++}
++EOF
++	g++ -Wall -o${TEMPDIR}/inodes ${TEMPDIR}/inodes.cpp
++}
++
++Setup
++
++Mount
++${TEMPDIR}/inodes target || Fail "inodes"
++Unmount
+-- 
+2.17.0
+

@@ -1,0 +1,56 @@
+From 23b51fea4388a27f77c8c141b340e9d041ff0758 Mon Sep 17 00:00:00 2001
+From: Iain Lane <iain.lane@canonical.com>
+Date: Thu, 19 Jan 2017 17:03:45 +0000
+Subject: [PATCH] runner/autopkgtest: Fix build_source to work if
+ "Package-List" is the last line in the apt output
+
+In this case:
+
+  (zesty-amd64)root@zesty:/# echo "$(apt-cache showsrc --only-source panic)"
+  Package: panic
+  Binary: panic
+  Version: 1
+  Section: misc
+  Maintainer: Iain Lane <iain@orangesquash.org.uk>
+  Build-Depends: debhelper (>= 9)
+  Architecture: any
+  Standards-Version: 3.9.8
+  Format: 3.0 (native)
+  Directory: pool/main/p/panic
+  Files:
+   6cfecf2721d2a016e5f6f69d9904b9d3 6100 panic_1.tar.xz
+   bc95d474e82520a9ecd02c96d32fc0b5 1385 panic_1.dsc
+  Checksums-Sha1:
+   de34b9b0897c1e0032144f38c7741b80c2bd4dd0 6100 panic_1.tar.xz
+   2200182522ab5ba484c65d5721d40242b41d4434 1385 panic_1.dsc
+  Checksums-Sha256:
+   6c5bb9f05b088dd4b12588d8fdab34181a7db064488a5f73382dd660290e696c 6100 panic_1.tar.xz
+   704037ae8f1d3a7371e3996254af43ce98b714da062ed3b9665e8fa8e815fc4d 1385 panic_1.dsc
+  Testsuite: autopkgtest
+  Testsuite-Triggers: build-essential
+  Package-List: panic deb misc optional arch=any
+  (zesty-amd64)root@zesty:/#
+
+the embedded awk script will not run the "{ }" (every line) block to
+construct $pkgs, since Package-List is the last line. Append a newline
+to the output, so that this block is always run last.
+---
+ runner/autopkgtest | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/runner/autopkgtest b/runner/autopkgtest
+index daabdba..b0d497f 100755
+--- a/runner/autopkgtest
++++ b/runner/autopkgtest
+@@ -374,7 +374,7 @@ def build_source(kind, arg, built_binaries):
+         # very old source packages don't have Package-List: yet, fall back to Binary:
+         # (Binary: is generally not sufficient as it gets truncated for long lists)
+         create_command = ('pkgs=$(apt-cache showsrc --only-source %(src)s || [ $? != 100 ] || apt-cache showsrc %(src)s); '
+-                          'pkgs=$(echo "$pkgs" | awk "/^Package: / { if (\$2 != \\"%(src)s\\") { skippar=1; next; } else { skippar=0}} { if (skippar) next; }    /^Binary:/ { sub(/^Binary:/, \\"\\"); gsub(/,/, \\"\\"); split(\$0,oldpkgs)}; /^Package-List:/ { inlist=1; have_pl=1; delete thissrc; if (\$2) thissrc[\$2] = 1; next } (/^ / && inlist == 1) { thissrc[\$1] = 1; next } { if (!inlist) next; inlist=0; if (intersect) {for (p in pkgs) { if (!(p in thissrc)) delete pkgs[p]; else remaining=1}; if (!remaining) {for (p in thissrc) {pkgs[p] = 1}} } else { for (p in thissrc) { pkgs[p] = 1}; intersect=1 } } END {if (have_pl) { for (p in pkgs) print p } else {for (p in oldpkgs) print oldpkgs[p]} }");'
++                          'pkgs=$(echo "$pkgs\n" | awk "/^Package: / { if (\$2 != \\"%(src)s\\") { skippar=1; next; } else { skippar=0}} { if (skippar) next; }    /^Binary:/ { sub(/^Binary:/, \\"\\"); gsub(/,/, \\"\\"); split(\$0,oldpkgs)}; /^Package-List:/ { inlist=1; have_pl=1; delete thissrc; if (\$2) thissrc[\$2] = 1; next } (/^ / && inlist == 1) { thissrc[\$1] = 1; next } { if (!inlist) next; inlist=0; if (intersect) {for (p in pkgs) { if (!(p in thissrc)) delete pkgs[p]; else remaining=1}; if (!remaining) {for (p in thissrc) {pkgs[p] = 1}} } else { for (p in thissrc) { pkgs[p] = 1}; intersect=1 } } END {if (have_pl) { for (p in pkgs) print p } else {for (p in oldpkgs) print oldpkgs[p]} }");'
+                           ' [ -n "$pkgs" ] || exit 1; '
+                           ' for pkg in $pkgs; do'
+                           '  pkg_candidate=$(apt-cache policy "^$pkg\$"|sed -n "/Candidate:/ { s/^.* //; /none/d; p}") || continue;'
+-- 
+2.10.2
+

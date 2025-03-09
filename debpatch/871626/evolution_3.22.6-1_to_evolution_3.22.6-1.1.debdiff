@@ -1,0 +1,130 @@
+diff -Nru evolution-3.22.6/debian/changelog evolution-3.22.6/debian/changelog
+--- evolution-3.22.6/debian/changelog	2017-03-13 23:51:12.000000000 +0000
++++ evolution-3.22.6/debian/changelog	2017-08-13 17:01:34.000000000 +0100
+@@ -1,3 +1,11 @@
++evolution (3.22.6-1.1) unstable; urgency=medium
++
++  * Non-maintainer upload.
++  * Added debian/patches/20_composer_hangs_right_click.patch (Closes: #871626)
++    - Backport patch from git - Fix hangs on right click in composer window.
++
++ -- Phil Wyett <philwyett@kathenas.org>  Sun, 13 Aug 2017 17:01:34 +0100
++
+ evolution (3.22.6-1) unstable; urgency=medium
+ 
+   * New upstream release.
+diff -Nru evolution-3.22.6/debian/patches/20_composer_hangs_right_click.patch evolution-3.22.6/debian/patches/20_composer_hangs_right_click.patch
+--- evolution-3.22.6/debian/patches/20_composer_hangs_right_click.patch	1970-01-01 01:00:00.000000000 +0100
++++ evolution-3.22.6/debian/patches/20_composer_hangs_right_click.patch	2017-08-13 16:59:10.000000000 +0100
+@@ -0,0 +1,104 @@
++Description: Backported patch from git - Fix hangs on right click in composer
++ window.
++Bug-GNOME: https://bugzilla.gnome.org/show_bug.cgi?id=777086
++
++---
++Index: b/e-util/e-html-editor.c
++===================================================================
++--- a/e-util/e-html-editor.c	2017-08-10 02:19:27.349879933 +0100
+++++ b/e-util/e-html-editor.c	2017-08-10 02:25:30.691503859 +0100
++@@ -488,36 +488,73 @@
++ 	g_strfreev (languages);
++ }
++
+++typedef struct _ContextMenuData {
+++	GWeakRef *editor_weakref; /* EHTMLEditor * */
+++	EContentEditorNodeFlags flags;
+++	guint button;
+++	guint32 time;
+++} ContextMenuData;
+++
+++static void
+++context_menu_data_free (gpointer ptr)
+++{
+++	ContextMenuData *cmd = ptr;
+++
+++	if (cmd) {
+++		e_weak_ref_free (cmd->editor_weakref);
+++		g_free (cmd);
+++	}
+++}
+++
+++static gboolean
+++html_editor_show_context_menu_idle_cb (gpointer user_data)
+++{
+++	ContextMenuData *cmd = user_data;
+++	EHTMLEditor *editor;
+++
+++	g_return_val_if_fail (cmd != NULL, FALSE);
+++
+++	editor = g_weak_ref_get (cmd->editor_weakref);
+++	if (editor) {
+++		GtkWidget *menu;
+++
+++		menu = e_html_editor_get_managed_widget (editor, "/context-menu");
+++
+++		g_signal_emit (editor, signals[UPDATE_ACTIONS], 0, cmd->flags);
+++
+++		if (!gtk_menu_get_attach_widget (GTK_MENU (menu)))
+++			gtk_menu_attach_to_widget (GTK_MENU (menu), GTK_WIDGET (editor), NULL);
+++
+++		gtk_menu_popup (GTK_MENU (menu), NULL, NULL, NULL,
+++			GTK_WIDGET (e_html_editor_get_content_editor (editor)), cmd->button, cmd->time);
+++
+++		g_object_unref (editor);
+++	}
+++
+++	return FALSE;
+++}
+++
++ static gboolean
++ html_editor_context_menu_requested_cb (EContentEditor *cnt_editor,
++                                        EContentEditorNodeFlags flags,
++                                        GdkEvent *event,
++                                        EHTMLEditor *editor)
++ {
++-	GtkWidget *menu;
+++	ContextMenuData *cmd;
+++
+++	g_return_val_if_fail (E_IS_HTML_EDITOR (editor), FALSE);
+++
+++	cmd = g_new0 (ContextMenuData, 1);
+++	cmd->editor_weakref = e_weak_ref_new (editor);
+++	cmd->flags = flags;
++
++-	/* COUNT FLAGS */
++-	menu = e_html_editor_get_managed_widget (editor, "/context-menu");
+++	if (!event || !gdk_event_get_button (event, &cmd->button))
+++		cmd->button = 0;
++
++-	g_signal_emit (editor, signals[UPDATE_ACTIONS], 0, flags);
+++	cmd->time = event ? gdk_event_get_time (event) : gtk_get_current_event_time ();
++
++-	if (!gtk_menu_get_attach_widget (GTK_MENU (menu)))
++-		gtk_menu_attach_to_widget (GTK_MENU (menu),
++-					   GTK_WIDGET (editor),
++-					   NULL);
++-
++-	if (event)
++-		gtk_menu_popup (
++-			GTK_MENU (menu), NULL, NULL, NULL,
++-			GTK_WIDGET (cnt_editor),
++-			((GdkEventButton*) event)->button,
++-			((GdkEventButton*) event)->time);
++-	else
++-		gtk_menu_popup (
++-			GTK_MENU (menu), NULL, NULL, NULL,
++-			GTK_WIDGET (cnt_editor),
++-			0,
++-			gtk_get_current_event_time ());
+++	g_idle_add_full (G_PRIORITY_LOW, html_editor_show_context_menu_idle_cb,
+++		cmd, context_menu_data_free);
++
++ 	return TRUE;
++ }
+diff -Nru evolution-3.22.6/debian/patches/series evolution-3.22.6/debian/patches/series
+--- evolution-3.22.6/debian/patches/series	2016-11-07 12:56:27.000000000 +0000
++++ evolution-3.22.6/debian/patches/series	2017-08-13 16:59:16.000000000 +0100
+@@ -1,2 +1,3 @@
+ 02_nss_paths.patch
+ 10_revert_libevolution_avoid-version.patch
++20_composer_hangs_right_click.patch

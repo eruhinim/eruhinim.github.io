@@ -1,0 +1,64 @@
+From 0a7a2a4a5918677237ea2ae57befec2bd443aee9 Mon Sep 17 00:00:00 2001
+From: Barry Warsaw <barry@ubuntu.com>
+Date: Wed, 28 Sep 2016 13:08:58 -0400
+Subject: [PATCH] Support url#refspec format.
+
+First, I fixed the bug in the previously supported url#branch syntax,
+where the code expected a space separator but the documentation
+described the # separator.
+
+Next, this generalizes the approach so that GitHub style PR refspecs,
+e.g. refs/68/merge also work after the #.  Since the code paths are
+identical now, we get both for free.
+---
+ runner/autopkgtest | 23 +++++++++++++++--------
+ 1 file changed, 15 insertions(+), 8 deletions(-)
+
+diff --git a/runner/autopkgtest b/runner/autopkgtest
+index 8b583cf..d45696e 100755
+--- a/runner/autopkgtest
++++ b/runner/autopkgtest
+@@ -389,14 +389,14 @@ def build_source(kind, arg, built_binaries):
+                           'if [ -n "$RC" ]; then if echo "$OUT" | grep -q "Unable to find a source package"; then exit 1; else exit $RC; fi; fi;'
+                           'echo "$OUT" | grep ^Get: || true' % {'src': arg})
+     elif kind == 'git-source':
+-        fields = arg.split()
+-        if len(fields) == 1:
+-            create_command = "git clone '%s' || { sleep 15; git clone '%s'; }" % (arg, arg)
+-        elif len(fields) == 2:
+-            create_command = "git clone --branch '%(b)s' '%(u)s' || { sleep 15; git clone --branch '%(b)s' '%(u)s'; }" \
+-                % {'b': fields[1], 'u': fields[0]}
++        url, sep, branch = arg.partition('#')
++        create_command = "git clone '%s' || { sleep 15; git clone '%s'; }" % (url, url)
++        if sep == '#':
++            # This is url#branch or url#refspec (for pull requests).
++            fetch_command = "git fetch -fu origin '%s:testbranch' || { sleep 15; git fetch -fu origin '%s:testbranch'; }" % (branch, branch)
+         else:
+-            adtlog.bomb('--git-source argument must be "URL" or "URL branchname"')
++            # This is just a plain url.
++            fetch_command = None
+ 
+         testbed.satisfy_dependencies_string('git, ca-certificates', 'install git for --git-source')
+     else:
+@@ -419,10 +419,17 @@ def build_source(kind, arg, built_binaries):
+         create_command,
+         'chmod -R a+rX .',
+         'cd [a-z0-9]*/.',
++    ]
++    if fetch_command is not None:
++        script.extend([
++            fetch_command,
++            "git checkout -qf testbranch || { sleep 15; git checkout -qf testbranch; }"
++        ])
++    script.extend([
+         'pwd >&3',
+         'sed -n "1 {s/).*//; s/ (/\\n/; p}" debian/changelog >&3',
+         'set +e; grep -q "^Restrictions:.*\\bbuild-needed\\b" debian/tests/control 2>/dev/null; echo $? >&3'
+-    ]
++    ])
+ 
+     (result_pwd, testpkg_name, testpkg_version, build_needed_rc) = \
+         source_rules_command(script, 'extract', results_lines=4)
+-- 
+2.9.3
+

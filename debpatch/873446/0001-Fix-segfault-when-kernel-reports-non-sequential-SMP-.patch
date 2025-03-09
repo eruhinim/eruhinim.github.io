@@ -1,0 +1,77 @@
+From d3065426868cdf63ccbbaf6afd917de64403ae49 Mon Sep 17 00:00:00 2001
+From: Brad Sawatzky <brad+debian@swatter.net>
+Date: Sun, 27 Aug 2017 16:10:48 -0400
+Subject: [PATCH] Fix segfault when kernel reports non-sequential SMP CPU
+ indices
+
+- For an AMD FX(tm)-6350 Six-Core Processor the file '/sys/.../present'
+  reports "0,3-7".  I assume that chip is really an 8-core die with two
+  cores disabled...  Presumably you could also get "0,3-4,6", and other
+  combos too...
+---
+ src/linux.cc | 32 +++++++++++++++++++++++++++-----
+ 1 file changed, 27 insertions(+), 5 deletions(-)
+
+diff --git a/src/linux.cc b/src/linux.cc
+index 664ddf5e..5ebed315 100644
+--- a/src/linux.cc
++++ b/src/linux.cc
+@@ -801,8 +801,11 @@ void get_cpu_count(void)
+ {
+ 	FILE *stat_fp;
+ 	static int rep = 0;
+-	int highest_cpu_index;
+ 	char buf[256];
++	char *str1, *str2, *token, *subtoken;
++	char *saveptr1, *saveptr2;
++	int subtoken1=-1;
++	int subtoken2=-1;
+ 
+ 	if (info.cpu_usage) {
+ 		return;
+@@ -819,11 +822,30 @@ void get_cpu_count(void)
+ 			break;
+ 		}
+ 
+-		if (sscanf(buf, "%*d-%d", &highest_cpu_index) == 1) {
+-			info.cpu_count = highest_cpu_index;
++		// Do some parsing here to handle skipped cpu numbers.  For example,
++		// for an AMD FX(tm)-6350 Six-Core Processor /sys/.../present reports
++		// "0,3-7".  I assume that chip is really an 8-core die with two cores
++		// disabled...  Presumably you could also get "0,3-4,6", and other
++		// combos too...
++		for (str1 = buf; ; str1 = NULL) {
++			token = strtok_r(str1, ",", &saveptr1);
++			if (token == NULL) break;
++			++info.cpu_count;
++
++			subtoken1=-1;
++			subtoken2=-1;
++			for (str2 = token; ; str2 = NULL) {
++				subtoken = strtok_r(str2, "-", &saveptr2);
++				if (subtoken == NULL) break;
++				if(subtoken1 < 0)
++					subtoken1=atoi(subtoken);
++				else
++					subtoken2=atoi(subtoken);
++			}
++			if(subtoken2 > 0)
++				info.cpu_count += subtoken2 - subtoken1;
+ 		}
+ 	}
+-	++info.cpu_count;
+ 	info.cpu_usage = (float*)malloc((info.cpu_count + 1) * sizeof(float));
+ 
+ 	fclose(stat_fp);
+@@ -896,7 +918,7 @@ int update_stat(void)
+ 		} else if (strncmp(buf, "cpu", 3) == 0) {
+ 			double delta;
+ 			if (isdigit(buf[3])) {
+-				idx = atoi(&buf[3]) + 1;
++				idx++;  //just increment here since the CPU index can skip numbers
+ 			} else {
+ 				idx = 0;
+ 			}
+-- 
+2.11.0
+

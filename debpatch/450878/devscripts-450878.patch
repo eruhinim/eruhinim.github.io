@@ -1,0 +1,124 @@
+Index: debian/changelog
+===================================================================
+--- debian/changelog	(Revision 2041)
++++ debian/changelog	(Arbeitskopie)
+@@ -1,3 +1,11 @@
++devscripts (2.10.59~nomeata) UNRELEASED; urgency=low
++
++  [ Joachim Breitner ]
++  * Add support for having only debian/ under a svn, cvs or darcs VCS (Closes:
++    #450878)
++
++ -- Joachim Breitner <nomeata@debian.org>  Mon, 23 Nov 2009 15:32:18 +0100
++
+ devscripts (2.10.58) unstable; urgency=low
+ 
+   * who-uploads: Correct the argument to wget's -O option.  Thanks to
+@@ -2,3 +10,3 @@
+     Yves-Alexis Perez for the patch.  (Closes: #557507)
+-
++  
+  -- James Vega <jamessan@debian.org>  Sun, 22 Nov 2009 09:16:03 -0500
+Index: scripts/debcommit.pl
+===================================================================
+--- scripts/debcommit.pl	(Revision 2041)
++++ scripts/debcommit.pl	(Arbeitskopie)
+@@ -238,9 +238,10 @@
+ my $all=0;
+ my $stripmessage=1;
+ my $signtags=0;
+-my $changelog="debian/changelog";
++my $changelog;
+ my $keyid;
+ my $version;
++my $onlydebian=0;
+ 
+ # Now start by reading configuration files and then command line
+ # The next stuff is boilerplate
+@@ -295,6 +296,12 @@
+     }
+ }
+ 
++# Find a good default for the changelog file location
++
++for (qw"debian/changelog changelog") {
++    $changelog = $_ if -e ($_);
++}
++
+ # Now read the command line arguments
+ 
+ Getopt::Long::Configure("bundling");
+@@ -327,6 +334,9 @@
+ }
+ 
+ my $prog=getprog();
++if (! defined $changelog) {
++    die "debcommit: Could not find a Debian changelog\n";
++}
+ if (! -e $changelog) {
+     die "debcommit: cannot find $changelog\n";
+ }
+@@ -353,7 +363,7 @@
+ 	}
+ 	close C;
+ 
+-	$version=`dpkg-parsechangelog | grep '^Version:' | cut -f 2 -d ' '`;
++	$version=`dpkg-parsechangelog -l\Q$changelog\E | grep '^Version:' | cut -f 2 -d ' '`;
+ 	chomp $version;
+     }
+ 
+@@ -373,8 +383,17 @@
+ sub getprog {
+     if (-d "debian") {
+ 	if (-d "debian/.svn") {
++	    # SVN has .svn even in subdirs...
++	    if (! -d ".svn") {
++		$onlydebian = 1;
++	    }
+ 	    return "svn";
+ 	} elsif (-d "debian/CVS") {
++	    # CVS has CVS even in subdirs...
++	    if (! -d "CVS") {
++		$onlydebian = 1;
++	    }
++	    $onlydebian = 1;
+ 	    return "cvs";
+ 	} elsif (-d "debian/{arch}") {
+ 	    # I don't think we can tell just from the working copy
+@@ -386,6 +405,7 @@
+ 		return "tla";
+ 	    }
+ 	} elsif (-d "debian/_darcs") {
++	    $onlydebian = 1;
+ 	    return "darcs";
+ 	}
+     }
+@@ -441,6 +461,9 @@
+ 
+ sub action {
+     my $prog=shift;
++    if ($prog eq "darcs" && $onlydebian) {
++	splice(@_,1,0,"--repodir=debian");
++    }
+     print $prog, " ",
+       join(" ", map { if (/[^-A-Za-z0-9]/) { "'$_'" } else { $_ } } @_), "\n";
+     return 1 if $noact;
+@@ -487,6 +510,9 @@
+ 
+     my $action_rc;  # return code of external command
+     if ($prog =~ /^(cvs|svn|svk|hg)$/) {
++	if (!@files_to_commit && $onlydebian) {
++	    @files_to_commit = ("debian");
++	}
+         $action_rc = $diffmode
+ 	    ? action($prog, "diff", @files_to_commit)
+ 	    : action($prog, "commit", "-m", $message, @files_to_commit);
+@@ -675,6 +701,8 @@
+ 	} elsif ($prog eq 'svk') {
+ 	    $ENV{'SVKDIFF'} = '/usr/bin/diff -w -u';
+ 	    @diffcmd = ($prog, 'diff');
++	} elsif ($prog eq 'darcs' && $onlydebian) {
++	    @diffcmd = ($prog, 'diff', '--repodir=debian', '--diff-opts=-wu');
+ 	} elsif ($prog eq 'darcs') {
+ 	    @diffcmd = ($prog, 'diff', '--diff-opts=-wu');
+ 	} else {

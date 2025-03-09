@@ -1,0 +1,172 @@
+From 4c59d384fc80a9c2fba32d28bcf62eea76224841 Mon Sep 17 00:00:00 2001
+From: Adam Borowski <kilobyte@angband.pl>
+Date: Mon, 10 Jul 2017 23:57:29 +0200
+Subject: [PATCH] A simple ALSA device finder.
+
+It works by scraping /proc/asound/cards rather than by proper ioctls,
+doesn't check device suitability (like, an USB microphone would show up
+as a card despite having no pcm output), and so on.  But we can improve
+it later.
+
+For consistency with the PulseAudio finder, only top-level devices are
+shown.  We'd probably want subdevices as well (#5352), but unless we query
+plug sensors, the list would be too spammy for now.
+
+Fixes #5611.
+---
+ src/CMakeLists.txt               |  8 ++++++
+ src/engines/alsadevicefinder.cpp | 58 ++++++++++++++++++++++++++++++++++++++++
+ src/engines/alsadevicefinder.h   | 31 +++++++++++++++++++++
+ src/engines/gstengine.cpp        |  7 +++++
+ 4 files changed, 104 insertions(+)
+ create mode 100644 src/engines/alsadevicefinder.cpp
+ create mode 100644 src/engines/alsadevicefinder.h
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index f0a8a569b..afc77ba01 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -896,6 +896,14 @@ optional_source(WIN32
+     ${CMAKE_SOURCE_DIR}/3rdparty/tinysvcmdns
+ )
+ 
++# Platform specific - Linux
++optional_source(LINUX
++  SOURCES
++    engines/alsadevicefinder.cpp
++  HEADERS
++    engines/alsadevicefinder.h
++)
++
+ # Platform specific - X11
+ optional_source(LINUX SOURCES widgets/osd_x11.cpp)
+ 
+diff --git a/src/engines/alsadevicefinder.cpp b/src/engines/alsadevicefinder.cpp
+new file mode 100644
+index 000000000..7b58a0594
+--- /dev/null
++++ b/src/engines/alsadevicefinder.cpp
+@@ -0,0 +1,58 @@
++/* This file is part of Clementine.
++   Copyright 2017, Adam Borowski <kilobyte@angband.pl>
++
++   Clementine is free software: you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation, either version 3 of the License, or
++   (at your option) any later version.
++
++   Clementine is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with Clementine.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#include <QFile>
++
++#include "alsadevicefinder.h"
++
++AlsaDeviceFinder::AlsaDeviceFinder()
++    : DeviceFinder("alsasink") {
++}
++
++QList<DeviceFinder::Device> AlsaDeviceFinder::ListDevices() {
++  QList<Device> ret;
++
++  QFile cards("/proc/asound/cards");
++  if (!cards.open(QIODevice::ReadOnly)) return ret;
++
++/* Syntax:
++                        snd_iprintf(buffer, "%2i [%-15s]: %s - %s\n",
++                                        idx,
++                                        card->id,
++                                        card->driver,
++                                        card->shortname);
++                        snd_iprintf(buffer, "                      %s\n",
++                                        card->longname);
++*/
++  QRegExp regid("^ ?(\\d{1,2}) \\[.{15}\\]: .* - .*$");
++  QRegExp regln("^                      (.*)\n");
++
++  while (1) {
++    QString line = cards.readLine();
++    if (regid.indexIn(line) == -1) break;
++    line = cards.readLine();
++    if (regln.indexIn(line) == -1) break;
++
++    Device dev;
++    dev.description = regln.cap(1).remove(QRegExp(" at .*$"));
++    dev.device_property_value = QString("hw:%1").arg(regid.cap(1));
++    dev.icon_name = GuessIconName(dev.description);
++    ret.append(dev);
++  }
++
++  return ret;
++}
+diff --git a/src/engines/alsadevicefinder.h b/src/engines/alsadevicefinder.h
+new file mode 100644
+index 000000000..73f90d4c2
+--- /dev/null
++++ b/src/engines/alsadevicefinder.h
+@@ -0,0 +1,31 @@
++/* This file is part of Clementine.
++   Copyright 2017 Adam Borowski <kilobyte@angband.pl>
++
++   Clementine is free software: you can redistribute it and/or modify
++   it under the terms of the GNU General Public License as published by
++   the Free Software Foundation, either version 3 of the License, or
++   (at your option) any later version.
++
++   Clementine is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with Clementine.  If not, see <http://www.gnu.org/licenses/>.
++*/
++
++#ifndef ALSADEVICEFINDER_H
++#define ALSADEVICEFINDER_H
++
++#include "engines/devicefinder.h"
++
++class AlsaDeviceFinder : public DeviceFinder {
++ public:
++  AlsaDeviceFinder();
++
++  virtual bool Initialise() { return true; }
++  virtual QList<Device> ListDevices();
++};
++
++#endif // ALSADEVICEFINDER_H
+diff --git a/src/engines/gstengine.cpp b/src/engines/gstengine.cpp
+index f0d47b4e9..a59aa1a7b 100644
+--- a/src/engines/gstengine.cpp
++++ b/src/engines/gstengine.cpp
+@@ -58,6 +58,10 @@
+ #include "engines/pulsedevicefinder.h"
+ #endif
+ 
++#ifdef Q_OS_LINUX
++#include "engines/alsadevicefinder.h"
++#endif
++
+ #ifdef Q_OS_DARWIN
+ #include "engines/osxdevicefinder.h"
+ #endif
+@@ -162,6 +166,9 @@ void GstEngine::InitialiseGstreamer() {
+ #ifdef HAVE_LIBPULSE
+   device_finders.append(new PulseDeviceFinder);
+ #endif
++#ifdef Q_OS_LINUX
++  device_finders.append(new AlsaDeviceFinder);
++#endif
+ #ifdef Q_OS_DARWIN
+   device_finders.append(new OsxDeviceFinder);
+ #endif
+-- 
+2.13.2
+

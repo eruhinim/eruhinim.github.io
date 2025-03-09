@@ -1,0 +1,117 @@
+From 99adaf58da5f63065076d21818ce03ac3c7537a4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=A9my=20Bobbio?= <lunar@debian.org>
+Date: Sat, 30 Aug 2014 02:24:57 +0000
+Subject: [PATCH] dh_strip: normalize ar file headers for reproducible builds
+
+User id, group id, timestamps and file modes can get captured when creating
+static libraries. While this information is not useful while building software,
+it prevents build to be reproducible. Let's replace the data by what is
+written when `ar` is used in "deterministic" mode.
+
+Thanks to Niko Tyni for the Perl code.
+---
+ dh_strip |   61 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 61 insertions(+)
+
+diff --git a/dh_strip b/dh_strip
+index 516b6f2..c55f10f 100755
+--- a/dh_strip
++++ b/dh_strip
+@@ -8,6 +8,7 @@ dh_strip - strip executables, shared libraries, and some static libraries
+ 
+ use strict;
+ use File::Find;
++use Fcntl q/SEEK_SET/;
+ use Debian::Debhelper::Dh_Lib;
+ 
+ =head1 SYNOPSIS
+@@ -28,6 +29,9 @@ strips each as much as is possible. (Which is not at all for debugging
+ libraries.) In general it seems to make very good guesses, and will do the
+ right thing in almost all cases.
+ 
++For static libraries, it will also normalize user id, group id, timestamp and
++file mode of the archive members to enable build reproducibility.
++
+ Since it is very hard to automatically guess if a file is a
+ module, and hard to determine how to strip a module, B<dh_strip> does not
+ currently deal with stripping binary modules such as F<.o> files.
+@@ -190,6 +194,61 @@ sub attach_debug {
+ 	doit($objcopy, "--add-gnu-debuglink", $debug_path, $file);
+ }
+ 
++sub normalize_ar {
++	my $file=shift;
++
++	my $GLOBAL_HEADER= "!<arch>\n";
++	my $GLOBAL_HEADER_LENGTH=length $GLOBAL_HEADER;
++
++	my $FILE_HEADER_LENGTH=60;
++	my $FILE_MAGIC="`\n";
++
++	my $buf;
++
++	open(F, '+<', $file)
++		or die("failed to open $file for read+write: $!");
++
++	read F, $buf, $GLOBAL_HEADER_LENGTH;
++	die("Unable to find global header") if $buf ne $GLOBAL_HEADER;
++
++	while (1) {
++		my $file_header_start=tell F;
++		my $count=read F, $buf, $FILE_HEADER_LENGTH;
++		die "reading $file failed: $!" if !defined $count;
++		last if $count == 0;
++
++		# http://en.wikipedia.org/wiki/Ar_(Unix)
++		#from   to     Name                      Format
++		#0      15     File name                 ASCII
++		#16     27     File modification date    Decimal
++		#28     33     Owner ID                  Decimal
++		#34     39     Group ID                  Decimal
++		#40     47     File mode                 Octal
++		#48     57     File size in bytes        Decimal
++		#58     59     File magic                \140\012
++
++		die "Incorrect header length"
++			if length $buf != $FILE_HEADER_LENGTH;
++		die "Incorrect file magic"
++			if substr($buf, 58, length($FILE_MAGIC)) ne $FILE_MAGIC;
++
++		my $file_size = substr($buf, 48, 10);
++		seek F, $file_header_start + 16, SEEK_SET;
++
++		# mtime
++		syswrite F, sprintf("%-12d", 0);
++		# owner
++		syswrite F, sprintf("%-6d", 0);
++		# group
++		syswrite F, sprintf("%-6d", 0);
++		# file mode
++		syswrite F, sprintf("%-8o", 0644);
++
++		# move to next member
++		seek F, $file_header_start + $FILE_HEADER_LENGTH + $file_size, SEEK_SET;
++	}
++}
++
+ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 	my $tmp=tmpdir($package);
+ 
+@@ -236,6 +295,7 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 
+ 	foreach (@static_libs) {
+ 		doit($strip,"--strip-debug",$_);
++		normalize_ar($_);
+ 	}
+ }
+ 
+@@ -248,5 +308,6 @@ This program is a part of debhelper.
+ =head1 AUTHOR
+ 
+ Joey Hess <joeyh@debian.org>
++Niko Tyni <ntyni@debian.org>
+ 
+ =cut
+-- 
+1.7.10.4
+

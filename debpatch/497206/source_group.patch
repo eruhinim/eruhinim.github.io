@@ -1,0 +1,169 @@
+Index: aptitude-0.6.1.5/src/load_grouppolicy.cc
+===================================================================
+--- aptitude-0.6.1.5.orig/src/load_grouppolicy.cc	2010-03-10 20:56:59.000000000 -0300
++++ aptitude-0.6.1.5/src/load_grouppolicy.cc	2010-03-10 20:57:03.000000000 -0300
+@@ -536,6 +536,18 @@
+   }
+ };
+ 
++class source_policy_parser : public string_policy_parser
++{
++public:
++  group_policy_parse_node *create_node(const vector<string> &args)
++  {
++    if(args.size()!=0)
++      throw GroupParseException(_("Too many arguments to by-source grouping policy"));
++
++    return new policy_node0<pkg_grouppolicy_source_factory>;
++  }
++};
++
+ class ver_policy_parser : public string_policy_parser
+ {
+   group_policy_parse_node *create_node(const vector<string> &args)
+@@ -758,6 +770,7 @@
+       parse_types["action"]=new mode_policy_parser;
+       parse_types["filter"]=new filter_policy_parser;
+       parse_types["firstchar"]=new firstchar_policy_parser;
++      parse_types["source"]=new source_policy_parser;
+ 
+       parse_types["versions"]=new ver_policy_parser;
+       parse_types["deps"]=new dep_policy_parser;
+Index: aptitude-0.6.1.5/src/pkg_grouppolicy.cc
+===================================================================
+--- aptitude-0.6.1.5.orig/src/pkg_grouppolicy.cc	2010-03-10 20:57:00.000000000 -0300
++++ aptitude-0.6.1.5/src/pkg_grouppolicy.cc	2010-03-10 20:57:03.000000000 -0300
+@@ -1655,3 +1655,66 @@
+ {
+   delete chain;
+ }
++
++
++/*****************************************************************************/
++
++// Groups packages by source package
++class pkg_grouppolicy_source:public pkg_grouppolicy
++{
++  typedef map<string,
++	      pair<pkg_grouppolicy *, pkg_subtree *> > childmap;
++
++  childmap children;
++  pkg_grouppolicy_factory *chain;
++
++  pkg_grouppolicy *spillover;
++public:
++  pkg_grouppolicy_source(pkg_grouppolicy_factory *_chain,
++			 pkg_signal *_sig, desc_signal *_desc_sig)
++    :pkg_grouppolicy(_sig, _desc_sig),
++     chain(_chain),
++     spillover(_chain->instantiate(get_sig(), get_desc_sig()))
++  {
++  }
++
++  ~pkg_grouppolicy_source()
++  {
++    for(childmap::iterator i=children.begin(); i!=children.end(); i++)
++      delete i->second.first;
++  }
++
++  void add_package(const pkgCache::PkgIterator &pkg, pkg_subtree *root)
++  {
++    if (pkg.VersionList().end() || pkg.VersionList().FileList().end())
++      return;
++    string source=apt_package_records->Lookup(pkg.VersionList().FileList()).SourcePkg();
++    if (source.length()==0)
++      source=pkg.Name();
++
++    childmap::iterator found=children.find(source);
++
++    if(found!=children.end())
++      found->second.first->add_package(pkg, found->second.second);
++    else
++      {
++	pkg_subtree *newtree=new pkg_subtree(cw::util::transcode(source.c_str()),
++					     L"",
++					     get_desc_sig());
++	pkg_grouppolicy *newchild=chain->instantiate(get_sig(),
++						     get_desc_sig());
++	children[source].first=newchild;
++	children[source].second=newtree;
++	root->add_child(newtree);
++	newtree->set_num_packages_parent(root);
++
++	newchild->add_package(pkg, newtree);
++      }
++  }
++};
++
++pkg_grouppolicy *pkg_grouppolicy_source_factory::instantiate(pkg_signal *sig,
++							     desc_signal *desc_sig)
++{
++  return new pkg_grouppolicy_source(chain, sig, desc_sig);
++}
+Index: aptitude-0.6.1.5/src/pkg_grouppolicy.h
+===================================================================
+--- aptitude-0.6.1.5.orig/src/pkg_grouppolicy.h	2010-03-10 20:56:59.000000000 -0300
++++ aptitude-0.6.1.5/src/pkg_grouppolicy.h	2010-03-10 20:57:03.000000000 -0300
+@@ -377,4 +377,18 @@
+   ~pkg_grouppolicy_facet_tag_factory();
+ };
+ 
++// Groups by source package
++class pkg_grouppolicy_source_factory:public pkg_grouppolicy_factory
++{
++  pkg_grouppolicy_factory *chain;
++public:
++  pkg_grouppolicy_source_factory(pkg_grouppolicy_factory *_chain):chain(_chain) {}
++
++  pkg_grouppolicy *instantiate(pkg_signal *_sig,
++			       desc_signal *_desc_sig);
++
++  virtual ~pkg_grouppolicy_source_factory()
++  {delete chain;}
++};
++
+ #endif
+Index: aptitude-0.6.1.5/src/ui.cc
+===================================================================
+--- aptitude-0.6.1.5.orig/src/ui.cc	2010-03-10 20:56:59.000000000 -0300
++++ aptitude-0.6.1.5/src/ui.cc	2010-03-11 15:25:23.000000000 -0300
+@@ -920,6 +920,27 @@
+   p->destroy();
+ }
+ 
++static void do_new_source_view_with_new_bar()
++{
++  progress_ref p = gen_progress_bar();
++
++  pkg_grouppolicy_factory *grp = NULL;
++  string grpstr = "source";
++  grp = parse_grouppolicy(grpstr);
++
++  pkg_tree_ref tree = pkg_tree::create(grpstr.c_str(), grp);
++
++  add_main_widget(make_default_view(tree,
++				    &tree->selected_signal,
++				    &tree->selected_desc_signal),
++		  _("Packages"),
++		  _("View available packages and choose actions to perform"),
++		  _("Packages"));
++
++  tree->build_tree(*p->get_progress().unsafe_get_ref());
++  p->destroy();
++}
++
+ void do_new_hier_view(OpProgress &progress)
+ {
+   pkg_grouppolicy_factory *grp=NULL;
+@@ -2520,6 +2541,11 @@
+ 	       N_("Browse packages using Debtags data"),
+ 	       sigc::ptr_fun(do_new_tag_view_with_new_bar)),
+ 
++  cw::menu_info(cw::menu_info::MENU_ITEM, N_("New ^Source Browser"),
++	       NULL,
++	       N_("Browse packages by Source package"),
++	       sigc::ptr_fun(do_new_source_view_with_new_bar)),
++
+   cw::menu_info(cw::menu_info::MENU_ITEM, N_("New Categorical ^Browser"),
+ 	       NULL,
+ 	       N_("Browse packages by category"),

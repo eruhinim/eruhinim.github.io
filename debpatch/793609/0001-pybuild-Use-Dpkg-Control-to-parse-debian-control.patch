@@ -1,0 +1,73 @@
+From 60cffaf3f787a40c5b69c7d2f6401768e33c514f Mon Sep 17 00:00:00 2001
+From: James McCoy <jamessan@debian.org>
+Date: Sat, 25 Jul 2015 14:49:54 -0400
+Subject: [PATCH] pybuild: Use Dpkg::Control to parse debian/control
+
+The manual parsing failed to handle comment lines in the Build-Depends
+field.  Using Dpkg::Control avoids this since the resulting string
+already has comments removed.
+---
+ debian/control |  4 ++--
+ dh/pybuild.pm  | 14 ++++++++------
+ 2 files changed, 10 insertions(+), 8 deletions(-)
+
+diff --git a/debian/control b/debian/control
+index 2666816..8325f33 100644
+--- a/debian/control
++++ b/debian/control
+@@ -3,7 +3,7 @@ Section: python
+ Priority: optional
+ Maintainer: Piotr Ożarowski <piotr@debian.org>
+ Uploaders: Stefano Rivera <stefanor@debian.org>, Barry Warsaw <barry@debian.org>
+-Build-Depends: debhelper (>= 9), python3-minimal, libpython3-stdlib,
++Build-Depends: debhelper (>= 9), python3-minimal, libpython3-stdlib, libdpkg-perl,
+ # provides rst2man command (python3-docutils not used to avoid circular deps):
+  python-docutils
+ Standards-Version: 3.9.6
+@@ -14,7 +14,7 @@ X-Python3-Version: >= 3.2
+ Package: dh-python
+ Architecture: all
+ Multi-Arch: foreign
+-Depends: ${misc:Depends}, ${python3:Depends}
++Depends: libdpkg-perl, ${misc:Depends}, ${python3:Depends}
+ Breaks:
+ # due to /usr/bin/dh_python3 and debhelper files
+  python3 (<< 3.3.2-4~)
+diff --git a/dh/pybuild.pm b/dh/pybuild.pm
+index eef5818..ef1810b 100644
+--- a/dh/pybuild.pm
++++ b/dh/pybuild.pm
+@@ -8,6 +8,7 @@
+ package Debian::Debhelper::Buildsystem::pybuild;
+ 
+ use strict;
++use Dpkg::Control;
+ use Debian::Debhelper::Dh_Lib qw(error doit);
+ use base 'Debian::Debhelper::Buildsystem';
+ 
+@@ -155,15 +156,16 @@ sub python_build_dependencies {
+ 	my $this=shift;
+ 
+ 	my @result;
+-	open (CONTROL, 'debian/control') || error("cannot read debian/control: $!\n");
+-	foreach my $builddeps (join('', <CONTROL>) =~ 
+-			/^Build-Depends[^:]*:.*\n(?:^[^\w\n#].*\n)*/gmi) {
+-		while ($builddeps =~ /[\s,](pypy|python[0-9\.]*(-all)?((-dev)|(-dbg))?)[\s,]|$/g) {
+-			if ($1) {push @result, $1};
++	my $c = Dpkg::Control->new(type => CTRL_INFO_SRC);
++	if ($c->load('debian/control')) {
++		for my $field (grep /^Build-Depends/, keys %{$c}) {
++			my $builddeps = $c->{$field};
++			while ($builddeps =~ /(?:^|[\s,])(pypy|python[0-9\.]*(-all)?((-dev)|(-dbg))?)(?:[\s,]|$)/g) {
++				if ($1) {push @result, $1};
++			}
+ 		}
+ 	}
+ 
+-	close CONTROL;
+ 	return @result;
+ }
+ 
+-- 
+2.4.6
+

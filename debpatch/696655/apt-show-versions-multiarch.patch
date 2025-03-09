@@ -1,0 +1,221 @@
+Index: apt-show-versions
+===================================================================
+--- apt-show-versions	(revision 2468)
++++ apt-show-versions	(revision 2469)
+@@ -36,8 +36,8 @@
+ use Getopt::Long;
+ use Storable qw(store retrieve);
+ 
+-my $apackagescachefile="/var/cache/apt-show-versions/apackages";
+-my $ipackagescachefile="/var/cache/apt-show-versions/ipackages";
++my $apackagescachefile="/var/cache/apt-show-versions/apackages-multiarch";
++my $ipackagescachefile="/var/cache/apt-show-versions/ipackages-multiarch";
+ my $filescachefile="/var/cache/apt-show-versions/files";
+ 
+ use AptPkg::Cache;
+@@ -69,6 +69,7 @@
+ my $SUITE    = 'Suite';
+ my $UNKNOWN  = 'unknown';
+ my $VERS     = 'Version';
++my $ARCH     = 'Architecture';
+ 
+ # process commandline parameters
+ my %opts;
+@@ -257,8 +258,10 @@
+     if (! -e $apackagescachefile or -C $_ < -M $apackagescachefile
+         or $cache_file_corrupt) {
+         my ($href, $release) = &parse_file ($_);
+-        foreach (keys %$href) {
+-            $apackages->{$_}{$release} = $href->{$_};
++        foreach my $pkg (keys %$href) {
++            foreach my $arch (keys $href->{$pkg}) {
++                $apackages->{$pkg}{$arch}{$release} = $href->{$pkg}{$arch};
++            }
+         }
+     }
+ }
+@@ -299,20 +302,20 @@
+ #   Version information to be printed (undef if no information exists)
+ ################################################################################
+ sub print_version {
+-    my ($archiv, $package, $iversion, $aversion, $cand) = @_;
++    my ($archiv, $pkgarch, $iversion, $aversion, $cand) = @_;
+ 
+-    if (defined($aversion) and $cache->{$package}) {
++    if (defined($aversion) and $cache->{$pkgarch}) {
+         if ($cand and $aversion eq $cand->{VerStr})
+         {
+             my $cmp_versions = $vs->compare($aversion, $iversion);
+             if ($cmp_versions != 0) {
+                 my $direction = ($cmp_versions > 0) ? 'up' : 'down';
+-                return(2, "$package/$archiv",
++                return(2, "$pkgarch/$archiv",
+                        (defined($opts{'brief'})) ? "\n" :
+                        " ${direction}gradeable from $iversion to $aversion\n");
+             }
+             else {
+-                return(1, "$package/$archiv", defined($opts{'brief'}) ? "\n"
++                return(1, "$pkgarch/$archiv", defined($opts{'brief'}) ? "\n"
+                        : " uptodate $iversion\n");
+             }
+         }
+@@ -327,8 +330,23 @@
+ sub print_package {
+     my ($package) = @_;
+ 
++    if ($package =~ m/:/) {
++        my ($pkgname, $arch) = split /:/, $package;
++        print_package_internal($pkgname, $arch);
++    } else {
++        my $pkgs = ($opts{'regex-all'}) ? $apackages : $ipackages;
++        foreach my $arch (sort keys $pkgs->{$package}) {
++            print_package_internal($package, $arch);
++        }
++    }
++}
++
++sub print_package_internal {
++    my ($package, $arch) = @_;
++    my $pkgarch = $package . ":" . $arch;
++
+     # Sort all releases of package.
+-    my @pkg_releases = sort sort_pkg_releases values(%{$apackages->{$package}});
++    my @pkg_releases = sort sort_pkg_releases values(%{$apackages->{$package}{$arch}});
+ 
+     # All print information of package must be buffered, as the decision
+     # whether to suppress all printing for the package can be executed only at
+@@ -340,16 +358,17 @@
+     my $max_package_len = 0;
+     my $max_version_len = 0;
+     my $max_name_len = 0;
++    my $ipkg = $ipackages->{$package}{$arch};
+ 
+     # print more information if required
+     if ($opts{'allversions'}) {
+-        if ($ipackages->{$package}->{$PACKAGE}) {
+-            push @print_info, "$ipackages->{$package}->{$PACKAGE} ";
+-            unless ($ipackages->{$package}->{$STATUS} =~ /not-installed/ ||
+-                $ipackages->{$package}->{$STATUS} =~ /config-files/) {
+-                push @print_info, "$ipackages->{$package}->{$VERS} ";
++        if ($ipkg->{$PACKAGE}) {
++            push @print_info, "$ipkg->{$PACKAGE}:$ipkg->{$ARCH} ";
++            unless ($ipkg->{$STATUS} =~ /not-installed/ ||
++                $ipkg->{$STATUS} =~ /config-files/) {
++                push @print_info, "$ipkg->{$VERS} ";
+             }
+-            push @print_info, "$ipackages->{$package}->{$STATUS}\n";
++            push @print_info, "$ipkg->{$STATUS}\n";
+         } else {
+             push @print_info, "Not installed\n";
+         }
+@@ -374,11 +393,12 @@
+             }
+             # Then handle current release.
+             (my $archive = $pkg->{$RELEASE}) =~ s/_.*//;
+-            push @print_info, {$PACKAGE => $pkg->{$PACKAGE},
++            my $pa = $pkg->{$PACKAGE} . ":" . $pkg->{$ARCH};
++            push @print_info, {$PACKAGE => $pa,
+                                $VERS => $pkg->{$VERS},
+                                $NAME => &get_rel_name($pkg->{$RELEASE}),
+                                $ARCHIVE => $archive};
+-            $max_package_len = &max(length($pkg->{$PACKAGE}), $max_package_len);
++            $max_package_len = &max(length($pa), $max_package_len);
+             $max_version_len = &max(length($pkg->{$VERS}), $max_version_len);
+             $max_name_len = &max(length(&get_rel_name($pkg->{$RELEASE})),
+                                  $max_name_len);
+@@ -391,27 +411,28 @@
+         }
+     }
+ 
+-    my $iversion = $ipackages->{$package}->{$VERS};
++    my $iversion = $ipkg->{$VERS};
+ 
+     # print info about upgrade status (only if package is installed)
+ 
+-    if (($ipackages->{$package}->{$VERS}) &&
+-        (!($ipackages->{$package}->{$STATUS} =~ /config-files/))) {
++    if (($ipkg->{$VERS}) &&
++        (!($ipkg->{$STATUS} =~ /config-files/))) {
+         # Reorder package version structures to prefer the default release.
+         @pkg_releases = &reorder_pkg_releases(@pkg_releases);
+         my $found = 0;
+         my $aversion = 0;
+         my $cand;
+-        if ($cache->{$package}) {
+-            $cand = $policy->candidate($cache->{$package});
++        if ($cache->{$pkgarch}) {
++            $cand = $policy->candidate($cache->{$pkgarch});
+         }
++
+         foreach (@pkg_releases) {
+             my $version = $_->{$VERS};
+             if ($version) {
+                 my @version_info;
+                 ($found, @version_info) =
+                     &print_version(&get_rel_name($_->{$RELEASE}),
+-                                   $package, $iversion, $version, $cand);
++                                   $pkgarch, $iversion, $version, $cand);
+                 push @print_info, @version_info if ($found);
+                 $aversion = $version;
+             }
+@@ -434,7 +455,7 @@
+             if ($newer_indic and not defined($opts{'brief'}))
+             {
+                 push(@print_info,
+-                     "$package $iversion newer than version in archive\n");
++                     "$pkgarch $iversion newer than version in archive\n");
+             }
+         } elsif (not $found) {
+             # Check for manual upgrade possibility:
+@@ -450,7 +471,7 @@
+                         $vs->compare($iversion, $cmp_version) < 0)
+                     {
+                         push(@print_info,
+-                             $package,
++                             $pkgarch,
+                              '/',
+                              &get_rel_name($release->{$RELEASE}),
+                              (defined($opts{'brief'})) ? "\n" :
+@@ -463,13 +484,13 @@
+                 }
+             }
+             if (not $found) {
+-                push(@print_info, "$package $iversion installed: No available ",
++                push(@print_info, "$pkgarch $iversion installed: No available ",
+                      "version in archive\n");
+             }
+         }
+     } else {
+-        push(@print_info, "$package not installed",
+-             ($mode == $MODE_SINGLE and not keys(%{$apackages->{$package}}))
++        push(@print_info, "$pkgarch not installed",
++             ($mode == $MODE_SINGLE and not keys(%{$apackages->{$package}{$arch}}))
+              ? " (even not available)\n" : "\n");
+     }
+ 
+@@ -525,21 +546,21 @@
+                         ($package->{$STATUS} =~ /not-installed|config-files/ or
+                          # don't print holded packages if requested
+                          ($opts{'nohold'} and $package->{$STATUS} =~ /hold/))) {
+-                    $packages->{ $package->{$PACKAGE}} = $package;
++                    $packages->{$package->{$PACKAGE}}{$package->{$ARCH}} = $package;
+                 }
+             }
+             else {
+                 if (!defined $packages->{$package->{$PACKAGE}} or
+-                    $vs->compare($packages->{$package->{$PACKAGE}}{$VERS},
++                    $vs->compare($packages->{$package->{$PACKAGE}}{$package->{$ARCH}}{$VERS},
+                         $package->{$VERS}) < 0) {
+                     $package->{$RELEASE} = $release;
+-                    $packages->{$package->{$PACKAGE}} = $package;
++                    $packages->{$package->{$PACKAGE}}{$package->{$ARCH}} = $package;
+                 }
+             }
+             undef $package;
+             next;
+         }
+-        unless ((/^Package/) || (/^Version/) || (/^Status/) || (/^Source/)) {next};
++        unless ((/^Package/) || (/^Version/) || (/^Status/) || (/^Source/) || (/^Architecture/)) {next};
+         ($key, $value) = split /: /, $_;
+         $value =~ s/\n//;
+         $value =~ s/\s\(.*\)$//; # Remove any Version information in ()

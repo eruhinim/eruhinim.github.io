@@ -1,0 +1,222 @@
+diff -Naur 4.2.27-3_i386/usr/bin/apt-move work/usr/bin/apt-move
+--- 4.2.27-3_i386/usr/bin/apt-move	2013-08-20 19:26:22.000000000 +0200
++++ work/usr/bin/apt-move	2013-08-21 01:50:08.000000000 +0200
+@@ -139,6 +139,20 @@
+ 	exit 64
+ }
+ 
++apt_move_sha1() {
++    while read line
++    do
++	sha1sum ${line} | cut -d" " -f 1
++    done
++}
++
++apt_move_sha256() {
++    while read line
++    do
++      sha256sum ${line} | cut -d" " -f 1
++    done
++}
++
+ apt_move_stat() {
+ 	perl -lpe '$_ = (stat)[7];'
+ }
+@@ -756,8 +770,8 @@
+ 
+ 	local pf i bif
+ 	pf=$TMPHOME/movefiles
+-	rm -f $pf-fifo1 $pf-fifo2
+-	mkfifo $pf-fifo1 $pf-fifo2
++	rm -f $pf-fifo1 $pf-fifo2 $pf-fifo3 $pf-fifo4
++	mkfifo $pf-fifo1 $pf-fifo2 $pf-fifo3 $pf-fifo4
+ 	rm -rf $pf
+ 	mkdir $pf
+ 
+@@ -789,15 +803,19 @@
+ 
+ 	if [ $GET_BINARY ]; then
+ 		< $pf-deb apt_move_stat > $pf-fifo1&
++	        < $pf-deb apt_move_sha256 > $pf-fifo3&
++	        < $pf-deb apt_move_sha1 > $pf-fifo4&
+ 		< $pf-deb xargs -r md5sum |
+-			$MOVE4 $pf/deb $pf-fifo1 $pf-skip1 $pf-pkg $CONTENTS
++			$MOVE4 $pf/deb $pf-fifo1 $pf-skip1 $pf-fifo3 $pf-fifo4 $pf-pkg $CONTENTS
+ 		waitall
+ 	fi > $pf-mvdeb
+ 
+ 	if [ $GET_SOURCE ]; then
+ 		< $pf-dsc apt_move_stat > $pf-fifo1&
++		< $pf-dsc apt_move_sha256 > $pf-fifo3&
++		< $pf-dsc apt_move_sha1 > $pf-fifo4&
+ 		< $pf-dsc xargs -r md5sum |
+-			$MOVE4 $pf/dsc $pf-fifo1 $pf-skip2 > $pf-dsc1
++			$MOVE4 $pf/dsc $pf-fifo1 $pf-skip2 $pf-fifo3 $pf-fifo4 > $pf-dsc1
+ 		waitall
+ 
+ 		sort -t _ -k 2 .apt-move/source > $pf-sdist
+@@ -858,14 +876,18 @@
+ 	\)
+ 
+ 	< $pf-deb apt_move_stat > $pf-fifo1&
++	< $pf-deb apt_move_sha256 > $pf-fifo3&
++	< $pf-deb apt_move_sha1 > $pf-fifo4&
+ 	< $pf-deb xargs -r md5sum |
+-		$MOVE4 $pf/deb $pf-fifo1 $pf-skip1 $pf-pkg $CONTENTS \
++		$MOVE4 $pf/deb $pf-fifo1 $pf-skip1 $pf-fifo3 $pf-fifo4 $pf-pkg $CONTENTS \
+ 		> $pf-mvdeb
+ 	waitall
+ 
+ 	< $pf-dsc apt_move_stat > $pf-fifo1&
++	< $pf-dsc apt_move_sha256 > $pf-fifo3&
++	< $pf-dsc apt_move_sha1 > $pf-fifo4&
+ 	< $pf-dsc xargs -r md5sum |
+-		$MOVE4 $pf/dsc $pf-fifo1 $pf-skip2 > $pf-dsc1
++		$MOVE4 $pf/dsc $pf-fifo1 $pf-skip2 $pf-fifo3 $pf-fifo4 > $pf-dsc1
+ 	waitall
+ 
+ 	cd .apt-move
+@@ -935,8 +957,8 @@
+ dofsck() {
+ 	local pf fifos i readlink bif overawk
+ 	pf=$TMPHOME/dofsck
+-	rm -f $pf-fifo1 $pf-fifo2
+-	mkfifo $pf-fifo1 $pf-fifo2
++	rm -f $pf-fifo1 $pf-fifo2 $pf-fifo3 $pf-fifo4
++	mkfifo $pf-fifo1 $pf-fifo2 $pf-fifo3 $pf-fifo4
+ 	rm -rf $pf
+ 	mkdir $pf
+ 
+@@ -1266,6 +1288,8 @@
+                        $($cont|md5sum) $size $j/$k/$l
+                printf ' %40s%.s %16d %s\n' \
+                        $($cont|sha1sum) $size $j/$k/$l >&3
++               printf ' %64s%.s %16d %s\n' \
++                       $($cont|sha256sum) $size $j/$k/$l >&4
+        done
+ }
+ 
+@@ -1325,7 +1349,7 @@
+ 		fi
+ 
+ 		cd $prev
+-	done > $pf-md5sum 3> $pf-sha1sum
++	done > $pf-md5sum 3> $pf-sha1sum 4> $pf-sha256sum
+ 
+ 	[ -n "$compo" ] || return 0
+ 
+@@ -1347,6 +1371,8 @@
+ 	cat $pf-md5sum
+ 	echo SHA1:
+ 	cat $pf-sha1sum
++	echo SHA256:
++	cat $pf-sha256sum
+ 
+ 	exec >&-
+ 
+diff -Naur 4.2.27-3_i386/usr/share/apt-move/move4 work/usr/share/apt-move/move4
+--- 4.2.27-3_i386/usr/share/apt-move/move4	2013-08-20 19:26:22.000000000 +0200
++++ work/usr/share/apt-move/move4	2013-08-21 01:14:45.000000000 +0200
+@@ -19,6 +19,28 @@
+ 	return toupper(substr(s, 1, 1)) substr(s, 2)
+ }
+ 
++function readsha256(sha256f, sha256) {
++	err = getline sha256 < sha256f
++	if (err < 0) {
++		print "getline failed on " sha256f > "/dev/stderr"
++		exit 1
++	} else if (err == 0) {
++		return -1
++	}
++	return sha256
++}
++
++function readsha1(sha1f, sha1) {
++	err = getline sha1 < sha1f
++	if (err < 0) {
++		print "getline failed on " sha1f > "/dev/stderr"
++		exit 1
++	} else if (err == 0) {
++		return -1
++	}
++	return sha1
++}
++
+ function readsize(sizef, size) {
+ 	err = getline size < sizef
+ 	if (err < 0) {
+@@ -34,8 +56,10 @@
+ 	pref = ARGV[1]
+ 	sizef = ARGV[2]
+ 	skipf = ARGV[3]
+-	pkgf = ARGV[4]
+-	contents = ARGV[5] == "yes"
++	sha256f = ARGV[4]
++	sha1f = ARGV[5]
++	pkgf = ARGV[6]
++	contents = ARGV[7] == "yes"
+ 	ARGC = 1
+ 
+ 	isbin = pref ~ /deb$/
+@@ -72,7 +96,8 @@
+ 		pri[++i] = "Filename"
+ 		pri[++i] = "Size"
+ 		pri[++i] = "MD5sum"
+-		pri[++i] = "SHA1sum"
++		pri[++i] = "SHA1"
++		pri[++i] = "SHA256"
+ 		pri[++i] = "Description"
+ 	} else {
+ 		pri[++i] = "Package"
+@@ -90,10 +115,14 @@
+ 		pri[++i] = "Format"
+ 		pri[++i] = "Directory"
+ 		pri[++i] = "Files"
++		pri[++i] = "Checksums-sha1"
++		pri[++i] = "Checksums-sha256"
+ 	}
+ 	prilen = i
+ 
+ 	nextsize = readsize(sizef)
++	nextsha256 = readsha256(sha256f)
++	nextsha1 = readsha1(sha1f)
+ 	printf "" > skipf
+ 	if (isbin) {
+ 		printf "" > pkgf
+@@ -110,6 +139,17 @@
+ 	nextsize = readsize(sizef)
+ }
+ 
++{
++	sha256 = nextsha256
++	nextsha256 = readsha256(sha256f)
++}
++
++{
++	sha1 = nextsha1
++	nextsha1 = readsha1(sha1f)
++}
++
++
+ isbin {
+ 	suffix = substr($2, length($2) - 3)
+ 	if (suffix == "udeb") {
+@@ -147,6 +187,8 @@
+ 
+ 	tv["md5sum"] = " " $1
+ 	tv["size"] = " " size
++	tv["sha256"] = " " sha256
++	tv["sha1"] = " " sha1
+ 	if ("revision" in tv) {
+ 		tv["version"] = tv["version"] "-" tv["revision"]
+ 		delete tv["revision"]
+@@ -216,6 +258,8 @@
+ 		files = files " " a[i]
+ 	}
+ 	tv["files"] = "\n " $1 " " size " " file tv["files"]
++	tv["checksums-sha256"] = "\n " sha256 " " size " " file tv["checksums-sha256"] 
++	tv["checksums-sha1"] = "\n " sha1 " " size " " file tv["checksums-sha1"]
+ 	tv["section"] = tv["section"]
+ 	tv["priority"] = tv["priority"]
+ 	tv["directory"] = tv["directory"]

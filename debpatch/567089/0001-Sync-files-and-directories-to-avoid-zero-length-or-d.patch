@@ -1,0 +1,712 @@
+From 0dfbf20cfade46085efa48288e243395ab1483ee Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Wed, 17 Feb 2010 16:08:30 +0100
+Subject: [PATCH] Sync files and directories to avoid zero-length or delayed allocation
+
+To guarantee the atomicity of the rename()s we have to first, fflush()
+if using stdio streams, and then fsync() the files acted on. This goes
+for files installed during unpack, and any other database file handled
+by dpkg and companion tools. To make sure the package is in a correct
+file system state even after an abrupt program termination, we have to
+fsync() the directories which have had entry creation, rename and removal
+operations on them.
+
+Based-on-patch-by: Jean-Baptiste Lallement <jeanbaptiste.lallement@gmail.com>
+---
+ dpkg-deb/build.c          |    4 ++
+ dpkg-split/join.c         |    5 ++
+ dpkg-split/queue.c        |    7 +++
+ lib/dpkg/Makefile.am      |    1 +
+ lib/dpkg/dbmodify.c       |   10 ++++
+ lib/dpkg/dir.c            |  122 +++++++++++++++++++++++++++++++++++++++++++++
+ lib/dpkg/dir.h            |   38 ++++++++++++++
+ lib/dpkg/dump.c           |    4 ++
+ lib/dpkg/trigdeferred.l   |    6 ++
+ lib/dpkg/triglib.c        |   17 ++++++
+ src/archives.c            |   10 +++-
+ src/cleanup.c             |    3 +
+ src/configure.c           |    3 +
+ src/filesdb.c             |    3 +
+ src/filesdb.h             |    1 +
+ src/processarc.c          |   35 +++++++++++++
+ src/remove.c              |    4 ++
+ src/statcmd.c             |    7 +++
+ utils/start-stop-daemon.c |    4 ++
+ 19 files changed, 283 insertions(+), 1 deletions(-)
+ create mode 100644 lib/dpkg/dir.c
+ create mode 100644 lib/dpkg/dir.h
+
+diff --git a/dpkg-deb/build.c b/dpkg-deb/build.c
+index 87f4ec1..0fee64c 100644
+--- a/dpkg-deb/build.c
++++ b/dpkg-deb/build.c
+@@ -560,6 +560,10 @@ void do_build(const char *const *argv) {
+       if (putc('\n',ar) == EOF)
+         werr(debar);
+   }
++  if (fflush(ar))
++    ohshite(_("unable to flush file '%s'"), debar);
++  if (fsync(fileno(ar)))
++    ohshite(_("unable to sync file '%s'"), debar);
+   if (fclose(ar)) werr(debar);
+                              
+   exit(0);
+diff --git a/dpkg-split/join.c b/dpkg-split/join.c
+index 6b200d8..97b6cd6 100644
+--- a/dpkg-split/join.c
++++ b/dpkg-split/join.c
+@@ -24,6 +24,7 @@
+ #include <assert.h>
+ #include <limits.h>
+ #include <string.h>
++#include <unistd.h>
+ #include <stdlib.h>
+ #include <stdio.h>
+ 
+@@ -68,6 +69,10 @@ void reassemble(struct partinfo **partlist, const char *outputfile) {
+     nr= fwrite(buffer,1,pi->thispartlen,output);
+     if (nr != pi->thispartlen) werr(outputfile);
+   }
++  if (fflush(output))
++    ohshite(_("unable to flush file '%s'"), outputfile);
++  if (fsync(fileno(output)))
++    ohshite(_("unable to sync file '%s'"), outputfile);
+   if (fclose(output)) werr(outputfile);
+   printf(_("done\n"));
+ }
+diff --git a/dpkg-split/queue.c b/dpkg-split/queue.c
+index ed114e6..f49e708 100644
+--- a/dpkg-split/queue.c
++++ b/dpkg-split/queue.c
+@@ -44,6 +44,7 @@
+ #include <dpkg/i18n.h>
+ #include <dpkg/dpkg.h>
+ #include <dpkg/dpkg-db.h>
++#include <dpkg/dir.h>
+ #include <dpkg/myopt.h>
+ 
+ #include "dpkg-split.h"
+@@ -166,6 +167,10 @@ void do_auto(const char *const *argv) {
+     if (!part) ohshite(_("unable to open new depot file `%.250s'"),p);
+     nr= fwrite(buffer,1,refi->filesize,part);
+     if (nr != refi->filesize) werr(p);
++    if (fflush(part))
++      ohshite(_("unable to flush file '%s'"), p);
++    if (fsync(fileno(part)))
++      ohshite(_("unable to sync file '%s'"), p);
+     if (fclose(part)) werr(p);
+     if (rename(p,q)) ohshite(_("unable to rename new depot file `%.250s' to `%.250s'"),p,q);
+ 
+@@ -190,6 +195,8 @@ void do_auto(const char *const *argv) {
+ 
+   }
+ 
++  dir_sync_path(depotdir);
++
+   m_output(stderr, _("<standard error>"));
+ }
+ 
+diff --git a/lib/dpkg/Makefile.am b/lib/dpkg/Makefile.am
+index 48991a8..fbed4f1 100644
+--- a/lib/dpkg/Makefile.am
++++ b/lib/dpkg/Makefile.am
+@@ -26,6 +26,7 @@ libdpkg_a_SOURCES = \
+ 	compress.c compress.h \
+ 	database.c \
+ 	dbmodify.c \
++	dir.c dir.h \
+ 	dump.c \
+ 	ehandle.c \
+ 	file.c file.h \
+diff --git a/lib/dpkg/dbmodify.c b/lib/dpkg/dbmodify.c
+index f2a572e..880d9ec 100644
+--- a/lib/dpkg/dbmodify.c
++++ b/lib/dpkg/dbmodify.c
+@@ -40,6 +40,7 @@
+ #include <dpkg/i18n.h>
+ #include <dpkg/dpkg.h>
+ #include <dpkg/dpkg-db.h>
++#include <dpkg/dir.h>
+ 
+ char *statusfile=NULL, *availablefile=NULL;
+ char *triggersdir, *triggersfilefile, *triggersnewfilefile;
+@@ -48,6 +49,7 @@ static enum modstatdb_rw cstatus=-1, cflags=0;
+ static char *importanttmpfile=NULL;
+ static FILE *importanttmp;
+ static int nextupdate;
++static char *updatesdir;
+ static int updateslength;
+ static char *updatefnbuf, *updatefnrest;
+ static const char *admindir;
+@@ -101,6 +103,8 @@ static void cleanupdates(void) {
+   }
+   free(cdlist);
+ 
++  dir_sync_path(updatesdir);
++
+   nextupdate= 0;
+ }
+ 
+@@ -131,6 +135,7 @@ static const struct fni {
+ } fnis[] = {
+   {   STATUSFILE,                 &statusfile         },
+   {   AVAILFILE,                  &availablefile      },
++  {   UPDATESDIR,                 &updatesdir         },
+   {   UPDATESDIR IMPORTANTTMP,    &importanttmpfile   },
+   {   TRIGGERSDIR,                &triggersdir        },
+   {   TRIGGERSDIR "/File",        &triggersfilefile   },
+@@ -214,6 +219,9 @@ void modstatdb_checkpoint(void) {
+     if (unlink(updatefnbuf))
+       ohshite(_("failed to remove my own update file %.255s"),updatefnbuf);
+   }
++
++  dir_sync_path(updatesdir);
++
+   nextupdate= 0;
+ }
+ 
+@@ -263,6 +271,8 @@ modstatdb_note_core(struct pkginfo *pkg)
+   if (rename(importanttmpfile, updatefnbuf))
+     ohshite(_("unable to install updated status of `%.250s'"), pkg->name);
+ 
++  dir_sync_path(updatesdir);
++
+   /* Have we made a real mess? */
+   assert(strlen(updatefnrest) <= IMPORTANTMAXLEN);
+ 
+diff --git a/lib/dpkg/dir.c b/lib/dpkg/dir.c
+new file mode 100644
+index 0000000..869b813
+--- /dev/null
++++ b/lib/dpkg/dir.c
+@@ -0,0 +1,122 @@
++/*
++ * libdpkg - Debian packaging suite library routines
++ * dir.c - directory handling functions
++ *
++ * Copyright © 2010 Guillem Jover <guillem@debian.org>
++ *
++ * This is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <config.h>
++#include <compat.h>
++
++#include <sys/types.h>
++#include <sys/stat.h>
++
++#include <fcntl.h>
++#include <dirent.h>
++#include <string.h>
++#include <stdlib.h>
++#include <unistd.h>
++
++#include <dpkg/dpkg.h>
++#include <dpkg/i18n.h>
++#include <dpkg/varbuf.h>
++#include <dpkg/dir.h>
++
++/* FIXME: Ideally we'd use openat() here, to avoid the path mangling, but
++ * it's not widely available yet, so this will do for now. */
++static void
++dir_file_sync(const char *dir, const char *filename)
++{
++	struct varbuf path = VARBUF_INIT;
++	int fd;
++
++	varbufprintf(&path, "%s/%s", dir, filename);
++
++	fd = open(path.buf, O_WRONLY);
++	if (fd < 0)
++		ohshite(_("unable to open file '%s'"), path.buf);
++	if (fsync(fd))
++		ohshite(_("unable to sync file '%s'"), path.buf);
++	if (close(fd))
++		ohshite(_("unable to close file '%s'"), path.buf);
++
++	varbuf_destroy(&path);
++}
++
++void
++dir_sync_contents(const char *path)
++{
++	DIR *dir;
++	struct dirent *dent;
++
++	dir = opendir(path);
++	if (!dir)
++		ohshite(_("unable to open directory '%s'"), path);
++
++	while ((dent = readdir(dir)) != NULL) {
++		if (strcmp(dent->d_name, ".") == 0 ||
++		    strcmp(dent->d_name, "..") == 0)
++			continue;
++
++		dir_file_sync(path, dent->d_name);
++	}
++
++	closedir(dir);
++}
++
++void
++dir_sync(DIR *dir, const char *path)
++{
++	int fd;
++
++	fd = dirfd(dir);
++	if (fd < 0)
++		ohshite(_("unable to get file descriptor for directory '%s'"),
++		        path);
++
++	if (fsync(fd))
++		ohshite(_("unable to sync directory '%s'"), path);
++}
++
++void
++dir_sync_path(const char *path)
++{
++	DIR *dir;
++
++	dir = opendir(path);
++	if (!dir)
++		ohshite(_("unable to open directory '%s'"), path);
++
++	dir_sync(dir, path);
++
++	closedir(dir);
++}
++
++void
++dir_sync_path_parent(const char *path)
++{
++	char *dirname, *slash;
++
++	dirname = m_strdup(path);
++
++	slash = strrchr(dirname, '/');
++	if (slash != NULL) {
++		*slash = '\0';
++		dir_sync_path(dirname);
++	}
++
++	free(dirname);
++}
+diff --git a/lib/dpkg/dir.h b/lib/dpkg/dir.h
+new file mode 100644
+index 0000000..de6c331
+--- /dev/null
++++ b/lib/dpkg/dir.h
+@@ -0,0 +1,38 @@
++/*
++ * libdpkg - Debian packaging suite library routines
++ * dir.h - directory handling routines
++ *
++ * Copyright © 2010 Guillem Jover <guillem@debian.org>
++ *
++ * This is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#ifndef LIBDPKG_DIR_H
++#define LIBDPKG_DIR_H
++
++#include <dpkg/macros.h>
++
++#include <dirent.h>
++
++DPKG_BEGIN_DECLS
++
++void dir_sync_contents(const char *path);
++void dir_sync(DIR *dir, const char *path);
++void dir_sync_path(const char *path);
++void dir_sync_path_parent(const char *path);
++
++DPKG_END_DECLS
++
++#endif /* LIBDPKG_DIR_H */
++
+diff --git a/lib/dpkg/dump.c b/lib/dpkg/dump.c
+index eeddc69..70a1ce6 100644
+--- a/lib/dpkg/dump.c
++++ b/lib/dpkg/dump.c
+@@ -37,6 +37,7 @@
+ #include <dpkg/i18n.h>
+ #include <dpkg/dpkg.h>
+ #include <dpkg/dpkg-db.h>
++#include <dpkg/dir.h>
+ #include <dpkg/parsedump.h>
+ 
+ void w_name(struct varbuf *vb,
+@@ -411,4 +412,7 @@ void writedb(const char *filename, int available, int mustsync) {
+             newfn, filename, which);
+   free(newfn);
+   free(oldfn);
++
++  if (mustsync)
++    dir_sync_path_parent(filename);
+ }
+diff --git a/lib/dpkg/trigdeferred.l b/lib/dpkg/trigdeferred.l
+index c1fdbdd..70976df 100644
+--- a/lib/dpkg/trigdeferred.l
++++ b/lib/dpkg/trigdeferred.l
+@@ -42,6 +42,7 @@
+ #include <dpkg/i18n.h>
+ #include <dpkg/dpkg.h>
+ #include <dpkg/dpkg-db.h>
++#include <dpkg/dir.h>
+ 
+ #define YY_NO_INPUT
+ 
+@@ -196,6 +197,11 @@ trigdef_process_done(void)
+ 		if (rename(newfn.buf, fn.buf))
+ 			ohshite(_("unable to install new triggers deferred "
+ 			          "file `%.250s'"), fn.buf);
++
++		/* FIXME: probably safe to just use:
++		 * dir_sync_path(triggersdir);
++		 */
++		dir_sync_path_parent(fn.buf);
+ 	}
+ 
+ 	/* Unlock. */
+diff --git a/lib/dpkg/triglib.c b/lib/dpkg/triglib.c
+index 4825f58..01c8f92 100644
+--- a/lib/dpkg/triglib.c
++++ b/lib/dpkg/triglib.c
+@@ -34,6 +34,7 @@
+ #include <dpkg/dpkg-db.h>
+ #include <dpkg/pkg-list.h>
+ #include <dpkg/dlist.h>
++#include <dpkg/dir.h>
+ 
+ const char *
+ illegal_triggername(const char *p)
+@@ -396,6 +397,12 @@ trk_explicit_interest_change(const char *trig,  struct pkginfo *pkg, int signum)
+ 	if (ferror(nf))
+ 		ohshite(_("unable to write new trigger interest file `%.250s'"),
+ 		        newfn.buf);
++	if (fflush(nf))
++		ohshite(_("unable to flush new trigger interest file '%.250s'"),
++		        newfn.buf);
++	if (fsync(fileno(nf)))
++		ohshite(_("unable to sync new trigger interest file '%.250s'"),
++		        newfn.buf);
+ 	pop_cleanup(ehflag_normaltidy);
+ 	if (fclose(nf))
+ 		ohshite(_("unable to close new trigger interest file `%.250s'"),
+@@ -404,6 +411,8 @@ trk_explicit_interest_change(const char *trig,  struct pkginfo *pkg, int signum)
+ 	if (rename(newfn.buf, trk_explicit_fn.buf))
+ 		ohshite(_("unable to install new trigger interest file `%.250s'"),
+ 		        trk_explicit_fn.buf);
++
++	dir_sync_path(triggersdir);
+ }
+ 
+ static const struct trigkindinfo tki_explicit = {
+@@ -498,6 +507,12 @@ trig_file_interests_save(void)
+ 	if (ferror(nf))
+ 		ohshite(_("unable to write new file triggers file `%.250s'"),
+ 		        triggersnewfilefile);
++	if (fflush(nf))
++		ohshite(_("unable to flush new file triggers file '%.250s'"),
++		        triggersnewfilefile);
++	if (fsync(fileno(nf)))
++		ohshite(_("unable to sync new file triggers file '%.250s'"),
++		        triggersnewfilefile);
+ 	pop_cleanup(ehflag_normaltidy);
+ 	if (fclose(nf))
+ 		ohshite(_("unable to close new file triggers file `%.250s'"),
+@@ -507,6 +522,8 @@ trig_file_interests_save(void)
+ 		ohshite(_("unable to install new file triggers file as `%.250s'"),
+ 		        triggersfilefile);
+ 
++	dir_sync_path(triggersdir);
++
+ 	filetriggers_edited = 0;
+ }
+ 
+diff --git a/src/archives.c b/src/archives.c
+index 77d67ce..4615226 100644
+--- a/src/archives.c
++++ b/src/archives.c
+@@ -571,8 +571,13 @@ int tarobject(struct TarInfo *ti) {
+     }
+   }
+        
+-  if (existingdirectory) return 0;
++  if (existingdirectory) {
++    nifd->namenode->flags |= fnnf_is_dir;
++    return 0;
++  }
+   if (keepexisting) {
++    if (statr == 0 && S_ISDIR(stab.st_mode))
++      nifd->namenode->flags |= fnnf_is_dir;
+     tarfile_skip_one_forward(ti, oldnifd, nifd);
+     return 0;
+   }
+@@ -658,6 +663,8 @@ int tarobject(struct TarInfo *ti) {
+     am=(nifd->namenode->statoverride ? nifd->namenode->statoverride->mode : ti->Mode) & ~S_IFMT;
+     if (fchmod(fd,am))
+       ohshite(_("error setting permissions of `%.255s'"),ti->Name);
++    if (fsync(fd))
++      ohshite(_("error syncing '%.255s'"), ti->Name);
+     pop_cleanup(ehflag_normaltidy); /* fd= open(fnamenewvb.buf) */
+     if (close(fd))
+       ohshite(_("error closing/writing `%.255s'"),ti->Name);
+@@ -706,6 +713,7 @@ int tarobject(struct TarInfo *ti) {
+       ohshite(_("error creating directory `%.255s'"),ti->Name);
+     debug(dbg_eachfiledetail,"tarobject Directory creating");
+     newtarobject_allmodes(fnamenewvb.buf,ti,nifd->namenode->statoverride);
++    nifd->namenode->flags |= fnnf_is_dir;
+     break;
+   default:
+     internerr("unknown tar type '%d', but already checked", ti->Type);
+diff --git a/src/cleanup.c b/src/cleanup.c
+index a51eecc..a8186eb 100644
+--- a/src/cleanup.c
++++ b/src/cleanup.c
+@@ -37,6 +37,7 @@
+ #include <dpkg/i18n.h>
+ #include <dpkg/dpkg.h>
+ #include <dpkg/dpkg-db.h>
++#include <dpkg/dir.h>
+ #include <dpkg/tarfn.h>
+ #include <dpkg/myopt.h>
+ 
+@@ -102,6 +103,8 @@ void cu_installnew(int argc, void **argv) {
+   if (unlinkorrmdir(fnamenewvb.buf) && errno != ENOENT && errno != ENOTDIR)
+     ohshite(_("unable to remove newly-extracted version of `%.250s'"),namenode->name);
+ 
++  dir_sync_path_parent(fnamevb.buf);
++
+   cleanup_pkg_failed--; cleanup_conflictor_failed--;
+ }
+ 
+diff --git a/src/configure.c b/src/configure.c
+index aa974cc..aa6b3c0 100644
+--- a/src/configure.c
++++ b/src/configure.c
+@@ -44,6 +44,7 @@
+ #include <dpkg/dpkg-db.h>
+ #include <dpkg/buffer.h>
+ #include <dpkg/file.h>
++#include <dpkg/dir.h>
+ #include <dpkg/subproc.h>
+ 
+ #include "filesdb.h"
+@@ -201,6 +202,8 @@ deferred_configure_conffile(struct pkginfo *pkg, struct conffile *conff)
+ 		internerr("unknown conffopt '%d'", what);
+ 	}
+ 
++	dir_sync_path_parent(cdr.buf);
++
+ 	conff->hash = nfstrsave(newdisthash);
+ 	modstatdb_note(pkg);
+ 
+diff --git a/src/filesdb.c b/src/filesdb.c
+index e1dc738..e02677b 100644
+--- a/src/filesdb.c
++++ b/src/filesdb.c
+@@ -38,6 +38,7 @@
+ #include <dpkg/dpkg.h>
+ #include <dpkg/dpkg-db.h>
+ #include <dpkg/path.h>
++#include <dpkg/dir.h>
+ #include <dpkg/buffer.h>
+ #include <dpkg/progress.h>
+ 
+@@ -331,6 +332,8 @@ void write_filelist_except(struct pkginfo *pkg, struct fileinlist *list, int lea
+   if (rename(newvb.buf,vb.buf))
+     ohshite(_("failed to install updated files list file for package %s"),pkg->name);
+ 
++  dir_sync_path_parent(newvb.buf);
++
+   note_must_reread_files_inpackage(pkg);
+ }
+ 
+diff --git a/src/filesdb.h b/src/filesdb.h
+index ac7c274..10e6ad2 100644
+--- a/src/filesdb.h
++++ b/src/filesdb.h
+@@ -69,6 +69,7 @@ struct filenamenode {
+     fnnf_elide_other_lists=   000010, /* must remove from other packages' lists */
+     fnnf_no_atomic_overwrite= 000020, /* >=1 instance is a dir, cannot rename over */
+     fnnf_placed_on_disk=      000040, /* new file has been placed on the disk */
++    fnnf_is_dir =             000200, /* node on disk is a directory */
+   } flags; /* Set to zero when a new node is created. */
+   const char *oldhash; /* valid iff this namenode is in the newconffiles list */
+   struct stat *filestat;
+diff --git a/src/processarc.c b/src/processarc.c
+index 8417f45..77e7345 100644
+--- a/src/processarc.c
++++ b/src/processarc.c
+@@ -42,6 +42,7 @@
+ #include <dpkg/dpkg-db.h>
+ #include <dpkg/buffer.h>
+ #include <dpkg/subproc.h>
++#include <dpkg/dir.h>
+ #include <dpkg/tarfn.h>
+ #include <dpkg/myopt.h>
+ 
+@@ -214,6 +215,13 @@ void process_archive(const char *filename) {
+   subproc_wait_check(c1, BACKEND " --control", 0);
+   strcpy(cidirrest,CONTROLFILE);
+ 
++  /* We want to guarantee the extracted files are on the disk, so that the
++   * subsequent renames to the info database do not end up with zelo lenght
++   * files. As neither dpkg-deb nor tar do explicit fsync()s, we have to do
++   * them here. XXX: We might replace this at some point with an internal
++   * tar implementation. */
++  dir_sync_contents(cidir);
++
+   parsedb(cidir, pdb_recordavailable | pdb_rejectstatus | pdb_ignorefiles,
+           &pkg,NULL,NULL);
+   if (!pkg->files) {
+@@ -880,6 +888,11 @@ void process_archive(const char *filename) {
+     debug(dbg_scripts,"process_archive tmp.ci script/file `%s' installed as `%s'",
+           cidir, newinfofilename);
+   }
++
++  /* We sync the info database directory to make sure all the renames are
++   * in place in case of an abrupt error making dpkg crash. */
++  dir_sync(dsd, cidir);
++
+   pop_cleanup(ehflag_normaltidy); /* closedir */
+ 
+   /* Update the status database.
+@@ -1079,6 +1092,11 @@ void process_archive(const char *filename) {
+         ohshite(_("unable to delete disappearing control info file `%.250s'"),fnvb.buf);
+       debug(dbg_scripts, "process_archive info unlinked %s",fnvb.buf);
+     }
++
++    /* We sync the info database directory to make sure all the unlinks are
++     * in place in case of an abrupt error making dpkg crash. */
++    dir_sync(dsd, fnvb.buf);
++
+     pop_cleanup(ehflag_normaltidy); /* closedir */
+     
+     otherpkg->status= stat_notinstalled;
+@@ -1148,6 +1166,22 @@ void process_archive(const char *filename) {
+     }
+   }
+ 
++  /* We want to make sure the file operations we have done while unpacking
++   * have propagated to the directory structures, so we do an fsync on all
++   * owned directories. FIXME: We might be doing unneeded fsync()s for
++   * directories that have not had any content modified, but we'll ingore
++   * this for now. */
++  for (cfile = newfileslist; cfile; cfile = cfile->next) {
++    if (!(cfile->namenode->flags & fnnf_is_dir))
++      continue;
++
++    fnamevb.used = fnameidlu;
++    varbufaddstr(&fnamevb, namenodetouse(cfile->namenode, pkg)->name);
++    varbufaddc(&fnamevb, '\0');
++
++    dir_sync_path(fnamevb.buf);
++  }
++
+   /* Right, the package we've unpacked is now in a reasonable state.
+    * The only thing that we have left to do with it is remove
+    * backup files, and we can leave the user to fix that if and when
+@@ -1173,6 +1207,7 @@ void process_archive(const char *filename) {
+     varbufaddstr(&fnametmpvb,DPKGTEMPEXT);
+     varbufaddc(&fnametmpvb,0);
+     ensure_pathname_nonexisting(fnametmpvb.buf);
++    dir_sync_path_parent(fnametmpvb.buf); // FIXME: Do it only for dirs
+   }
+ 
+   /* OK, we're now fully done with the main package.
+diff --git a/src/remove.c b/src/remove.c
+index 922932e..9ece7a5 100644
+--- a/src/remove.c
++++ b/src/remove.c
+@@ -37,6 +37,7 @@
+ #include <dpkg/i18n.h>
+ #include <dpkg/dpkg.h>
+ #include <dpkg/dpkg-db.h>
++#include <dpkg/dir.h>
+ #include <dpkg/myopt.h>
+ 
+ #include "filesdb.h"
+@@ -294,6 +295,9 @@ static void removal_bulk_remove_files(
+         ohshite(_("unable to delete control info file `%.250s'"),fnvb.buf);
+       debug(dbg_scripts, "removal_bulk info unlinked %s",fnvb.buf);
+     }
++
++    dir_sync(dsd, fnvb.buf);
++
+     pop_cleanup(ehflag_normaltidy); /* closedir */
+     
+     pkg->status= stat_configfiles;
+diff --git a/src/statcmd.c b/src/statcmd.c
+index 6ab16e7..58e0c70 100644
+--- a/src/statcmd.c
++++ b/src/statcmd.c
+@@ -41,6 +41,7 @@
+ #include <dpkg/dpkg.h>
+ #include <dpkg/dpkg-db.h>
+ #include <dpkg/path.h>
++#include <dpkg/dir.h>
+ #include <dpkg/myopt.h>
+ 
+ #include "main.h"
+@@ -231,6 +232,10 @@ statdb_write(void)
+ 		statdb_node_print(dbfile, file);
+ 	iterfileend(i);
+ 
++	if (fflush(dbfile))
++		ohshite(_("unable to flush file '%s'"), dbname_new.buf);
++	if (fsync(fileno(dbfile)))
++		ohshite(_("unable to sync file '%s'"), dbname_new.buf);
+ 	fclose(dbfile);
+ 
+ 	chmod(dbname_new.buf, 0644);
+@@ -241,6 +246,8 @@ statdb_write(void)
+ 	if (rename(dbname_new.buf, dbname.buf))
+ 		ohshite(_("error installing new statoverride"));
+ 
++	dir_sync_path(admindir);
++
+ 	varbuf_destroy(&dbname);
+ 	varbuf_destroy(&dbname_new);
+ 	varbuf_destroy(&dbname_old);
+diff --git a/utils/start-stop-daemon.c b/utils/start-stop-daemon.c
+index f5a003a..7ba970f 100644
+--- a/utils/start-stop-daemon.c
++++ b/utils/start-stop-daemon.c
+@@ -1581,6 +1581,10 @@ main(int argc, char **argv)
+ 			fatal("Unable to open pidfile '%s' for writing: %s",
+ 			      pidfile, strerror(errno));
+ 		fprintf(pidf, "%d\n", pidt);
++		if (fflush(pidf))
++			fatal("Unable to flush pidfile '%s'", pidfile);
++		if (fsync(fileno(pidf)))
++			fatal("Unable to sync pidfile '%s'", pidfile);
+ 		fclose(pidf);
+ 	}
+ 	if (changeroot != NULL) {
+-- 
+1.7.0
+

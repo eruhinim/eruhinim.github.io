@@ -1,0 +1,99 @@
+From ad449c5b2d84f3d093a0e3ba2667fc3e282aa8f8 Mon Sep 17 00:00:00 2001
+From: Guilhem Moulin <guilhem@guilhem.org>
+Date: Wed, 9 Dec 2015 04:53:41 +0100
+Subject: [PATCH] Add support for storing keyfiles directly in the initrd.
+
+---
+ debian/README.initramfs         | 18 ++++++++++++++++++
+ debian/initramfs/cryptroot-hook | 22 ++++++++++++++++++----
+ 2 files changed, 36 insertions(+), 4 deletions(-)
+
+diff --git a/debian/README.initramfs b/debian/README.initramfs
+index d7088b7..41f1f67 100644
+--- a/debian/README.initramfs
++++ b/debian/README.initramfs
+@@ -222,5 +222,23 @@ limitation:
+ 
+ [1] https://bugs.debian.org/671037
+ 
++12. Storing keyfiles directly in the initrd
++-------------------------------------------
++Normally devices using a keyfile are ignored (with a loud warning), and
++the key file itself is not included in the initrd, because the initramfs
++image typically lives on an unencrypted /boot partition.  However in
++some cases it is desirable to include the key file in the initrd; for
++instance recent versions of GRUB support booting from encrypted block
++devices, allowing an encrypted /boot partition.
++
++Among the key files used in the crypttab(5), those matching the
++environment variable $KEYFILE_PATTERN (interpreted as a shell pattern)
++will be included in the initramfs image.  For instance if /etc/crypttab
++contains two key files /etc/keys/{root,swap}.key, you can add the
++following to initramfs.conf to add them to the initrd.
++
++  KEYFILE_PATTERN="/etc/keys/*.key"
++  export KEYFILE_PATTERN
++
+  -- David Härdeman <david@hardeman.nu>
+  -- Jonas Meurer <mejo@debian.org>  Thu, 01 Nov 2012 13:44:31 +0100
+diff --git a/debian/initramfs/cryptroot-hook b/debian/initramfs/cryptroot-hook
+index 66a7175..4042917 100644
+--- a/debian/initramfs/cryptroot-hook
++++ b/debian/initramfs/cryptroot-hook
+@@ -232,10 +232,11 @@ get_lvm_deps() {
+ }
+ 
+ get_device_opts() {
+-	local target source link extraopts rootopts opt
++	local target source link extraopts rootopts opt key
+ 	target="$1"
+ 	extraopts="$2"
+ 	KEYSCRIPT=""
++	KEYFILE=""
+ 	CRYPTHEADER=""
+ 	OPTIONS=""
+ 
+@@ -279,7 +280,7 @@ get_device_opts() {
+ 	fi
+ 
+ 	# We have all the basic options, let's go trough them
+-	OPTIONS="target=$target,source=$source,key=$key"
++	OPTIONS="target=$target,source=$source"
+ 	local IFS=", "
+ 	unset HASH_FOUND
+ 	unset LUKS_FOUND
+@@ -359,9 +360,16 @@ get_device_opts() {
+ 
+ 	# If keyscript is set, the "key" is just an argument to the script
+ 	if [ "$key" != "none" ] && [ -z "$KEYSCRIPT" ]; then
+-		echo "cryptsetup: WARNING: target $target uses a key file, skipped" >&2
+-		return 1
++		case "$key" in
++			$KEYFILE_PATTERN)
++				KEYFILE="$key"
++				OPTIONS="$OPTIONS,keyscript=cat"
++				key="/cryptroot-keyfiles/${target}.key";;
++			*) echo "cryptsetup: WARNING: target $target uses a key file, skipped" >&2
++			   return 1
++		esac
+ 	fi
++	OPTIONS="$OPTIONS,key=$key"
+ }
+ 
+ get_device_modules() {
+@@ -517,6 +525,12 @@ add_device() {
+ 				echo "cryptsetup: WARNING: failed to find keyscript $KEYSCRIPT" >&2
+ 				continue
+ 			fi
++		elif [ -n "$KEYFILE" ]; then
++			case "$KEYFILE" in
++				$KEYFILE_PATTERN)
++					mkdir -pm0700 "$DESTDIR/cryptroot-keyfiles"
++					cp --preserve=all "$KEYFILE" "$DESTDIR/cryptroot-keyfiles/${node}.key";;
++			esac
+ 		fi
+ 
+ 		# If we have a LUKS header, make sure it is included
+-- 
+2.6.2
+

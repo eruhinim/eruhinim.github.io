@@ -1,0 +1,132 @@
+From 0a6976aa5ed4a42e4ada6fb9f279423e8fbeec8a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Rapha=C3=ABl=20Hertzog?= <hertzog@debian.org>
+Date: Tue, 20 Sep 2016 16:11:57 +0200
+Subject: [PATCH 4/6] setup-instance: better systemd support
+
+Rely on the systemd apache2@instance.service for multi-instance support.
+Update the associated README.
+---
+ debian/README.multiple-instances | 32 +++++++++++++++++++++++---------
+ debian/changelog                 |  2 ++
+ debian/setup-instance            | 21 ++++++++++++++++-----
+ 3 files changed, 41 insertions(+), 14 deletions(-)
+
+diff --git a/debian/README.multiple-instances b/debian/README.multiple-instances
+index 77dcf98..42c3baf 100644
+--- a/debian/README.multiple-instances
++++ b/debian/README.multiple-instances
+@@ -14,12 +14,16 @@ Adjust the configuration in /etc/apache2-xxx, especially the listen ports in
+ ports.conf and in the virtual host directives in
+ /etc/apache2-xxx/sites-enabled/*.
+ 
+-You can then use a2enmod-xxx, /etc/init.d/apache2-xxx, ... as usual, and they
++You can then use a2enmod-xxx, apache2ctl-xxx, ... as usual, and they
+ will affect the new instance of apache2.
+ 
++If you use systemd, the service name of your new instance is
++"apache2@xxx.service". Otherwise the script installed an init script
++named /etc/init.d/apache2-xxx.
++
+ To start the new apache2 instance on boot, use
+ - if you use systemd, run:
+-	systemctl enable apache2-xxx
++	systemctl enable apache2@xxx
+ - if you use sysv-init with dependency based boot sequence (the default):
+   If you don't have ssl keys with passphrases, you may want to set
+   'X-Interactive: false' in /etc/init.d/apache2-xxx to reduce boot time.
+@@ -57,13 +61,24 @@ The Apache 2 package will only remove the default configuration files and
+ directories.
+ 
+ 
+-Configuration
+-=============
++htcacheclean service
++====================
++
++The apache-htcacheclean service can be handled in the same way as the
++main apache2 script. You can create an
++'apache-htcacheclean@instance.service' service under systemd or you can
++copy /etc/init.d/apache-htcacheclean as
++/etc/init.d/apache-htcacheclean-xxx under SystemV.
++
++The parameters of the service can be customized with
++/etc/default/apache-htcacheclean-xxx (that is created by the
++setup-instance helper script).
+ 
+-The init script will try to read /etc/defaults/apache2-xxx. If that does not
+-exist, it will use /etc/defaults/apache2 instead.
+ 
+-The following environment variables can be used to influence the scripts.  The
++Environment variables
++=====================
++
++The following environment variables can be used to influence many scripts.  The
+ default apache2 configuration will make use of them, too. Most can be set in
+ /etc/apache2-xxx/envvars. Variables set in /etc/apache2-xxx/envvars must be
+ exported.
+@@ -79,7 +94,7 @@ APACHE_ARGUMENTS	empty if $APACHE_CONFDIR = /etc/apache2
+ APACHE_RUN_USER		www-data
+ APACHE_RUN_GROUP	www-data
+ 
+-APACHE_PID_FILE         /var/run/apache2.pid or /var/run/apachd2-xxx.pid
++APACHE_PID_FILE         /var/run/apache2/apache2.pid or /var/run/apache2-xxx/apache2.pid
+ APACHE_RUN_DIR		/var/run/apache2     or /var/run/apache2-xxx
+ APACHE_LOCK_DIR		/var/lock/apache2    or /var/lock/apache2-xxx
+ APACHE_LOG_DIR		/var/log/apache2     or /var/log/apache2-xxx
+@@ -91,4 +106,3 @@ APACHE_SITES_ENABLED	$APACHE_CONFDIR/sites-enabled
+ 
+ APACHE_LYNX		www-browser -dump
+ APACHE_STATUSURL	http://localhost:80/server-status
+-
+diff --git a/debian/changelog b/debian/changelog
+index dfec91d..8eb8e88 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -9,6 +9,8 @@ apache2 (2.4.23-5) UNRELEASED; urgency=medium
+   * Improve a2enmod to enable apache-htcacheclean with systemctl and let
+     it enable 'apache-htcacheclean@instance.service' for multi-instance
+     support.
++  * Improve setup-instance to rely on the systemd apache2@instance.service for
++    multi-instance support.
+ 
+  -- Stefan Fritsch <sf@debian.org>  Sat, 13 Aug 2016 13:38:30 +0200
+ 
+diff --git a/debian/setup-instance b/debian/setup-instance
+index 2c8e499..e404dec 100644
+--- a/debian/setup-instance
++++ b/debian/setup-instance
+@@ -18,11 +18,19 @@ fi
+ echo Setting up /etc/apache2-$SUFFIX ...
+ cp -a /etc/apache2 /etc/apache2-$SUFFIX
+ 
+-echo Setting up /etc/init.d/apache2-$SUFFIX ...
+-cp /usr/share/doc/apache2/examples/secondary-init-script /etc/init.d/apache2-$SUFFIX
+-# adjust service name (this prevents us from using a simple symlink)
+-perl -p -i -e s,XXX,$SUFFIX, /etc/init.d/apache2-$SUFFIX
+-chmod 755 /etc/init.d/apache2-$SUFFIX
++if [ -d /run/systemd ] && [ -x /bin/systemctl ]; then
++    echo "systemd is in use, no init script installed"
++    echo "use the 'apache2@$SUFFIX.service' service to control your new instance"
++    echo "sample commands:"
++    echo "systemctl start apache2@$SUFFIX.service"
++    echo "systemctl enable apache2@$SUFFIX.service"
++else
++    echo "Setting up /etc/init.d/apache2-$SUFFIX ..."
++    cp /usr/share/doc/apache2/examples/secondary-init-script /etc/init.d/apache2-$SUFFIX
++    # adjust service name (this prevents us from using a simple symlink)
++    perl -p -i -e s,XXX,$SUFFIX, /etc/init.d/apache2-$SUFFIX
++    chmod 755 /etc/init.d/apache2-$SUFFIX
++fi
+ 
+ echo -n Setting up symlinks: 
+ for a in a2enmod a2dismod a2ensite a2dissite a2enconf a2disconf apache2ctl ; do
+@@ -37,3 +45,6 @@ perl -p -i -e s,apache2,apache2-$SUFFIX,g /etc/logrotate.d/apache2-$SUFFIX
+ mkdir /var/log/apache2-$SUFFIX
+ chmod 750 /var/log/apache2-$SUFFIX
+ chown root:adm /var/log/apache2-$SUFFIX
++
++echo "Setting up /etc/default/apache-htcacheclean-$SUFFIX"
++cp -a /etc/default/apache-htcacheclean /etc/default/apache-htcacheclean-$SUFFIX
+-- 
+2.9.3
+

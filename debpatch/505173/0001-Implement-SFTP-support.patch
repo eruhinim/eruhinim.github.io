@@ -1,0 +1,223 @@
+From aa58ec7ea124d3f2cb51ebbd4371dc68b1798460 Mon Sep 17 00:00:00 2001
+From: Julian Andres Klode <julian.klode@canonical.com>
+Date: Thu, 11 Jan 2018 09:06:10 +0100
+Subject: [PATCH 1/6] Implement SFTP support
+
+Implement SFTP by using paramiko's SFTP support on top of an
+SSH process which acts as the SFTP channel.
+
+The reason for doing it this way, rather than using paramiko
+directly is that paramiko is not really designed for interactive
+use. Integration with agents does not seem to work, and a form
+of interactive unknown host adding does not exist either. By reusing
+openssh for the connection part, we solve this problem.
+
+Other python3 libraries are not better either. asyncssh suffers from
+the same connection setup problem, and bindings for libssh2 are even
+worse - they require you manually handling which authentication types
+are tried.
+
+Closes: #505173
+---
+ debian/control       |   2 +-
+ doc/man/dput.cf.5    |   4 ++
+ dput/methods/sftp.py | 159 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 164 insertions(+), 1 deletion(-)
+ create mode 100644 dput/methods/sftp.py
+
+diff --git a/debian/control b/debian/control
+index 2162572..7244944 100644
+--- a/debian/control
++++ b/debian/control
+@@ -25,7 +25,7 @@ Depends:
+     python3-pkg-resources,
+     ${python3:Depends},
+     ${misc:Depends}
+-Suggests: openssh-client, lintian, mini-dinstall, rsync
++Suggests: openssh-client, python3-paramiko, lintian, mini-dinstall, rsync
+ Breaks:
+     devscripts (<< 2.17.0)
+ Replaces:
+diff --git a/doc/man/dput.cf.5 b/doc/man/dput.cf.5
+index 5e78a57..14753ff 100644
+--- a/doc/man/dput.cf.5
++++ b/doc/man/dput.cf.5
+@@ -120,6 +120,10 @@ This transfers files using a secure SSH tunnel, and needs
+ authentication credentials on the remote machine.
+ .
+ .TP
++.B sftp
++the package will be uploaded using ssh's sftp. This transfers files using a
++secure ssh tunnel, and needs sftp access on the upload machine.
++.TP
+ .B rsync
+ The package will be uploaded using
+ .B rsync
+diff --git a/dput/methods/sftp.py b/dput/methods/sftp.py
+new file mode 100644
+index 0000000..bd4ca6f
+--- /dev/null
++++ b/dput/methods/sftp.py
+@@ -0,0 +1,159 @@
++# dput/methods/sftp.py
++# Part of ‘dput’, a Debian package upload toolkit.
++#
++# This is free software, and you are welcome to redistribute it under
++# certain conditions; see the end of this file for copyright
++# information, grant of license, and disclaimer of warranty.
++
++
++""" Implementation for SFTP upload method. """
++
++import errno
++import os
++import os.path
++import sys
++import socket
++import subprocess
++
++from ..helper import dputhelper
++
++
++class ProcessAsChannelAdapter(object):
++    """ Wrap a process as a paramiko Channel. """
++
++    def __init__(self, argv):
++        # Need to use a socket for some unknown reason
++        self.__socket, subproc_sock = socket.socketpair()
++        self.__proc = subprocess.Popen(argv, stdin=subproc_sock,
++                                       stdout=subproc_sock)
++
++    def get_name(self):
++        """ Return a simple name for the adapter. """
++        return "ProcessAsChannelAdapter"
++
++    def send(self, data):
++        """ Send a number of bytes to the subprocess. """
++        return self.__socket.send(data)
++
++    def recv(self, num_bytes):
++        """ Receive a number of bytes from the subprocess. """
++        try:
++            return self.__socket.recv(num_bytes)
++        except socket.error as e:
++            if e.args[0] in (errno.EPIPE, errno.ECONNRESET, errno.ECONNABORTED,
++                             errno.EBADF):
++                # Connection has closed.  Paramiko expects an empty string in
++                # this case, not an exception.
++                return ''
++            raise
++
++    def close(self):
++        """ Close and wait for process to finish. """
++        self.__socket.close()
++        self.__proc.terminate()
++        self.__proc.wait()
++
++
++def get_ssh_command_line(login, fqdn):
++    """ Gather a command line for connection to a server. """
++    return ["ssh",
++            "-oForwardX11 no",
++            "-oForwardAgent no",
++            "-oPermitLocalCommand no",
++            "-oClearAllForwardings yes",
++            "-oProtocol 2",
++            "-oNoHostAuthenticationForLocalhost yes",
++            "-l", login,
++            "-s", "--", fqdn, "sftp"]
++
++
++def copy_file(sftp_client, local_path, remote_path, debug, progress):
++    """ Upload a single file. """
++    with open(local_path, 'rb') as fileobj:
++        if progress:
++            try:
++                size = os.stat(local_path).st_size
++            except Exception:
++                size = -1
++                if debug:
++                    sys.stdout.write(
++                        "D: Determining size of file '%s' failed\n"
++                        % local_path)
++
++            fileobj = dputhelper.FileWithProgress(fileobj, ptype=progress,
++                                                  progressf=sys.stdout,
++                                                  size=size)
++
++        # TODO: Do atomic?
++        with sftp_client.file(remote_path, "w") as remote_fileobj:
++            while True:
++                data = fileobj.read(4096)
++                if not data:
++                    break
++                remote_fileobj.write(data)
++
++
++def upload(fqdn, login, incoming, files, debug, compress, progress=0):
++    """ Upload the files via SFTP.
++
++        Requires paramiko for SFTP protocol, but uses the ssh binary
++        for setting up the connection so we get proper prompts for
++        authentication, unknown hosts and other stuff.
++
++        """
++    try:
++        import paramiko.sftp_client
++    except Exception as e:
++        sys.stdout.write(
++            "E: paramiko must be installed to use sftp transport.\n")
++        sys.exit(1)
++
++    if not login or login == '*':
++        login = os.getenv("USER")
++
++    if not incoming.endswith("/"):
++        incoming = "%s/" % incoming
++
++    try:
++        channel = ProcessAsChannelAdapter(get_ssh_command_line(login,
++                                                               fqdn))
++        sftp_client = paramiko.sftp_client.SFTPClient(channel)
++    except Exception as e:
++        sys.stdout.write("%s\nE: Error connecting to remote host.\n" % e)
++        sys.exit(1)
++
++    try:
++        for local_path in files:
++            path_to_package, base_filename = os.path.split(local_path)
++            remote_path = os.path.join(incoming, base_filename)
++            sys.stdout.write("  Uploading %s: " % base_filename)
++            sys.stdout.flush()
++            try:
++                copy_file(sftp_client, local_path, remote_path,
++                          debug, progress)
++            except Exception as e:
++                sys.stdout.write("\n%s\nE: Error uploading file.\n" % e)
++                sys.exit(1)
++            sys.stdout.write("done.\n")
++    finally:
++        channel.close()
++
++
++# Copyright © 2006-2018 Canonical Ltd.
++# Copyright © 2006 Robey Pointer <robey@lag.net>
++#                  (parts of ProcessAsChannelAdapter)
++#
++# Authors: Cody A.W. Somerville <cody.somerville@canonical.com>
++#          Julian Andres Klode <julian.klode@canonical.com>
++#
++# This is free software: you may copy, modify, and/or distribute this work
++# under the terms of the GNU General Public License as published by the
++# Free Software Foundation; version 3 of that license or any later version.
++# No warranty expressed or implied. See the file ‘LICENSE.GPL-3’ for details.
++
++
++# Local variables:
++# coding: utf-8
++# mode: python
++# End:
++# vim: fileencoding=utf-8 filetype=python :
+-- 
+2.15.1
+

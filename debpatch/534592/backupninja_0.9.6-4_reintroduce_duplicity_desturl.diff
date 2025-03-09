@@ -1,0 +1,121 @@
+diff -Nru backupninja-0.9.6.orig/examples/example.dup backupninja-0.9.6/examples/example.dup
+--- backupninja-0.9.6.orig/examples/example.dup	2009-06-17 09:43:36.000000000 +0200
++++ backupninja-0.9.6/examples/example.dup	2009-06-17 09:47:00.000000000 +0200
+@@ -120,6 +120,12 @@
+ #keep = 60
+ #keep = yes
+ 
++# full destination URL, in duplicity format; if set, desturl overrides
++# sshoptions, destdir, desthost and destuser; it also disables testconnect and
++# bandwithlimit. For details, see duplicity manpage, section "URL FORMAT".
++#desturl = file:///usr/local/backup
++#desturl = rsync://user@other.host//var/backup/bla
++
+ # bandwith limit, in kbit/s ; default is 0, i.e. no limit
+ #bandwidthlimit = 128
+ 
+diff -Nru backupninja-0.9.6.orig/handlers/dup.in backupninja-0.9.6/handlers/dup.in
+--- backupninja-0.9.6.orig/handlers/dup.in	2009-06-17 09:43:36.000000000 +0200
++++ backupninja-0.9.6/handlers/dup.in	2009-06-17 09:47:00.000000000 +0200
+@@ -24,6 +24,7 @@
+ setsection dest
+ getconf incremental yes
+ getconf keep 60
++getconf desturl
+ getconf sshoptions
+ getconf bandwidthlimit 0
+ getconf desthost
+@@ -33,8 +34,8 @@
+ 
+ ### SANITY CHECKS ##############################################################
+ 
+-[ -n "$destdir" ]  || fatal "Destination directory not set"
+-[ -n "$include" ]  || fatal "No source includes specified"
++[ -n "$desturl" -o -n "$destdir" ]  || fatal "The destination directory (destdir) must be set when desturl is not used."
++[ -n "$include" -o -n "$vsinclude" ]  || fatal "No source includes specified"
+ [ -n "$password" ] || fatal "The password option must be set."
+ 
+ ### VServers
+@@ -58,13 +59,17 @@
+ 
+ ### See if we can login on $desthost
+ if [ "$testconnect" == "yes" ]; then
+-   debug "ssh $sshoptions -o PasswordAuthentication=no $desthost -l $destuser 'echo -n 1'"
+-   if [ ! $test ]; then
+-      result=`ssh $sshoptions -o PasswordAuthentication=no $desthost -l $destuser 'echo -n 1'`
+-      if [ "$result" != "1" ]; then
+-	 fatal "Can't connect to $desthost as $destuser."
+-      else
+-	 debug "Connected to $desthost as $destuser successfully"
++   if [ -n "$desturl" ]; then
++      warning 'testconnect can not be used when desturl is set'
++   else
++      debug "ssh $sshoptions -o PasswordAuthentication=no $desthost -l $destuser 'echo -n 1'"
++      if [ ! $test ]; then
++         result=`ssh $sshoptions -o PasswordAuthentication=no $desthost -l $destuser 'echo -n 1'`
++         if [ "$result" != "1" ]; then
++	    fatal "Can't connect to $desthost as $destuser."
++         else
++	    debug "Connected to $desthost as $destuser successfully"
++         fi
+       fi
+    fi
+ fi
+@@ -75,7 +80,14 @@
+ execstr_command=
+ execstr_options="$options --no-print-statistics"
+ execstr_source=
+-execstr_serverpart="scp://$destuser@$desthost/$destdir"
++if [ -n "$desturl" ]; then
++   [ -z "$destuser" ] || warning 'the configured destuser is ignored since desturl is set'
++   [ -z "$desthost" ] || warning 'the configured desthost is ignored since desturl is set'
++   [ -z "$destdir" ] || warning 'the configured destdir is ignored since desturl is set'
++   execstr_serverpart="$desturl"
++else
++   execstr_serverpart="scp://$destuser@$desthost/$destdir"
++fi
+ 
+ ### duplicity version
+ duplicity_version="`duplicity --version | @AWK@ '{print $2}'`"
+@@ -93,7 +105,10 @@
+ #    --sftp-command ourselves
+ 
+ scpoptions="$sshoptions"
+-[ "$bandwidthlimit" == 0 ] || scpoptions="$scpoptions -l $bandwidthlimit"
++if [ "$bandwidthlimit" =! 0 ]; then
++   [ -z "$testurl" ] || warning 'The bandwidthlimit option is not used when desturl is set.'
++   scpoptions="$scpoptions -l $bandwidthlimit"
++fi
+ 
+ # < 0.4.2 : only uses ssh and scp
+ if [ "$duplicity_major" -le 0 -a "$duplicity_minor" -le 4 -a "$duplicity_sub" -lt 2 ]; then
+@@ -205,12 +220,12 @@
+ 
+ # cleanup
+ if [ "$duplicity_major" -ge 0 -a "$duplicity_minor" -ge 4 -a "$duplicity_sub" -ge 4 ]; then
+-   debug "$precmd duplicity cleanup $execstr_options $execstr_serverpart"
++   debug "$precmd duplicity cleanup --force $execstr_options $execstr_serverpart"
+    if [ ! $test ]; then
+       export PASSPHRASE=$password
+       output=`nice -n $nicelevel \
+          su -c \
+-         "$precmd duplicity cleanup $execstr_options $execstr_serverpart 2>&1"`
++         "$precmd duplicity cleanup --force $execstr_options $execstr_serverpart 2>&1"`
+       exit_code=$?
+       if [ $exit_code -eq 0 ]; then
+ 	 debug $output
+@@ -225,12 +240,12 @@
+ # remove-older-than
+ if [ "$keep" != "yes" ]; then
+    if [ "$duplicity_major" -ge 0 -a "$duplicity_minor" -ge 4 -a "$duplicity_sub" -ge 4 ]; then
+-      debug "$precmd duplicity remove-older-than $keep $execstr_options $execstr_serverpart"
++      debug "$precmd duplicity remove-older-than $keep --force $execstr_options $execstr_serverpart"
+       if [ ! $test ]; then
+          export PASSPHRASE=$password
+ 	 output=`nice -n $nicelevel \
+                    su -c \
+-                      "$precmd duplicity remove-older-than $keep $execstr_options $execstr_serverpart 2>&1"`
++                      "$precmd duplicity remove-older-than $keep --force $execstr_options $execstr_serverpart 2>&1"`
+ 	 exit_code=$?
+ 	 if [ $exit_code -eq 0 ]; then
+ 	    debug $output

@@ -1,0 +1,148 @@
+From e4493b25885d3211f11764948bbfb0bd44e41a0d Mon Sep 17 00:00:00 2001
+From: Colin Watson <cjwatson@ubuntu.com>
+Date: Tue, 7 Jul 2009 11:06:54 +0100
+Subject: [PATCH 3/4] Add Launchpad-Bugs-Fixed to various places that mention Closes
+
+This arranges that the Launchpad-Bugs-Fixed field added by the Ubuntu
+vendor hook is properly aggregated from multiple changelog versions, is
+sorted better, doesn't trigger unknown-field warnings, etc.
+---
+ debian/changelog           |    3 +++
+ scripts/Dpkg/Changelog.pm  |   19 ++++++++++++++++++-
+ scripts/dpkg-genchanges.pl |    6 +++---
+ scripts/dpkg-gencontrol.pl |    2 +-
+ scripts/dpkg-source.pl     |    2 +-
+ 5 files changed, 26 insertions(+), 6 deletions(-)
+
+diff --git a/debian/changelog b/debian/changelog
+index c875d44..e75efb1 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -28,6 +28,9 @@ dpkg (1.15.4) UNRELEASED; urgency=low
+     dpkg-genchanges, so that it can work for dpkg-parsechangelog etc. as
+     well. Since the hook interface changed in the process, I've renamed it
+     from before-changes-creation to parse-changelog.
++  * Add Launchpad-Bugs-Fixed to various places that mention Closes, so that
++    the field is properly aggregated from multiple changelog versions, is
++    sorted better, doesn't trigger unknown-field warnings, etc.
+ 
+   [ Updated dpkg translations ]
+   * Asturian (Marcos Alvarez Costales). Closes: #535327
+diff --git a/scripts/Dpkg/Changelog.pm b/scripts/Dpkg/Changelog.pm
+index 7c4b1ca..6cbddaf 100644
+--- a/scripts/Dpkg/Changelog.pm
++++ b/scripts/Dpkg/Changelog.pm
+@@ -465,6 +465,10 @@ date of the (first) entry
+ 
+ bugs closed by the entry/entries, sorted by bug number
+ 
++=item Launchpad-Bugs-Fixed
++
++bugs closed by the entry/entries, sorted by bug number (Ubuntu vendor hook)
++
+ =item Changes
+ 
+ content of the the entry/entries
+@@ -487,7 +491,8 @@ our ( @CHANGELOG_FIELDS, %CHANGELOG_FIELDS );
+ our ( @URGENCIES, %URGENCIES );
+ BEGIN {
+     @CHANGELOG_FIELDS = qw(Source Version Distribution
+-                           Urgency Maintainer Date Closes Changes
++                           Urgency Maintainer Date
++                           Closes Launchpad-Bugs-Fixed Changes
+                            Timestamp Header Items Trailer
+                            Urgency_comment Urgency_lc);
+     tie %CHANGELOG_FIELDS, 'Dpkg::Fields::Object';
+@@ -518,6 +523,9 @@ sub dpkg {
+ 
+     $f->{Changes} = get_dpkg_changes( $data->[0] );
+     $f->{Closes} = [ @{$data->[0]{Closes}} ];
++    if (exists $data->[0]{'Launchpad-Bugs-Fixed'}) {
++	$f->{'Launchpad-Bugs-Fixed'} = [ @{$data->[0]{'Launchpad-Bugs-Fixed'}} ];
++    }
+ 
+     my $first = 1; my $urg_comment = '';
+     foreach my $entry (@$data) {
+@@ -532,6 +540,9 @@ sub dpkg {
+ 
+ 	$f->{Changes} .= "\n .".get_dpkg_changes( $entry );
+ 	push @{$f->{Closes}}, @{$entry->{Closes}};
++	if (exists $entry->{'Launchpad-Bugs-Fixed'}) {
++	    push @{$f->{'Launchpad-Bugs-Fixed'}}, @{$entry->{'Launchpad-Bugs-Fixed'}};
++	}
+ 
+ 	# handle unknown fields
+ 	foreach my $field (keys %$entry) {
+@@ -542,6 +553,9 @@ sub dpkg {
+     }
+ 
+     $f->{Closes} = join " ", sort { $a <=> $b } @{$f->{Closes}};
++    if (exists $f->{'Launchpad-Bugs-Fixed'}) {
++	$f->{'Launchpad-Bugs-Fixed'} = join " ", sort { $a <=> $b } @{$f->{'Launchpad-Bugs-Fixed'}};
++    }
+     $f->{Urgency} .= $urg_comment;
+ 
+     return %$f if wantarray;
+@@ -594,6 +608,9 @@ sub rfc822 {
+ 	$f->{Urgency} .= $entry->{Urgency_Comment};
+ 	$f->{Changes} = get_dpkg_changes( $entry );
+ 	$f->{Closes} = join " ", sort { $a <=> $b } @{$entry->{Closes}};
++	if (exists $entry->{'Launchpad-Bugs-Fixed'}) {
++	    $f->{'Launchpad-Bugs-Fixed'} = join " ", sort { $a <=> $b } @{$entry->{'Launchpad-Bugs-Fixed'}};
++	}
+ 
+ 	# handle unknown fields
+ 	foreach my $field (keys %$entry) {
+diff --git a/scripts/dpkg-genchanges.pl b/scripts/dpkg-genchanges.pl
+index a3ca95f..1d1b0d8 100755
+--- a/scripts/dpkg-genchanges.pl
++++ b/scripts/dpkg-genchanges.pl
+@@ -25,8 +25,8 @@ textdomain("dpkg-dev");
+ 
+ my @changes_fields = qw(Format Date Source Binary Architecture Version
+                         Distribution Urgency Maintainer Changed-By
+-                        Description Closes Changes Checksums-Md5
+-                        Checksums-Sha1 Checksums-Sha256 Files);
++                        Description Closes Launchpad-Bugs-Fixed Changes
++                        Checksums-Md5 Checksums-Sha1 Checksums-Sha256 Files);
+ 
+ my $controlfile = 'debian/control';
+ my $changelogfile = 'debian/changelog';
+@@ -336,7 +336,7 @@ foreach $_ (keys %{$changelog}) {
+ 	set_source_package($v);
+     } elsif (m/^Maintainer$/i) {
+ 	$fields->{"Changed-By"} = $v;
+-    } elsif (m/^(Version|Changes|Urgency|Distribution|Date|Closes)$/i) {
++    } elsif (m/^(Version|Changes|Urgency|Distribution|Date|Closes|Launchpad-Bugs-Fixed)$/i) {
+ 	$fields->{$_} = $v;
+     } elsif (s/^X[BS]*C[BS]*-//i) {
+ 	$fields->{$_} = $v;
+diff --git a/scripts/dpkg-gencontrol.pl b/scripts/dpkg-gencontrol.pl
+index 73c9dc9..95c8f4d 100755
+--- a/scripts/dpkg-gencontrol.pl
++++ b/scripts/dpkg-gencontrol.pl
+@@ -206,7 +206,7 @@ foreach $_ (keys %{$changelog}) {
+     } elsif (m/^Version$/) {
+ 	$sourceversion = $v;
+ 	$fields->{$_} = $v unless defined($forceversion);
+-    } elsif (m/^(Maintainer|Changes|Urgency|Distribution|Date|Closes)$/) {
++    } elsif (m/^(Maintainer|Changes|Urgency|Distribution|Date|Closes|Launchpad-Bugs-Fixed)$/) {
+     } elsif (s/^X[CS]*B[CS]*-//i) {
+ 	$fields->{$_} = $v;
+     } elsif (!m/^X[CS]+-/i) {
+diff --git a/scripts/dpkg-source.pl b/scripts/dpkg-source.pl
+index cf13936..fa086ca 100755
+--- a/scripts/dpkg-source.pl
++++ b/scripts/dpkg-source.pl
+@@ -237,7 +237,7 @@ if ($options{'opmode'} eq 'build') {
+ 	    $fields->{$_} = $v;
+ 	} elsif (s/^X[BS]*C[BS]*-//i) {
+ 	    $fields->{$_} = $v;
+-	} elsif (m/^(Maintainer|Changes|Urgency|Distribution|Date|Closes)$/i ||
++	} elsif (m/^(Maintainer|Changes|Urgency|Distribution|Date|Closes|Launchpad-Bugs-Fixed)$/i ||
+ 		 m/^X[BS]+-/i) {
+ 	} else {
+ 	    unknown($_, _g("parsed version of changelog"));
+-- 
+1.6.3.3
+

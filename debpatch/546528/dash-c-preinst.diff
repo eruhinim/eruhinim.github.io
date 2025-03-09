@@ -1,0 +1,226 @@
+reverted:
+--- dash-0.5.5.1/debian/dash.preinst
++++ dash-0.5.5.1.orig/debian/dash.preinst
+@@ -1,27 +0,0 @@
+-#!/bin/sh
+-set -e
+-
+-divert() {
+-	dfile=$1
+-	ltarget=$2
+-	div=$(dpkg-divert --list $dfile)
+-	distrib=${3:-$dfile.distrib}
+-	if [ -z "$div" ]; then
+-		dpkg-divert --package dash --divert $distrib --add $dfile
+-		# This differs from dpkg-divert's --rename because we
+-		# first make a copy of $dfile (the file being diverted)
+-		# in $distrib. Then, a symlink to $ltarget is forcibly created
+-		# from $dfile.
+-		# dpkg-divert's --rename direct equivalent would be:
+-		# mv $dfile $distrib -- but we could end up without a symlink
+-		cp -dp $dfile $distrib
+-		ln -sf $ltarget $dfile
+-	fi
+-}
+-
+-# Divert the following files if no diversion exists already
+-# It is currently used to prevent the files collision between bash and
+-# dash: they both provide the files in the package.
+-divert /bin/sh dash
+-divert /usr/share/man/man1/sh.1.gz dash.1.gz \
+-	/usr/share/man/man1/sh.distrib.1.gz
+diff -u dash-0.5.5.1/debian/changelog dash-0.5.5.1/debian/changelog
+--- dash-0.5.5.1/debian/changelog
++++ dash-0.5.5.1/debian/changelog
+@@ -1,3 +1,11 @@
++dash (0.5.5.1-7.1) unstable; urgency=low
++
++  * Non-maintainer upload.
++  * Fix "dash's preinst shouldn't rely on /bin/sh" by applying the patch by
++    David Riebenbauer (Closes: #546528)
++
++ -- Marek Kubica <marek@xivilization.net>  Sat, 17 Jul 2010 15:10:54 +0200
++
+ dash (0.5.5.1-7) unstable; urgency=low
+ 
+   [ Raphael Geissert ]
+diff -u dash-0.5.5.1/debian/rules dash-0.5.5.1/debian/rules
+--- dash-0.5.5.1/debian/rules
++++ dash-0.5.5.1/debian/rules
+@@ -36,7 +36,7 @@
+ 	  exec ../configure --host='$(DEB_HOST_GNU_TYPE)')
+ 	touch configure-stamp
+ 
+-build: deb-checkdir build-stamp
++build: preinst-build deb-checkdir build-stamp
+ build-stamp: configure-stamp
+ 	-$(CC) -v
+ 	(cd build-tmp && exec $(MAKE) CFLAGS='$(CFLAGS)') || \
+@@ -55,6 +55,11 @@
+ 	rm -f configure-stamp patch-stamp build-stamp po-templates-stamp
+ 	rm -rf '$(DIR)' '$(DIRA)'
+ 	rm -f debian/files debian/substvars debian/dash.templates changelog
++	rm -f debian/dash.preinst
++
++preinst-build: debian/dash.preinst
++debian/dash.preinst: debian/dash.preinst.c
++	$(CC) -O2 -s -o debian/dash.preinst debian/dash.preinst.c
+ 
+ install: install-indep install-arch
+ install-indep: deb-checkdir deb-checkuid
+only in patch2:
+unchanged:
+--- dash-0.5.5.1.orig/debian/dash.preinst.c
++++ dash-0.5.5.1/debian/dash.preinst.c
+@@ -0,0 +1,151 @@
++/* Copyright (c) 2009 David Riebenbuaer <davrieb@liegesta.at>
++ *
++ * You may freely use, distribute, and modify this program.
++ */
++
++#include <stdlib.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <string.h>
++#include <sys/types.h>
++#include <sys/wait.h>
++#include <err.h>
++#include <errno.h>
++#include <error.h>
++
++#define DPKG_DIVERT "/usr/bin/dpkg-divert"
++#define LINE_LEN 1024
++
++void run_op(const char *const op[])
++{
++  pid_t child;
++
++  switch (child = fork()) {
++    case -1:
++      // fork failed
++      {
++        err(EXIT_FAILURE, "fork failed");
++      }
++
++
++    case 0:
++      // child
++      {
++        execvp(op[0], (char *const *)(op));
++
++        err(EXIT_FAILURE, "failed to exec %s", op[0]);
++      }
++
++
++    default:
++      // parent
++      {
++        int status;
++        pid_t pid;
++
++        pid = waitpid(child, &status, 0);
++
++        if (pid != -1) {
++          if (WIFEXITED(status)) {
++            if (WEXITSTATUS(status) == 0) {
++              return;
++            }
++            else {
++              exit(WEXITSTATUS(status));
++            }
++          }
++          else {
++            fprintf(stderr, "child didn't exit normally");
++            exit(EXIT_FAILURE);
++          }
++        }
++        else {
++          err(EXIT_FAILURE, "wait failed");
++        }
++
++        break;
++      }
++  }
++}
++
++void divert(const char *target, const char *source, const char *distrib)
++{
++  pid_t child;
++  int pipedes[2];
++  static char line[LINE_LEN];
++
++  memset(line, '\0', LINE_LEN);
++
++  if (pipe(pipedes)) {
++    err(EXIT_FAILURE, "pipe creation failed");
++  }
++
++  switch(child = fork()) {
++    case -1:
++      // fork failed
++      {
++        int errnum = errno;
++
++        close(pipedes[0]);
++        close(pipedes[1]);
++        error(EXIT_FAILURE, errnum, "fork failed");
++      }
++
++
++    case 0:
++      // child
++      {
++        if (dup2(pipedes[STDOUT_FILENO], STDOUT_FILENO) < 0) {
++          err(EXIT_FAILURE, "replacing stdout with pipe failed");
++        }
++
++        close(pipedes[STDIN_FILENO]);
++        close(pipedes[STDOUT_FILENO]);
++
++        execlp(DPKG_DIVERT, DPKG_DIVERT, "--list", target, NULL);
++
++        err(EXIT_FAILURE, "dpkg-divert exec failed");
++      }
++
++
++    default:
++      // parent
++      {
++        FILE *fd;
++
++        close(pipedes[STDOUT_FILENO]);
++        fcntl(pipedes[STDIN_FILENO], F_SETFD, FD_CLOEXEC);
++        fd = fdopen(pipedes[STDIN_FILENO], "r");
++
++        while (fgets(line, LINE_LEN, fd) != NULL) {
++          line[strlen(line)-1] = '\0';
++          break;
++        }
++        fclose(fd);
++
++        break;
++      }
++  }
++
++  if (strlen(line) == 0) {
++    const char *const dpkg_divert_op[] = {DPKG_DIVERT, "--package", "dash",
++      "--divert", distrib, "--add", target, NULL};
++    const char *const cp_op[] = {"cp", "-pd", target, distrib, NULL};
++    const char *const ln_op[] = {"ln", "-fs", source, target, NULL};
++
++    run_op(dpkg_divert_op);
++    run_op(cp_op);
++    run_op(ln_op);
++  }
++}
++
++int main(void)
++{
++  divert("/bin/sh", "dash", "/bin/sh.distrib");
++  divert("/usr/share/man/man1/sh.1.gz", "dash.1.gz",
++      "/usr/share/man/man1/sh.distrib.1.gz");
++
++  return EXIT_SUCCESS;
++}
++

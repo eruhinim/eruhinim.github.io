@@ -1,0 +1,171 @@
+From 2d870b20534bac2847b55b544351c112a85595e8 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Bastien=20ROUCARI=C3=88S?= <roucaries.bastien@gmail.com>
+Date: Mon, 20 Mar 2017 16:27:09 +0100
+Subject: [PATCH 5/7] Honor DPKG_ROOT in dir to symlink
+
+---
+ scripts/dpkg-maintscript-helper.sh | 83 +++++++++++++++++++++++---------------
+ 1 file changed, 51 insertions(+), 32 deletions(-)
+
+diff --git a/scripts/dpkg-maintscript-helper.sh b/scripts/dpkg-maintscript-helper.sh
+index 0b867d805..5becba33a 100755
+--- a/scripts/dpkg-maintscript-helper.sh
++++ b/scripts/dpkg-maintscript-helper.sh
+@@ -354,10 +354,10 @@ dir_to_symlink() {
+ 	      "PACKAGE=$PACKAGE LASTVERSION=$LASTVERSION ACTION=$1 PARAM=$2"
+ 
+ 	case "$DPKG_MAINTSCRIPT_NAME" in
+-	preinst)
++	    preinst)
+ 		if [ "$1" = "install" -o "$1" = "upgrade" ] &&
+ 		   [ -n "$2" ] &&
+-		   [ ! -h "$PATHNAME" ] && [ -d "$PATHNAME" ] &&
++		   [ ! -h "$DPKG_ROOT$PATHNAME" ] && [ -d "$DPKG_ROOT$PATHNAME" ] &&
+ 		   dpkg --compare-versions -- "$2" le-nl "$LASTVERSION"; then
+ 			prepare_dir_to_symlink "$PACKAGE" "$PATHNAME"
+ 		fi
+@@ -368,24 +368,24 @@ dir_to_symlink() {
+ 		# have been unpacked, then upgraded with an unpack and thus
+ 		# never been configured before.
+ 		if [ "$1" = "configure" ] &&
+-		   [ -d "${PATHNAME}.dpkg-backup" ] &&
+-		   [ ! -h "$PATHNAME" ] && [ -d "$PATHNAME" ] &&
+-		   [ -f "$PATHNAME/.dpkg-staging-dir" ]; then
++		   [ -d "$DPKG_ROOT${PATHNAME}.dpkg-backup" ] &&
++		   [ ! -h "$DPKG_ROOT$PATHNAME" ] && [ -d "$DPKG_ROOT$PATHNAME" ] &&
++		   [ -f "$DPKG_ROOT$PATHNAME/.dpkg-staging-dir" ]; then
+ 			finish_dir_to_symlink "$PATHNAME" "$SYMLINK_TARGET"
+ 		fi
+ 		;;
+ 	postrm)
+-		if [ "$1" = "purge" ] && [ -d "${PATHNAME}.dpkg-backup" ]; then
+-		    rm -rf "${PATHNAME}.dpkg-backup"
++		if [ "$1" = "purge" ] && [ -d "$DPKG_ROOT${PATHNAME}.dpkg-backup" ]; then
++		    rm -rf "$DPKG_ROOT${PATHNAME}.dpkg-backup"
+ 		fi
+ 		if [ "$1" = "abort-install" -o "$1" = "abort-upgrade" ] &&
+ 		   [ -n "$2" ] &&
+-		   [ -d "${PATHNAME}.dpkg-backup" ] &&
+-		   [ \( ! -h "$PATHNAME" -a -d "$PATHNAME" -a \
+-		        -f "$PATHNAME/.dpkg-staging-dir" \) -o \
+-		     \( -h "$PATHNAME" -a symlink_match "$PATHNAME" "$SYMLINK_TARGET" \)] &&
++		   [ -d "$DPKG_ROOT${PATHNAME}.dpkg-backup" ] &&
++		   [ \( ! -h "$DPKG_ROOT$PATHNAME" -a -d "$DPKG_ROOT$PATHNAME" -a \
++		        -f "$DPKG_ROOT$PATHNAME/.dpkg-staging-dir" \) -o \
++		     \( -h "$DPKG_ROOT$PATHNAME" -a symlink_match "$PATHNAME" "$SYMLINK_TARGET" \)] &&
+ 		   dpkg --compare-versions -- "$2" le-nl "$LASTVERSION"; then
+-			abort_dir_to_symlink "$PATHNAME"
++			abort_dir_to_symlink "$DPKG_ROOT$PATHNAME"
+ 		fi
+ 		;;
+ 	*)
+@@ -412,10 +412,23 @@ prepare_dir_to_symlink()
+ 
+ 	# If there are locally created files or files owned by another package
+ 	# we should not perform the switch.
+-	find "$PATHNAME" -print0 | xargs -0 -n1 \
+-		dpkg-maintscript-helper package_owns_file_or_error $PACKAGE || \
+-		error "directory '$PATHNAME' contains files not owned by" \
+-		      "package $PACKAGE, cannot switch to symlink"
++	if [ -n "$DPKG_ROOT" ]; then
++	        find "$PATHNAME" -print0 | xargs -0 -n1 \
++		       dpkg-maintscript-helper package_owns_file_or_error $PACKAGE || \
++		              error "directory '$PATHNAME' contains files not owned by" \
++		                    "package $PACKAGE, cannot switch to symlink"
++	else
++	    find "$DPKG_ROOT$PATHNAME" -printf "%P\0" | xargs -0 -n1 \
++		       sh -c '
++		       	  file=$2
++			  pathname=$1
++		       	  echo -n "$pathname/$file"; printf "\0"' \
++			  addpathname $PATHNAME | \
++		       xargs -0 -n1 \
++		       dpkg-maintscript-helper package_owns_file_or_error $PACKAGE || \
++		              error "directory '$PATHNAME' contains files not owned by" \
++		                    "package $PACKAGE, cannot switch to symlink"
++	fi
+ 
+ 	# At this point, we know that the directory either contains no files,
+ 	# or only non-conffiles owned by the package.
+@@ -431,11 +444,11 @@ prepare_dir_to_symlink()
+ 	# So we need to create a staging directory, to avoid removing files
+ 	# from other packages, and to trap any new files in the directory
+ 	# to move them to their correct place later on.
+-	mv -f "$PATHNAME" "${PATHNAME}.dpkg-backup"
+-	mkdir "$PATHNAME"
++	mv -f "$DPKG_ROOT$PATHNAME" "$DPKG_ROOT${PATHNAME}.dpkg-backup"
++	mkdir "$DPKG_ROOT$PATHNAME"
+ 
+ 	# Mark it as a staging directory, so that we can track things.
+-	touch "$PATHNAME/.dpkg-staging-dir"
++	touch "$DPKG_ROOT$PATHNAME/.dpkg-staging-dir"
+ }
+ 
+ finish_dir_to_symlink()
+@@ -452,19 +465,25 @@ finish_dir_to_symlink()
+ 	else
+ 		ABS_SYMLINK_TARGET="$SYMLINK_TARGET"
+ 	fi
+-	rm "$PATHNAME/.dpkg-staging-dir"
+-	find "$PATHNAME" -mindepth 1 -print0 | \
+-		xargs -0 -i% mv -f "%" "$ABS_SYMLINK_TARGET/"
++	rm "$DPKG_ROOT$PATHNAME/.dpkg-staging-dir"
++	find "$DPKG_ROOT$PATHNAME" -mindepth 1 -print0 | \
++		xargs -0 -i% mv -f "%" "$DPKG_ROOT$ABS_SYMLINK_TARGET/"
+ 
+ 	# Remove the staging directory.
+-	rmdir "$PATHNAME"
++	rmdir "$DPKG_ROOT$PATHNAME"
+ 
+ 	# Do the actual switch.
+-	ln -s "$SYMLINK_TARGET" "$PATHNAME"
+-
++	case $SYMLINK_TARGET in
++	    /*)
++		ln -s "$DPKG_ROOT$SYMLINK_TARGET" "$DPKG_ROOT$PATHNAME"
++		;;
++	    *)
++		ln -s "$SYMLINK_TARGET" "$DPKG_ROOT$PATHNAME"
++		;;
++	esac
+ 	# We are left behind the old files owned by this package in the backup
+ 	# directory, just remove it.
+-	rm -rf "${PATHNAME}.dpkg-backup"
++	rm -rf "$DPKG_ROOT${PATHNAME}.dpkg-backup"
+ }
+ 
+ abort_dir_to_symlink()
+@@ -472,16 +491,16 @@ abort_dir_to_symlink()
+ 	local PATHNAME="$1"
+ 
+ 	echo "Restoring backup of $PATHNAME ..."
+-	if [ -h "$PATHNAME" ]; then
+-		rm -f "$PATHNAME"
++	if [ -h "$DPKG_ROOT$PATHNAME" ]; then
++		rm -f "$DPKG_ROOT$PATHNAME"
+ 	else
+ 		# The staging directory must be empty, as no other package
+ 		# should have been unpacked in between.
+-		rm -f "$PATHNAME/.dpkg-staging-dir"
+-		rmdir "$PATHNAME"
++		rm -f "$DPKG_ROOT$PATHNAME/.dpkg-staging-dir"
++		rmdir "$DPKG_ROOT$PATHNAME"
+ 	fi
+ 
+-	mv "${PATHNAME}.dpkg-backup" "$PATHNAME"
++	mv "$DPKG_ROOT${PATHNAME}.dpkg-backup" "$DPKG_ROOT$PATHNAME"
+ }
+ 
+ # Common functions
+@@ -512,7 +531,7 @@ ensure_package_owns_file() {
+ 
+ package_owns_file_or_error() {
+        local PACKAGE="$1"
+-       local FILE="$2"
++       local FILE="${2%/}"
+        if ! ensure_package_owns_file $PACKAGE $FILE ; then
+ 	   error "File '$FILE' not owned by package " \
+ 		 "'$PACKAGE'"
+-- 
+2.11.0
+

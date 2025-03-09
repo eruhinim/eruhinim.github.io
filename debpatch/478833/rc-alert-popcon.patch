@@ -1,0 +1,206 @@
+Index: scripts/rc-alert.pl
+===================================================================
+--- scripts/rc-alert.pl	(Revision 1861)
++++ scripts/rc-alert.pl	(Arbeitskopie)
+@@ -27,7 +27,7 @@
+ use Getopt::Long;
+ 
+ sub remove_duplicate_values($);
+-sub print_if_relevant(%);
++sub store_if_relevant(%);
+ sub human_flags($);
+ sub unhtmlsanit($);
+ sub dt_parse_request($);
+@@ -65,6 +65,10 @@
+ my $distincoperation = "or";
+ my $distexcoperation = "or";
+ 
++my $popcon = 0;
++my $popcon_by_vote = 0;
++my $popcon_local = 0;
++
+ my $debtags = '';
+ my $debtags_db = '/var/lib/debtags/package-tags';
+ 
+@@ -93,6 +97,12 @@
+   --debtags          Comma separated list of tags
+                        (e.g. implemented-in::perl,role::plugin)
+   --debtags-database Database file (default: /var/lib/debtags/package-tags)
++
++  Popcon options:
++  --popcon           Sort bugs by package's popcon rank
++  --pc-vote          Sort by_vote instead of by_inst (see popularity-contest(8))
++  --pc-local         Use local popcon data from last popcon run
++                       (/var/log/popularity-contest)
+ EOF
+ 
+ my $version = <<"EOF";
+@@ -124,6 +134,9 @@
+ 	   "exclude-dist-op=s" => \$distexcoperation,
+ 	   "debtags=s" => \$debtags,
+ 	   "debtags-database=s" => \$debtags_db,
++	   "popcon" => \$popcon,
++	   "pc-vote" => \$popcon_by_vote,
++	   "pc-local" => \$popcon_local,
+ 	   );
+ 
+ if ($opt_help) { print $usage; exit 0; }
+@@ -177,6 +190,35 @@
+     $package_list = InstalledPackages(0);
+ }
+ 
++## Get popcon information
++my %popcon;
++if ($popcon) {
++    my $pc_by = $popcon_by_vote ? 'vote' : 'inst';
++
++    my $pc_regex;
++    if ($popcon_local) {
++	open POPCON, "/var/log/popularity-contest"
++	    or die "$progname: Unable to access popcon data: $!";
++	$pc_regex = '(\d+)\s\d+\s(\S+)';
++    } else {
++	open POPCON, "wget -q -O - http://popcon.debian.org/by_$pc_by.gz | gunzip -c |"
++	    or die "$progname: Not able to receive remote popcon data!";
++	$pc_regex = '(\d+)\s+(\S+)\s+(\d+\s+){5}\(.*\)';
++    }
++
++    while (<POPCON>) {
++	next unless /$pc_regex/;
++	# rank $1 for package $2
++	if ($popcon_local) {
++	    # negative for inverse sorting of atimes
++	    $popcon{$2} = "-$1";
++	} else {
++	    $popcon{$2} = $1;
++	}
++    }
++    close POPCON;
++}
++
+ ## Get debtags info
+ my %dt_pkg;
+ my @dt_requests;
+@@ -198,6 +240,7 @@
+ my $found_bugs_start;
+ my ($current_package, $comment);
+ 
++my %pkg_store;
+ while (defined(my $line = <BUGS>)) {
+     if( $line =~ /^<div class="package">/) {
+ 	$found_bugs_start = 1;
+@@ -210,9 +253,10 @@
+     } elsif ($line =~ m%<a name="(\d+)"></a>\s*<a href="[^\"]+">\d+</a> (\[[^\]]+\])( \[[^\]]+\])? ([^<]+)%i) {
+ 	my ($num, $tags, $dists, $name) = ($1, $2, $3, $4);
+ 	chomp $name;
+-	print_if_relevant(pkg => $current_package, num => $num, tags => $tags, dists => $dists, name => $name, comment => $comment);
++	store_if_relevant(pkg => $current_package, num => $num, tags => $tags, dists => $dists, name => $name, comment => $comment);
+     }
+ }
++for (sort {$a <=> $b } keys %pkg_store) { print $pkg_store{$_}; }
+ 
+ close BUGS or die "$progname: could not close $cachefile: $!\n";
+ 
+@@ -228,8 +272,9 @@
+     return $in;
+ }
+ 
+-sub print_if_relevant(%) {
++sub store_if_relevant(%) {
+     my %args = @_;
++    
+     if (exists($$package_list{$args{pkg}})) {
+ 	# potentially relevant
+ 	my ($flags, $flagsapply) = human_flags($args{tags});
+@@ -246,16 +291,28 @@
+ 	}
+ 
+ 	# yep, relevant
+-	print "Package: $args{pkg}\n",
+-	    $comment,  # non-empty comments always contain the trailing \n
+-	    "Bug:     $args{num}\n",
+-	    "Title:   " . unhtmlsanit($args{name}) , "\n",
+-	    "Flags:   " . $flags , "\n",
+-	    (defined $args{dists} ? "Dists:  " . $dists . "\n" : ""),
+-	    (defined $dt_pkg{$args{pkg}} ? 
+-		"Debtags: " . $dt_pkg{$args{pkg}} . "\n" : ""),
+-	    "\n";
++    my $bug_string = "Package: $args{pkg}\n" .
++		$comment .  # non-empty comments always contain the trailing \n
++		"Bug:     $args{num}\n" .
++		"Title:   " . unhtmlsanit($args{name}) . "\n" .
++		"Flags:   " . $flags . "\n" .
++		(defined $args{dists} ? "Dists:  " . $dists . "\n" : "") .
++		(defined $dt_pkg{$args{pkg}} ?
++		    "Debtags: " . $dt_pkg{$args{pkg}} . "\n" : "");
++		unless ($popcon_local) {
++		    $bug_string .= (defined $popcon{$args{pkg}} ?
++			"Popcon rank: " . $popcon{$args{pkg}} . "\n" : "");
+     }
++    $bug_string .= "\n";
++
++    if ($popcon) {
++		return unless $bug_string;
++		my $index = $popcon{$args{pkg}} ? $popcon{$args{pkg}} : 9999999;
++		$pkg_store{$index} .= $bug_string;
++    } else {
++		$pkg_store{1} .= $bug_string;
++    }
++    }
+ }
+ 
+ sub human_flags($) {
+Index: scripts/rc-alert.1
+===================================================================
+--- scripts/rc-alert.1	(Revision 1861)
++++ scripts/rc-alert.1	(Arbeitskopie)
+@@ -2,7 +2,7 @@
+ .SH NAME
+ rc-alert \- check for installed packages with release-critical bugs
+ .SH SYNOPSIS
+-\fBrc-alert [inclusion options] [\-\-debtags [tag[,tag ...]] [package ...]\fR
++\fBrc-alert [inclusion options] [\-\-debtags [tag[,tag ...]] [\-\-popcon] [package ...]\fR
+ .br
+ \fBrc-alert \-\-help|\-\-version\fR
+ .SH DESCRIPTION
+@@ -76,6 +76,23 @@
+ .BR \-\-debtags\-database
+ Use a non-standard debtags database.  The default is
+ /var/lib/debtags/packages-tags.
++.P
++Popularity-contest collects data about installation and usage of Debian
++packages. You can additionally sort the bugs by the popcon rank of the related
++packages.
++.TP
++.BR \-\-popcon
++Sort bugs by the popcon rank of the package the bug belongs to.
++.TP
++.BR \-\-pc\-vote
++By default, packages are sorted according to the number of people who have the
++package installed. This option enables sorting by the number of people
++regularly using the package instead. This option has no effect in combination
++with \-\-pc\-local.
++.TP
++.BR \-\-pc\-local
++Instead of requesting remote data the information from the last popcon run is
++used (/var/log/popularity-contest).
+ .SH EXAMPLES
+ .TP
+ .BR \-\-include\-dists " OS"
+@@ -95,11 +112,16 @@
+ The bug must apply to packages matching the specified debtags, i.e. the match
+ will only include packages that have the ‘role::plugin’ tag and that have
+ either of the tags ‘implemented-in::perl’ or ‘implemented-in::python’.
++.TP
++.BR \-\-popcon " "\-\-pc\-local
++Read /var/log/popularity-contest and sort bugs by your personal popcon ranking
++(which is basically the atime of your packages' binaries).
+ .SH BUGS
+ It is not possible to say "does not apply only to unstable"
+ .SH SEE ALSO
+ .BR debtags(1)
+ .BR popbugs(1)
++.BR popularity-contest(8)
+ .SH AUTHOR
+ \fBrc-alert\fR was written by Anthony DeRobertis and modified by
+ Julian Gilbey <jdg@debian.org> and Adam D. Barratt <adam@adam-barratt.org.uk>

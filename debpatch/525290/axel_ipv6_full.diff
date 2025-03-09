@@ -1,0 +1,562 @@
+Description: Implement full IPv6 support on axel-2.4.
+ The full implementation of IPv6 addresses the issues:
+ .
+ 1. Transport protocol in tcp.c.
+ .
+ 2. Parsing of bracketed, numerical IPv6 addresses in conn.c.
+ .
+ 3. Registration of interface bound IPv4 and IPv6 addresses in axel.c.
+ .
+ 4. Implementing EPSV and IPv6 target sensing in ftp.c.
+ .
+ 5. Introduce IPv6 target sensing in http.c.
+Author: Mats Erik Andersson <debian@gisladisker.se>
+Forwarded: yes
+Last-Update: 2020-04-25
+diff -Naup axel-2.4.orig/axel.c axel-2.4/axel.c
+--- axel-2.4.orig/axel.c	2009-04-27 16:19:03.000000000 +0200
++++ axel-2.4/axel.c	2010-04-24 01:51:06.000000000 +0200
+@@ -65,6 +65,7 @@ axel_t *axel_new( conf_t *conf, int coun
+ 		axel->url = malloc( sizeof( url_t ) );
+ 		axel->url->next = axel->url;
+ 		strncpy( axel->url->text, (char *) url, MAX_STRING );
++		strncpy( axel->url->text2, (char *) url, MAX_STRING );
+ 	}
+ 	else
+ 	{
+@@ -94,6 +95,7 @@ axel_t *axel_new( conf_t *conf, int coun
+ 	}
+ 
+ 	axel->conn[0].local_if = axel->conf->interfaces->text;
++	axel->conn[0].local_if6 = axel->conf->interfaces->text2;
+ 	axel->conf->interfaces = axel->conf->interfaces->next;
+ 	
+ 	strncpy( axel->filename, axel->conn[0].file, MAX_STRING );
+@@ -219,13 +221,14 @@ void axel_start( axel_t *axel )
+ {
+ 	int i;
+ 	
+-	/* HTTP might've redirected and FTP handles wildcards, so
+-	   re-scan the URL for every conn				*/
++	/* HTTP might have been redirected, and FTP handles wildcards,
++	 * so re-scan the URL for every conn				*/
+ 	for( i = 0; i < axel->conf->num_connections; i ++ )
+ 	{
+ 		conn_set( &axel->conn[i], axel->url->text );
+ 		axel->url = axel->url->next;
+ 		axel->conn[i].local_if = axel->conf->interfaces->text;
++		axel->conn[i].local_if6 = axel->conf->interfaces->text2;
+ 		axel->conf->interfaces = axel->conf->interfaces->next;
+ 		axel->conn[i].conf = axel->conf;
+ 		if( i ) axel->conn[i].supported = 1;
+@@ -233,7 +236,7 @@ void axel_start( axel_t *axel )
+ 	
+ 	if( axel->conf->verbose > 0 )
+ 		axel_message( axel, _("Starting download") );
+-	
++
+ 	for( i = 0; i < axel->conf->num_connections; i ++ )
+ 	if( axel->conn[i].currentbyte <= axel->conn[i].lastbyte )
+ 	{
+diff -Naup axel-2.4.orig/axel.h axel-2.4/axel.h
+--- axel-2.4.orig/axel.h	2009-04-29 07:26:57.000000000 +0200
++++ axel-2.4/axel.h	2010-04-19 18:25:10.000000000 +0200
+@@ -74,6 +74,7 @@ typedef struct
+ {
+ 	void *next;
+ 	char text[MAX_STRING];
++	char text2[MAX_STRING];
+ } message_t;
+ 
+ typedef message_t url_t;
+diff -Naup axel-2.4.orig/conf.c axel-2.4/conf.c
+--- axel-2.4.orig/conf.c	2009-04-27 16:19:03.000000000 +0200
++++ axel-2.4/conf.c	2010-04-25 02:27:45.000000000 +0200
+@@ -204,7 +204,7 @@ int parse_interfaces( conf_t *conf, char
+ 		for( s2 = s; *s2 != ' ' && *s2 != '\t' && *s2; s2 ++ );
+ 		*s2 = 0;
+ 		if( *s < '0' || *s > '9' )
+-			get_if_ip( s, iface->text );
++			get_if_ip( s, iface->text, iface->text2 );
+ 		else
+ 			strcpy( iface->text, s );
+ 		s = s2 + 1;
+diff -Naup axel-2.4.orig/conn.c axel-2.4/conn.c
+--- axel-2.4.orig/conn.c	2009-04-27 16:19:03.000000000 +0200
++++ axel-2.4/conn.c	2010-04-25 12:53:10.000000000 +0200
+@@ -114,8 +114,15 @@ int conn_set( conn_t *conn, char *set_ur
+ 		*i = 0;
+ 		strncpy( conn->pass, i + 1, MAX_STRING );
+ 	}
+-	/* Port number?							*/
+-	if( ( i = strchr( conn->host, ':' ) ) != NULL )
++
++	/* Trailing port number? Beware of IPv6 brackets.		*/
++	j = conn->host;
++	if( *(conn->host) == '[' && strchr( conn->host, ']' ) )
++		/* Advance to ending bracket. */
++		j = strchr( conn->host, ']' );
++
++	/* Detect the port, and end the host string.			*/
++	if( ( i = strchr( j, ':' ) ) != NULL )
+ 	{
+ 		*i = 0;
+ 		sscanf( i + 1, "%i", &conn->port );
+@@ -141,6 +148,19 @@ int conn_set( conn_t *conn, char *set_ur
+ 			conn->port = 21;
+ 	}
+ 	
++	/* Does the host string contain an IPv6 bracket?		*/
++	if( *conn->host == '[' )
++	{
++		/* Left justify the numerical IPv6 address. */
++		i = conn->host;
++		while( ( *(i+1) != '\0' ) && ( *(i+1) != ']' ) )
++		{
++			*i = *(i+1);
++			++i;
++		}
++		*i = '\0';
++	}
++
+ 	return( conn->port > 0 );
+ }
+ 
+@@ -156,7 +176,9 @@ char *conn_url( conn_t *conn )
+ 		sprintf( string + strlen( string ), "%s:%s@",
+ 			conn->user, conn->pass );
+ 
+-	sprintf( string + strlen( string ), "%s:%i%s%s",
++	sprintf( string + strlen( string ),
++			strchr( conn->host, ':' )
++				? "[%s]:%i%s%s" : "%s:%i%s%s",
+ 		conn->host, conn->port, conn->dir, conn->file );
+ 	
+ 	return( string );
+@@ -199,6 +221,7 @@ int conn_init( conn_t *conn )
+ 	if( conn->proto == PROTO_FTP && !conn->proxy )
+ 	{
+ 		conn->ftp->local_if = conn->local_if;
++		conn->ftp->local_if6 = conn->local_if6;
+ 		conn->ftp->ftp_mode = FTP_PASSIVE;
+ 		if( !ftp_connect( conn->ftp, conn->host, conn->port, conn->user, conn->pass ) )
+ 		{
+@@ -216,6 +239,7 @@ int conn_init( conn_t *conn )
+ 	else
+ 	{
+ 		conn->http->local_if = conn->local_if;
++		conn->http->local_if6 = conn->local_if6;
+ 		if( !http_connect( conn->http, conn->proto, proxy, conn->host, conn->port, conn->user, conn->pass ) )
+ 		{
+ 			conn->message = conn->http->headers;
+@@ -335,7 +359,10 @@ int conn_info( conn_t *conn )
+ 			}
+ 			else if( s[0] == '/' )
+ 			{
+-				sprintf( conn->http->headers, "http://%s:%i%s",
++				sprintf( conn->http->headers,
++						strchr( conn->host, ':' )
++							? "http://[%s]:%i%s"
++							: "http://%s:%i%s",
+ 					conn->host, conn->port, s );
+ 				strncpy( s, conn->http->headers, MAX_STRING );
+ 			}
+diff -Naup axel-2.4.orig/conn.h axel-2.4/conn.h
+--- axel-2.4.orig/conn.h	2009-04-27 16:19:03.000000000 +0200
++++ axel-2.4/conn.h	2010-04-19 18:04:11.000000000 +0200
+@@ -51,6 +51,7 @@ typedef struct
+ 	int last_transfer;
+ 	char *message;
+ 	char *local_if;
++	char *local_if6;
+ 
+ 	int state;
+ 	pthread_t setup_thread[1];
+diff -Naup axel-2.4.orig/ftp.c axel-2.4/ftp.c
+--- axel-2.4.orig/ftp.c	2009-04-27 16:19:03.000000000 +0200
++++ axel-2.4/ftp.c	2010-04-25 12:55:37.000000000 +0200
+@@ -30,7 +30,8 @@ int ftp_connect( ftp_t *conn, char *host
+ 	conn->data_fd = -1;
+ 	conn->message = malloc( MAX_STRING );
+ 	
+-	if( ( conn->fd = tcp_connect( host, port, conn->local_if ) ) == -1 )
++	if( ( conn->fd = tcp_connect( host, port, conn->local_if6 ) ) == -1
++	  && ( conn->fd = tcp_connect( host, port, conn->local_if ) ) == -1 )
+ 	{
+ 		sprintf( conn->message, _("Unable to connect to server %s:%i\n"), host, port );
+ 		return( 0 );
+@@ -228,9 +229,52 @@ int ftp_data( ftp_t *conn )
+ 	if( conn->data_fd > 0 )
+ 		return( 0 );
+ 	
+-/*	if( conn->ftp_mode == FTP_PASSIVE )
++	if( conn->ftp_mode == FTP_PASSIVE )
+ 	{
+-*/		ftp_command( conn, "PASV" );
++		/* First test the response to EPSV. */
++		ftp_command( conn, "EPSV 2" );
++		if( ftp_wait( conn ) == 229 )
++		{
++			/* Successful EPSV command. Need to find
++			 * port number. */
++			*host = '\0';
++			i = 0;
++
++			/* Typical message format:
++			 *    229 Extended Passive mode OK (|||portnum|) */
++			while( conn->message[i] && conn->message[i] != '(' )
++				++i;
++			if( conn->message[i] && conn->message[i+1] == conn->message[i+3]
++				&& sscanf( &conn->message[i+4], "%i", &info[0] ) == 1 )
++			{
++				/* Found a suitable port number.
++				 * Now locate the host. */
++				struct sockaddr_in6 sa;
++				socklen_t len = sizeof( sa );
++
++				getpeername( conn->fd, (struct sockaddr *) &sa, &len );
++				if ( getnameinfo( (struct sockaddr *) &sa, len,
++							host, sizeof(host),
++							NULL, 0, NI_NUMERICHOST ) )
++				{
++					sprintf( conn->message,
++						_("Error opening passive data connection.\n"));
++					return( 0 );
++				}
++				if( ( conn->data_fd = tcp_connect( host,
++							info[0], conn->local_if6 ) ) == -1 )
++				{
++					sprintf( conn->message,
++						_("Error opening passive data connection.\n") );
++					return( 0 );
++	
++				}
++				return( 1 );
++			}
++		}
++		/* EPSV setup failed at this point, if reached all. */
++
++		ftp_command( conn, "PASV" );
+ 		if( ftp_wait( conn ) / 100 != 2 )
+ 			return( 0 );
+ 		*host = 0;
+@@ -258,12 +302,13 @@ int ftp_data( ftp_t *conn )
+ 		}
+ 		
+ 		return( 1 );
+-/*	}
++	}
+ 	else
+ 	{
+ 		sprintf( conn->message, _("Active FTP not implemented yet.\n" ) );
+ 		return( 0 );
+-	} */
++	}
++		return( 0 );
+ }
+ 
+ /* Send a command to the server						*/
+diff -Naup axel-2.4.orig/ftp.h axel-2.4/ftp.h
+--- axel-2.4.orig/ftp.h	2009-04-27 16:19:03.000000000 +0200
++++ axel-2.4/ftp.h	2010-04-19 19:11:18.000000000 +0200
+@@ -35,6 +35,7 @@ typedef struct
+ 	int data_fd;
+ 	int ftp_mode;
+ 	char *local_if;
++	char *local_if6;
+ } ftp_t;
+ 
+ int ftp_connect( ftp_t *conn, char *host, int port, char *user, char *pass );
+Lika underkataloger: axel-2.4.orig/gui och axel-2.4/gui
+diff -Naup axel-2.4.orig/http.c axel-2.4/http.c
+--- axel-2.4.orig/http.c	2009-04-27 16:19:03.000000000 +0200
++++ axel-2.4/http.c	2010-04-24 20:15:18.000000000 +0200
+@@ -54,7 +54,8 @@ int http_connect( http_t *conn, int prot
+ 		conn->proxy = 0;
+ 	} }
+ 	
+-	if( ( conn->fd = tcp_connect( host, port, conn->local_if ) ) == -1 )
++	if( ( conn->fd = tcp_connect( host, port, conn->local_if6 ) ) == -1
++	  && ( conn->fd = tcp_connect( host, port, conn->local_if ) ) == -1 )
+ 	{
+ 		/* We'll put the message in conn->headers, not in request */
+ 		sprintf( conn->headers, _("Unable to connect to server %s:%i\n"), host, port );
+diff -Naup axel-2.4.orig/http.h axel-2.4/http.h
+--- axel-2.4.orig/http.h	2009-04-27 16:19:03.000000000 +0200
++++ axel-2.4/http.h	2010-04-19 19:06:59.000000000 +0200
+@@ -38,6 +38,7 @@ typedef struct
+ 	int status;
+ 	int fd;
+ 	char *local_if;
++	char *local_if6;
+ } http_t;
+ 
+ int http_connect( http_t *conn, int proto, char *proxy, char *host, int port, char *user, char *pass );
+diff -Naup axel-2.4.orig/tcp.c axel-2.4/tcp.c
+--- axel-2.4.orig/tcp.c	2009-04-27 16:19:03.000000000 +0200
++++ axel-2.4/tcp.c	2010-04-25 12:59:27.000000000 +0200
+@@ -24,82 +24,203 @@
+ */
+ 
+ #include "axel.h"
++#include <ifaddrs.h>
++
++#define LOCAL_DEBUG 0
+ 
+ /* Get a TCP connection */
+ int tcp_connect( char *hostname, int port, char *local_if )
+ {
+-	struct hostent *host = NULL;
+-	struct sockaddr_in addr;
+-	struct sockaddr_in local;
+-	int fd;
++	struct addrinfo hints, *ai, *aiptr;
++	struct sockaddr_storage local4, local6;
++	int fd, do_bind = 0;
++	char portstr[12];
+ 
+-#ifdef DEBUG
+-	socklen_t i = sizeof( local );
++#if defined(DEBUG) || LOCAL_DEBUG
++#	define alias local4
++	struct sockaddr_in *alias_sa4 = (struct sockaddr_in *) &alias;
++	struct sockaddr_in6 *alias_sa6 = (struct sockaddr_in6 *) &alias;
++	socklen_t i = sizeof( alias );
+ 	
+-	fprintf( stderr, "tcp_connect( %s, %i ) = ", hostname, port );
++	fprintf( stdout, "tcp_connect( %s port %i via %s )\n",
++			hostname, port, local_if );
+ #endif
+-	
+-	/* Why this loop? Because the call might return an empty record.
+-	   At least it very rarely does, on my system...		*/
+-	for( fd = 0; fd < 5; fd ++ )
+-	{
+-		if( ( host = gethostbyname( hostname ) ) == NULL )
+-			return( -1 );
+-		if( *host->h_name ) break;
+-	}
+-	if( !host || !host->h_name || !*host->h_name )
+-		return( -1 );
+-	
+-	if( ( fd = socket( AF_INET, SOCK_STREAM, 0 ) ) == -1 )
+-		return( -1 );
+-	
++
++	/* First check the validity of any local part.
++	 * This chosen address prescribes the address family. */
+ 	if( local_if && *local_if )
+ 	{
+-		local.sin_family = AF_INET;
+-		local.sin_port = 0;
+-		local.sin_addr.s_addr = inet_addr( local_if );
+-		if( bind( fd, (struct sockaddr *) &local, sizeof( struct sockaddr_in ) ) == -1 )
++		memset( &local4, 0, sizeof( local4 ) );
++		memset( &local6, 0, sizeof( local6 ) );
++		/* Future tests for active addresses:
++		 *   local4.ss_family != 0,
++		 *   local6.ss_family != 0. */
++
++		memset( &hints, 0, sizeof( hints ) );
++		hints.ai_flags = AI_NUMERICHOST | AI_ADDRCONFIG;
++		hints.ai_family = AF_UNSPEC;
++		hints.ai_socktype = SOCK_STREAM;
++
++		if( getaddrinfo( local_if, NULL, &hints, &aiptr ) )
++			return( -1 );
++
++		for( ai = aiptr; ai; ai = ai->ai_next )
+ 		{
++			if( ( fd = socket( ai->ai_family, ai->ai_socktype,
++							ai->ai_protocol ) ) < 0 )
++				continue;
++
++			if( ( ai->ai_family == AF_INET6 ||
++					ai->ai_family == AF_INET )
++			    && ( bind( fd, (struct sockaddr *) ai->ai_addr,
++						ai->ai_addrlen) == 0 ) )
++			
++			{
++				/* An applicable address has been found.
++				 * Recover ist value. */
++				memcpy( (ai->ai_family == AF_INET6)
++					    ? (struct sockaddr *) &local6
++					    : (struct sockaddr *) &local4,
++					ai->ai_addr, ai->ai_addrlen);
++			}
+ 			close( fd );
++		} /* Looping over candidates in aiptr. */
++
++		freeaddrinfo( aiptr );
++
++		if( local4.ss_family == 0 && local6.ss_family == 0 )
++		{
++			/* Reached end of candidate list and no success! */
+ 			return( -1 );
+ 		}
+-	}
+-	
+-	addr.sin_family = AF_INET;
+-	addr.sin_port = htons( port );
+-	addr.sin_addr = *( (struct in_addr *) host->h_addr );
+-	
+-	if( connect( fd, (struct sockaddr *) &addr, sizeof( struct sockaddr_in ) ) == -1 )
++
++		/* Access was granted to local address. */
++		do_bind = 1;
++	} /* Lookup of local address for binding. */
++
++	memset( &hints, 0, sizeof(hints) );
++	snprintf( portstr, sizeof( portstr )-1, "%d", port );
++	hints.ai_flags = AI_CANONNAME | AI_ADDRCONFIG;
++	hints.ai_socktype = SOCK_STREAM;
++	hints.ai_family = AF_UNSPEC;
++
++	if( getaddrinfo( hostname, portstr, &hints, &aiptr ) )
+ 	{
+-		close( fd );
++		/* Failed host lookup. */
+ 		return( -1 );
+ 	}
+-	
+-#ifdef DEBUG
+-	getsockname( fd, &local, &i );
+-	fprintf( stderr, "%i\n", ntohs( local.sin_port ) );
++
++	/* Successfully resolved hostname. Loop through candidates.
++	 * Observe that at least one of local4 and local6 are active. */
++	for( ai = aiptr; ai; ai = ai->ai_next )
++	{
++		int af_locally_alive = ( ai->ai_family == AF_INET6 )
++					? local6.ss_family
++					: local4.ss_family;
++
++		if( ( fd = socket( ai->ai_family, ai->ai_socktype,
++						ai->ai_protocol) ) < 0 )
++			continue;
++
++		if( do_bind && af_locally_alive )
++		{
++			socklen_t addrlen = ( ai->ai_family == AF_INET6 )
++						? sizeof(struct sockaddr_in6)
++						: sizeof(struct sockaddr_in);
++
++			if ( bind( fd, (ai->ai_family == AF_INET6 )
++					? (struct sockaddr *) &local6
++					: (struct sockaddr *) &local4,
++				    addrlen ) == -1 )
++			{
++				/* Look for better alternatives. */
++				close( fd );
++				continue;
++			}
++		}
++								
++		if( connect( fd, ai->ai_addr, ai->ai_addrlen ) < 0 )
++		{
++			/* Look for better alternatives. */
++			close( fd );
++			continue;
++		}
++			
++		/* Successfully connected, possibly also bound. */
++		break;
++	} /* Looping over candidates in aiptr. */
++
++	freeaddrinfo( aiptr );
++
++	if( ai == NULL )
++	{
++		/* No answer. */
++		return -1;
++	}
++
++#if defined(DEBUG) || LOCAL_DEBUG
++	getsockname( fd, (struct sockaddr *) &alias, &i );
++	fprintf( stderr, "Local connection port %i\n",
++			ntohs( (alias.ss_family == AF_INET6)
++				? alias_sa6->sin6_port
++				: alias_sa4->sin_port ) );
+ #endif
+ 	
+ 	return( fd );
+ }
+ 
+-int get_if_ip( char *iface, char *ip )
++#define CHECK_LOCAL_IN6(a) \
++	(IN6_IS_ADDR_LINKLOCAL(&((struct sockaddr_in6 *) (a))->sin6_addr) \
++	 || IN6_IS_ADDR_SITELOCAL(&((struct sockaddr_in6 *) (a))->sin6_addr))
++
++int get_if_ip( char *iface, char *ip, char *ip6 )
+ {
+-	struct ifreq ifr;
+-	int fd = socket( PF_INET, SOCK_DGRAM, IPPROTO_IP );
++	char ipaddr[INET6_ADDRSTRLEN];
++	struct ifaddrs *ifa, *ifaptr;
+ 	
+-	memset( &ifr, 0, sizeof( struct ifreq ) );
+-	
+-	strcpy( ifr.ifr_name, iface );
+-	ifr.ifr_addr.sa_family = AF_INET;
+-	if( ioctl( fd, SIOCGIFADDR, &ifr ) == 0 )
++	if( getifaddrs(&ifaptr) == -1 )
++		return( 0 );
++
++	if( ip )
++		*ip = '\0';
++	if( ip6 )
++		*ip6 = '\0';
++
++	for( ifa = ifaptr; ifa; ifa = ifa->ifa_next )
+ 	{
+-		struct sockaddr_in *x = (struct sockaddr_in *) &ifr.ifr_addr;
+-		strcpy( ip, inet_ntoa( x->sin_addr ) );
+-		return( 1 );
++		if( strcmp( ifa->ifa_name, iface ) )
++			continue;
++
++		if( ifa->ifa_addr->sa_family != AF_INET
++				&& ifa->ifa_addr->sa_family != AF_INET6 )
++			continue;
++
++		/* We have IPv4 or IPv6 address in 'ifa'. */
++		if( ifa->ifa_addr->sa_family == AF_INET
++				&& getnameinfo( ifa->ifa_addr,
++					sizeof(struct sockaddr_storage),
++					ipaddr, MAX_STRING, NULL, 0,
++					NI_NUMERICHOST) == 0 ) {
++			if( ip )
++				strncpy( ip, ipaddr, INET6_ADDRSTRLEN );
++			continue;
++		}
++		if( ifa->ifa_addr->sa_family == AF_INET6
++			&& ! CHECK_LOCAL_IN6( ifa->ifa_addr )
++			&& getnameinfo( ifa->ifa_addr,
++					sizeof(struct sockaddr_storage),
++					ipaddr, MAX_STRING, NULL, 0,
++					NI_NUMERICHOST ) == 0 ) {
++			if( ip6 )
++				strncpy( ip6, ipaddr, INET6_ADDRSTRLEN );
++		}
+ 	}
+-	else
+-	{
++
++	freeifaddrs( ifaptr );
++
++	/* Over the edge? */
++	if( (ip == NULL || *ip == '\0') && (ip6 == NULL || *ip6 == '\0') )
+ 		return( 0 );
+-	}
++
++	return( 1 );
+ }
+diff -Naup axel-2.4.orig/tcp.h axel-2.4/tcp.h
+--- axel-2.4.orig/tcp.h	2009-04-27 16:19:03.000000000 +0200
++++ axel-2.4/tcp.h	2010-04-19 16:51:27.000000000 +0200
+@@ -24,4 +24,4 @@
+ */
+ 
+ int tcp_connect( char *hostname, int port, char *local_if );
+-int get_if_ip( char *iface, char *ip );
++int get_if_ip( char *iface, char *ip, char *ip6 );

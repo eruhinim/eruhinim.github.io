@@ -1,0 +1,280 @@
+From c9363d090298601494e3a551a98e7fdaad73abbf Mon Sep 17 00:00:00 2001
+From: Nicolas Boulenguez <nicolas.boulenguez@free.fr>
+Date: Mon, 29 Jul 2019 18:34:13 +0200
+Subject: [PATCH 2/3] scripts/mk: extend and simplify tests
+
+Use less hash traversals, deal with key/values pairs instead of
+iterating on keys and search each value.
+There is no need to unexport build tools, tests happen in a separate process.
+Test SOURCE_DATE_EPOCH, from environemnt or d/changelog.
+Use Make loops instead of similar lines.
+Check that values may be overridden.
+Check that values are (or can be) exported, even if overridden.
+---
+ scripts/t/mk.t               | 35 ++++++++++++--------
+ scripts/t/mk/architecture.mk | 57 +++++++++++++-------------------
+ scripts/t/mk/buildflags.mk   | 33 +++++++++++++------
+ scripts/t/mk/buildtools.mk   | 63 +++++++++++++++++-------------------
+ scripts/t/mk/pkg-info.mk     |  2 ++
+ 5 files changed, 100 insertions(+), 90 deletions(-)
+
+diff --git a/scripts/t/mk.t b/scripts/t/mk.t
+index 98c7e5083..a46512b88 100644
+--- a/scripts/t/mk.t
++++ b/scripts/t/mk.t
+@@ -16,7 +16,7 @@
+ use strict;
+ use warnings;
+ 
+-use Test::More tests => 8;
++use Test::More tests => 9;
+ use Test::Dpkg qw(:paths);
+ 
+ use File::Spec::Functions qw(rel2abs);
+@@ -69,16 +69,23 @@ sub cmd_get_vars {
+ 
+ my %arch = cmd_get_vars($ENV{PERL}, "$srcdir/dpkg-architecture.pl", '-f');
+ 
+-delete $ENV{$_} foreach keys %arch;
+-$ENV{"TEST_$_"} = $arch{$_} foreach keys %arch;
++while (my ($k, $v) = each %arch) {
++    delete $ENV{$k};
++    $ENV{"TEST_$k"} = $v;
++}
+ test_makefile('architecture.mk');
+-$ENV{$_} = $arch{$_} foreach keys %arch;
++
++while (my ($k, $v) = each %arch) {
++    $ENV{$k} = $v;
++}
+ test_makefile('architecture.mk');
+ 
+ my %buildflag = cmd_get_vars($ENV{PERL}, "$srcdir/dpkg-buildflags.pl");
+ 
+-delete $ENV{$_} foreach keys %buildflag;
+-$ENV{"TEST_$_"} = $buildflag{$_} foreach keys %buildflag;
++while (my ($k, $v) = each %buildflag) {
++    delete $ENV{$k};
++    $ENV{"TEST_$k"} = $v;
++}
+ test_makefile('buildflags.mk');
+ 
+ my %buildtools = (
+@@ -101,19 +108,21 @@ my %buildtools = (
+     PKG_CONFIG => 'pkg-config',
+ );
+ 
+-foreach my $tool (keys %buildtools) {
++while (my ($tool, $default) = each %buildtools) {
+     delete $ENV{$tool};
+-    $ENV{"TEST_$tool"} = "$ENV{DEB_HOST_GNU_TYPE}-$buildtools{$tool}";
++    $ENV{"TEST_$tool"} = "$ENV{DEB_HOST_GNU_TYPE}-$default";
+     delete $ENV{"${tool}_FOR_BUILD"};
+-    $ENV{"TEST_${tool}_FOR_BUILD"} = "$ENV{DEB_BUILD_GNU_TYPE}-$buildtools{$tool}";
++    $ENV{"TEST_${tool}_FOR_BUILD"} = "$ENV{DEB_BUILD_GNU_TYPE}-$default";
+ }
+ test_makefile('buildtools.mk');
+ 
+-foreach my $tool (keys %buildtools) {
+-    delete $ENV{${tool}};
+-    delete $ENV{"${tool}_FOR_BUILD"};
+-}
++delete $ENV{SOURCE_DATE_EPOCH};
++$ENV{TEST_SOURCE_DATE_EPOCH} = `date +%s -d "Tue, 04 Aug 2015 16:13:50 +0200"`;
++chomp $ENV{TEST_SOURCE_DATE_EPOCH};
++test_makefile('pkg-info.mk');
+ 
++$ENV{SOURCE_DATE_EPOCH} = 100;
++$ENV{TEST_SOURCE_DATE_EPOCH} = 100;
+ test_makefile('pkg-info.mk');
+ 
+ test_makefile('vendor.mk');
+diff --git a/scripts/t/mk/architecture.mk b/scripts/t/mk/architecture.mk
+index 2ac0222ca..939835be3 100644
+--- a/scripts/t/mk/architecture.mk
++++ b/scripts/t/mk/architecture.mk
+@@ -1,36 +1,25 @@
++DEB_BUILD_ARCH := overridden
++
+ include $(srcdir)/mk/architecture.mk
+ 
+-test:
+-	test "$(DEB_BUILD_ARCH)" = "$(TEST_DEB_BUILD_ARCH)"
+-	test "$(DEB_BUILD_ARCH_ABI)" = "$(TEST_DEB_BUILD_ARCH_ABI)"
+-	test "$(DEB_BUILD_ARCH_BITS)" = "$(TEST_DEB_BUILD_ARCH_BITS)"
+-	test "$(DEB_BUILD_ARCH_CPU)" = "$(TEST_DEB_BUILD_ARCH_CPU)"
+-	test "$(DEB_BUILD_ARCH_ENDIAN)" = "$(TEST_DEB_BUILD_ARCH_ENDIAN)"
+-	test "$(DEB_BUILD_ARCH_LIBC)" = "$(TEST_DEB_BUILD_ARCH_LIBC)"
+-	test "$(DEB_BUILD_ARCH_OS)" = "$(TEST_DEB_BUILD_ARCH_OS)"
+-	test "$(DEB_BUILD_GNU_CPU)" = "$(TEST_DEB_BUILD_GNU_CPU)"
+-	test "$(DEB_BUILD_GNU_SYSTEM)" = "$(TEST_DEB_BUILD_GNU_SYSTEM)"
+-	test "$(DEB_BUILD_GNU_TYPE)" = "$(TEST_DEB_BUILD_GNU_TYPE)"
+-	test "$(DEB_BUILD_MULTIARCH)" = "$(TEST_DEB_BUILD_MULTIARCH)"
+-	test "$(DEB_HOST_ARCH)" = "$(TEST_DEB_HOST_ARCH)"
+-	test "$(DEB_HOST_ARCH_ABI)" = "$(TEST_DEB_HOST_ARCH_ABI)"
+-	test "$(DEB_HOST_ARCH_BITS)" = "$(TEST_DEB_HOST_ARCH_BITS)"
+-	test "$(DEB_HOST_ARCH_CPU)" = "$(TEST_DEB_HOST_ARCH_CPU)"
+-	test "$(DEB_HOST_ARCH_ENDIAN)" = "$(TEST_DEB_HOST_ARCH_ENDIAN)"
+-	test "$(DEB_HOST_ARCH_LIBC)" = "$(TEST_DEB_HOST_ARCH_LIBC)"
+-	test "$(DEB_HOST_ARCH_OS)" = "$(TEST_DEB_HOST_ARCH_OS)"
+-	test "$(DEB_HOST_GNU_CPU)" = "$(TEST_DEB_HOST_GNU_CPU)"
+-	test "$(DEB_HOST_GNU_SYSTEM)" = "$(TEST_DEB_HOST_GNU_SYSTEM)"
+-	test "$(DEB_HOST_GNU_TYPE)" = "$(TEST_DEB_HOST_GNU_TYPE)"
+-	test "$(DEB_HOST_MULTIARCH)" = "$(TEST_DEB_HOST_MULTIARCH)"
+-	test "$(DEB_TARGET_ARCH)" = "$(TEST_DEB_TARGET_ARCH)"
+-	test "$(DEB_TARGET_ARCH_ABI)" = "$(TEST_DEB_TARGET_ARCH_ABI)"
+-	test "$(DEB_TARGET_ARCH_BITS)" = "$(TEST_DEB_TARGET_ARCH_BITS)"
+-	test "$(DEB_TARGET_ARCH_CPU)" = "$(TEST_DEB_TARGET_ARCH_CPU)"
+-	test "$(DEB_TARGET_ARCH_ENDIAN)" = "$(TEST_DEB_TARGET_ARCH_ENDIAN)"
+-	test "$(DEB_TARGET_ARCH_LIBC)" = "$(TEST_DEB_TARGET_ARCH_LIBC)"
+-	test "$(DEB_TARGET_ARCH_OS)" = "$(TEST_DEB_TARGET_ARCH_OS)"
+-	test "$(DEB_TARGET_GNU_CPU)" = "$(TEST_DEB_TARGET_GNU_CPU)"
+-	test "$(DEB_TARGET_GNU_SYSTEM)" = "$(TEST_DEB_TARGET_GNU_SYSTEM)"
+-	test "$(DEB_TARGET_GNU_TYPE)" = "$(TEST_DEB_TARGET_GNU_TYPE)"
+-	test "$(DEB_TARGET_MULTIARCH)" = "$(TEST_DEB_TARGET_MULTIARCH)"
++vars := $(foreach machine,BUILD HOST TARGET,$(foreach var,\
++  ARCH \
++  ARCH_ABI \
++  ARCH_BITS \
++  ARCH_CPU \
++  ARCH_ENDIAN \
++  ARCH_LIBC \
++  ARCH_OS \
++  GNU_CPU \
++  GNU_SYSTEM \
++  GNU_TYPE \
++  MULTIARCH \
++,DEB_$(machine)_$(var)))
++
++test: $(vars)
++DEB_BUILD_ARCH:
++	test '$($@)' = overridden
++	test "$${$@}" = overridden
++$(filter-out DEB_BUILD_ARCH,$(vars)):
++	test '$($@)' = '$(TEST_$@)'
++	test "$${$@}" = '$(TEST_$@)'
+diff --git a/scripts/t/mk/buildflags.mk b/scripts/t/mk/buildflags.mk
+index feed5e31b..95b5cbf46 100644
+--- a/scripts/t/mk/buildflags.mk
++++ b/scripts/t/mk/buildflags.mk
+@@ -1,14 +1,27 @@
+ DEB_CPPFLAGS_MAINT_APPEND = -DTEST_MK=test
++DEB_CXXFLAGS_MAINT_SET := set
++DPKG_EXPORT_BUILDFLAGS := 1
+ 
+ include $(srcdir)/mk/buildflags.mk
+ 
+-test:
+-	test "$(CFLAGS)" = "$(TEST_CFLAGS)"
+-	test "$(CPPFLAGS)" = "$(TEST_CPPFLAGS) -DTEST_MK=test"
+-	test "$(CXXFLAGS)" = "$(TEST_CXXFLAGS)"
+-	test "$(FCFLAGS)" = "$(TEST_FCFLAGS)"
+-	test "$(FFLAGS)" = "$(TEST_FFLAGS)"
+-	test "$(GCJFLAGS)" = "$(TEST_GCJFLAGS)"
+-	test "$(LDFLAGS)" = "$(TEST_LDFLAGS)"
+-	test "$(OBJCFLAGS)" = "$(TEST_OBJCFLAGS)"
+-	test "$(OBJCXXFLAGS)" = "$(TEST_OBJCXXFLAGS)"
++vars := \
++  CFLAGS \
++  CPPFLAGS \
++  CXXFLAGS \
++  FCFLAGS \
++  FFLAGS \
++  GCJFLAGS \
++  LDFLAGS \
++  OBJCFLAGS \
++  OBJCXXFLAGS
++
++test: $(vars)
++CPPFLAGS:
++	test '$(CPPFLAGS)' = '$(TEST_CPPFLAGS) -DTEST_MK=test'
++	test "$${CPPFLAGS}" = '$(TEST_CPPFLAGS) -DTEST_MK=test'
++CXXFLAGS:
++	test '$(CXXFLAGS)' = set
++	test "$${CXXFLAGS}" = set
++$(filter-out CPPFLAGS CXXFLAGS,$(vars)):
++	test '$($@)' = '$(TEST_$@)'
++	test "$${$@}" = '$(TEST_$@)'
+diff --git a/scripts/t/mk/buildtools.mk b/scripts/t/mk/buildtools.mk
+index 0077791b5..ec9ddc115 100644
+--- a/scripts/t/mk/buildtools.mk
++++ b/scripts/t/mk/buildtools.mk
+@@ -1,35 +1,32 @@
++AR := overridden
++DPKG_EXPORT_BUILDTOOLS := 1
++
+ include $(srcdir)/mk/buildtools.mk
+ 
+-test:
+-	test "$(AS)" = "$(TEST_AS)"
+-	test "$(AS_FOR_BUILD)" = "$(TEST_AS_FOR_BUILD)"
+-	test "$(CC)" = "$(TEST_CC)"
+-	test "$(CC_FOR_BUILD)" = "$(TEST_CC_FOR_BUILD)"
+-	test "$(CXX)" = "$(TEST_CXX)"
+-	test "$(CXX_FOR_BUILD)" = "$(TEST_CXX_FOR_BUILD)"
+-	test "$(OBJC)" = "$(TEST_OBJC)"
+-	test "$(OBJC_FOR_BUILD)" = "$(TEST_OBJC_FOR_BUILD)"
+-	test "$(OBJCXX)" = "$(TEST_OBJCXX)"
+-	test "$(OBJCXX_FOR_BUILD)" = "$(TEST_OBJCXX_FOR_BUILD)"
+-	test "$(GCJ)" = "$(TEST_GCJ)"
+-	test "$(GCJ_FOR_BUILD)" = "$(TEST_GCJ_FOR_BUILD)"
+-	test "$(F77)" = "$(TEST_F77)"
+-	test "$(F77_FOR_BUILD)" = "$(TEST_F77_FOR_BUILD)"
+-	test "$(FC)" = "$(TEST_FC)"
+-	test "$(FC_FOR_BUILD)" = "$(TEST_FC_FOR_BUILD)"
+-	test "$(LD)" = "$(TEST_LD)"
+-	test "$(LD_FOR_BUILD)" = "$(TEST_LD_FOR_BUILD)"
+-	test "$(STRIP)" = "$(TEST_STRIP)"
+-	test "$(STRIP_FOR_BUILD)" = "$(TEST_STRIP_FOR_BUILD)"
+-	test "$(OBJCOPY)" = "$(TEST_OBJCOPY)"
+-	test "$(OBJCOPY_FOR_BUILD)" = "$(TEST_OBJCOPY_FOR_BUILD)"
+-	test "$(OBJDUMP)" = "$(TEST_OBJDUMP)"
+-	test "$(OBJDUMP_FOR_BUILD)" = "$(TEST_OBJDUMP_FOR_BUILD)"
+-	test "$(NM)" = "$(TEST_NM)"
+-	test "$(NM_FOR_BUILD)" = "$(TEST_NM_FOR_BUILD)"
+-	test "$(AR)" = "$(TEST_AR)"
+-	test "$(AR_FOR_BUILD)" = "$(TEST_AR_FOR_BUILD)"
+-	test "$(RANLIB)" = "$(TEST_RANLIB)"
+-	test "$(RANLIB_FOR_BUILD)" = "$(TEST_RANLIB_FOR_BUILD)"
+-	test "$(PKG_CONFIG)" = "$(TEST_PKG_CONFIG)"
+-	test "$(PKG_CONFIG_FOR_BUILD)" = "$(TEST_PKG_CONFIG_FOR_BUILD)"
++vars := $(foreach tool,\
++  AR \
++  AS \
++  CC \
++  CPP \
++  CXX \
++  F77 \
++  FC \
++  GCJ \
++  LD \
++  NM \
++  OBJC \
++  OBJCOPY	\
++  OBJCXX \
++  OBJDUMP \
++  PKG_CONFIG \
++  RANLIB \
++  STRIP \
++,$(tool) $(tool)_FOR_BUILD)
++
++test: $(vars)
++AR AR_FOR_BUILD:
++	test '$($@)' = overridden
++	test "$${$@}" = overridden
++$(filter-out AR AR_FOR_BUILD,$(vars)):
++	test '$($@)' = '$(TEST_$@)'
++	test "$${$@}" = '$(TEST_$@)'
+diff --git a/scripts/t/mk/pkg-info.mk b/scripts/t/mk/pkg-info.mk
+index 22a2bf44f..c0e3287b5 100644
+--- a/scripts/t/mk/pkg-info.mk
++++ b/scripts/t/mk/pkg-info.mk
+@@ -7,3 +7,5 @@ test:
+ 	test "$(DEB_VERSION_UPSTREAM_REVISION)" = "2:3.4-5-6"
+ 	test "$(DEB_VERSION_UPSTREAM)" = "2:3.4-5"
+ 	test "$(DEB_DISTRIBUTION)" = "suite"
++	test '$(SOURCE_DATE_EPOCH)' = '$(TEST_SOURCE_DATE_EPOCH)'
++	test "$${SOURCE_DATE_EPOCH}" = '$(TEST_SOURCE_DATE_EPOCH)'
+-- 
+2.20.1
+

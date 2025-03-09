@@ -1,0 +1,117 @@
+From 1d109773b214cdcd9b96d29499bbdd6713294884 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?IOhannes=20m=20zm=C3=B6lnig?=
+ <zmoelnig@umlautQ.umlaeute.mur.at>
+Date: Fri, 11 Oct 2013 17:05:38 +0200
+Subject: [PATCH] Intelligent autotools versions (Closes:#725950)
+
+DEB_AUTO_UPDATE_* can now be a (semicolon-separated) pair
+that defines a version range (A<=x<=B).
+the version range can be open (e.g. ",12" = '<=12')
+or empty (",", unversioned dependency)
+
+if the version is given as a version range, the autotools are invoked
+without any version suffix (e.g. "aclocal" instead of "aclocal-1.14"
+---
+ 1/class/autotools-files.mk.in | 14 ++++++++++----
+ 1/class/autotools-vars.mk.in  | 35 +++++++++++++++++++++++++++++++----
+ 2 files changed, 41 insertions(+), 8 deletions(-)
+
+diff --git a/1/class/autotools-files.mk.in b/1/class/autotools-files.mk.in
+index 3444309..9f1ee8d 100644
+--- a/1/class/autotools-files.mk.in
++++ b/1/class/autotools-files.mk.in
+@@ -1,5 +1,6 @@
+ # -*- mode: makefile; coding: utf-8 -*-
+ # Copyright Â© 2005 Robert Millan
++# Copyright Â© 2013 IOhannes m zmÃ¶lnig <zmoelnig@iem.at>
+ # Description: A class to automatically update GNU autotools files
+ #
+ # This program is free software; you can redistribute it and/or
+@@ -44,13 +45,18 @@ endif
+ 
+ DEB_ACLOCAL_ARGS ?= $(if $(wildcard $(DEB_SRCDIR)/m4),-I m4)
+ 
++## calculate invoke command for a (versioned) autotools-command
++# call as: $(call cdbs_autotools_dependencies,$(VERSION),$(VERSIONEDBINARY),$(BINARY))
++# if VERSION is a single value, it returns "$(VERSIONEDBINARY)$(VERSION)", else it returns "$(BINARY)"
++cdbs_autotools_invoke=$(if $(findstring $(comma),$(1)),$(3),$(2)$(1))
++
+ common-configure-arch common-configure-indep:: debian/stamp-autotools-files
+ debian/stamp-autotools-files:
+ 	$(if $(filter pre,$(DEB_AUTO_UPDATE_LIBTOOL)),cd $(DEB_SRCDIR) && libtoolize -c -f)
+-	$(if $(DEB_AUTO_UPDATE_ACLOCAL),cd $(DEB_SRCDIR) && aclocal-$(DEB_AUTO_UPDATE_ACLOCAL) $(DEB_ACLOCAL_ARGS))
+-	$(if $(DEB_AUTO_UPDATE_AUTOCONF),if [ -e $(DEB_SRCDIR)/configure.ac ] || [ -e $(DEB_SRCDIR)/configure.in ]; then cd $(DEB_SRCDIR) && `which autoconf$(DEB_AUTO_UPDATE_AUTOCONF) || which autoconf`; fi)
+-	$(if $(DEB_AUTO_UPDATE_AUTOHEADER),if [ -e $(DEB_SRCDIR)/configure.ac ] || [ -e $(DEB_SRCDIR)/configure.in ]; then cd $(DEB_SRCDIR) && `which autoheader$(DEB_AUTO_UPDATE_AUTOHEADER) || which autoheader` ; fi)
+-	$(if $(DEB_AUTO_UPDATE_AUTOMAKE),if [ -e $(DEB_SRCDIR)/Makefile.am ]; then cd $(DEB_SRCDIR) && automake-$(DEB_AUTO_UPDATE_AUTOMAKE) $(DEB_AUTOMAKE_ARGS) ; fi)
++	$(if $(DEB_AUTO_UPDATE_ACLOCAL),cd $(DEB_SRCDIR) && $(call cdbs_autotools_invoke,$(DEB_AUTO_UPDATE_ACLOCAL),aclocal-,aclocal) $(DEB_ACLOCAL_ARGS))
++	$(if $(DEB_AUTO_UPDATE_AUTOCONF),if [ -e $(DEB_SRCDIR)/configure.ac ] || [ -e $(DEB_SRCDIR)/configure.in ]; then cd $(DEB_SRCDIR) && `which $(call cdbs_autotools_invoke,$(DEB_AUTO_UPDATE_AUTOCONF),autoconf,autoconf) || which autoconf`; fi)
++	$(if $(DEB_AUTO_UPDATE_AUTOHEADER),if [ -e $(DEB_SRCDIR)/configure.ac ] || [ -e $(DEB_SRCDIR)/configure.in ]; then cd $(DEB_SRCDIR) && `which  $(call cdbs_autotools_invoke,$(DEB_AUTO_UPDATE_AUTOHEADER),autoheader,autoheader) || which autoheader` ; fi)
++	$(if $(DEB_AUTO_UPDATE_AUTOMAKE),if [ -e $(DEB_SRCDIR)/Makefile.am ]; then cd $(DEB_SRCDIR) &&  $(call cdbs_autotools_invoke,$(DEB_AUTO_UPDATE_AUTOMAKE),automake-,automake) $(DEB_AUTOMAKE_ARGS) ; fi)
+ 	touch debian/stamp-autotools-files
+ 
+ clean::
+diff --git a/1/class/autotools-vars.mk.in b/1/class/autotools-vars.mk.in
+index 74020bd..1088771 100644
+--- a/1/class/autotools-vars.mk.in
++++ b/1/class/autotools-vars.mk.in
+@@ -1,6 +1,7 @@
+ # -*- mode: makefile; coding: utf-8 -*-
+ # Copyright Â© 2002,2003 Colin Walters <walters@debian.org>
+ # Copyright Â© 2008-2009 Jonas Smedegaard <dr@jones.dk>
++# Copyright Â© 2013 IOhannes m zmÃ¶lnig <zmoelnig@iem.at>
+ # Description: Common variables for GNU autoconf+automake packages
+ #
+ # This program is free software; you can redistribute it and/or
+@@ -65,19 +66,45 @@ DEB_CONFIGURE_INVOKE ?= cd $(cdbs_make_curbuilddir) && $(DEB_CONFIGURE_SCRIPT_EN
+ 
+ #DEB_CONFIGURE_EXTRA_FLAGS =
+ 
++## calculate dependencies for an autotools package
++# call as: $(call cdbs_autotools_dependencies,$(VERSION),$(VERSIONEDPACKAGE),$(PACKAGE))
++# if VERSION is a single value,
++#   it returns $(VERSIONEDPACKAGE)$(VERSION)
++# if VERSION is a comma-separated pair,
++#   it returns "$(PACKAGE) (>=$(VERSION[0])),$(PACKAGE) (<=$(VERSION[1]))"
++# one value of the pair can be omitted to not specify a min/max version
++# if both values of the pair are omitted (',') an unversioned dependency on PACKAGE is created
++#
++# example, with PACKAGE=foo, VERSIONEDPACKAGE=foob- and VERSION=...
++# 3         : foob-3
++# 4,7       : foo (>=4), foo (<=7)
++# 1.10,     : foo (>=1.10)
++# ,3.14     : foo (<=3.14)
++# ,         : foo
++
++cdbs_autotools_dependencies=$(if $(findstring $(comma),$(1)), \
++	$(or \
++	 $(and $(filter $(1),$(comma)),$(3)),\
++	 $(and $(filter-out $(1),$(patsubst %$(comma),%,$(1))),$(3) (>=$(patsubst %$(comma),%,$(1)))),\
++	 $(and $(filter-out $(1),$(patsubst $(comma)%,%,$(1))),$(3) (<=$(patsubst $(comma)%,%,$(1)))),\
++	 $(3) (>=$(firstword $(subst $(comma), ,$(1))))$(comma) $(3) (<=$(lastword $(subst $(comma), ,$(1))))),\
++	$(2)$(1))
++
+ CDBS_BUILD_DEPENDS_class_autotools-vars_libtool ?= libtool
+ CDBS_BUILD_DEPENDS += $(if $(DEB_AUTO_UPDATE_LIBTOOL),$(comma) $(CDBS_BUILD_DEPENDS_class_autotools-vars_libtool))
+ 
+-CDBS_BUILD_DEPENDS_class_autotools-vars_automake ?= automake$(DEB_AUTO_UPDATE_AUTOMAKE)
++CDBS_BUILD_DEPENDS_class_autotools-vars_automake ?= $(call cdbs_autotools_dependencies,$(DEB_AUTO_UPDATE_AUTOMAKE),automake,automake)
+ CDBS_BUILD_DEPENDS += $(if $(DEB_AUTO_UPDATE_AUTOMAKE),$(comma) $(CDBS_BUILD_DEPENDS_class_autotools-vars_automake))
+ 
+-CDBS_BUILD_DEPENDS_class_autotools-vars_aclocal ?= automake$(DEB_AUTO_UPDATE_ACLOCAL)
++CDBS_BUILD_DEPENDS_class_autotools-vars_aclocal ?= $(call cdbs_autotools_dependencies,$(DEB_AUTO_UPDATE_ACLOCAL),automake,automake)
+ CDBS_BUILD_DEPENDS += $(if $(DEB_AUTO_UPDATE_ACLOCAL),$(comma) $(CDBS_BUILD_DEPENDS_class_autotools-vars_aclocal))
+ 
+-CDBS_BUILD_DEPENDS_class_autotools-vars_autoconf ?= autoconf$(filter 2.13,$(DEB_AUTO_UPDATE_AUTOCONF))
++CDBS_BUILD_DEPENDS_class_autotools-vars_autoconf ?= \
++	$(if $(findstring $(comma),$(DEB_AUTO_UPDATE_AUTOCONF)),$(call cdbs_autotools_dependencies,$(DEB_AUTO_UPDATE_AUTOCONF),autoconf,autoconf),autoconf$(filter 2.13,$(DEB_AUTO_UPDATE_AUTOCONF)))
+ CDBS_BUILD_DEPENDS += $(if $(DEB_AUTO_UPDATE_AUTOCONF),$(comma) $(CDBS_BUILD_DEPENDS_class_autotools-vars_autoconf))
+ 
+-CDBS_BUILD_DEPENDS_class_autotools-vars_autoheader ?= autoconf$(filter 2.13,$(DEB_AUTO_UPDATE_AUTOHEADER))
++CDBS_BUILD_DEPENDS_class_autotools-vars_autoheader ?= \
++	$(if $(findstring $(comma),$(DEB_AUTO_UPDATE_AUTOHEADER)),$(call cdbs_autotools_dependencies,$(DEB_AUTO_UPDATE_AUTOHEADER),autoconf,autoconf),autoconf$(filter 2.13,$(DEB_AUTO_UPDATE_AUTOHEADER)))
+ CDBS_BUILD_DEPENDS += $(if $(DEB_AUTO_UPDATE_AUTOHEADER),$(comma) $(CDBS_BUILD_DEPENDS_class_autotools-vars_autoheader))
+ 
+ endif
+-- 
+1.8.4.rc3
+

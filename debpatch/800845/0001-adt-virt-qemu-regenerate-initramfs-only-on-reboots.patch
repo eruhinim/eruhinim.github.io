@@ -1,0 +1,66 @@
+From f4652b649883e2d11aeb7354e3dcf4e52135e5e1 Mon Sep 17 00:00:00 2001
+From: Christian Seiler <christian@iwakd.de>
+Date: Sun, 6 Mar 2016 17:04:24 +0100
+Subject: [PATCH] adt-virt-qemu: regenerate initramfs only on reboots
+
+The initramfs needs to be regenerated due to UUID collisions with the
+baseimage drive, but we only need to do that if the testbed is
+rebooted. So in turn just set a flag file and only regenerate the
+initramfs when a reboot is requested.
+---
+ lib/adt_testbed.py         |  6 ++++++
+ virt-subproc/adt-virt-qemu | 14 ++++++++++++++
+ 2 files changed, 20 insertions(+)
+
+diff --git a/lib/adt_testbed.py b/lib/adt_testbed.py
+index 2e6dffd..30ee075 100644
+--- a/lib/adt_testbed.py
++++ b/lib/adt_testbed.py
+@@ -142,6 +142,9 @@ class Testbed:
+             self.execute(['sh', '-ecC', '''[ ! -e /tmp/autopkgtest-reboot ] || exit 0; '''
+                           '''/bin/echo -e '#!/bin/sh -e\\n'''
+                           '''[ -n "$1" ] || { echo "Usage: $0 <mark>" >&2; exit 1; }\\n'''
++                          '''[ ! -e "/run/autopkgtest-update-initramfs-at-reboot" ] || {'''
++                          '''  if type update-initramfs >/dev/null 2>&1; then '''
++                          '''    update-initramfs -k all -u; fi; }\\n'''
+                           '''echo "$1" > /run/autopkgtest-reboot-mark\\n'''
+                           '''test_script_pid=$(cat /tmp/adt_test_script_pid)\\n'''
+                           '''p=$PPID; while true; do read _ c _ pp _ < /proc/$p/stat;'''
+@@ -154,6 +157,9 @@ class Testbed:
+             self.execute(['sh', '-ecC', '''[ ! -e /tmp/autopkgtest-reboot-prepare ] || exit 0; '''
+                           '''/bin/echo -e '#!/bin/sh -e\\n'''
+                           '''[ -n "$1" ] || { echo "Usage: $0 <mark>" >&2; exit 1; }\\n'''
++                          '''[ ! -e "/run/autopkgtest-update-initramfs-at-reboot" ] || {'''
++                          '''  if type update-initramfs >/dev/null 2>&1; then '''
++                          '''    update-initramfs -k all -u; fi; }\\n'''
+                           '''echo "$1" > /run/autopkgtest-reboot-prepare-mark\\n'''
+                           '''test_script_pid=$(cat /tmp/adt_test_script_pid)\\n'''
+                           '''kill -KILL $test_script_pid\\n'''
+diff --git a/virt-subproc/adt-virt-qemu b/virt-subproc/adt-virt-qemu
+index 2116be1..a0f1339 100755
+--- a/virt-subproc/adt-virt-qemu
++++ b/virt-subproc/adt-virt-qemu
+@@ -208,6 +208,20 @@ def setup_baseimage():
+     term.send(b'udevadm settle --exit-if-exists=/dev/baseimage\n')
+     VirtSubproc.expect(term, b'#', 10)
+ 
++    # The initramfs needs to be regenerated to include the new udev
++    # rules, but this is only necesssary if the testbed is rebooted, so
++    # just touch a flag file.
++    term.send(b'touch /run/autopkgtest-update-initramfs-at-reboot\n')
++    VirtSubproc.expect(term, b'#', 10)
++
++    # Add an update-initramfs hook that removes the flag file, because
++    # if the test case calls update-initramfs anyway, we don't need to
++    # do so ourselves.
++    term.send(b'''if [ -d /usr/share/initramfs-tools/hooks ] ; then '''
++              b'''printf '#!/bin/sh\\nrm -f %s\\nexit 0\\n' "/run/autopkgtest-update-initramfs-at-reboot" '''
++              b'''> /usr/share/initramfs-tools/hooks/autopkgtest; '''
++              b'''chmod +x /usr/share/initramfs-tools/hooks/autopkgtest; fi\n''')
++    VirtSubproc.expect(term, b'#', 10)
+ 
+ def setup_shared(shared_dir):
+     '''Set up shared dir'''
+-- 
+2.1.4
+

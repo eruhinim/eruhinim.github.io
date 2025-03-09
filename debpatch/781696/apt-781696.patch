@@ -1,0 +1,120 @@
+The following changes since commit 1296bc7c466181a7978c313c40a041b34ce3eaeb:
+
+  HttpsMethod::Fetch(): Zero the FetchResult object when leaving due to 404 (2015-04-07 12:23:51 +0200)
+
+are available in the git repository at:
+
+  git://git.hcoop.net/git/ntk/apt.git 
+
+for you to fetch changes up to c42ab00a22d37c559f412a696ad36c368cf270d5:
+
+  apt-key del: Ignore case when checking if a keyid exists in a keyring. Fail if keyid is not found in any keyring. Add integration tests. (2015-04-09 00:40:07 -0400)
+
+----------------------------------------------------------------
+Nathan Kennedy (1):
+      apt-key del: Ignore case when checking if a keyid exists in a keyring.     Fail if keyid is not found in any keyring. Add integration tests.
+
+ cmdline/apt-key.in            | 22 +++++++++++++++++-----
+ test/integration/framework    |  2 +-
+ test/integration/test-apt-key | 14 ++++++++++++++
+ 3 files changed, 32 insertions(+), 6 deletions(-)
+
+diff --git a/cmdline/apt-key.in b/cmdline/apt-key.in
+index b4e0710..751cc5c 100644
+--- a/cmdline/apt-key.in
++++ b/cmdline/apt-key.in
+@@ -180,8 +180,8 @@ update() {
+ remove_key_from_keyring() {
+     local GPG="$GPG_CMD --keyring $1"
+     # check if the key is in this keyring: the key id is in the 5 column at the end
+-    if ! $GPG --with-colons --list-keys 2>&1 | grep -q "^pub:[^:]*:[^:]*:[^:]*:[0-9A-F]*$2:"; then
+-	return
++    if ! $GPG --with-colons --list-keys 2>&1 | grep -qi "^pub:[^:]*:[^:]*:[^:]*:[0-9A-F]*$2:"; then
++	return 1
+     fi
+     if [ ! -w "$1" ]; then
+ 	echo >&2 "Key ${2} is in keyring ${1}, but can't be removed as it is read only."
+@@ -211,23 +211,35 @@ remove_key_from_keyring() {
+ remove_key() {
+     requires_root
+ 
++    local NOTFOUND=1
++    local RET=0
+     # if a --keyring was given, just remove from there
+     if [ -n "$FORCED_KEYRING" ]; then
+-	remove_key_from_keyring "$FORCED_KEYRING" "$1"
++	remove_key_from_keyring "$FORCED_KEYRING" "$1" || RET=$?
++	NOTFOUND=$RET
+     else
+ 	# otherwise all known keyrings are up for inspection
+ 	local TRUSTEDFILE="/etc/apt/trusted.gpg"
+ 	eval $(apt-config shell TRUSTEDFILE Apt::GPGV::TrustedKeyring)
+ 	eval $(apt-config shell TRUSTEDFILE Dir::Etc::Trusted/f)
+-	remove_key_from_keyring "$TRUSTEDFILE" "$1"
++	remove_key_from_keyring "$TRUSTEDFILE" "$1" || RET=$?
++	NOTFOUND=$RET
+ 	TRUSTEDPARTS="/etc/apt/trusted.gpg.d"
+ 	eval $(apt-config shell TRUSTEDPARTS Dir::Etc::TrustedParts/d)
+ 	if [ -d "$TRUSTEDPARTS" ]; then
+ 	    for trusted in $(run-parts --list "$TRUSTEDPARTS" --regex '^.*\.gpg$'); do
+-		remove_key_from_keyring "$trusted" "$1"
++		RET=0
++		remove_key_from_keyring "$trusted" "$1" || RET=$?
++		if [ $RET -eq 0 ]; then
++		    NOTFOUND=0
++		fi
+ 	    done
+ 	fi
+     fi
++    if [ $NOTFOUND -ne 0 ]; then
++	echo >&2 "ERROR: The specified keyid '$1' was not found"
++	return 1
++    fi
+     echo "OK"
+ }
+ 
+diff --git a/test/integration/framework b/test/integration/framework
+index 70ad381..a12b884 100644
+--- a/test/integration/framework
++++ b/test/integration/framework
+@@ -1236,7 +1236,7 @@ testfailure() {
+ 		msgtest 'Test for failure in execution of' "$*"
+ 	fi
+ 	local OUTPUT="${TMPWORKINGDIRECTORY}/rootdir/tmp/testfailure.output"
+-	if $@ >${OUTPUT} 2>&1; then
++	if "$@" >${OUTPUT} 2>&1; then
+ 		echo >&2
+ 		cat >&2 $OUTPUT
+ 		msgfail
+diff --git a/test/integration/test-apt-key b/test/integration/test-apt-key
+index 47230cb..437212a 100755
+--- a/test/integration/test-apt-key
++++ b/test/integration/test-apt-key
+@@ -38,6 +38,12 @@ testsuccess --nomsg aptkey --fakeroot update
+ aptkey list | grep '^pub' > aptkey.list
+ testfileequal ./aptkey.list 'pub   2048R/DBAC8DAE 2010-08-18'
+ 
++msgtest "Try to remove a" 'nonexistent keyid'
++testfailure --nomsg aptkey --fakeroot --keyring rootdir/etc/apt/trusted.gpg del BOGUSKEY
++
++aptkey list | grep '^pub' > aptkey2.list
++testsuccess diff ./aptkey.list ./aptkey2.list
++
+ msgtest "Try to remove a key which exists, but isn't in the" 'forced keyring'
+ testsuccess --nomsg aptkey --fakeroot --keyring rootdir/etc/apt/trusted.gpg del DBAC8DAE
+ 
+@@ -61,6 +67,14 @@ testempty aptkey list
+ testsuccess test ! -e rootdir/etc/apt/trusted.gpg.d/joesixpack.gpg
+ testsuccess cmp keys/joesixpack.pub rootdir/etc/apt/trusted.gpg.d/joesixpack.gpg~
+ 
++msgtest 'Test key removal with' 'lowercase keyid'
++cleanplate
++cp -a keys/joesixpack.pub rootdir/etc/apt/trusted.gpg.d/joesixpack.gpg
++testsuccess --nomsg aptkey --fakeroot del dbac8dae
++testempty aptkey list
++testsuccess test ! -e rootdir/etc/apt/trusted.gpg.d/joesixpack.gpg
++testsuccess cmp keys/joesixpack.pub rootdir/etc/apt/trusted.gpg.d/joesixpack.gpg~
++
+ msgtest 'Test key removal with' 'single key in softlink'
+ cleanplate
+ ln -s $(readlink -f ./keys/joesixpack.pub) rootdir/etc/apt/trusted.gpg.d/joesixpack.gpg

@@ -1,0 +1,42 @@
+From: Jonathan Nieder <jrnieder@gmail.com>
+Date: Tue, 29 Sep 2009 00:29:37 -0500
+Subject: [PATCH 9/9] decompress_lzma(), _xz(): ignore unexpected eof
+
+dpkg-deb --contents stops feeding decompress_cat() data.tar.foo as
+soon as the decompressed data.tar ends.  Rather than detecting this
+case specially, treat all truncated compressed streams as
+intentional.
+---
+ lib/dpkg/compression.h |    9 ++++++++-
+ 1 files changed, 8 insertions(+), 1 deletions(-)
+
+diff --git a/lib/dpkg/compression.h b/lib/dpkg/compression.h
+index d9613ce..3d8ad85 100644
+--- a/lib/dpkg/compression.h
++++ b/lib/dpkg/compression.h
+@@ -328,7 +328,8 @@ static void filter_lzma(int fd_in, int fd_out, lzma_stream *s,
+ 
+ 		ret = lzma_code(s, action);
+ 
+-		if (s->avail_out == 0 || ret == LZMA_STREAM_END) {
++		if (ret == LZMA_STREAM_END || s->avail_out == 0 ||
++				ret == LZMA_BUF_ERROR) {
+ 			if (write_buf(fd_out, out_buf, s->next_out - out_buf)) {
+ 				if (errno == EDOM)
+ 					ohshite(_("%s: internal lzma error: "
+@@ -342,6 +343,12 @@ static void filter_lzma(int fd_in, int fd_out, lzma_stream *s,
+ 
+ 		if (ret == LZMA_OK)
+ 			continue;
++		if (!compressing && ret == LZMA_BUF_ERROR)
++			/*
++			 * Compressed file ended early.
++			 * Assume the caller meant for that to happen.
++			 */
++			break;
+ 		if (ret == LZMA_STREAM_END)
+ 			/* End of output. */
+ 			break;
+-- 
+1.6.5.rc1.199.g596ec
+

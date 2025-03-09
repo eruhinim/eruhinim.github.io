@@ -1,0 +1,137 @@
+diff -Nru curl-7.21.0/debian/changelog curl-7.21.0/debian/changelog
+--- curl-7.21.0/debian/changelog	2014-01-29 19:17:17.000000000 +0100
++++ curl-7.21.0/debian/changelog	2014-04-09 19:48:14.000000000 +0200
+@@ -1,3 +1,15 @@
++curl (7.21.0-2.1+squeeze8) squeeze-security; urgency=medium
++
++  * Fix multiple security issues (Closes: #742728):
++    - Fix connection re-use when using different log-in credentials
++      as per CVE-2014-0138
++      http://curl.haxx.se/docs/adv_20140326A.html
++    - Reject IP address wildcard matches as per CVE-2014-0139
++      http://curl.haxx.se/docs/adv_20140326B.html
++  * Set urgency=high accordingly
++
++ -- Alessandro Ghedini <ghedo@debian.org>  Wed, 09 Apr 2014 19:47:38 +0200
++
+ curl (7.21.0-2.1+squeeze7) squeeze-security; urgency=high
+ 
+   * Fix re-use of wrong HTTP NTLM connection as per CVE-2014-0015
+diff -Nru curl-7.21.0/debian/patches/CVE-2014-0138.patch curl-7.21.0/debian/patches/CVE-2014-0138.patch
+--- curl-7.21.0/debian/patches/CVE-2014-0138.patch	1970-01-01 01:00:00.000000000 +0100
++++ curl-7.21.0/debian/patches/CVE-2014-0138.patch	2014-04-09 19:48:14.000000000 +0200
+@@ -0,0 +1,58 @@
++Description: Fix connection re-use when using different log-in credentials
++ In addition to FTP, other connection based protocols such as IMAP, POP3,
++ SMTP, SCP, SFTP and LDAP require a new connection when different log-in
++ credentials are specified. Fixed the detection logic to include these
++ other protocols.
++Origin: upstream, http://curl.haxx.se/libcurl-bad-reuse.patch
++Forwarded: not-needed
++Author: Steve Holme <steve_holme@hotmail.com>
++Last-Update: 2014-04-09
++
++--- a/lib/http.c
+++++ b/lib/http.c
++@@ -162,7 +162,7 @@
++   ZERO_NULL,                            /* perform_getsock */
++   ZERO_NULL,                            /* disconnect */
++   PORT_HTTPS,                           /* defport */
++-  PROT_HTTP | PROT_HTTPS | PROT_SSL     /* protocol */
+++  PROT_HTTP | PROT_HTTPS | PROT_SSL | PROTOPT_CREDSPERREQUEST    /* protocol */
++ };
++ #endif
++ 
++--- a/lib/url.c
+++++ b/lib/url.c
++@@ -2986,11 +2986,11 @@
++             continue;
++           }
++         }
++-        if((needle->protocol & PROT_FTP) ||
+++        if((!(needle->protocol & PROTOPT_CREDSPERREQUEST)) ||
++            ((needle->protocol & PROT_HTTP) &&
++             (data->state.authhost.want & CURLAUTH_NTLM))) {
++-          /* This is FTP or HTTP+NTLM, verify that we're using the same name
++-             and password as well */
+++          /* This protocol requires credentials per connection or is HTTP+NTLM,
+++             so verify that we're using the same name and password as well */
++           if(!strequal(needle->user, check->user) ||
++              !strequal(needle->passwd, check->passwd)) {
++             /* one of them was different */
++--- a/lib/urldata.h
+++++ b/lib/urldata.h
++@@ -721,6 +721,8 @@
++ #define PROT_EXTMASK 0xffffff
++ 
++ #define PROT_SSL     (1<<29) /* protocol requires SSL */
+++#define PROTOPT_CREDSPERREQUEST (1<<30) /* requires login creditials per request
+++                                           as opposed to per connection */
++ 
++ /* these ones need action before socket close */
++ #define PROT_CLOSEACTION (PROT_FTP | PROT_IMAP | PROT_POP3)
++--- a/tests/data/DISABLED
+++++ b/tests/data/DISABLED
++@@ -2,5 +2,6 @@
++ # test cases are run by runtests.pl. Just add the plain test case numbers, one
++ # per line.
++ # Lines starting with '#' letters are treated as comments.
+++519
++ 563
++ 564
+diff -Nru curl-7.21.0/debian/patches/CVE-2014-0139.patch curl-7.21.0/debian/patches/CVE-2014-0139.patch
+--- curl-7.21.0/debian/patches/CVE-2014-0139.patch	1970-01-01 01:00:00.000000000 +0100
++++ curl-7.21.0/debian/patches/CVE-2014-0139.patch	2014-04-09 19:48:14.000000000 +0200
+@@ -0,0 +1,40 @@
++Description: Reject IP address wildcard matches
++ There are server certificates used with IP address in the CN field, but
++ we MUST not allow wildcard certs for hostnames given as IP addresses
++ only. Therefore we must make Curl_cert_hostcheck() fail such attempts.
++Origin: upstream, http://curl.haxx.se/libcurl-reject-cert-ip-wildcards.patch
++Forwarded: not-needed
++Author: Daniel Stenberg <daniel@haxx.se>
++Last-Update: 2014-04-09
++
++--- a/lib/ssluse.c
+++++ b/lib/ssluse.c
++@@ -53,6 +53,7 @@
++ #include "select.h"
++ #include "sslgen.h"
++ #include "rawstr.h"
+++#include "inet_pton.h"
++ 
++ #define _MPRINTF_REPLACE /* use the internal *printf() functions */
++ #include <curl/mprintf.h>
++@@ -1049,6 +1050,20 @@
++ 
++ static int hostmatch(const char *hostname, const char *pattern)
++ {
+++
+++  struct in_addr ignored;
+++#ifdef ENABLE_IPV6
+++  struct sockaddr_in6 si6;
+++#endif
+++
+++  /* detect IP address as hostname and fail the match if so */
+++  if(Curl_inet_pton(AF_INET, hostname, &ignored) > 0)
+++    return HOST_NOMATCH;
+++#ifdef ENABLE_IPV6
+++  else if(Curl_inet_pton(AF_INET6, hostname, &si6.sin6_addr) > 0)
+++    return HOST_NOMATCH;
+++#endif
+++
++   while(1) {
++     char c = *pattern++;
++ 
+diff -Nru curl-7.21.0/debian/patches/series curl-7.21.0/debian/patches/series
+--- curl-7.21.0/debian/patches/series	2014-01-29 19:17:17.000000000 +0100
++++ curl-7.21.0/debian/patches/series	2014-04-09 19:48:14.000000000 +0200
+@@ -14,6 +14,8 @@
+ CVE-2013-4545.patch
+ disable-verifyhost-with-insecure.patch
+ CVE-2014-0015.patch
++CVE-2014-0138.patch
++CVE-2014-0139.patch
+ 
+ # this must be the last
+ curl_links_with_rt

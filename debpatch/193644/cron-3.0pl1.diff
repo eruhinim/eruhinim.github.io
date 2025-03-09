@@ -1,0 +1,312 @@
+diff -uiwbBrN plain/cron-3.0pl1/cron.h included/cron-3.0pl1/cron.h
+--- plain/cron-3.0pl1/cron.h	2003-05-17 22:59:45.000000000 +0200
++++ included/cron-3.0pl1/cron.h	2003-05-17 22:29:49.000000000 +0200
+@@ -40,6 +40,10 @@
+ #include "config.h"
+ #include "externs.h"
+ 
++#ifdef CONFIG_FLASK 
++#include <linux/flask/flask_types.h>
++#endif
++
+ 	/* these are really immutable, and are
+ 	 *   defined for symbolic convenience only
+ 	 * TRUE, FALSE, and ERR must be distinct
+diff -uiwbBrN plain/cron-3.0pl1/database.c included/cron-3.0pl1/database.c
+--- plain/cron-3.0pl1/database.c	2003-05-17 22:59:45.000000000 +0200
++++ included/cron-3.0pl1/database.c	2003-05-17 22:50:55.000000000 +0200
+@@ -28,6 +28,13 @@
+ #include <sys/stat.h>
+ #include <sys/file.h>
+ 
++#ifdef CONFIG_FLASK
++#include <flask_util.h>
++#include <fs_secure.h>
++#include <ss.h>
++#include <linux/flask/av_permissions.h>
++#include <get_sid_list.h>
++#endif
+ 
+ #define TMAX(a,b) ((a)>(b)?(a):(b))
+ 
+@@ -321,14 +328,23 @@
+ 	struct passwd	*pw = NULL;
+ 	int		crontab_fd = OK - 1;
+ 	user		*u;
++	int		is_system;
++
++#ifdef CONFIG_FLASK
++	security_id_t   user_sid, file_sid;
++	struct security_query q;
++	struct security_response r;
++	int retval, flask_enabled;
++#endif
+ 
+ #ifdef DEBIAN
+-	/* If the name begins with *system*, don't worry about password -
+-	 it's part of the system crontab */
+-	if (strncmp(fname, "*system*", 8) && !(pw = getpwnam(uname))) {
++	is_system = strncmp(fname, "*system*", 8);
+ #else
+-	if (strcmp(fname, "*system*") && !(pw = getpwnam(uname))) {
++	is_system = strcmp(fname, "*system*");
+ #endif
++	/* If the name begins with *system*, don't worry about password -
++	 it's part of the system crontab */
++	if (is_system && !(pw = getpwnam(uname))) {
+ 		/* file doesn't have a user in passwd file.
+ 		 */
+ 		if (strncmp(fname, "tmp.", 4)) {
+@@ -345,6 +361,15 @@
+ 		goto next_crontab;
+ 	}
+ 
++#ifdef CONFIG_FLASK
++	flask_enabled = is_flask_enabled();
++	if (flask_enabled) {
++		if (fstat_secure(crontab_fd, statbuf, &file_sid) < OK) {
++			log_it(fname, getpid(), "FSTAT FAILED", tabname);
++			goto next_crontab;
++		}
++	} else
++#endif
+ 	if (fstat(crontab_fd, statbuf) < OK) {
+ 		log_it(fname, getpid(), "FSTAT FAILED", tabname);
+ 		goto next_crontab;
+@@ -375,6 +400,30 @@
+ 		free_user(u);
+ 		log_it(fname, getpid(), "RELOAD", tabname);
+ 	}
++#ifdef CONFIG_FLASK
++	if (flask_enabled)	{
++		/*
++		 * Since crontab files are not directly executed,
++		 * crond must ensure that the crontab file has
++		 * a context that is appropriate for the context of
++		 * the user cron job.  It performs an entrypoint
++		 * permission check for this purpose.
++		 */
++		if (get_default_sid(is_system ? "system_u" : fname, 0, &user_sid)) {
++			log_it(fname, getpid(), "NO SID", tabname);
++			goto next_crontab;
++		}
++		q.ssid = user_sid;
++		q.tsid = file_sid;
++		q.tclass = SECCLASS_FILE;
++		q.requested = FILE__ENTRYPOINT;
++		retval = security_compute_av(&q, &r);
++		if (retval || ((q.requested & r.allowed) != q.requested)) {
++			log_it(fname, getpid(), "ENTRYPOINT FAILED", tabname);
++			goto next_crontab;
++		}
++	}
++#endif
+ 	u = load_user(crontab_fd, pw, fname);
+ 	if (u != NULL) {
+ 		u->mtime = statbuf->st_mtime;
+diff -uiwbBrN plain/cron-3.0pl1/debian/changelog included/cron-3.0pl1/debian/changelog
+--- plain/cron-3.0pl1/debian/changelog	2003-05-17 22:59:45.000000000 +0200
++++ included/cron-3.0pl1/debian/changelog	2003-05-17 20:08:06.000000000 +0200
+@@ -1,3 +1,16 @@
++cron (3.0pl1-73.se2) unstable; urgency=low
++
++  * Standards 3.5.9
++  * Made it also build on non-i386
++
++ -- Torsten Knodt <tk-debian@datas-world.de>  Sat, 17 May 2003 14:29:58 +0200
++
++cron (3.0pl1-73.se1) unstable; urgency=low
++
++  * Built with SE support.
++
++ -- Russell Coker <russell@coker.com.au>  Fri, 15 Nov 2002 11:05:00 +0100
++
+ cron (3.0pl1-73) unstable; urgency=low
+ 
+   * Fixed spelling error in control file (Hi, Matt!) (closes: #124523)
+diff -uiwbBrN plain/cron-3.0pl1/debian/checksecurity.se included/cron-3.0pl1/debian/checksecurity.se
+--- plain/cron-3.0pl1/debian/checksecurity.se	1970-01-01 01:00:00.000000000 +0100
++++ included/cron-3.0pl1/debian/checksecurity.se	2003-05-17 20:08:06.000000000 +0200
+@@ -0,0 +1,8 @@
++#!/bin/sh
++
++savelog -c 7 -m 640 -u root -g adm setuid.changes >/dev/null
++if [ "$1" != "" ]; then
++  /usr/sbin/checksecurity > $1
++else
++  /usr/sbin/checksecurity
++fi
+diff -uiwbBrN plain/cron-3.0pl1/debian/control included/cron-3.0pl1/debian/control
+--- plain/cron-3.0pl1/debian/control	2003-05-17 22:59:45.000000000 +0200
++++ included/cron-3.0pl1/debian/control	2003-05-17 20:08:06.000000000 +0200
+@@ -2,12 +2,12 @@
+ Section: admin
+ Priority: important
+ Maintainer: Steve Greenland <stevegr@debian.org>
+-Standards-Version: 3.5.2
+-Build-Depends: debhelper, libpam0g-dev
++Standards-Version: 3.5.9
++Build-Depends: debhelper, libpam0g-dev, libselinux-dev [ i386 ]
+ 
+ Package: cron
+ Architecture: any
+-Depends: ${shlibs:Depends}, debianutils (>=1.7)
++Depends: ${misc:Depends}, ${shlibs:Depends}, debianutils (>=1.7)
+ Recommends: exim | smail | sendmail | mail-transport-agent
+ Suggests: anacron (>=2.0-1), logrotate, lockfile-progs
+ Conflicts: suidmanager (<< 0.50), lockfile-progs (<< 0.1.7)
+diff -uiwbBrN plain/cron-3.0pl1/debian/postinst included/cron-3.0pl1/debian/postinst
+--- plain/cron-3.0pl1/debian/postinst	2003-05-17 22:59:45.000000000 +0200
++++ included/cron-3.0pl1/debian/postinst	2003-05-17 22:56:48.000000000 +0200
+@@ -1,7 +1,6 @@
+ #!/bin/sh
+ set -e
+ 
+-update-rc.d cron defaults 89 11 >/dev/null
+ # Copy existing allow/deny files
+ crondir="/var/spool/cron"
+ pausemessage="F"
+@@ -46,12 +45,4 @@
+     fi                        
+ done)
+ 
+-if [ -x /etc/init.d/cron ]; then
+-	if [ -x /usr/sbin/invoke-rc.d ] ; then
+-	       invoke-rc.d cron start
+-	else
+-	       /etc/init.d/cron start
+-	fi
+-fi
+-
+ #DEBHELPER#
+diff -uiwbBrN plain/cron-3.0pl1/debian/postrm included/cron-3.0pl1/debian/postrm
+--- plain/cron-3.0pl1/debian/postrm	2003-05-17 22:59:45.000000000 +0200
++++ included/cron-3.0pl1/debian/postrm	2003-05-17 22:53:46.000000000 +0200
+@@ -1,7 +1,7 @@
+ #!/bin/sh
+ set -e
+ if [ $1 = purge ]; then 
+-    update-rc.d cron remove >/dev/null
+     rm -f /etc/cron.allow /etc/cron.deny
+ fi
+ 
++#DEBHELPER#
+diff -uiwbBrN plain/cron-3.0pl1/debian/prerm included/cron-3.0pl1/debian/prerm
+--- plain/cron-3.0pl1/debian/prerm	2003-05-17 22:59:45.000000000 +0200
++++ included/cron-3.0pl1/debian/prerm	1970-01-01 01:00:00.000000000 +0100
+@@ -1,12 +0,0 @@
+-#!/bin/sh
+-set -e
+-
+-if [ -x /etc/init.d/cron ]; then
+-	if [ -x /usr/sbin/invoke-rc.d ] ; then
+-	       invoke-rc.d cron stop
+-	else
+-	       /etc/init.d/cron stop
+-	fi
+-fi
+-
+-#DEBHELPER#
+diff -uiwbBrN plain/cron-3.0pl1/debian/rules included/cron-3.0pl1/debian/rules
+--- plain/cron-3.0pl1/debian/rules	2003-05-17 22:59:45.000000000 +0200
++++ included/cron-3.0pl1/debian/rules	2003-05-17 22:54:55.000000000 +0200
+@@ -67,6 +67,7 @@
+ 	# Add here commands to install the files into debian/tmp
+ 	$(MAKE) install DESTDIR=`pwd`/debian/tmp OPTIM="$(DEB_OPTIM)" INSTALL="$(DEB_INSTALL)" DEBUG_DEFS="$(DEB_DEBUG_DEFS)"
+ 	install -m 755 debian/checksecurity debian/tmp/usr/sbin/.
++	install -m 755 debian/checksecurity.se debian/tmp/usr/sbin/.
+ 	install -m 644 debian/checksecurity.conf debian/tmp/etc/.
+ 
+ 	cp -p debian/$(CONFFILES) debian/conffiles
+@@ -74,7 +75,7 @@
+ #	dh_installexamples
+ #	dh_installmenu
+ 	dh_installpam
+-	dh_installinit --noscripts
++	dh_installinit --update-rcd-params="defaults 89 11"
+ 	# Can't use dh_installcron because we don't have "normal" naming
+ 	# convention
+ 	install -m 644 debian/crontab.main debian/tmp/etc/crontab
+diff -uiwbBrN plain/cron-3.0pl1/debian/standard.daily included/cron-3.0pl1/debian/standard.daily
+--- plain/cron-3.0pl1/debian/standard.daily	2003-05-17 22:59:45.000000000 +0200
++++ included/cron-3.0pl1/debian/standard.daily	2003-05-17 20:08:06.000000000 +0200
+@@ -58,8 +58,7 @@
+ fi
+ cd /var/log
+ umask 027
+-savelog -c 7 -m 640 -u root -g adm setuid.changes >/dev/null
+-checksecurity >setuid.changes
++checksecurity.se setuid.changes
+ 
+ #
+ # Check to see if any files are in lost+found directories and warn admin
+diff -uiwbBrN plain/cron-3.0pl1/do_command.c included/cron-3.0pl1/do_command.c
+--- plain/cron-3.0pl1/do_command.c	2003-05-17 22:59:45.000000000 +0200
++++ included/cron-3.0pl1/do_command.c	2003-05-17 23:09:00.000000000 +0200
+@@ -42,6 +42,12 @@
+    }
+ #endif
+ 
++#ifdef CONFIG_FLASK
++#include <flask_util.h>
++#include <proc_secure.h>
++#include <get_sid_list.h>
++#endif
++
+ 
+ static void		child_process __P((entry *, user *)),
+ 			do_univ __P((user *));
+@@ -298,7 +304,27 @@
+ 			}
+ 			fprintf(stdout,"error");
+ #endif
++#ifdef CONFIG_FLASK
++			if (is_flask_enabled()) {
++			  security_id_t sid;	
++			  int is_system;
++#ifdef DEBIAN
++                          is_system = strncmp(u->name, "*system*", 8);
++#else
++                          is_system = strcmp(u->name, "*system*");
++#endif
++			  if (get_default_sid(is_system ? "system_u" : u->name, 0, &sid)) {
++			    fprintf(stderr, "execle_secure: couldn't get sid for user %s\n", u->name); 
++			    _exit(ERROR_EXIT);
++			  }
++			  execle_secure(shell, sid, shell, "-c", e->cmd, (char *)0, e->envp);
++			}
++			else {
++			execle(shell, shell, "-c", e->cmd, (char *)0, e->envp);
++			}
++#else
+ 			execle(shell, shell, "-c", e->cmd, (char *)0, e->envp);
++#endif
+ 			fprintf(stderr, "execl: couldn't exec `%s'\n", shell);
+ 			perror("execl");
+ 			_exit(ERROR_EXIT);
+diff -uiwbBrN plain/cron-3.0pl1/Makefile included/cron-3.0pl1/Makefile
+--- plain/cron-3.0pl1/Makefile	2003-05-17 22:59:45.000000000 +0200
++++ included/cron-3.0pl1/Makefile	2003-05-17 20:08:06.000000000 +0200
+@@ -52,7 +52,7 @@
+ DESTBIN		=	$(DESTROOT)/bin
+ DESTMAN		=	$(DESTROOT)/share/man
+ #<<need bitstring.h>>
+-INCLUDE		=	-I.
++INCLUDE		=	-I. -I/usr/include/selinux
+ #INCLUDE	=
+ #<<need getopt()>>
+ LIBS		= $(PAM_LIBS)
+@@ -75,6 +75,13 @@
+ DEBUG_DEFS = -DDEBUGGING=0   
+ # The -DUSE_SIGCHLD is needed for the Alpha port
+ DEFS = -DDEBIAN -DUSE_SIGCHLD $(DEBUG_DEFS) $(PAM_DEFS)
++
++# SE-Linux magic
++ifeq (/usr/include/selinux, $(shell ls /usr/include/selinux -d 2>/dev/null))
++	DEFS += -DCONFIG_FLASK
++	LIBS += -lsecure
++endif
++
+ #(SGI IRIX systems need this)
+ #DEFS		=	-D_BSD_SIGNALS -Dconst=
+ #<<the name of the BSD-like install program>>

@@ -1,0 +1,51 @@
+From a9c4f1806f1927a2da42712658f4cfdd37f73e50 Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Tue, 23 Nov 2021 02:26:50 +0100
+Subject: [PATCH] Dpkg::Shlibs::Objdump: Fix apply_relocations to work with
+ versioned symbols
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Since at least binutils 2.28 copy relocations for versioned symbols have
+the version appended after «@@». We were not taking this into account
+which meant these did not match and did not get marked as undefined.
+
+Try both the version qualified symbol and the bare symbol name to cope
+with old and new formats.
+
+Closes: #1000421
+---
+ scripts/Dpkg/Shlibs/Objdump.pm | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/scripts/Dpkg/Shlibs/Objdump.pm b/scripts/Dpkg/Shlibs/Objdump.pm
+index 93319d1eb..43d786edd 100644
+--- a/scripts/Dpkg/Shlibs/Objdump.pm
++++ b/scripts/Dpkg/Shlibs/Objdump.pm
+@@ -488,9 +488,20 @@ sub apply_relocations {
+ 	# We want to mark as undefined symbols those which are currently
+ 	# defined but that depend on a copy relocation
+ 	next if not $sym->{defined};
+-	next if not exists $self->{dynrelocs}{$sym->{name}};
+-	if ($self->{dynrelocs}{$sym->{name}} =~ /^R_.*_COPY$/) {
++
++        my @relocs;
++        push @relocs, $sym->{name} . '@@' . $sym->{version} if $sym->{version};
++
++        # Symbols that are not versioned, or versioned but linked with old
++        # binutils do not have a version appended.
++        push @relocs, $sym->{name};
++
++        foreach my $reloc (@relocs) {
++            next if not exists $self->{dynrelocs}{$reloc};
++            next if not $self->{dynrelocs}{$reloc} =~ /^R_.*_COPY$/;
++
+ 	    $sym->{defined} = 0;
++            last;
+ 	}
+     }
+ }
+-- 
+2.34.0
+

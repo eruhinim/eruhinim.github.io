@@ -1,0 +1,78 @@
+commit 5d03dc3da84531a3902536b2e9fed01d5eb54e23
+Author: Antonio Russo <aerusso@aerusso.net>
+Date:   Thu Dec 22 04:41:14 2022 -0700
+
+    Streaming support for Sources
+    
+    Signed-off-by: Antonio Russo <aerusso@aerusso.net>
+
+diff --git a/src/cacheman.cc b/src/cacheman.cc
+index 940be40..52f3a38 100644
+--- a/src/cacheman.cc
++++ b/src/cacheman.cc
+@@ -1695,6 +1695,7 @@ bool cacheman::ParseAndProcessMetaFile(std::function<void(const tRemoteFileInfo&
+ 	unsigned progHint=0;
+ #define STEP 2048
+ 	tDtorEx postNewline([this, &progHint](){if(progHint>=STEP) SendChunk("<br>\n");});
++	CSTYPES current_cstype = CSTYPES::CSTYPE_INVALID;
+ 
+ 	switch(idxType)
+ 	{
+@@ -1911,8 +1912,55 @@ bool cacheman::ParseAndProcessMetaFile(std::function<void(const tRemoteFileInfo&
+ 		return ParseDebianRfc822Index(reader, ret, sBaseDir, sPkgBaseDir,
+ 				EIDX_DIFFIDX, CSTYPES::CSTYPE_SHA256, "SHA256-Download", byHashMode);
+ 	case EIDX_SOURCES:
+-		return ParseDebianRfc822Index(reader, ret, sBaseDir, sPkgBaseDir,
+-				EIDX_SOURCES, CSTYPES::CSTYPE_MD5, "Files", byHashMode);
++		LOG("filetype: Sources file");
++		static const string sSrcMD5("MD5"), sSrcSHA256("Checksums-Sha256");
++
++		UrlUnescape(sPkgBaseDir);
++
++		while (reader.GetOneLine(sLine))
++		{
++			string key, val;
++			if(CheckStopSignal())
++				return true;
++
++			trimBack(sLine);
++			if(0 == ((++progHint) & (STEP-1)))
++				SendChunk("<wbr>.");
++
++			if (sLine.empty())
++			{
++				current_cstype = CSTYPES::CSTYPE_INVALID;
++				continue;
++			}
++
++			if (isspace((unsigned) (sLine[0])))
++			{
++				if(current_cstype == CSTYPES::CSTYPE_INVALID)
++					continue;
++
++				trimBoth(sLine);
++				info.fpr.csType = current_cstype;
++				if(ParseDebianIndexLine(info, sLine)) {
++					info.sDirectory=sPkgBaseDir;
++					ret(info);
++				}
++				info.SetInvalid();
++				continue;
++			}
++
++			current_cstype = CSTYPES::CSTYPE_INVALID;
++
++			if (ParseKeyValLine(sLine, key, val))
++			{
++				if(key==sSrcMD5)
++					current_cstype = CSTYPE_MD5;
++				else if(key==sSrcSHA256)
++					current_cstype = CSTYPE_SHA256;
++				else
++					continue;
++			}
++		}
++		break;
+ 	case EIDX_TRANSIDX:
+ 		return ParseDebianRfc822Index(reader, ret, sBaseDir, sPkgBaseDir,
+ 				EIDX_TRANSIDX, CSTYPES::CSTYPE_SHA1, "SHA1", byHashMode);

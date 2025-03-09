@@ -1,0 +1,104 @@
+From 087e8f7f1d5e613f5db166df1b3545c5ea48bbee Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Rapha=C3=ABl=20Hertzog?= <hertzog@debian.org>
+Date: Tue, 20 Sep 2016 16:03:56 +0200
+Subject: [PATCH 3/6] a2enmod: implement systemd support
+
+Use systemctl when systemd is in use and make it aware of
+the apache-htcacheclean@instance.service generic service
+for multi-instance support.
+---
+ debian/a2enmod   | 41 ++++++++++++++++++++++++++++++-----------
+ debian/changelog |  3 +++
+ 2 files changed, 33 insertions(+), 11 deletions(-)
+
+diff --git a/debian/a2enmod b/debian/a2enmod
+index 350a285..3116688 100755
+--- a/debian/a2enmod
++++ b/debian/a2enmod
+@@ -84,7 +84,14 @@ my $linkdir = File::Spec->abs2rel( $availdir, $enabldir );
+ my $request_reload = 0;
+ my $request_htcacheclean;
+ my $htc = "apache-htcacheclean$dir_suffix";
+-
++my $htc_service = "apache-htcacheclean";  # Service name for systemd
++my $apache_service = "apache2";
++if (defined($dir_suffix) and $dir_suffix ne '') {
++    # Uses '@instance.service' suffix instead of '-instance' suffix
++    my $service_suffix = '@' . substr($dir_suffix, 1) . '.service';
++    $htc_service .= $service_suffix;
++    $apache_service .= $service_suffix;
++}
+ my $rc = 0;
+ 
+ if ( !scalar @ARGV ) {
+@@ -114,13 +121,18 @@ foreach my $acton (@objs) {
+ }
+ 
+ my $htcstart = "";
+-if ($request_htcacheclean) {
+-    my $cmd = ($act eq "enable") ? "start" : "stop";
++my $apache_reload = "";
++my $cmd = ($act eq "enable") ? "start" : "stop";
++if (-d "/run/systemd" and -x "/bin/systemctl") {
++    $htcstart = "  systemctl $cmd $htc_service\n";
++    $apache_reload = "  systemctl $reload $apache_service\n";
++} else {
+     $htcstart = "  service $htc $cmd\n";
++    $apache_reload = "  service apache2$dir_suffix $reload\n";
+ }
+ info(  "To activate the new configuration, you need to run:\n"
+-     . "  service apache2$dir_suffix $reload\n"
+-     . $htcstart
++     . $apache_reload
++     . ($request_htcacheclean ? $htcstart : "")
+ ) if $request_reload;
+ 
+ exit($rc);
+@@ -574,17 +586,24 @@ sub special_module_handling {
+         when ('cache_disk') {
+             $request_htcacheclean = 1;
+             my $verb = "\u$act";
++            my $command;
+             $verb =~ s/e$/ing/;
+-            info("$verb external service $htc\n");
+-            # The init script has no Default-Start runlevels, so we need to
+-            # specify them explicitly.
+-            system("update-rc.d $htc $act 2 3 4 5");
+-            if ($rc == 0) {
++            if (-d "/run/systemd" and -x "/bin/systemctl") {
++                info("$verb external service $htc_service\n");
++                $command = "systemctl $act $htc_service";
++            } else {
++                info("$verb external service $htc\n");
++                # The init script has no Default-Start runlevels, so we need to
++                # specify them explicitly.
++                $command = "update-rc.d $htc $act 2 3 4 5";
++            }
++            my $res = system($command);
++            if ($res == 0) {
+                 info("The service will be started on next reboot.\n")
+                     if $act eq 'enable';
+             }
+             else {
+-                warning("update-rc.d failed\n");
++                warning("'$command' failed\n");
+             }
+ 
+         }
+diff --git a/debian/changelog b/debian/changelog
+index 4eef0f3..dfec91d 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -6,6 +6,9 @@ apache2 (2.4.23-5) UNRELEASED; urgency=medium
+ 
+   [ Raphaël Hertzog ]
+   * Add systemd unit files. Closes: #798430
++  * Improve a2enmod to enable apache-htcacheclean with systemctl and let
++    it enable 'apache-htcacheclean@instance.service' for multi-instance
++    support.
+ 
+  -- Stefan Fritsch <sf@debian.org>  Sat, 13 Aug 2016 13:38:30 +0200
+ 
+-- 
+2.9.3
+

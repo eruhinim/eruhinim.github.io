@@ -1,0 +1,290 @@
+From 86df92a019235d013d4ec763a97bb39544707673 Mon Sep 17 00:00:00 2001
+From: Roger Leigh <rleigh@debian.org>
+Date: Wed, 16 May 2012 20:51:45 +0100
+Subject: [PATCH] Add Build-Depends-Arch and Build-Conflicts-Arch
+
+dpkg currently supports
+  Build-Depends (arch all and any)
+  Build-Depends-Indep (arch all)
+and the same Build-Conflicts.
+
+This patch adds
+  Build-Depends-Arch (arch any)
+and Build-Conflicts-Arch.
+
+This makes the support for build dependencies for arch all and any
+packages symmetrical and more logical.  It also permits arch-any
+dependencies to be omitted for arch-all-only builds.
+
+This change will not break any existing packages: if the arch any
+deps are in Build-Depends, they may be installed unnecessarily,
+but they will still be installed.  This change just allows an
+additional optimisation, and tidies up a slight omission in the
+original implementation of build dependencies, and would give the
+buildds additional options when arch-all autobuilding is enabled
+(especially now it's available as a separate independent arch).
+
+Signed-off-by: Roger Leigh <rleigh@debian.org>
+---
+ man/deb-src-control.5          |   49 ++++++++++++++++++++++++++++++----------
+ man/dpkg-checkbuilddeps.1      |   12 +++++++---
+ scripts/Dpkg/Control/Fields.pm |   16 ++++++++++---
+ scripts/dpkg-buildpackage.pl   |    4 ++--
+ scripts/dpkg-checkbuilddeps.pl |   27 ++++++++++++++++------
+ scripts/dpkg-source.pl         |    2 +-
+ 6 files changed, 82 insertions(+), 28 deletions(-)
+
+diff --git a/man/deb-src-control.5 b/man/deb-src-control.5
+index 8915265..bba8ddf 100644
+--- a/man/deb-src-control.5
++++ b/man/deb-src-control.5
+@@ -125,27 +125,51 @@ package.
+ 
+ .TP
+ .BI Build\-Depends: " package-list"
+-A list of packages that need to be installed and configured to be able to build
+-the source package.
++A list of packages that need to be installed and configured to be able
++to build the source package. Including a dependency in this list has
++the same effect as including it in both \fBBuild\-Depends\-Arch\fP and
++\fBBuild\-Depends\-Indep\fP, with the additional effect of being used
++for source-only builds.
++
++.TP
++.BI Build\-Depends\-Arch: " package list"
++Same as \fBBuild\-Depends\fP, but they are only needed when building
++the architecture dependent packages. The \fBBuild\-Depends\fP are also
++installed in this case.  This field was introduced in dpkg version
++1.16.4; in order to build with older dpkg versions,
++\fBBuild\-Depends\fP should be used instead.
+ 
+ .TP
+ .BI Build\-Depends\-Indep: " package-list"
+-Same as \fBBuild\-Depends\fP, but they are only needed when building the
+-architecture independent packages. The \fBBuild\-Depends\fP are also installed
+-in this case.
++Same as \fBBuild\-Depends\fP, but they are only needed when building
++the architecture independent packages. The \fBBuild\-Depends\fP are
++also installed in this case.
++
++.TP
++.BI Build\-Conflicts: " package list"
++A list of packages that should not be installed when the package is
++built, for example because they interfere with the build system used.
++Including a dependency in this list has the same effect as including
++it in both \fBBuild\-Conflicts\-Arch\fP and
++\fBBuild\-Conflicts\-Indep\fP, with the additional effect of being
++used for source-only builds.
+ 
+ .TP
+-.BI Build\-Conflicts: " package-list"
+-A list of packages that should not be installed when the package is build, for
+-example because they interfere with the used build system.
++.BI Build\-Conflicts\-Arch: " package list"
++Same as \fBBuild\-Conflicts\fP, but only when building the
++architecture dependent packages.  This field was introduced in dpkg
++version 1.16.4; in order to build with older dpkg versions,
++\fBBuild\-Conflicts\fP should be used instead.
+ 
+ .TP
+ .BI Build\-Conflicts\-Indep: " package-list"
+-Same as \fBBuild\-Conflicts\fP, but only when building the architecture
+-independent packages.
++Same as \fBBuild\-Conflicts\fP, but only when building the
++architecture independent packages.
+ 
++.PP
+ The syntax of the
+-.B Build\-Depends
++.BR Build\-Depends ,
++.B Build\-Depends\-Arch
+ and
+ .B Build\-Depends\-Indep
+ fields is a list of groups of alternative packages. Each group is a list
+@@ -156,7 +180,8 @@ optionally followed by a version number specification in parentheses and an
+ architecture specification in square brackets.
+ 
+ The syntax of the
+-.B Build\-Conflicts
++.BR Build\-Conflicts ,
++.B Build\-Conflicts\-Arch
+ and
+ .B Build\-Conflicts\-Indep
+ fields is a list of comma-separated package names, where the comma is read
+diff --git a/man/dpkg-checkbuilddeps.1 b/man/dpkg-checkbuilddeps.1
+index d7dcf11..e62d918 100644
+--- a/man/dpkg-checkbuilddeps.1
++++ b/man/dpkg-checkbuilddeps.1
+@@ -17,7 +17,7 @@
+ .\" You should have received a copy of the GNU General Public License
+ .\" along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ .
+-.TH dpkg\-checkbuilddeps 1 "2011-07-04" "Debian Project" "dpkg utilities"
++.TH dpkg\-checkbuilddeps 1 "2012-05-16" "Debian Project" "dpkg utilities"
+ .SH NAME
+ dpkg\-checkbuilddeps \- check build dependencies and conflicts
+ .
+@@ -40,9 +40,15 @@ may be specified on the command line.
+ Change the location of the \fBdpkg\fR database. The default location is
+ \fI/var/lib/dpkg\fP.
+ .TP
++.B \-A
++Ignore \fIBuild\-Depends\-Arch\fR and \fIBuild\-Conflicts\-Arch\fR lines. Use
++when only arch-indep packages will be built, or combine with \fB\-B\fP
++when only a source package is to be built.
++.TP
+ .B \-B
+-Ignore \fIBuild\-Depends\-Indep\fR lines. Use when no arch-indep packages will
+-be built.
++Ignore \fIBuild\-Depends\-Indep\fR and \fIBuild\-Conflicts\-Indep\fR
++lines. Use when only arch-dep packages will be built, or combine with
++\fB\-A\fP when only a source package is to be built.
+ .TP
+ .BI "\-d " build-depends-string
+ .TP
+diff --git a/scripts/Dpkg/Control/Fields.pm b/scripts/Dpkg/Control/Fields.pm
+index 41b5d9c..8ff4c47 100644
+--- a/scripts/Dpkg/Control/Fields.pm
++++ b/scripts/Dpkg/Control/Fields.pm
+@@ -61,23 +61,33 @@ our %FIELDS = (
+     'Build-Conflicts' => {
+         allowed => ALL_SRC,
+         dependency => 'union',
+-        dep_order => 3,
++        dep_order => 4,
++    },
++    'Build-Conflicts-Arch' => {
++        allowed => ALL_SRC,
++        dependency => 'union',
++        dep_order => 5,
+     },
+     'Build-Conflicts-Indep' => {
+         allowed => ALL_SRC,
+         dependency => 'union',
+-        dep_order => 4,
++        dep_order => 6,
+     },
+     'Build-Depends' => {
+         allowed => ALL_SRC,
+         dependency => 'normal',
+         dep_order => 1,
+     },
+-    'Build-Depends-Indep' => {
++    'Build-Depends-Arch' => {
+         allowed => ALL_SRC,
+         dependency => 'normal',
+         dep_order => 2,
+     },
++    'Build-Depends-Indep' => {
++        allowed => ALL_SRC,
++        dependency => 'normal',
++        dep_order => 3,
++    },
+     'Built-Using' => {
+         allowed => ALL_PKG,
+         dependency => 'union',
+diff --git a/scripts/dpkg-buildpackage.pl b/scripts/dpkg-buildpackage.pl
+index 7222fb9..5fd2d30 100755
+--- a/scripts/dpkg-buildpackage.pl
++++ b/scripts/dpkg-buildpackage.pl
+@@ -214,14 +214,14 @@ while (@ARGV) {
+ 	build_sourceonly && usageerr(_g("cannot combine %s and %s"), $_, "-S");
+ 	$include = BUILD_ARCH_INDEP;
+ 	push @changes_opts, '-A';
+-	@checkbuilddep_opts = ();
++	@checkbuilddep_opts = ('-A');
+ 	$buildtarget = 'build-indep';
+ 	$binarytarget = 'binary-indep';
+     } elsif (/^-S$/) {
+ 	build_binaryonly && usageerr(_g("cannot combine %s and %s"), build_opt, "-S");
+ 	$include = BUILD_SOURCE;
+ 	push @changes_opts, '-S';
+-	@checkbuilddep_opts = ('-B');
++	@checkbuilddep_opts = ('-A', '-B');
+     } elsif (/^-F$/) {
+ 	!build_normal && usageerr(_g("cannot combine %s and %s"), $_, build_opt);
+ 	$include = BUILD_ALL;
+diff --git a/scripts/dpkg-checkbuilddeps.pl b/scripts/dpkg-checkbuilddeps.pl
+index e6e97ce..31ab143 100755
+--- a/scripts/dpkg-checkbuilddeps.pl
++++ b/scripts/dpkg-checkbuilddeps.pl
+@@ -43,7 +43,8 @@ sub usage {
+ "Usage: %s [<option>...] [<control-file>]")
+ 	. "\n\n" . _g(
+ "Options:
+-  -B             binary-only, ignore -Indep.
++  -A             ignore Build-Depends-Arch and Build-Conflicts-Arch.
++  -B             ignore Build-Depends-Indep and Build-Conflicts-Indep.
+   -d build-deps  use given string as build dependencies instead of
+                  retrieving them from control file
+   -c build-conf  use given string for build conflicts instead of
+@@ -58,10 +59,12 @@ sub usage {
+ 	. "\n", $progname;
+ }
+ 
+-my $binary_only=0;
++my $ignore_bd_arch = 0;
++my $ignore_bd_indep = 0;
+ my ($bd_value, $bc_value);
+ my $host_arch = get_host_arch();
+-if (!GetOptions('B' => \$binary_only,
++if (!GetOptions('A' => \$ignore_bd_arch,
++                'B' => \$ignore_bd_indep,
+                 'help|h' => sub { usage(); exit(0); },
+                 'version' => \&version,
+                 'd=s' => \$bd_value,
+@@ -82,11 +85,21 @@ my $facts = parse_status("$admindir/status");
+ unless (defined($bd_value) or defined($bc_value)) {
+     $bd_value = 'build-essential';
+     $bd_value .= ", " . $fields->{"Build-Depends"} if defined $fields->{"Build-Depends"};
+-    if (not $binary_only and defined $fields->{"Build-Depends-Indep"}) {
++    if (not $ignore_bd_arch and defined $fields->{"Build-Depends-Arch"}) {
++	$bd_value .= ", " . $fields->{"Build-Depends-Arch"};
++    }
++    if (not $ignore_bd_indep and defined $fields->{"Build-Depends-Indep"}) {
+ 	$bd_value .= ", " . $fields->{"Build-Depends-Indep"};
+     }
+     $bc_value = $fields->{"Build-Conflicts"} if defined $fields->{"Build-Conflicts"};
+-    if (not $binary_only and defined $fields->{"Build-Conflicts-Indep"}) {
++    if (not $ignore_bd_arch and defined $fields->{"Build-Conflicts-Arch"}) {
++	if ($bc_value) {
++	    $bc_value .= ", " . $fields->{"Build-Conflicts-Arch"};
++	} else {
++	    $bc_value = $fields->{"Build-Conflicts-Arch"};
++	}
++    }
++    if (not $ignore_bd_indep and defined $fields->{"Build-Conflicts-Indep"}) {
+ 	if ($bc_value) {
+ 	    $bc_value .= ", " . $fields->{"Build-Conflicts-Indep"};
+ 	} else {
+@@ -97,12 +110,12 @@ unless (defined($bd_value) or defined($bc_value)) {
+ my (@unmet, @conflicts);
+ 
+ if ($bd_value) {
+-	push @unmet, build_depends('Build-Depends/Build-Depends-Indep',
++	push @unmet, build_depends('Build-Depends/Build-Depends-Arch/Build-Depends-Indep',
+ 		deps_parse($bd_value, host_arch => $host_arch,
+ 			   reduce_arch => 1), $facts);
+ }
+ if ($bc_value) {
+-	push @conflicts, build_conflicts('Build-Conflicts/Build-Conflicts-Indep',
++	push @conflicts, build_conflicts('Build-Conflicts/Build-Conflicts-Arch/Build-Conflicts-Indep',
+ 		deps_parse($bc_value, host_arch => $host_arch,
+ 			   reduce_arch => 1, union => 1), $facts);
+ }
+diff --git a/scripts/dpkg-source.pl b/scripts/dpkg-source.pl
+index 881d521..f167bab 100755
+--- a/scripts/dpkg-source.pl
++++ b/scripts/dpkg-source.pl
+@@ -246,7 +246,7 @@ if ($options{'opmode'} =~ /^(-b|--print-format|--(before|after)-build|--commit)$
+ 	    $fields->{$_} = $v;
+ 	} elsif (m/^Uploaders$/i) {
+ 	    ($fields->{$_} = $v) =~ s/\s*[\r\n]\s*/ /g; # Merge in a single-line
+-	} elsif (m/^Build-(Depends|Conflicts)(-Indep)?$/i) {
++	} elsif (m/^Build-(Depends|Conflicts)(-Arch|-Indep)?$/i) {
+ 	    my $dep;
+ 	    my $type = field_get_dep_type($_);
+ 	    $dep = deps_parse($v, union => $type eq 'union');
+-- 
+1.7.10
+

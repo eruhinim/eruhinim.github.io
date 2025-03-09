@@ -1,0 +1,182 @@
+From 414c4de332cfa5c5a792deafb645e6c34f5e10d5 Mon Sep 17 00:00:00 2001
+From: Mehdi Dogguy <mehdi@debian.org>
+Date: Wed, 23 May 2012 17:28:50 +0200
+Subject: [PATCH] Add support for InRelease files (Closes: #673625)
+
+---
+ debian/changelog |    6 ++++++
+ include/gpg.h    |    4 +++-
+ include/log.h    |    1 +
+ src/download.c   |   58 ++++++++++++++++++++++++++++++++++++++----------------
+ src/gpg.c        |    9 ++++++---
+ src/log.c        |    5 +++++
+ 6 files changed, 62 insertions(+), 21 deletions(-)
+
+diff --git a/debian/changelog b/debian/changelog
+index 58e3c22..db29982 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,3 +1,9 @@
++cdebootstrap (0.5.8+nmu1) UNRELEASED; urgency=low
++
++  * Add support for InRelease files (Closes: #673625)
++
++ -- Mehdi Dogguy <mehdi@debian.org>  Tue, 22 May 2012 20:42:07 +0200
++
+ cdebootstrap (0.5.8) unstable; urgency=low
+ 
+   * Support SHA1 checksums for release files. (closes: #614314)
+diff --git a/include/gpg.h b/include/gpg.h
+index dfee7e9..41c2291 100644
+--- a/include/gpg.h
++++ b/include/gpg.h
+@@ -25,7 +25,9 @@
+ #ifndef GPG_H
+ #define GPG_H
+ 
+-int gpg_check_release (const char *file, const char *file_sig);
++#include <stdbool.h>
++
++int gpg_check_release (const char *file, const char *file_sig, const char *msg, bool in_release_mode);
+ 
+ int gpg_init (const char **keyring_dirs, const char *keyring_name);
+ 
+diff --git a/include/log.h b/include/log.h
+index bb3d632..8d28950 100644
+--- a/include/log.h
++++ b/include/log.h
+@@ -33,6 +33,7 @@ typedef enum log_message_name
+   LOG_MESSAGE_ERROR_DOWNLOAD_PARSE,
+   LOG_MESSAGE_ERROR_DOWNLOAD_RETRIEVE,
+   LOG_MESSAGE_ERROR_DOWNLOAD_VALIDATE,
++  LOG_MESSAGE_WARNING_DOWNLOAD_RETRIEVE,
+   LOG_MESSAGE_WARNING_DOWNLOAD_VALIDATE,
+   LOG_MESSAGE_INFO_DOWNLOAD_PARSE,
+   LOG_MESSAGE_INFO_DOWNLOAD_RETRIEVE,
+diff --git a/src/download.c b/src/download.c
+index 499e21b..66be295 100644
+--- a/src/download.c
++++ b/src/download.c
+@@ -57,33 +57,57 @@ static int download_file (const char *source, const char *target, const char *me
+ static di_release *download_release (void)
+ {
+   char source[256];
+-  char target[4096], target1[4096];
++  char in_target[4096], sig_target[4096], target[4096];
++  bool in_release_mode = true;
+   di_release *ret;
+ 
+-  build_indices_root ("Release", source, sizeof (source), target, sizeof (target));
++  build_indices_root ("InRelease", source, sizeof (source), in_target, sizeof (in_target));
+ 
+-  if (download_file (source, target, "Release"))
+-    log_message (LOG_MESSAGE_ERROR_DOWNLOAD_RETRIEVE, "Release");
++  if (!download_file (source, in_target, "InRelease"))
++  {
++    if (gpg_check_release (in_target, in_target, "InRelease", in_release_mode))
++      log_message (authentication ? LOG_MESSAGE_ERROR_DOWNLOAD_VALIDATE : LOG_MESSAGE_WARNING_DOWNLOAD_VALIDATE, "InRelease");
+ 
+-  build_indices_root ("Release.gpg", source, sizeof (source), target1, sizeof (target1));
++    log_message (LOG_MESSAGE_INFO_DOWNLOAD_PARSE, "InRelease");
+ 
+-  if (download_file (source, target1, "Release.gpg"))
+-  {
+-    if (authentication)
+-      log_message (LOG_MESSAGE_ERROR_DOWNLOAD_RETRIEVE, "Release.gpg");
++    build_indices_root ("Release", source, sizeof (source), target, sizeof (target));
++
++    if (!(ret = di_release_read_file (in_target)))
++      log_message (LOG_MESSAGE_ERROR_DOWNLOAD_PARSE, "InRelease");
++
++    if (!suite && suite_use (ret->codename))
++      return NULL;
++
++    return ret;
+   }
+-  else if (gpg_check_release (target, target1))
+-    log_message (authentication ? LOG_MESSAGE_ERROR_DOWNLOAD_VALIDATE : LOG_MESSAGE_WARNING_DOWNLOAD_VALIDATE, "Release");
++  else
++  {
++    log_message (LOG_MESSAGE_WARNING_DOWNLOAD_RETRIEVE, "InRelease");
+ 
+-  log_message (LOG_MESSAGE_INFO_DOWNLOAD_PARSE, "Release");
++    build_indices_root ("Release", source, sizeof (source), target, sizeof (target));
++    if (download_file (source, target, "Release"))
++      log_message (LOG_MESSAGE_ERROR_DOWNLOAD_RETRIEVE, "Release");
+ 
+-  if (!(ret = di_release_read_file (target)))
+-    log_message (LOG_MESSAGE_ERROR_DOWNLOAD_PARSE, "Release");
++    build_indices_root ("Release.gpg", source, sizeof (source), sig_target, sizeof (sig_target));
+ 
+-  if (!suite && suite_use (ret->codename))
+-    return NULL;
++    if (download_file (source, sig_target, "Release.gpg"))
++    {
++      if (authentication)
++        log_message (LOG_MESSAGE_ERROR_DOWNLOAD_RETRIEVE, "Release.gpg");
++    }
++    else if (gpg_check_release (target, sig_target, "Release", !in_release_mode))
++      log_message (authentication ? LOG_MESSAGE_ERROR_DOWNLOAD_VALIDATE : LOG_MESSAGE_WARNING_DOWNLOAD_VALIDATE, "Release");
+ 
+-  return ret;
++    log_message (LOG_MESSAGE_INFO_DOWNLOAD_PARSE, "Release");
++
++    if (!(ret = di_release_read_file (target)))
++      log_message (LOG_MESSAGE_ERROR_DOWNLOAD_PARSE, "Release");
++
++    if (!suite && suite_use (ret->codename))
++      return NULL;
++
++    return ret;
++  }
+ }
+ 
+ static di_packages *download_packages_parse (const char *target, di_packages_allocator *allocator)
+diff --git a/src/gpg.c b/src/gpg.c
+index d92fae1..ac117dc 100644
+--- a/src/gpg.c
++++ b/src/gpg.c
+@@ -73,7 +73,7 @@ static int check_release_status_io_handler (char *buf, size_t n __attribute__ ((
+   return 0;
+ }
+ 
+-int gpg_check_release (const char *file, const char *file_sig)
++int gpg_check_release (const char *file, const char *file_sig, const char *msg, bool in_release_mode)
+ { 
+   char command[4096];
+   struct check_release data = { 0, 0 };
+@@ -81,9 +81,12 @@ int gpg_check_release (const char *file, const char *file_sig)
+   if (!keyring)
+     return 1;
+ 
+-  log_message (LOG_MESSAGE_INFO_DOWNLOAD_VALIDATE, "Release");
++  log_message (LOG_MESSAGE_INFO_DOWNLOAD_VALIDATE, msg);
+ 
+-  snprintf (command, sizeof command, "gpgv --logger-fd 1 --status-fd 1 --keyring %s %s %s", keyring, file_sig, file);
++  if (in_release_mode)
++    snprintf (command, sizeof command, "gpgv --logger-fd 1 --status-fd 1 --keyring %s %s", keyring, file);
++  else
++    snprintf (command, sizeof command, "gpgv --logger-fd 1 --status-fd 1 --keyring %s %s %s", keyring, file_sig, file);
+   
+   execute_full (command, check_release_status_io_handler, execute_io_log_handler, &data);
+ 
+diff --git a/src/log.c b/src/log.c
+index 359e0dd..a163212 100644
+--- a/src/log.c
++++ b/src/log.c
+@@ -61,6 +61,11 @@ const log_message_text log_messages[] =
+     "Couldn't validate %s!",
+     DI_LOG_LEVEL_WARNING,
+   },
++  [LOG_MESSAGE_WARNING_DOWNLOAD_RETRIEVE] =
++  {
++    "Couldn't download %s!",
++    DI_LOG_LEVEL_WARNING,
++  },
+   [LOG_MESSAGE_INFO_DOWNLOAD_RETRIEVE] =
+   {
+     "Retrieving %s",
+-- 
+1.7.10
+
+

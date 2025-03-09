@@ -1,0 +1,262 @@
+diff -ru ../clean/busybox-1.1.3/debian/config-udeb ./debian/config-udeb
+--- ../clean/busybox-1.1.3/debian/config-udeb	2006-10-01 18:07:09.000000000 +0200
++++ ./debian/config-udeb	2006-10-27 20:58:21.564246216 +0200
+@@ -441,7 +441,7 @@
+ #
+ # Networking Utilities
+ #
+-# CONFIG_FEATURE_IPV6 is not set
++CONFIG_FEATURE_IPV6=y
+ # CONFIG_ARPING is not set
+ # CONFIG_DNSD is not set
+ # CONFIG_ETHER_WAKE is not set
+diff -ru ../clean/busybox-1.1.3/include/libbb.h ./include/libbb.h
+--- ../clean/busybox-1.1.3/include/libbb.h	2006-05-25 20:35:19.000000000 +0200
++++ ./include/libbb.h	2006-10-27 20:59:37.644680232 +0200
+@@ -270,6 +270,18 @@
+ extern unsigned short bb_lookup_port(const char *port, const char *protocol, unsigned short default_port);
+ extern void bb_lookup_host(struct sockaddr_in *s_in, const char *host);
+ 
++struct sockaddr_in4_in6 {
++	int addr4_valid, addr6_valid;
++	struct in_addr  addr4;
++#ifdef CONFIG_FEATURE_IPV6
++	struct in6_addr addr6;
++#endif
++	in_port_t port;
++};
++
++extern int xconnect2(struct sockaddr_in4_in6 *sa);
++extern void bb_lookup_host2(struct sockaddr_in4_in6 *sa, const char *host);
++	
+ //#warning wrap this?
+ char *dirname (char *path);
+ 
+diff -ru ../clean/busybox-1.1.3/libbb/xconnect.c ./libbb/xconnect.c
+--- ../clean/busybox-1.1.3/libbb/xconnect.c	2006-04-16 18:27:46.000000000 +0200
++++ ./libbb/xconnect.c	2006-10-27 20:59:42.663917192 +0200
+@@ -70,3 +70,86 @@
+ 	}
+ 	return s;
+ }
++
++void bb_lookup_host2(struct sockaddr_in4_in6 *sa, const char *host)
++{
++	struct hostent *he;
++
++	memset(sa, 0, sizeof(struct sockaddr_in4_in6));
++
++#ifdef CONFIG_FEATURE_IPV6
++	if ((he = gethostbyname2(host,AF_INET6)) != NULL) {
++		sa->addr6_valid = 1;
++		memcpy(&(sa->addr6), he->h_addr_list[0], he->h_length); 
++	}
++#endif
++	
++	if ((he = gethostbyname(host)) != NULL) {
++		sa->addr4_valid = 1;
++		memcpy(&(sa->addr4), he->h_addr_list[0], he->h_length); 
++	}
++
++	if ( !(sa->addr4_valid || sa->addr6_valid) )
++		bb_herror_msg_and_die("%s", host);
++
++	printf("bb_lookup_host2: host=%s ipv4=%d ipv6=%d\n",
++		   host,sa->addr4_valid,sa->addr6_valid);
++}
++
++int xconnect2(struct sockaddr_in4_in6 *sa)
++{
++	char addr_name[256];
++	int s;
++	int ipv6_tried = 0;
++	struct sockaddr_in sa_in4;
++#ifdef CONFIG_FEATURE_IPV6
++	struct sockaddr_in6 sa_in6;
++
++	printf("xconnect2: ipv4=%d ipv6=%d\n",sa->addr4_valid,sa->addr6_valid);
++	
++	if ( sa->addr6_valid ) {
++		sa_in6.sin6_family = AF_INET6;
++		sa_in6.sin6_addr = sa->addr6;
++		sa_in6.sin6_port = sa->port;
++		
++		s = socket(AF_INET6, SOCK_STREAM, 0);
++
++		if ( connect(s, &sa_in6, sizeof(struct sockaddr_in6))==0 ) {
++			printf("xconnect2: connected ipv6\n");
++			sa->addr4_valid = 0;
++			return s;
++		}
++
++		inet_ntop(AF_INET6, &sa_in6.sin6_addr, addr_name, 255);
++		
++		sa->addr6_valid = 0;
++		ipv6_tried = 1;
++	}
++#endif
++	if ( ipv6_tried && !sa->addr4_valid )
++		bb_perror_msg_and_die("Unable to connect to remote host (%s)", addr_name);
++
++	if ( sa->addr4_valid ) {
++		sa_in4.sin_family = AF_INET;
++		sa_in4.sin_addr = sa->addr4;
++		sa_in4.sin_port = sa->port;
++		
++		s = socket(AF_INET, SOCK_STREAM, 0);
++
++		if ( connect(s, &sa_in4, sizeof(struct sockaddr_in))==0 ) {
++			printf("xconnect2: connected ipv4\n");
++			return s;
++		}
++
++		if (ENABLE_FEATURE_CLEAN_UP) close(s);
++		
++		inet_ntop(AF_INET, &sa_in4.sin_addr, addr_name, 255);
++		
++		sa->addr4_valid = 0;
++		
++		bb_perror_msg_and_die("Unable to connect to remote host (%s)", addr_name);
++	}
++	
++	bb_perror_msg_and_die("No valid address for remote host to connect to");
++	return -1;
++}
+diff -ru ../clean/busybox-1.1.3/networking/wget.c ./networking/wget.c
+--- ../clean/busybox-1.1.3/networking/wget.c	2006-04-16 18:27:46.000000000 +0200
++++ ./networking/wget.c	2006-10-27 21:00:25.713372680 +0200
+@@ -37,7 +37,7 @@
+ };
+ 
+ static void parse_url(char *url, struct host_info *h);
+-static FILE *open_socket(struct sockaddr_in *s_in);
++static FILE *open_socket(struct sockaddr_in4_in6 *sa);
+ static char *gethdr(char *buf, size_t bufsiz, FILE *fp, int *istrunc);
+ static int ftpcmd(char *s1, char *s2, FILE *fp, char *buf);
+ 
+@@ -171,8 +171,9 @@
+ 	char *extra_headers_ptr = extra_headers;
+ 	int extra_headers_left = sizeof(extra_headers);
+ 	struct host_info server, target;
+-	struct sockaddr_in s_in;
++	struct sockaddr_in4_in6 sa;
+ 	llist_t *headers_llist = NULL;
++	char addr_name[256];
+ 
+ 	FILE *sfp = NULL;		/* socket to web/ftp server	    */
+ 	FILE *dfp = NULL;		/* socket to ftp server (data)	    */
+@@ -288,11 +289,20 @@
+ 	/* We want to do exactly _one_ DNS lookup, since some
+ 	 * sites (i.e. ftp.us.debian.org) use round-robin DNS
+ 	 * and we want to connect to only one IP... */
+-	bb_lookup_host(&s_in, server.host);
+-	s_in.sin_port = server.port;
++	bb_lookup_host2(&sa, server.host);
++	sa.port = server.port;
+ 	if (quiet_flag==FALSE) {
++#ifdef CONFIG_FEATURE_IPV6
++		if ( sa.addr6_valid ) {
++			inet_ntop(AF_INET6, &sa.addr6, addr_name, 255);
++		} else
++#endif
++		{
++			inet_ntop(AF_INET, &sa.addr4, addr_name, 255);
++		}
++			
+ 		fprintf(stdout, "Connecting to %s[%s]:%d\n",
+-				server.host, inet_ntoa(s_in.sin_addr), ntohs(server.port));
++				server.host, addr_name, ntohs(server.port));
+ 	}
+ 
+ 	if (use_proxy || !target.is_ftp) {
+@@ -309,7 +319,7 @@
+ 			 * Open socket to http server
+ 			 */
+ 			if (sfp) fclose(sfp);
+-			sfp = open_socket(&s_in);
++			sfp = open_socket(&sa);
+ 
+ 			/*
+ 			 * Send HTTP request.
+@@ -410,8 +420,8 @@
+ 							server.host = target.host;
+ 							server.port = target.port;
+ 						}
+-						bb_lookup_host(&s_in, server.host);
+-						s_in.sin_port = server.port;
++						bb_lookup_host2(&sa, server.host);
++						sa.port = server.port;
+ 						break;
+ 					}
+ 				}
+@@ -428,7 +438,7 @@
+ 		if (! target.user)
+ 			target.user = bb_xstrdup("anonymous:busybox@");
+ 
+-		sfp = open_socket(&s_in);
++		sfp = open_socket(&sa);
+ 		if (ftpcmd(NULL, NULL, sfp, buf) != 220)
+ 			close_delete_and_die("%s", buf+4);
+ 
+@@ -468,15 +478,28 @@
+ 		/*
+ 		 * Entering passive mode
+ 		 */
+-		if (ftpcmd("PASV", NULL, sfp, buf) !=  227)
+-			close_delete_and_die("PASV: %s", buf+4);
+-		s = strrchr(buf, ',');
+-		*s = 0;
+-		port = atoi(s+1);
+-		s = strrchr(buf, ',');
+-		port += atoi(s+1) * 256;
+-		s_in.sin_port = htons(port);
+-		dfp = open_socket(&s_in);
++#ifdef CONFIG_FEATURE_IPV6
++		if ( sa.addr6_valid ) {
++			if (ftpcmd("EPSV", NULL, sfp, buf) !=  229)
++				close_delete_and_die("EPSV: %s", buf+4);
++			s = strrchr(buf, '|');
++			*s = 0;
++			s = strrchr(buf, '|');
++			port = atoi(s+1);
++			sa.port = htons(port);
++		} else
++#endif
++		{
++			if (ftpcmd("PASV", NULL, sfp, buf) !=  227)
++				close_delete_and_die("PASV: %s", buf+4);
++			s = strrchr(buf, ',');
++			*s = 0;
++			port = atoi(s+1);
++			s = strrchr(buf, ',');
++			port += atoi(s+1) * 256;
++			sa.port = htons(port);
++		}
++		dfp = open_socket(&sa);
+ 
+ 		if (do_continue) {
+ 			sprintf(buf, "REST %ld", beg_range);
+@@ -554,7 +577,7 @@
+ 		h->host = url + 7;
+ 		h->is_ftp = 0;
+ 	} else if (strncmp(url, "ftp://", 6) == 0) {
+-		h->port = bb_lookup_port("ftp", "tfp", 21);
++		h->port = bb_lookup_port("ftp", "tcp", 21);
+ 		h->host = url + 6;
+ 		h->is_ftp = 1;
+ 	} else
+@@ -599,12 +622,11 @@
+ 	}
+ }
+ 
+-
+-FILE *open_socket(struct sockaddr_in *s_in)
++FILE *open_socket(struct sockaddr_in4_in6 *sa)
+ {
+ 	FILE *fp;
+ 
+-	fp = fdopen(xconnect(s_in), "r+");
++	fp = fdopen(xconnect2(sa), "r+");
+ 	if (fp == NULL)
+ 		bb_perror_msg_and_die("fdopen()");
+ 

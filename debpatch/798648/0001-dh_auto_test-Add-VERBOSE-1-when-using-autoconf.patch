@@ -1,0 +1,112 @@
+From 3c604a8e7ba2fe8d4504be91e732ccb3ccfcb49c Mon Sep 17 00:00:00 2001
+From: Gergely Nagy <algernon@madhouse-project.org>
+Date: Fri, 11 Sep 2015 14:30:05 +0200
+Subject: [PATCH] dh_auto_test: Add VERBOSE=1 when using autoconf
+
+When the build system is autoconf, assume that one also uses automake,
+and pass VERBOSE=1 to make check too. Without VERBOSE=1, newer
+automake-generated makefiles will not display the actual test errors,
+but store them in a file. This makes build logs considerably less useful
+when it comes to discovering test failures.
+
+With VERBOSE=1 set, test failures are displayed. It should have no ill
+effects when used with a non-automake makefile + autoconf combination.
+
+The test suite was updated to reflect the changes, and new tests were
+added to verify the new functionality.
+
+Signed-off-by: Gergely Nagy <algernon@madhouse-project.org>
+---
+ Debian/Debhelper/Buildsystem/autoconf.pm | 10 ++++++++++
+ t/buildsystems/autoconf/configure        |  2 +-
+ t/buildsystems/buildsystem_tests         | 13 +++++++++----
+ 3 files changed, 20 insertions(+), 5 deletions(-)
+
+diff --git a/Debian/Debhelper/Buildsystem/autoconf.pm b/Debian/Debhelper/Buildsystem/autoconf.pm
+index 62ff8b3..8604152 100644
+--- a/Debian/Debhelper/Buildsystem/autoconf.pm
++++ b/Debian/Debhelper/Buildsystem/autoconf.pm
+@@ -23,6 +23,10 @@ sub check_auto_buildable {
+ 	if ($step eq "configure") {
+ 		return 1 if -x $this->get_sourcepath("configure");
+ 	}
++	if ($step eq "test") {
++		return 1 if (-e $this->get_buildpath("Makefile") &&
++			     -x $this->get_sourcepath("configure"));
++	}
+ 	return 0;
+ }
+ 
+@@ -78,6 +82,12 @@ sub configure {
+ 	}
+ }
+ 
++sub test {
++	my $this=shift;
++	$this->make_first_existing_target(['test', 'check'],
++		"VERBOSE=1", @_);
++}
++
+ 1
+ 
+ # Local Variables:
+diff --git a/t/buildsystems/autoconf/configure b/t/buildsystems/autoconf/configure
+index b606f9e..80cf3ec 100755
+--- a/t/buildsystems/autoconf/configure
++++ b/t/buildsystems/autoconf/configure
+@@ -51,7 +51,7 @@ all: stamp_configure \$(CONFIGURE)
+ 
+ # Tests if dh_auto_test executes 'check' target if 'test' does not exist
+ check: \$(CONFIGURE) stamp_build
+-	\@echo Tested > stamp_test
++	\@echo VERBOSE=\$(VERBOSE) > stamp_test
+ 
+ install: stamp_build
+ 	\@echo DESTDIR=\$(DESTDIR) > stamp_install
+diff --git a/t/buildsystems/buildsystem_tests b/t/buildsystems/buildsystem_tests
+index 98b3895..6bda610 100755
+--- a/t/buildsystems/buildsystem_tests
++++ b/t/buildsystems/buildsystem_tests
+@@ -1,6 +1,6 @@
+ #!/usr/bin/perl
+ 
+-use Test::More tests => 297;
++use Test::More tests => 299;
+ 
+ use strict;
+ use warnings;
+@@ -264,7 +264,7 @@ test_check_auto_buildable($bs{perl_makemaker}, "Makefile.PL", { configure => 1 }
+ # With Makefile
+ touch "$builddir/Makefile";
+ test_check_auto_buildable($bs{makefile}, "Makefile", 1);
+-test_check_auto_buildable($bs{autoconf}, "configure+Makefile", { configure => 1 });
++test_check_auto_buildable($bs{autoconf}, "configure+Makefile", { configure => 1, test => 1 });
+ test_check_auto_buildable($bs{cmake}, "CMakeLists.txt+Makefile", 1);
+ touch "$builddir/CMakeCache.txt"; # strong evidence that cmake was run
+ test_check_auto_buildable($bs{cmake}, "CMakeCache.txt+Makefile", 2);
+@@ -317,7 +317,7 @@ touch "$tmpdir/configure", 0755;
+ touch "$builddir/Makefile";
+ test_autoselection("autoconf",
+     { configure => "autoconf", build => "makefile",
+-      test => "makefile", install => "makefile", clean => "makefile" }, %tmp);
++      test => "autoconf", install => "makefile", clean => "makefile" }, %tmp);
+ cleandir $tmpdir;
+ 
+ # Perl Makemaker (build, test, clean fail with builddir set [not supported])
+@@ -474,7 +474,12 @@ sub dh_auto_do_autoconf {
+ 	&$do_dh_auto('build');
+ 	ok ( -f "$buildpath/stamp_build", "$buildpath/stamp_build exists" );
+ 	&$do_dh_auto('test');
+-	ok ( -f "$buildpath/stamp_test", "$buildpath/stamp_test exists" );
++        @lines=();
++	if ( ok(open(FILE, "$buildpath/stamp_test"), "$buildpath/stamp_test exists") ) {
++		@lines = @{readlines(\*FILE)};
++	}
++	is_deeply( \@lines, [ "VERBOSE=1" ],
++	    "$buildpath/stamp_test contains VERBOSE=1" );
+ 	&$do_dh_auto('install');
+ 	@lines=();
+ 	if ( ok(open(FILE, "$buildpath/stamp_install"), "$buildpath/stamp_install exists") ) {
+-- 
+2.5.1
+

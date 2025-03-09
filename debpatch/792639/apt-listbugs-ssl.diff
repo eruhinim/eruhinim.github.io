@@ -1,0 +1,189 @@
+diff -ur apt-listbugs-0.1.16-orig/apt-listbugs apt-listbugs-0.1.16/apt-listbugs
+--- apt-listbugs-0.1.16-orig/apt-listbugs	2014-08-25 13:41:12.000000000 -0400
++++ apt-listbugs-0.1.16/apt-listbugs	2015-07-16 20:33:43.925422599 -0400
+@@ -46,7 +46,7 @@
+ 
+ == USAGE
+ 
+-apt-listbugs [-h] [-v] [-s <severities>] [-T <tags>] [-S <states>] [-B <bug#>] [-D] [-H <hostname>] [-p <port>] [-P <priority>] [-E <title>] [-q] [-C <apt.conf>] [-F] [-y] [-n] [-d] <command> [arguments]
++apt-listbugs [-h] [-v] [-s <severities>] [-T <tags>] [-S <states>] [-B <bug#>] [-D] [-u <url>] [-P <priority>] [-E <title>] [-q] [-C <apt.conf>] [-F] [-y] [-n] [-d] <command> [arguments]
+ 
+ == OPTIONS
+ 
+@@ -104,14 +104,21 @@
+ 
+   Show bugs of downgraded packages. (apt mode only)
+ 
++* -u <url>, --url <url>
++
++  Specifies the SOAP URL for the Debian Bug Tracking System
++  [https://bugs.debian.org:443/cgi-bin/soap.cgi]. The default URL may be
++  changed by setting the AptListbugs::URL configuration option.
++
+ * -H <hostname>, --hostname <hostname>
+ 
+-  Specifies the hostname of the Debian Bug Tracking System [bugs.debian.org].
++  Specifies the hostname of the Debian Bug Tracking System
++  (deprecated, and disables https; use --url instead).
+ 
+ * -p <port>, --port <port>
+ 
+   Specifies the port number of the web interface of the Debian Bug
+-  Tracking System [80].
++  Tracking System (deprecated, and disables https; use --url instead).
+ 
+ * -P <priority>, --pin-priority <priority>
+ 
+@@ -214,6 +221,10 @@
+   Useful for setting HTTP proxy for apt-listbugs.
+   The special keyword 'DIRECT' will disable proxy.
+ 
++: AptListbugs::URL
++
++  Default SOAP URL for the Debian Bug Tracking System.
++
+ : AptListbugs::Severities
+ 
+   Default (comma-separated) list of bug severities to be shown. When
+diff -ur apt-listbugs-0.1.16-orig/lib/apt-listbugs/logic.rb apt-listbugs-0.1.16/lib/apt-listbugs/logic.rb
+--- apt-listbugs-0.1.16-orig/lib/apt-listbugs/logic.rb	2014-08-25 13:41:12.000000000 -0400
++++ apt-listbugs-0.1.16/lib/apt-listbugs/logic.rb	2015-07-16 20:40:29.519387373 -0400
+@@ -42,6 +42,12 @@
+   QUERYBTS = "/usr/bin/querybts"
+   WWW_BROWSER = "/usr/bin/www-browser"
+   SENSIBLE_BROWSER = "/usr/bin/sensible-browser"
++  DEFAULT_URL = "https://bugs.debian.org:443/cgi-bin/soap.cgi"
++  # The default hostname and port are for backwards compatibility,
++  # and won't be used if neither --hostname nor --port is specified.
++  # They don't support https, so --url is preferred.
++  DEFAULT_HOSTNAME = "bugs.debian.org"
++  DEFAULT_PORT = 80
+ 
+   def usage
+     $stderr.print _("Usage: "), File.basename($0),
+@@ -56,8 +62,7 @@
+       sprintf(_(" -S <states>      : Filter bugs by pending-state categories you want to see\n                    [%s].\n"), @stats.join(',')),
+       _(" -B <bug#>        : Filter bugs by number, showing only the specified bugs.\n"),
+       _(" -D               : Show downgraded packages, too.\n"),
+-      sprintf(_(" -H <hostname>    : Hostname of Debian Bug Tracking System [%s].\n"), @hostname),
+-      sprintf(_(" -p <port>        : Port number of the server [%s].\n"), @port),
++      sprintf(_(" -u <url>         : SOAP URL for Debian Bug Tracking System [%s].\n"), DEFAULT_URL),
+       sprintf(_(" -P <priority>    : Pin-Priority value [%s].\n"), @pin_priority),
+       _(" -E <title>       : Title of RSS output.\n"),
+       _(" -q               : Don't display progress bar.\n"),
+@@ -86,8 +91,9 @@
+                 ["done", _("Resolved in some Version")]]
+     @fbugs = nil
+     @show_downgrade = false
+-    @hostname = "bugs.debian.org"
+-    @port = 80
++    @soapurl = nil
++    @hostname = nil
++    @port = nil
+     @parsestep = 200
+     @quiet = false
+     @command = nil
+@@ -149,6 +155,7 @@
+                            ['--stats', '-S', GetoptLong::REQUIRED_ARGUMENT],
+                            ['--bugs', '-B', GetoptLong::REQUIRED_ARGUMENT],
+                            ['--show-downgrade', '-D', GetoptLong::NO_ARGUMENT],
++                           ['--url', '-u', GetoptLong::REQUIRED_ARGUMENT],
+                            ['--hostname', '-H', GetoptLong::REQUIRED_ARGUMENT],
+                            ['--port', '-p', GetoptLong::REQUIRED_ARGUMENT],
+                            ['--pin-priority', '-P', GetoptLong::REQUIRED_ARGUMENT],
+@@ -185,6 +192,8 @@
+           @fbugs = optargs.split(',')
+         when '--show-downgrade'
+           @show_downgrade = true
++        when '--url'
++          @soapurl = optargs
+         when '--hostname'
+           @hostname = optargs
+         when '--port'
+@@ -280,8 +289,30 @@
+       exit 1
+     end
+ 
++    if @soapurl == nil
++      if @hostname == nil && @port == nil
++        if /soapurl='(.*)'/ =~ `apt-config #{@apt_conf} shell soapurl AptListbugs::URL`
++          @soapurl = $1
++        else
++          @soapurl = DEFAULT_URL
++        end
++      else
++        if @hostname == nil
++          @hostname = DEFAULT_HOSTNAME
++        end
++        if @port == nil
++          @port = DEFAULT_PORT
++        end
++        @soapurl="http://#{@hostname}:#{@port}/cgi-bin/soap.cgi"
++      end
++    else
++      if @hostname != nil || @port != nil
++        $stderr.puts _("W: ") + _("hostname and port options were overridden by a URL option.")
++      end
++    end
++
+     @parser =
+-      Debian::BTS::Parser::SoapIndex.new(@hostname, @port)
++      Debian::BTS::Parser::SoapIndex.new(@soapurl)
+ 
+     if FileTest.executable?("#{QUERYBTS}")
+       @querybts = QUERYBTS
+diff -ur apt-listbugs-0.1.16-orig/lib/debian/bts.rb apt-listbugs-0.1.16/lib/debian/bts.rb
+--- apt-listbugs-0.1.16-orig/lib/debian/bts.rb	2014-08-25 13:41:12.000000000 -0400
++++ apt-listbugs-0.1.16/lib/debian/bts.rb	2015-07-16 19:10:08.463611531 -0400
+@@ -31,23 +31,21 @@
+   module BTS
+     class Parser
+ 
+-      def initialize(host, port)
+-        @host = host
+-        @port = port
++      def initialize(url)
++        @soapurl = url
+       end
+ 
+       # use SOAP interface to obtain the index.
+       class SoapIndex < Parser
+-        def initialize(host, port)
+-          @host = host
+-          @port = port
++        def initialize(url)
++          @soapurl = url
+           @indexes = {}
+           @buf = nil
+         end
+ 
+         def parse_bug(bugnum)
+           require 'debian/btssoap'
+-          soap = Debian::BTSSOAP::Soap.new(@host, @port)
++          soap = Debian::BTSSOAP::Soap.new(@soapurl)
+           sa = Debian::BTSSOAP::StringArray.new
+ 
+           # query the BTS about the given bug number
+@@ -58,7 +56,7 @@
+ 
+         def parse(ma_copies, parsestep, severities = ["critical", "grave"])
+           require 'debian/btssoap'
+-          soap = Debian::BTSSOAP::Soap.new(@host, @port)
++          soap = Debian::BTSSOAP::Soap.new(@soapurl)
+           sa = Debian::BTSSOAP::StringArray.new
+           bugs = Debian::Bugs.new
+ 
+diff -ur apt-listbugs-0.1.16-orig/lib/debian/btssoap.rb apt-listbugs-0.1.16/lib/debian/btssoap.rb
+--- apt-listbugs-0.1.16-orig/lib/debian/btssoap.rb	2014-08-25 13:41:12.000000000 -0400
++++ apt-listbugs-0.1.16/lib/debian/btssoap.rb	2015-07-16 19:18:06.512542474 -0400
+@@ -23,8 +23,8 @@
+   module BTSSOAP
+     class StringArray < Array; end
+     class Soap
+-      def initialize(host = "bugs.debian.org", port = 80)
+-        @server="http://#{host}:#{port}/cgi-bin/soap.cgi"
++      def initialize(soapurl)
++        @server=soapurl
+         @ns = 'Debbugs/SOAP/'
+         @drv = SOAP::RPC::Driver.new(@server, @ns)
+         @drv.wiredump_dev = STDOUT if $DEBUG

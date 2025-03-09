@@ -1,0 +1,142 @@
+Description: Adds two options to nmudiff:
+ --non-dd: uses a message adapted to non-DDs and does not add pending tag.
+ --template=TEMPLATEFILE: uses content of TEMPLATEFILE for he message.
+Author: Mònica Ramírez Arceda <monica@probeta.net>
+Last-Update: 2012-03-06
+
+diff -ru devscripts-2.11.4/scripts/nmudiff.1 devscripts-2.11.5/scripts/nmudiff.1
+--- devscripts-2.11.4/scripts/nmudiff.1	2011-12-22 22:39:47.000000000 +0100
++++ devscripts-2.11.5/scripts/nmudiff.1	2012-03-06 11:25:38.666975875 +0100
+@@ -71,6 +71,14 @@
+ Do not read any configuration files.  This can only be used as the
+ first option given on the command-line.
+ .TP
++\fB\-\-non\-dd\fR, \fB\-\-nondd\fR
++Use a different message, specially designed for non-DDs, who can not upload NMUs. 
++Pending tag won't be added.
++.TP
++\fB\-\-template\fR \fITEMPLATEFILE\fR
++Use content of TEMPLATEFILE for message body instead of default template. 
++If TEMPLATEFILE does not exist, default template is applied. 
++.TP
+ .B \-\-help
+ Display a help message and exit successfully.
+ .TP
+diff -ru devscripts-2.11.4/scripts/nmudiff.sh devscripts-2.11.5/scripts/nmudiff.sh
+--- devscripts-2.11.4/scripts/nmudiff.sh	2011-12-22 22:39:47.000000000 +0100
++++ devscripts-2.11.5/scripts/nmudiff.sh	2012-03-06 11:23:55.586975870 +0100
+@@ -42,6 +42,10 @@
+     --no-conf, --noconf
+                       Don't read devscripts config files;
+                       must be the first option given
++    --non-dd, --nondd
++                      Use a message adapted to non-DDs.
++    --template=TEMPLATEFILE
++                      Use content of TEMPLATEFILE for message.
+     --help, -h        Show this help information.
+     --version         Show version and copyright information.
+ 
+@@ -146,6 +150,8 @@
+ 	--long sendmail:,from:,new,old,mutt,no-mutt,nomutt \
+ 	--long delay:,no-delay,nodelay \
+ 	--long no-conf,noconf \
++        --long non-dd,nondd \
++        --long template: \
+         --long help,version -n "$PROGNAME" -- "$@") || (usage >&2; exit 1)
+ 
+ eval set -- $TEMP
+@@ -201,6 +207,21 @@
+     --no-conf|--noconf)
+ 	echo "$PROGNAME: $1 is only acceptable as the first command-line option!" >&2
+ 	exit 1 ;;
++    --non-dd|--nondd)
++        NMUDIFF_NONDD=yes ;;
++    --template)
++        shift
++        case "$1" in
++            "") echo "$PROGNAME: TEMPLATEFILE cannot be empty, using default" >&2
++            ;;
++            *)  if [ -f "$1" ]; then
++                    NMUDIFF_TEMPLATE="$1"
++                else
++                    echo "$PROGNAME: TEMPLATEFILE must exist, using default" >&2                    
++                fi
++            ;;
++        esac
++        ;;
+     --help|-h) usage; exit 0 ;;
+     --version) version; exit 0 ;;
+     --)	shift; break ;;
+@@ -325,7 +346,7 @@
+ 	    TAGS="$TAGS
+ tags $b + patch"
+ 	fi
+-	if [ "$NMUDIFF_DELAY" != "0" ] && [ "`bts select bugs:$b tag:pending`" != "$b" ]; then
++	if [ "$NMUDIFF_DELAY" != "0" ] && [ "`bts select bugs:$b tag:pending`" != "$b" ] && [ "$NMUDIFF_NONDD" != "yes" ]; then
+ 	    TAGS="$TAGS
+ tags $b + pending"
+ 	fi
+@@ -342,20 +363,33 @@
+ 
+ TMPNAM="$( tempfile )"
+ 
+-if [ "$NMUDIFF_DELAY" = "XX" ]; then
++if [ "$NMUDIFF_DELAY" = "XX" ] && [ "$NMUDIFF_NONDD" != "yes" ] && [ "$NMUDIFF_TEMPLATE" = "" ]; then
+     DELAY_HEADER="
+ [Replace XX with correct value]"
+ fi
+ 
+-if [ "$NMUDIFF_DELAY" = "0" ]; then
+-    BODY="$(printf "%s\n%s\n" \
++if [ "$NMUDIFF_TEMPLATE" != "" ]; then
++    BODY=$(cat "$NMUDIFF_TEMPLATE")
++elif [ "$NMUDIFF_NONDD" = "yes" ]; then
++    BODY="$(printf "%s\n\n%s\n%s\n\n%s\n" \
++"Dear maintainer," \
+ "I've prepared an NMU for $SOURCE (versioned as $VERSION). The diff" \
+-"is attached to this message.")"
++"is attached to this message. I've not uploaded this NMU as I'm not a DD
++but I hope it is useful for you." \
++"Regards.")"
++elif [ "$NMUDIFF_DELAY" = "0" ]; then
++    BODY="$(printf "%s\n\n%s\n%s\n\n%s\n" \
++"Dear maintainer," \
++"I've prepared an NMU for $SOURCE (versioned as $VERSION). The diff" \
++"is attached to this message." \
++"Regards.")"
+ else
+-    BODY="$(printf "%s\n%s\n%s\n" \
++    BODY="$(printf "%s\n\n%s\n%s\n%s\n\n%s\n" \
++"Dear maintainer," \
+ "I've prepared an NMU for $SOURCE (versioned as $VERSION) and" \
+ "uploaded it to DELAYED/$NMUDIFF_DELAY. Please feel free to tell me if I" \
+-"should delay it longer.")"
++"should delay it longer." \
++"Regards.")"
+ fi
+ 
+ if [ "$NMUDIFF_MUTT" = no ]; then
+@@ -370,11 +404,7 @@
+ 
+ $TAGS
+ $DELAY_HEADER
+-Dear maintainer,
+-
+ $BODY
+-
+-Regards.
+ EOF
+ 
+     cat ../${SOURCE}-${VERSION_NO_EPOCH}-nmu.diff >> "$TMPNAM"
+@@ -409,11 +439,7 @@
+     cat <<EOF > "$TMPNAM"
+ $TAGS
+ $DELAY_HEADER
+-Dear maintainer,
+-
+ $BODY
+-
+-Regards.
+ EOF
+ 
+     mutt -s "$SOURCE: diff for NMU version $VERSION" -i "$TMPNAM" \

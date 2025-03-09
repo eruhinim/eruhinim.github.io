@@ -1,0 +1,100 @@
+diff --git a/src/generic/apt/apt.cc b/src/generic/apt/apt.cc
+index d534b43..2dd76e3 100644
+--- a/src/generic/apt/apt.cc
++++ b/src/generic/apt/apt.cc
+@@ -504,19 +504,73 @@ void apt_load_cache(OpProgress *progress_bar, bool do_initselections,
+ 
+   LOG_TRACE(logger, "Initializing the download cache.");
+   // Open the download cache.  By default, it goes in
+-  // ~/.aptitude/cache; it has 512Kb of in-memory cache and 10MB of
+-  // on-disk cache.
++  // $XDG_CACHE_HOME/aptitude-download-cache (typically
++  // ~/.cache/aptitude-download-cache); it has 512Kb of
++  // in-memory cache and 10MB of on-disk cache.
++  const char *XDG_CACHE_HOME = getenv("XDG_CACHE_HOME");
+   const char *HOME = getenv("HOME");
+-  if(HOME != NULL)
++
++  std::string download_cache_filename = "aptitude-download-cache";
++
++  // path for XDG
++  std::string download_cache_dir_xdg;
++  if(XDG_CACHE_HOME)
++    download_cache_dir_xdg = std::string(XDG_CACHE_HOME) + "/";
++  else if(HOME)
++    download_cache_dir_xdg = std::string(HOME) + "/.cache/";
++
++  // path old
++  std::string download_cache_dir_old;
++  if(HOME)
++    download_cache_dir_old = std::string(HOME) + "/.aptitude/";
++
++  // move from old path to new path, if still exists
++  if(!download_cache_dir_old.empty() && !download_cache_dir_xdg.empty())
++    {
++      std::string old = download_cache_dir_old + "cache";
++      std::string xdg = download_cache_dir_xdg + download_cache_filename;
++
++      // exists?
++      struct stat sb;
++      int result_stat = stat(old.c_str(), &sb);
++      if (result_stat != -1)
++        {
++	  // ... only then, attempt to move
++
++	  // attempt to create XDG dir if it does not exist
++	  int result_stat_dir = stat(download_cache_dir_xdg.c_str(), &sb);
++	  if (result_stat_dir == -1)
++	    {
++	      int result_mkdir = mkdir(download_cache_dir_xdg.c_str(), 700);
++	      if (result_mkdir != 0)
++	        {
++		  LOG_WARN(logger, "Could not create directory for cache file in '" << download_cache_dir_xdg << "'");
++		}
++	    }
++
++	  // attempt to move
++	  int result_rename = rename(old.c_str(), xdg.c_str());
++	  if (result_rename != 0)
++	    {
++	      LOG_WARN(logger, "Could not move existing cache file to new location, from '" << old << "' to '" << xdg << "'");
++	    }
++	  else
++	    {
++	      LOG_INFO(logger, "Moved cache file to new location, from '" << old << "' to '" << xdg << "'");
++	    }
++	}
++    }
++
++  if(!download_cache_dir_xdg.empty())
+     {
+-      std::string download_cache_file_name = string(HOME) + "/.aptitude/cache";
++      std::string download_cache_full_path = download_cache_dir_xdg + download_cache_filename;
+       const int download_cache_memory_size =
+ 	aptcfg->FindI(PACKAGE "::UI::DownloadCache::MemorySize", 512 * 1024);
+       const int download_cache_disk_size   =
+ 	aptcfg->FindI(PACKAGE "::UI::DownloadCache::DiskSize", 10 * 1024 * 1024);
+       try
+ 	{
+-	  download_cache = aptitude::util::file_cache::create(download_cache_file_name,
++	  download_cache = aptitude::util::file_cache::create(download_cache_full_path,
+ 							      download_cache_memory_size,
+ 							      download_cache_disk_size);
+ 	}
+@@ -524,14 +578,14 @@ void apt_load_cache(OpProgress *progress_bar, bool do_initselections,
+ 	{
+ 	  LOG_WARN(logger,
+ 		   "Can't open the file cache \""
+-		   << download_cache_file_name
++		   << download_cache_full_path
+ 		   << "\": " << ex.errmsg());
+ 	}
+       catch(std::exception &ex)
+ 	{
+ 	  LOG_WARN(logger,
+ 		   "Can't open the file cache \""
+-		   << download_cache_file_name
++		   << download_cache_full_path
+ 		   << "\": " << ex.what());
+ 	}
+     }

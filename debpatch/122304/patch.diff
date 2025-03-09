@@ -1,0 +1,565 @@
+diff --ignore-space-change -x '*~' -urN apt-0.5.25.orig/apt-pkg/depcache.cc apt-0.5.25.mine/apt-pkg/depcache.cc
+--- apt-0.5.25.orig/apt-pkg/depcache.cc	2001-05-26 23:36:04.000000000 -0600
++++ apt-0.5.25.mine/apt-pkg/depcache.cc	2004-05-28 13:10:23.000000000 -0600
+@@ -588,6 +588,92 @@
+    Update(Pkg);
+    AddSizes(Pkg);
+ }
++
++void pkgDepCache::MarkOrsInstall(vector<PkgIterator> &packages)
++{
++	/*
++	 * This walks through a complete list of user-specified packages
++	 * and marks up the Ors.
++	 * Pre: All single-dependencies of each package in the vector are
++	 *      marked for install
++	 * Post: All dependencies are satisfied.
++	 */
++	 //if the passed-in vector is empty, return
++	 if (packages.size() == 0)
++	 	return;
++	 vector<PkgIterator>::iterator arguments = packages.begin();
++	 //this member function needs to be recursive so that all of
++	 //the Or groups in all of the packages are taken care of but
++	 //it accepts a vector<PkgIterator> so we need to create one
++	 //do pass when we recurse.
++	 vector<PkgIterator> PackagesWithOrsToResolve;
++	 for (; arguments != packages.end(); arguments++)
++	 {
++	 	//get a DepIterator for this package's dependency linked list
++	 	DepIterator Dep = PkgState[(*arguments)->ID].InstVerIter(*this).DependsList();
++		while (Dep.end() != true)
++		{
++			DepIterator endOfOrIterator = Dep;
++			//move the endOfOrIterator to the last member of the Or group
++			//or fail to move it if the dependency is not part of such a
++			//group
++			while ((endOfOrIterator->CompareOp & Dep::Or) == Dep::Or)
++				endOfOrIterator++;
++			//if this wasn't an or it's already been taken care of
++			if (endOfOrIterator == Dep)
++			{
++				Dep++;
++				continue;
++			}
++			//actually the end iterator should be one beyond the end of the group
++			//set it now
++			endOfOrIterator++;
++			//If a member of an Or group has already been selected that means
++			//that it exists as a single-dependency of another package.
++			//Find out if that's the case.
++			bool memberIsInstalled = false;
++			DepIterator choice;
++			for (choice = Dep; choice != endOfOrIterator; choice++)
++			{
++				PkgIterator Res;
++				if (CheckDep(choice, choice->Type, Res))
++				{
++					PackagesWithOrsToResolve.push_back(Res);
++					memberIsInstalled = true;
++					break;
++				}
++			}
++			//if there is a member installed this group is satisfied, move on.
++			if (memberIsInstalled)
++			{
++				Dep = endOfOrIterator;
++				continue;
++			}
++			//at this point nothing odd was found and the correct satisfaction
++			//for this Or group is the first member. Reset choice.
++			choice = Dep;
++			//first check to see if it needs to be installed at all
++			if (IsImportantDep(choice) == false)
++			{
++				Dep = endOfOrIterator;
++				continue;
++			}
++			if ((*arguments)->CurrentVer != 0 && choice.IsCritical() == false)
++			{
++				Dep = endOfOrIterator;
++				continue;
++			}
++			//install the chosen package with autoinstalling enabled
++			MarkInstall(choice.TargetPkg(),true);
++			//push the package on to the vector to recurse on it
++			PackagesWithOrsToResolve.push_back(choice.TargetPkg());
++			//set Dep to the package just after the last dependency
++			Dep = endOfOrIterator;
++		}
++	 }
++	 //recurse
++	 MarkOrsInstall(PackagesWithOrsToResolve); 
++}
+ 									/*}}}*/
+ // DepCache::MarkInstall - Put the package in the install state		/*{{{*/
+ // ---------------------------------------------------------------------
+@@ -667,11 +753,9 @@
+ 	 continue;
+       if (Pkg->CurrentVer != 0 && Start.IsCritical() == false)
+ 	 continue;
+-      
+-      /* If we are in an or group locate the first or that can 
+-         succeed. We have already cached this.. */
+-      for (; Ors > 1 && (DepState[Start->ID] & DepCVer) != DepCVer; Ors--)
+-	 Start++;
++      //skip Or groups, we'll deal with them later
++      if (Ors > 1) //because > 1 or means it's an Or group that needs to be skipped.
++	continue;
+ 
+       /* This bit is for processing the possibilty of an install/upgrade
+          fixing the problem */
+@@ -715,7 +799,6 @@
+ 	    if (P->CurrentVer == 0)
+ 	       PkgState[InstPkg->ID].Flags |= Flag::Auto;
+ 	 }
+-	 
+ 	 continue;
+       }
+       
+diff --ignore-space-change -x '*~' -urN apt-0.5.25.orig/apt-pkg/depcache.h apt-0.5.25.mine/apt-pkg/depcache.h
+--- apt-0.5.25.orig/apt-pkg/depcache.h	2001-02-20 00:03:17.000000000 -0700
++++ apt-0.5.25.mine/apt-pkg/depcache.h	2004-05-28 12:53:07.000000000 -0600
+@@ -44,6 +44,8 @@
+ 
+ #include <apt-pkg/pkgcache.h>
+ #include <apt-pkg/progress.h>
++#include <vector>
++using std::vector;
+ 
+ class pkgDepCache : protected pkgCache::Namespace
+ {
+@@ -187,6 +189,7 @@
+    void MarkDelete(PkgIterator const &Pkg,bool Purge = false);
+    void MarkInstall(PkgIterator const &Pkg,bool AutoInst = true,
+ 		    unsigned long Depth = 0);
++   void MarkOrsInstall(vector<PkgIterator> &packages);
+    void SetReInstall(PkgIterator const &Pkg,bool To);
+    void SetCandidateVersion(VerIterator TargetVer);
+    
+diff --ignore-space-change -x '*~' -urN apt-0.5.25.orig/cmdline/apt-get.cc apt-0.5.25.mine/cmdline/apt-get.cc
+--- apt-0.5.25.orig/cmdline/apt-get.cc	2004-02-26 12:17:55.000000000 -0700
++++ apt-0.5.25.mine/cmdline/apt-get.cc	2004-05-28 13:38:08.000000000 -0600
+@@ -1321,6 +1321,16 @@
+    
+    return InstallPackages(Cache,true);
+ }
++void TryToInstallOrs(vector<pkgCache::PkgIterator> arguments, pkgDepCache &Cache)
++{
++	/*
++	 * for consistency's sake this is basically a wrapper for
++	 * a call to Cache.MarkOrsInstall
++	 */
++	 Cache.MarkOrsInstall(arguments);
++}
++									
++									
+ 									/*}}}*/
+ // DoInstall - Install packages from the command line			/*{{{*/
+ // ---------------------------------------------------------------------
+@@ -1345,6 +1355,8 @@
+    if (strcasecmp(CmdL.FileList[0],"remove") == 0)
+       DefRemove = true;
+ 
++   vector<pkgCache::PkgIterator> arguments;
++
+    for (const char **I = CmdL.FileList + 1; *I != 0; I++)
+    {
+       // Duplicate the string
+@@ -1396,6 +1408,7 @@
+       
+       // Locate the package
+       pkgCache::PkgIterator Pkg = Cache->FindPkg(S);
++      arguments.push_back (Pkg);
+       Packages++;
+       if (Pkg.end() == true)
+       {
+@@ -1453,6 +1466,8 @@
+ 	    return false;
+       }      
+    }
++   //satisfy the Or groups
++   TryToInstallOrs(arguments, Cache);
+ 
+    /* If we are in the Broken fixing mode we do not attempt to fix the
+       problems. This is if the user invoked install without -f and gave
+diff --ignore-space-change -x '*~' -urN apt-0.5.25.orig/po/apt-all.pot apt-0.5.25.mine/po/apt-all.pot
+--- apt-0.5.25.orig/po/apt-all.pot	2004-05-08 13:41:36.000000000 -0600
++++ apt-0.5.25.mine/po/apt-all.pot	2004-05-28 13:45:41.000000000 -0600
+@@ -7,7 +7,7 @@
+ msgstr ""
+ "Project-Id-Version: PACKAGE VERSION\n"
+ "Report-Msgid-Bugs-To: \n"
+-"POT-Creation-Date: 2004-04-29 21:56-0700\n"
++"POT-Creation-Date: 2004-05-28 13:45-0600\n"
+ "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+ "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+ "Language-Team: LANGUAGE <LL@li.org>\n"
+@@ -148,7 +148,7 @@
+ 
+ #: cmdline/apt-cache.cc:1646 cmdline/apt-cdrom.cc:731 cmdline/apt-config.cc:70
+ #: cmdline/apt-extracttemplates.cc:225 ftparchive/apt-ftparchive.cc:545
+-#: cmdline/apt-get.cc:2260 cmdline/apt-sortpkgs.cc:144
++#: cmdline/apt-get.cc:2275 cmdline/apt-sortpkgs.cc:144
+ #, c-format
+ msgid "%s %s for %s %s compiled on %s %s\n"
+ msgstr ""
+@@ -518,7 +518,7 @@
+ msgid "Y"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:140 cmdline/apt-get.cc:1422
++#: cmdline/apt-get.cc:140 cmdline/apt-get.cc:1435
+ #, c-format
+ msgid "Regex compilation error - %s"
+ msgstr ""
+@@ -649,11 +649,11 @@
+ msgid "Packages need to be removed but Remove is disabled."
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:744 cmdline/apt-get.cc:1716 cmdline/apt-get.cc:1749
++#: cmdline/apt-get.cc:744 cmdline/apt-get.cc:1731 cmdline/apt-get.cc:1764
+ msgid "Unable to lock the download directory"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:754 cmdline/apt-get.cc:1797 cmdline/apt-get.cc:2008
++#: cmdline/apt-get.cc:754 cmdline/apt-get.cc:1812 cmdline/apt-get.cc:2023
+ #: apt-pkg/cachefile.cc:67
+ msgid "The list of sources could not be read."
+ msgstr ""
+@@ -711,7 +711,7 @@
+ msgid "Do you want to continue? [Y/n] "
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:911 cmdline/apt-get.cc:1281 cmdline/apt-get.cc:1906
++#: cmdline/apt-get.cc:911 cmdline/apt-get.cc:1281 cmdline/apt-get.cc:1921
+ #, c-format
+ msgid "Failed to fetch %s  %s\n"
+ msgstr ""
+@@ -720,7 +720,7 @@
+ msgid "Some files failed to download"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:930 cmdline/apt-get.cc:1915
++#: cmdline/apt-get.cc:930 cmdline/apt-get.cc:1930
+ msgid "Download complete and in download only mode"
+ msgstr ""
+ 
+@@ -830,27 +830,27 @@
+ msgid "Internal Error, AllUpgrade broke stuff"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1409 cmdline/apt-get.cc:1445
++#: cmdline/apt-get.cc:1422 cmdline/apt-get.cc:1458
+ #, c-format
+ msgid "Couldn't find package %s"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1432
++#: cmdline/apt-get.cc:1445
+ #, c-format
+ msgid "Note, selecting %s for regex '%s'\n"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1462
++#: cmdline/apt-get.cc:1477
+ msgid "You might want to run `apt-get -f install' to correct these:"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1465
++#: cmdline/apt-get.cc:1480
+ msgid ""
+ "Unmet dependencies. Try 'apt-get -f install' with no packages (or specify a "
+ "solution)."
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1477
++#: cmdline/apt-get.cc:1492
+ msgid ""
+ "Some packages could not be installed. This may mean that you have\n"
+ "requested an impossible situation or if you are using the unstable\n"
+@@ -858,149 +858,149 @@
+ "or been moved out of Incoming."
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1485
++#: cmdline/apt-get.cc:1500
+ msgid ""
+ "Since you only requested a single operation it is extremely likely that\n"
+ "the package is simply not installable and a bug report against\n"
+ "that package should be filed."
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1490
++#: cmdline/apt-get.cc:1505
+ msgid "The following information may help to resolve the situation:"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1493
++#: cmdline/apt-get.cc:1508
+ msgid "Broken packages"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1519
++#: cmdline/apt-get.cc:1534
+ msgid "The following extra packages will be installed:"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1590
++#: cmdline/apt-get.cc:1605
+ msgid "Suggested packages:"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1591
++#: cmdline/apt-get.cc:1606
+ msgid "Recommended packages:"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1611
++#: cmdline/apt-get.cc:1626
+ msgid "Calculating Upgrade... "
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1614 methods/ftp.cc:702 methods/connect.cc:99
++#: cmdline/apt-get.cc:1629 methods/ftp.cc:702 methods/connect.cc:99
+ msgid "Failed"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1619
++#: cmdline/apt-get.cc:1634
+ msgid "Done"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1792
++#: cmdline/apt-get.cc:1807
+ msgid "Must specify at least one package to fetch source for"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1819 cmdline/apt-get.cc:2026
++#: cmdline/apt-get.cc:1834 cmdline/apt-get.cc:2041
+ #, c-format
+ msgid "Unable to find a source package for %s"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1866
++#: cmdline/apt-get.cc:1881
+ #, c-format
+ msgid "You don't have enough free space in %s"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1871
++#: cmdline/apt-get.cc:1886
+ #, c-format
+ msgid "Need to get %sB/%sB of source archives.\n"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1874
++#: cmdline/apt-get.cc:1889
+ #, c-format
+ msgid "Need to get %sB of source archives.\n"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1880
++#: cmdline/apt-get.cc:1895
+ #, c-format
+ msgid "Fetch Source %s\n"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1911
++#: cmdline/apt-get.cc:1926
+ msgid "Failed to fetch some archives."
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1939
++#: cmdline/apt-get.cc:1954
+ #, c-format
+ msgid "Skipping unpack of already unpacked source in %s\n"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1951
++#: cmdline/apt-get.cc:1966
+ #, c-format
+ msgid "Unpack command '%s' failed.\n"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1968
++#: cmdline/apt-get.cc:1983
+ #, c-format
+ msgid "Build command '%s' failed.\n"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:1987
++#: cmdline/apt-get.cc:2002
+ msgid "Child process failed"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:2003
++#: cmdline/apt-get.cc:2018
+ msgid "Must specify at least one package to check builddeps for"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:2031
++#: cmdline/apt-get.cc:2046
+ #, c-format
+ msgid "Unable to get build-dependency information for %s"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:2051
++#: cmdline/apt-get.cc:2066
+ #, c-format
+ msgid "%s has no build depends.\n"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:2103
++#: cmdline/apt-get.cc:2118
+ #, c-format
+ msgid ""
+ "%s dependency for %s cannot be satisfied because the package %s cannot be "
+ "found"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:2155
++#: cmdline/apt-get.cc:2170
+ #, c-format
+ msgid ""
+ "%s dependency for %s cannot be satisfied because no available versions of "
+ "package %s can satisfy version requirements"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:2190
++#: cmdline/apt-get.cc:2205
+ #, c-format
+ msgid "Failed to satisfy %s dependency for %s: Installed package %s is too new"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:2215
++#: cmdline/apt-get.cc:2230
+ #, c-format
+ msgid "Failed to satisfy %s dependency for %s: %s"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:2229
++#: cmdline/apt-get.cc:2244
+ #, c-format
+ msgid "Build-dependencies for %s could not be satisfied."
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:2233
++#: cmdline/apt-get.cc:2248
+ msgid "Failed to process build dependencies"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:2265
++#: cmdline/apt-get.cc:2280
+ msgid "Supported Modules:"
+ msgstr ""
+ 
+-#: cmdline/apt-get.cc:2306
++#: cmdline/apt-get.cc:2321
+ msgid ""
+ "Usage: apt-get [options] command\n"
+ "       apt-get [options] install|remove pkg1 [pkg2 ...]\n"
+@@ -1544,7 +1544,7 @@
+ msgid "Unable to accept connection"
+ msgstr ""
+ 
+-#: methods/ftp.cc:864 methods/http.cc:912 methods/rsh.cc:303
++#: methods/ftp.cc:864 methods/http.cc:916 methods/rsh.cc:303
+ msgid "Problem hashing file"
+ msgstr ""
+ 
+@@ -1638,76 +1638,76 @@
+ msgid "Read error from %s process"
+ msgstr ""
+ 
+-#: methods/http.cc:340
++#: methods/http.cc:344
+ msgid "Waiting for headers"
+ msgstr ""
+ 
+-#: methods/http.cc:486
++#: methods/http.cc:490
+ #, c-format
+ msgid "Got a single header line over %u chars"
+ msgstr ""
+ 
+-#: methods/http.cc:494
++#: methods/http.cc:498
+ msgid "Bad header line"
+ msgstr ""
+ 
+-#: methods/http.cc:513 methods/http.cc:520
++#: methods/http.cc:517 methods/http.cc:524
+ msgid "The http server sent an invalid reply header"
+ msgstr ""
+ 
+-#: methods/http.cc:549
++#: methods/http.cc:553
+ msgid "The http server sent an invalid Content-Length header"
+ msgstr ""
+ 
+-#: methods/http.cc:564
++#: methods/http.cc:568
+ msgid "The http server sent an invalid Content-Range header"
+ msgstr ""
+ 
+-#: methods/http.cc:566
++#: methods/http.cc:570
+ msgid "This http server has broken range support"
+ msgstr ""
+ 
+-#: methods/http.cc:590
++#: methods/http.cc:594
+ msgid "Unknown date format"
+ msgstr ""
+ 
+-#: methods/http.cc:733
++#: methods/http.cc:737
+ msgid "Select failed"
+ msgstr ""
+ 
+-#: methods/http.cc:738
++#: methods/http.cc:742
+ msgid "Connection timed out"
+ msgstr ""
+ 
+-#: methods/http.cc:761
++#: methods/http.cc:765
+ msgid "Error writing to output file"
+ msgstr ""
+ 
+-#: methods/http.cc:789
++#: methods/http.cc:793
+ msgid "Error writing to file"
+ msgstr ""
+ 
+-#: methods/http.cc:814
++#: methods/http.cc:818
+ msgid "Error writing to the file"
+ msgstr ""
+ 
+-#: methods/http.cc:828
++#: methods/http.cc:832
+ msgid "Error reading from server Remote end closed connection"
+ msgstr ""
+ 
+-#: methods/http.cc:830
++#: methods/http.cc:834
+ msgid "Error reading from server"
+ msgstr ""
+ 
+-#: methods/http.cc:1061
++#: methods/http.cc:1065
+ msgid "Bad header Data"
+ msgstr ""
+ 
+-#: methods/http.cc:1078
++#: methods/http.cc:1082
+ msgid "Connection failed"
+ msgstr ""
+ 
+-#: methods/http.cc:1169
++#: methods/http.cc:1173
+ msgid "Internal error"
+ msgstr ""
+ 

@@ -1,0 +1,175 @@
+diff --git a/scripts/Dpkg/Deps.pm b/scripts/Dpkg/Deps.pm
+index 9635cc2..d85ad5f 100644
+--- a/scripts/Dpkg/Deps.pm
++++ b/scripts/Dpkg/Deps.pm
+@@ -51,7 +51,7 @@ use warnings;
+ our $VERSION = "1.01";
+ 
+ use Dpkg::Version;
+-use Dpkg::Arch qw(get_host_arch);
++use Dpkg::Arch qw(get_host_arch get_build_arch);
+ use Dpkg::ErrorHandling;
+ use Dpkg::Gettext;
+ 
+@@ -271,6 +271,11 @@ current architecture.
+ If set to 1, returns a Dpkg::Deps::Union instead of a Dpkg::Deps::AND. Use
+ this when parsing non-dependency fields like Conflicts.
+ 
++=item build_dep (defaults to 0)
++
++If set to 1, allow build-dep only arch qualifiers, that is “:native”.
++This should be set whenever working with build-deps.
++
+ =back
+ 
+ =cut
+@@ -282,6 +287,7 @@ sub deps_parse {
+     $options{reduce_arch} = 0 if not exists $options{reduce_arch};
+     $options{host_arch} = get_host_arch() if not exists $options{host_arch};
+     $options{union} = 0 if not exists $options{union};
++    $options{build_dep} = 0 if not exists $options{build_dep};
+ 
+     # Strip trailing/leading spaces
+     $dep_line =~ s/^\s+//;
+@@ -292,7 +298,9 @@ sub deps_parse {
+         my @or_list = ();
+         foreach my $dep_or (split(/\s*\|\s*/m, $dep_and)) {
+ 	    my $dep_simple = Dpkg::Deps::Simple->new($dep_or, host_arch =>
+-	                                             $options{host_arch});
++	                                             $options{host_arch},
++	                                             build_dep =>
++	                                             $options{build_dep});
+ 	    if (not defined $dep_simple->{package}) {
+ 		warning(_g("can't parse dependency %s"), $dep_or);
+ 		return undef;
+@@ -538,6 +546,8 @@ sub new {
+     bless $self, $class;
+     $self->reset();
+     $self->{host_arch} = $opts{host_arch} || Dpkg::Arch::get_host_arch();
++    $self->{build_arch} = $opts{build_arch} || Dpkg::Arch::get_build_arch();
++    $self->{build_dep} = $opts{build_dep} || 0;
+     $self->parse_string($arg) if defined($arg);
+     return $self;
+ }
+@@ -565,7 +575,7 @@ sub parse_string {
+               ([a-zA-Z0-9][a-zA-Z0-9+.-]*)  # package name
+               (?:                           # start of optional part
+                 :                           # colon for architecture
+-                (any)                       # architecture name
++                (any|native)                # architecture name
+               )?                            # end of optional part
+               (?:                           # start of optional part
+                 \s* \(                      # open parenthesis for version part
+@@ -580,8 +590,11 @@ sub parse_string {
+               )?                            # end of optional architecture
+ 	      \s*$			    # trailing spaces at end
+             /x;
++    if (defined($2)) {
++	return if $2 eq "native" and not $self->{build_dep};
++	$self->{archqual} = $2;
++    }
+     $self->{package} = $1;
+-    $self->{archqual} = $2 if defined($2);
+     $self->{relation} = version_normalize_relation($3) if defined($3);
+     if (defined($4)) {
+ 	$self->{version} = Dpkg::Version->new($4);
+@@ -1247,6 +1260,7 @@ sub _find_package {
+     my ($pkg, $archqual) = ($dep->{package}, $dep->{archqual});
+     return undef if not exists $self->{pkg}{$pkg};
+     my $host_arch = $dep->{host_arch};
++    my $build_arch = $dep->{build_arch};
+     foreach my $p (@{$self->{pkg}{$pkg}}) {
+ 	my $a = $p->{"architecture"};
+ 	my $ma = $p->{"multi-arch"};
+@@ -1254,12 +1268,13 @@ sub _find_package {
+ 	    $$lackinfos = 1;
+ 	    next;
+ 	}
+-	return $p if $ma eq "foreign";
+ 	if (not defined $archqual) {
+ 	    return $p if $a eq $host_arch or $a eq "all";
++	    return $p if $ma eq "foreign";
+ 	} elsif ($archqual eq "any") {
+ 	    return $p if $ma eq "allowed";
+-	    return $p if $a eq $host_arch or $a eq "all";
++	} elsif ($archqual eq "native") {
++	    return $p if $a eq $build_arch and $ma ne "foreign";
+ 	}
+     }
+     return undef;
+diff --git a/scripts/dpkg-buildpackage.pl b/scripts/dpkg-buildpackage.pl
+index c337107..bace1e8 100755
+--- a/scripts/dpkg-buildpackage.pl
++++ b/scripts/dpkg-buildpackage.pl
+@@ -67,7 +67,7 @@ Options:
+   -spgp          the sign-command is called like PGP.
+   -us            unsigned source.
+   -uc            unsigned changes.
+-  -a<arch>       Debian architecture we build for (implies -d).
++  -a<arch>       Debian architecture we build for.
+   -b             binary-only, do not build source.   } also passed to
+   -B             binary-only, no arch-indep files.   } dpkg-genchanges
+   -A             binary-only, only arch-indep files. }
+@@ -182,7 +182,6 @@ while (@ARGV) {
+ 	$usepause = 1;
+     } elsif (/^-a(.*)$/) {
+ 	$targetarch = $1;
+-	$checkbuilddep = 0;
+     } elsif (/^-s[iad]$/) {
+ 	push @changes_opts, $_;
+     } elsif (/^-(?:s[insAkurKUR]|[zZ].*|i.*|I.*)$/) {
+diff --git a/scripts/dpkg-checkbuilddeps.pl b/scripts/dpkg-checkbuilddeps.pl
+index e6e97ce..84c9090 100755
+--- a/scripts/dpkg-checkbuilddeps.pl
++++ b/scripts/dpkg-checkbuilddeps.pl
+@@ -80,7 +80,7 @@ my $fields = $control->get_source();
+ my $facts = parse_status("$admindir/status");
+ 
+ unless (defined($bd_value) or defined($bc_value)) {
+-    $bd_value = 'build-essential';
++    $bd_value = 'build-essential:native';
+     $bd_value .= ", " . $fields->{"Build-Depends"} if defined $fields->{"Build-Depends"};
+     if (not $binary_only and defined $fields->{"Build-Depends-Indep"}) {
+ 	$bd_value .= ", " . $fields->{"Build-Depends-Indep"};
+@@ -99,12 +99,13 @@ my (@unmet, @conflicts);
+ if ($bd_value) {
+ 	push @unmet, build_depends('Build-Depends/Build-Depends-Indep',
+ 		deps_parse($bd_value, host_arch => $host_arch,
+-			   reduce_arch => 1), $facts);
++			   reduce_arch => 1, build_dep => 1), $facts);
+ }
+ if ($bc_value) {
+ 	push @conflicts, build_conflicts('Build-Conflicts/Build-Conflicts-Indep',
+ 		deps_parse($bc_value, host_arch => $host_arch,
+-			   reduce_arch => 1, union => 1), $facts);
++			   reduce_arch => 1, union => 1,
++			   build_dep => 1), $facts);
+ }
+ 
+ if (@unmet) {
+diff --git a/scripts/dpkg-shlibdeps.pl b/scripts/dpkg-shlibdeps.pl
+index 6054500..88b324d 100755
+--- a/scripts/dpkg-shlibdeps.pl
++++ b/scripts/dpkg-shlibdeps.pl
+@@ -140,7 +140,7 @@ my $control = Dpkg::Control::Info->new();
+ my $fields = $control->get_source();
+ my $build_depends = defined($fields->{"Build-Depends"}) ?
+ 		    $fields->{"Build-Depends"} : "";
+-my $build_deps = deps_parse($build_depends, reduce_arch => 1);
++my $build_deps = deps_parse($build_depends, reduce_arch => 1, build_dep => 1);
+ 
+ my %dependencies;
+ my %shlibs;
+diff --git a/scripts/dpkg-source.pl b/scripts/dpkg-source.pl
+index 881d521..53acf7e 100755
+--- a/scripts/dpkg-source.pl
++++ b/scripts/dpkg-source.pl
+@@ -249,7 +249,7 @@ if ($options{'opmode'} =~ /^(-b|--print-format|--(before|after)-build|--commit)$
+ 	} elsif (m/^Build-(Depends|Conflicts)(-Indep)?$/i) {
+ 	    my $dep;
+ 	    my $type = field_get_dep_type($_);
+-	    $dep = deps_parse($v, union => $type eq 'union');
++	    $dep = deps_parse($v, union => $type eq 'union', build_dep => 1);
+ 	    error(_g("error occurred while parsing %s"), $_) unless defined $dep;
+ 	    my $facts = Dpkg::Deps::KnownFacts->new();
+ 	    $dep->simplify_deps($facts);

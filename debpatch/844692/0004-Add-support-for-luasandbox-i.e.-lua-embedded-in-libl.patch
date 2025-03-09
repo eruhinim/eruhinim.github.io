@@ -1,0 +1,214 @@
+From c7e8c8af54ec825b616312636b2dbf788a012bf9 Mon Sep 17 00:00:00 2001
+From: Mathieu Parent <math.parent@gmail.com>
+Date: Sun, 23 Oct 2016 16:44:11 +0200
+Subject: [PATCH 4/5] Add support for luasandbox (i.e. lua embedded in
+ libluasandbox0) (Closes: #844692)
+
+---
+ Makefile                    |  2 ++
+ bin/dh_lua                  |  5 +++
+ debian/control              |  2 +-
+ doc/policy.txt              |  4 +--
+ make/dh-lua.Makefile.single |  3 ++
+ test/sandbox/app.c          | 85 +++++++++++++++++++++++++++++++++++++++++++++
+ test/sandbox/app.c.conf.in  | 11 ++++++
+ 7 files changed, 109 insertions(+), 3 deletions(-)
+ create mode 100644 test/sandbox/app.c
+ create mode 100644 test/sandbox/app.c.conf.in
+
+diff --git a/Makefile b/Makefile
+index 94559be..88a5e14 100644
+--- a/Makefile
++++ b/Makefile
+@@ -19,6 +19,7 @@ install:
+ 	mkdir -p $(DESTDIR)/$(DH_LUA_HOME)/test/5.1/
+ 	mkdir -p $(DESTDIR)/$(DH_LUA_HOME)/test/5.2/
+ 	mkdir -p $(DESTDIR)/$(DH_LUA_HOME)/test/5.3/
++	mkdir -p $(DESTDIR)/$(DH_LUA_HOME)/test/sandbox/
+ 	mkdir -p $(DESTDIR)/$(DH_HOME)/Buildsystem/
+ 	mkdir -p $(DESTDIR)/$(DH_HOME)/Sequence/
+ 	mkdir -p $(DESTDIR)/usr/bin/
+@@ -29,6 +30,7 @@ install:
+ 	cp test/5.1/* $(DESTDIR)/$(DH_LUA_HOME)/test/5.1/
+ 	cp test/5.2/* $(DESTDIR)/$(DH_LUA_HOME)/test/5.2/
+ 	cp test/5.3/* $(DESTDIR)/$(DH_LUA_HOME)/test/5.3/
++	cp test/sandbox/* $(DESTDIR)/$(DH_LUA_HOME)/test/sandbox/
+ 	cp debhelper7/buildsystem/* $(DESTDIR)/$(DH_HOME)/Buildsystem/
+ 	cp debhelper7/sequence/* $(DESTDIR)/$(DH_HOME)/Sequence/
+ 	cat doc/policy.txt | sed 's/@@V@@/$(POLICY_VERSION)/' \
+diff --git a/bin/dh_lua b/bin/dh_lua
+index eeef10b..507962a 100755
+--- a/bin/dh_lua
++++ b/bin/dh_lua
+@@ -96,6 +96,11 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 			print "deduplicating $what\n";
+ 			doit("ln","-sf", mklorig($what), $dest);
+ 		}
++		$dest=mklfn($tmp,"sandbox",$what);
++		if (compare($src, $dest) == 0) {
++			print "deduplicating $what\n";
++			doit("ln","-sf", mklorig($what), $dest);
++		}
+ 	}
+ }
+ 
+diff --git a/debian/control b/debian/control
+index 26dc733..0c8deb8 100644
+--- a/debian/control
++++ b/debian/control
+@@ -10,7 +10,7 @@ Homepage: http://pkg-lua.alioth.debian.org/
+ 
+ Package: dh-lua
+ Architecture: all
+-Depends: ${misc:Depends}, ${perl:Depends}, debhelper (>= 8.0.0), dctrl-tools, libtool, libtool-bin, pkg-config, liblua5.3-dev, lua5.3, liblua5.2-dev, lua5.2, liblua5.1-0-dev, lua5.1, libfile-find-rule-perl
++Depends: ${misc:Depends}, ${perl:Depends}, debhelper (>= 8.0.0), dctrl-tools, libtool, libtool-bin, pkg-config, liblua5.3-dev, lua5.3, liblua5.2-dev, lua5.2, liblua5.1-0-dev, lua5.1, libluasandbox-dev (>=  1.2.1-2~), libluasandbox-bin (>= 1.2.1-2~), libfile-find-rule-perl
+ Description: helper tools for maintaining Lua-related packages
+  This package contains the Debian policy for the Debian packages relative to
+  the Lua scripting language, as well as some tools to help build them.
+diff --git a/doc/policy.txt b/doc/policy.txt
+index 2a1b8b5..4e6ca9a 100644
+--- a/doc/policy.txt
++++ b/doc/policy.txt
+@@ -29,7 +29,7 @@ Conventions <a id="ch-conventions"></a>
+ In the following we shall write `{VARIABLE}` to mean a schema of file names.
+ The following ones are the most relevant:
+ 
+-  - `{LUA_VERSION}` The Lua major version, like `5.1` or `5.2`
++  - `{LUA_VERSION}` The Lua major version, like `5.1`, `5.2`, `5.3` or `sandbox`
+   - `{PKG_NAME}` The name of the library, like `expat`, `lpeg` and `sql`
+   - `{LUA_MODNAME}` The string used to `require` the module, like `lxp`
+ 
+@@ -342,7 +342,7 @@ while the former is used to infer the deb package name, substituting `.` with
+ A special case is when the the configuration file name starts with
+ `lua${LUA_VERSION}`.  In that case the `LUA_VERSION` variable can be omitted
+ and it is automatically set to the value extracted from the file name.
+-Supported values are `5.3`, `5.2` and `5.1`.
++Supported values are `5.3`, `5.2`, `5.1` and `sandbox`.
+ This makes it possible to use one single
+ conf file to build the library for many Lua version.  It is sufficient to
+ name the file like `debian/lua5.1.lpeg.dh-lua.conf` and add a symlink to it
+diff --git a/make/dh-lua.Makefile.single b/make/dh-lua.Makefile.single
+index fa58745..8fa5b89 100644
+--- a/make/dh-lua.Makefile.single
++++ b/make/dh-lua.Makefile.single
+@@ -32,6 +32,9 @@ endif
+ ifeq "$(LUA_VERSION)" ""
+ LUA_VERSION:=$(if $(shell echo $(CONFIGURATION_FILE) | grep ^debian/luajit),jit)
+ endif
++ifeq "$(LUA_VERSION)" ""
++LUA_VERSION:=$(if $(shell echo $(CONFIGURATION_FILE) | grep ^debian/luasandbox),sandbox)
++endif
+ 
+ # UID for the LUA_VERSION
+ UID=$(shell pwd)/$(LUA_VERSION)-$(PKG_NAME)
+diff --git a/test/sandbox/app.c b/test/sandbox/app.c
+new file mode 100644
+index 0000000..781b683
+--- /dev/null
++++ b/test/sandbox/app.c
+@@ -0,0 +1,85 @@
++// Copyright: © 2012 Enrico Tassi <gareuselesinge@debian.org>
++// License: MIT/X
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <lauxlib.h>
++#include <lualib.h>
++
++// this should include all the needed libraries and
++// define 
++//   static void app_open(lua_State* L)
++#include "app.c.conf"
++
++int main(int argn,char** argv){
++	int rc;
++	int i;
++	const char *init = getenv("LUA_INIT");
++
++	// create a lua VM
++	lua_State* L = lua_open();
++	if (L == NULL) {
++		fprintf(stderr,"Unable to allocate a lua_State");
++		return 1;
++	}
++
++	// load stdlib
++	lua_gc(L, LUA_GCSTOP, 0);  /* stop collector during initialization */
++	luaL_openlibs(L);  /* open libraries */
++	lua_gc(L, LUA_GCRESTART, 0);
++
++	// LUA_INIT
++	if (init != NULL && luaL_dostring(L, init)) {
++		const char* error = NULL;
++		error = lua_tostring(L,-1);
++		fprintf(stderr,"app.c: %s\n",error);
++		return 1;
++	}
++
++	// here the specific luaopen_MODULENAME
++	app_open(L);
++
++	// LOAD
++	if (argn < 2 || !strcmp("-", argv[1])) {
++		rc = luaL_loadfile(L, NULL);
++	}
++	else {
++		rc = luaL_loadfile(L,argv[1]);
++	}
++
++	// check for errors
++	if (rc != 0){
++		const char* error = NULL;
++		error = lua_tostring(L,-1);
++		fprintf(stderr,"app.c: %s\n",error);
++		return 1;
++	}
++
++	// RUN!
++	lua_newtable(L);
++	for(i=1;i<argn;i++){
++		lua_pushnumber(L,i-1);
++		lua_pushstring(L,argv[i]);
++		lua_settable(L,-3);
++	}
++	lua_setglobal(L,"arg");
++
++	for(i=2;i<argn;i++) lua_pushstring(L,argv[i]);
++	rc = lua_pcall(L,(argn > 2 ? argn-2 : 0),LUA_MULTRET,0);
++	
++	// check for errors
++	if (rc != 0){
++		const char* error = NULL;
++		error = lua_tostring(L,-1);
++		fprintf(stderr,"app.c: %s\n",error);
++		return 1;
++	}
++
++	// shutdown lua VM
++	lua_close(L);
++
++	// bye!
++	return (rc == 0 ? EXIT_SUCCESS : 1);
++}
+diff --git a/test/sandbox/app.c.conf.in b/test/sandbox/app.c.conf.in
+new file mode 100644
+index 0000000..d4b250b
+--- /dev/null
++++ b/test/sandbox/app.c.conf.in
+@@ -0,0 +1,11 @@
++// Copyright: © 2012 Enrico Tassi <gareuselesinge@debian.org>
++// License: MIT/X
++
++#include "@@LUA_HEADER@@"
++
++static void app_open(lua_State* L){
++  lua_getglobal(L,"package");
++  lua_getfield(L,-1,"preload");
++  lua_pushcfunction(L,luaopen_@@LUA_MODNAME_CPART_UNDERSCORE@@);
++  lua_setfield(L,-2,"@@LUA_MODNAME_CPART@@");
++}
+-- 
+2.10.2
+

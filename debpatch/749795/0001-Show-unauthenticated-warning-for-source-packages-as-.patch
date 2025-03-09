@@ -1,0 +1,129 @@
+From b7f501b5cc8583f61467f0c7a0282acbb88e4b29 Mon Sep 17 00:00:00 2001
+From: Michael Vogt <mvo@debian.org>
+Date: Fri, 30 May 2014 14:47:56 +0200
+Subject: [PATCH] Show unauthenticated warning for source packages as well
+
+This will show the same unauthenticated warning for source packages
+as for binary packages and will not download a source package if
+it is unauthenticated. This can be overriden with
+--allow-unauthenticated
+
+Closes: #749795
+---
+ apt-private/private-download.cc                    |  5 +++++
+ apt-private/private-download.h                     |  6 +++++
+ cmdline/apt-get.cc                                 |  9 ++++++++
+ test/integration/test-apt-get-source-authenticated | 26 ++++++++++++++++++++++
+ 4 files changed, 46 insertions(+)
+ create mode 100755 test/integration/test-apt-get-source-authenticated
+
+diff --git a/apt-private/private-download.cc b/apt-private/private-download.cc
+index a095f0c..be7d23c 100644
+--- a/apt-private/private-download.cc
++++ b/apt-private/private-download.cc
+@@ -28,6 +28,11 @@ bool CheckAuth(pkgAcquire& Fetcher, bool const PromptUser)
+    if (UntrustedList == "")
+       return true;
+ 
++   return AuthPrompt(UntrustedList, PromptUser);
++}
++
++bool AuthPrompt(std::string UntrustedList, bool const PromptUser)
++{
+    ShowList(c2out,_("WARNING: The following packages cannot be authenticated!"),UntrustedList,"");
+ 
+    if (_config->FindB("APT::Get::AllowUnauthenticated",false) == true)
+diff --git a/apt-private/private-download.h b/apt-private/private-download.h
+index a108aa5..a90ac7e 100644
+--- a/apt-private/private-download.h
++++ b/apt-private/private-download.h
+@@ -5,7 +5,13 @@
+ 
+ class pkgAcquire;
+ 
++// Check if all files in the fetcher are authenticated
+ APT_PUBLIC bool CheckAuth(pkgAcquire& Fetcher, bool const PromptUser);
++
++// show a authentication warning prompt and return true if the system
++// should continue
++APT_PUBLIC bool AuthPrompt(std::string UntrustedList, bool const PromptUser);
++
+ APT_PUBLIC bool AcquireRun(pkgAcquire &Fetcher, int const PulseInterval, bool * const Failure, bool * const TransientNetworkFailure);
+ 
+ #endif
+diff --git a/cmdline/apt-get.cc b/cmdline/apt-get.cc
+index 0f18b0e..d74d6d5 100644
+--- a/cmdline/apt-get.cc
++++ b/cmdline/apt-get.cc
+@@ -76,6 +76,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <sys/ioctl.h>
+ #include <sys/stat.h>
+ #include <sys/statfs.h>
+ #include <sys/statvfs.h>
+@@ -755,6 +756,7 @@ static bool DoSource(CommandLine &CmdL)
+ 
+    // Load the requestd sources into the fetcher
+    unsigned J = 0;
++   std::string UntrustedList;
+    for (const char **I = CmdL.FileList + 1; *I != 0; I++, J++)
+    {
+       string Src;
+@@ -763,6 +765,9 @@ static bool DoSource(CommandLine &CmdL)
+       if (Last == 0) {
+ 	 return _error->Error(_("Unable to find a source package for %s"),Src.c_str());
+       }
++
++      if (Last->Index().IsTrusted() == false)
++         UntrustedList += Src + " ";
+       
+       string srec = Last->AsStr();
+       string::size_type pos = srec.find("\nVcs-");
+@@ -846,6 +851,10 @@ static bool DoSource(CommandLine &CmdL)
+ 			Last->Index().SourceInfo(*Last,*I),Src);
+       }
+    }
++
++   // check authentication status of the source as well
++   if (UntrustedList != "" && !AuthPrompt(UntrustedList, true))
++      return false;
+    
+    // Display statistics
+    unsigned long long FetchBytes = Fetcher.FetchNeeded();
+diff --git a/test/integration/test-apt-get-source-authenticated b/test/integration/test-apt-get-source-authenticated
+new file mode 100755
+index 0000000..e384b3d
+--- /dev/null
++++ b/test/integration/test-apt-get-source-authenticated
+@@ -0,0 +1,26 @@
++#!/bin/sh
++set -e
++
++TESTDIR=$(readlink -f $(dirname $0))
++. $TESTDIR/framework
++
++setupenvironment
++configarchitecture "i386"
++
++# a "normal" package with source and binary
++buildsimplenativepackage 'foo' 'all' '2.0'
++
++setupaptarchive --no-update
++
++APTARCHIVE=$(readlink -f ./aptarchive)
++rm -f $APTARCHIVE/dists/unstable/*Release*
++
++# update without authenticated InRelease file
++testsuccess aptget update
++
++# this all should fail
++testfailure aptget install -y foo
++testfailure aptget source -y foo
++
++# allow overriding the warning
++testsuccess aptget source --allow-unauthenticated foo
+-- 
+1.9.1
+

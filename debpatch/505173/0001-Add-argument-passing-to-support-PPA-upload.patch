@@ -1,0 +1,143 @@
+From 043a400186685351997484155e634078f29180f2 Mon Sep 17 00:00:00 2001
+From: Daniel Lintott <daniel@serverb.co.uk>
+Date: Sat, 7 Jun 2014 22:37:25 +0100
+Subject: [PATCH] Add argument passing to support PPA upload
+
+---
+ dput      |   22 ++++++++++++++++++++--
+ dput.1    |   10 +++++++---
+ dput.cf   |    3 +--
+ dput.cf.5 |    7 +++++++
+ http.py   |    2 +-
+ 5 files changed, 36 insertions(+), 8 deletions(-)
+
+diff --git a/dput b/dput
+index 8b6c105..dd9d1b4 100755
+--- a/dput
++++ b/dput
+@@ -260,7 +260,7 @@ def source_check(changes, debug):
+                 print "D: Upstream Version: %s" % upstream_version
+                 print "D: Debian Version: %s" % debian_version
+             if debian_version == '0.1' or debian_version == '1' \
+-               or debian_version == '1.1':
++               or debian_version == '1.1' or debian_version == '0ubuntu1':
+                 include_orig = 1
+             else:
+                 include_tar = 1
+@@ -710,6 +710,17 @@ def main():
+     elif len(args) == 1 and not check_only:
+         package_to_upload = args[0:]
+     else:
++        if ':' in args[0]:
++            args[0], hostArgument = args[0].split(":", 1)
++        else:
++            hostArgument = ""
++
++        if config.has_section(args[0]):
++            config.set(args[0], args[0], hostArgument)
++        else:
++            # Let the code below handle this as it is sometimes okay (ie. -o)
++            pass
++
+         if not check_only:
+             if debug:
+                 print "D: Checking if a host was named on the command line."
+@@ -740,8 +751,11 @@ def main():
+                 print "D: Host %s found in config." % args[0]
+                 preferred_host = args[0]
+                 package_to_upload = args[1:]
+-            elif not config.has_section(args[0]):
++            elif len(args) > 1:
+                 print "D: No host %s found in config" % args[0]
++                package_to_upload = args[1:]
++            else:
++                print "D: No host specified."
+                 package_to_upload = args[0:]
+ 
+     # Now Import the Upload functions
+@@ -770,6 +784,10 @@ def main():
+         else:
+             host = preferred_host
+         
++        if not config.has_section(host):
++            print "E: No host %s found in config" % host
++            sys.exit(1)
++
+         # Check if we already did this upload or not
+         check_upload_logfile(package_name, host, check_only,
+                              call_lintian, force_upload, debug)
+diff --git a/dput.1 b/dput.1
+index 719ea3d..0528c02 100644
+--- a/dput.1
++++ b/dput.1
+@@ -6,7 +6,7 @@
+ .SH SYNTAX
+ .B dput
+ [\fIoptions\fR]
+-[\fBhost\fR]
++[\fBhost\fR[:\fBargument\fR]]
+ \fBpackage.changes\fR ...
+ .SH DESCRIPTION
+ This is a tool for uploading Debian packages into the archive. You may specify
+@@ -14,8 +14,12 @@ to which host it should upload the file by passing it an
+ .I host
+ argument. If omitted, dput uses the host specified by
+ .I default_host
+-(or, historically \fIdefault_host_non-us\fR) configuration option.
+-Also you have to pass the program one or more name of 
++(or, historically \fIdefault_host_non-us\fR) configuration option. You also can
++pass an argument to the host by appending the hostname with a colon followed
++by the argument. For example, you can upload easily to different launchpad PPAs
++by passing the PPAs' id to the ppa host without having to modify dput.cf.
++.P
++You have to pass the program one or more name of
+ .I package.changes
+ files and then they will be sequentially uploaded.
+ .P
+diff --git a/dput.cf b/dput.cf
+index 9296262..de113f1 100644
+--- a/dput.cf
++++ b/dput.cf
+@@ -90,8 +90,7 @@ login			= anonymous
+ [ppa]
+ fqdn			= ppa.launchpad.net
+ method			= ftp
+-# replace <launchpad-id> with your Launchpad ID
+-incoming		= ~<launchpad-id>/ubuntu
++incoming		= ~%(ppa)s/ubuntu
+ login			= anonymous
+ 
+ [mentors]
+diff --git a/dput.cf.5 b/dput.cf.5
+index ca14cf0..d29143b 100644
+--- a/dput.cf.5
++++ b/dput.cf.5
+@@ -150,6 +150,13 @@ This option defines a command to be run by dput before a upload happens.
+ This defines the default host for packages that are allowed to be uploaded
+ to the main archive. This variable is used when guessing the host to upload to.
+ 
++.SH HOST ARGUMENT
++.P
++If a user passes an argument to a host by appending the hostname with a colon,
++.B %(HOSTNAME)s
++will be replaced with the specified argument. Otherwise, it will be replaced
++with an empty string.
++
+ .SH BUGS
+ .P
+ Please send bug reports to the author.
+diff --git a/http.py b/http.py
+index 85527b0..3fbc71b 100644
+--- a/http.py
++++ b/http.py
+@@ -123,6 +123,6 @@ def upload(fqdn, login, incoming, files_to_upload, debug, dummy, progress=0, pro
+             print "Upload failed as unauthorized: %s"%res.reason
+             print "  Maybe wrong username or password?"
+           else:
+-            print "Upload failed: %d %s"% (res.status, res.reason)
++            print "Upload failed:", res.status, res.reason
+           sys.exit(1)
+         res.read() # must be done, but we're not interested
+-- 
+1.7.10.4
+

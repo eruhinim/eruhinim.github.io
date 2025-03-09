@@ -1,0 +1,120 @@
+diff --git a/debian/changelog b/debian/changelog
+index 9a7f784..8f70544 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,3 +1,12 @@
++ca-certificates (20070303-0.2) unstable; urgency=low
++
++  * Non-maintainer upload.
++  * Call hooks in /etc/ca-certificates/update.d during update-ca-certificates
++    with a list of added and removed certificate file paths on stdin
++    (closes: #377314).
++
++ -- martin f. krafft <madduck@debian.org>  Tue, 01 Apr 2008 00:50:04 +0200
++
+ ca-certificates (20070303-0.1) unstable; urgency=low
+ 
+   * Non-maintainer upload to fix longstanding pending l10n issues.
+diff --git a/debian/dirs b/debian/dirs
+index f04f347..b64bbd3 100644
+--- a/debian/dirs
++++ b/debian/dirs
+@@ -1,3 +1,4 @@
+ etc/ssl/certs
+ usr/sbin
+ usr/share/ca-certificates/
++etc/ca-certificates/update.d
+diff --git a/sbin/update-ca-certificates b/sbin/update-ca-certificates
+index baa1bb9..46e4c10 100644
+--- a/sbin/update-ca-certificates
++++ b/sbin/update-ca-certificates
+@@ -38,9 +38,10 @@ done
+ CERTSCONF=/etc/ca-certificates.conf
+ CERTSDIR=/usr/share/ca-certificates
+ CERTBUNDLE=ca-certificates.crt
+-cd /etc/ssl/certs
++ETCCERTSDIR=/etc/ssl/certs
++cd $ETCCERTSDIR
+ if [ "$fresh" = 1 ]; then
+-  echo -n "Clearing symlinks in /etc/ssl/certs..."
++  echo -n "Clearing symlinks in $ETCCERTSDIR..."
+   find . -type l -print | while read symlink
+   do
+      case $(readlink $symlink) in
+@@ -53,31 +54,49 @@ if [ "$fresh" = 1 ]; then
+   done
+   echo "done."
+ fi
+-echo -n "Updating certificates in /etc/ssl/certs...."
++echo -n "Updating certificates in $ETCCERTSDIR...."
+ 
+ bundletmp=`mktemp "${CERTBUNDLE}.tmp.XXXXXX"`
+-sed -ne 's/^!//p' $CERTSCONF | while read crt
++removed="$(sed -ne 's/^!//p' $CERTSCONF | while read crt
+ do
+  if test "$crt" = ""; then continue; fi
+  pem=$(basename "$crt" .crt).pem
+- if test -e "$pem"; then rm -f "$pem"; fi
+-done
++ if test -e "$pem"; then
++  rm -f "$pem"
++  echo "-$ETCCERTSDIR/$pem"
++ fi
++done)"
+ 
+-sed -e '/^#/d' -e '/^!/d' $CERTSCONF | while read crt
++added="$(sed -e '/^#/d' -e '/^!/d' $CERTSCONF | while read crt
+ do
+  if test "$crt" = ""; then continue; fi
+  if ! test -f "$CERTSDIR/$crt"; then continue; fi
+  pem=$(basename "$crt" .crt).pem
++ if ! test -e "$pem"; then echo "+$ETCCERTSDIR/$pem"; fi
+  ln -sf "$CERTSDIR/$crt" "$pem"
+  cat "$CERTSDIR/$crt" >> "$bundletmp"
+-done
++done)"
+ chmod 0644 "$bundletmp"
+ mv -f "$bundletmp" "$CERTBUNDLE"
+ 
+-if [ "$verbose" = 0 ]; then
+-  c_rehash . > /dev/null 2>&1
++if [ -n "$added" ] || [ -n "$removed" ]; then
++  # only run if set of files has changed
++
++  if [ "$verbose" = 0 ]; then
++    c_rehash . > /dev/null 2>&1
++  else
++    c_rehash .
++  fi
++  echo "done."
++
++  HOOKSDIR=/etc/ca-certificates/update.d
++  echo -n "Running hooks in $HOOKSDIR...."
++  VERBOSE_ARG=
++  [ "$verbose" = 0 ] || VERBOSE_ARG=--verbose
++  eval run-parts $VERB_ARG --test -- $HOOKSDIR | while read hook; do
++  printf -- "${removed:+$removed\n}${added:+$added\n}" | eval $hook
++  done
++  echo "done."
+ else
+-  c_rehash .
++  echo "done."
+ fi
+-echo "done."
+-
+diff --git a/sbin/update-ca-certificates.8 b/sbin/update-ca-certificates.8
+index 38d0386..3c71502 100644
+--- a/sbin/update-ca-certificates.8
++++ b/sbin/update-ca-certificates.8
+@@ -34,6 +34,11 @@ It reads /etc/ca-certificates.conf file. Each lines list pathname of
+ activated CA certificates under /usr/share/ca-certificates.
+ Lines that begin with "#" is comment line. 
+ Lines that begin with "!" is deselect, deactivation of the CA certificates. 
++.PP
++Before terminating, \fBupdate-ca-certificates\fP invokes
++\fBrun-parts\fP on /etc/ca-certificates/update.d and calls each hook with
++a list of certificates: those added are prefixed with a +, those removed are
++prefixed with a -.
+ .SH OPTIONS
+ A summary of options is included below.
+ .TP

@@ -1,0 +1,162 @@
+From bae1b41a7d450e9be895edee4220fe34bbe99946 Mon Sep 17 00:00:00 2001
+From: David Kalnischkies <david@kalnischkies.de>
+Date: Sat, 23 Jul 2016 10:07:53 +0200
+Subject: [PATCH] [INCOMPLETE] dpkg-maintscript-helper: support DPKG_ROOT
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+As dpkg-maintscript-helper "works around known dpkg limitations in
+maintainer scripts" it should behave as if it were a maintainerscript
+and prepend DPKG_ROOT to all paths it uses.
+
+This is preferred over having the conffile parameter(s) be prepended
+with DPKG_ROOT by the maintainerscripts calling the helper as the helper
+would then need to strip DPKG_ROOT from the path to verify if the
+conffile belongs to the package – it also means that it magically works
+for all callers instantly instead of requiring e.g. dh_installdeb to be
+patched and packages to be rebuilt against a patched version.
+
+FIXME:
+- The same should apply to symlink_to_dir and vice versa.
+---
+ scripts/dpkg-maintscript-helper.sh | 62 +++++++++++++++++++-------------------
+ 1 file changed, 31 insertions(+), 31 deletions(-)
+
+diff --git a/scripts/dpkg-maintscript-helper.sh b/scripts/dpkg-maintscript-helper.sh
+index f0e69db..94dc43a 100755
+--- a/scripts/dpkg-maintscript-helper.sh
++++ b/scripts/dpkg-maintscript-helper.sh
+@@ -66,8 +66,8 @@ rm_conffile() {
+ 		;;
+ 	postrm)
+ 		if [ "$1" = "purge" ]; then
+-			rm -f "$CONFFILE.dpkg-bak" "$CONFFILE.dpkg-remove" \
+-			      "$CONFFILE.dpkg-backup"
++			rm -f "${DPKG_ROOT}$CONFFILE.dpkg-bak" "${DPKG_ROOT}$CONFFILE.dpkg-remove" \
++			      "${DPKG_ROOT}$CONFFILE.dpkg-backup"
+ 		fi
+ 		if [ "$1" = "abort-install" -o "$1" = "abort-upgrade" ] &&
+ 		   [ -n "$2" ] &&
+@@ -85,31 +85,31 @@ prepare_rm_conffile() {
+ 	local CONFFILE="$1"
+ 	local PACKAGE="$2"
+ 
+-	[ -e "$CONFFILE" ] || return 0
++	[ -e "${DPKG_ROOT}$CONFFILE" ] || return 0
+ 	ensure_package_owns_file "$PACKAGE" "$CONFFILE" || return 0
+ 
+ 	local md5sum old_md5sum
+-	md5sum="$(md5sum "$CONFFILE" | sed -e 's/ .*//')"
++	md5sum="$(md5sum "${DPKG_ROOT}$CONFFILE" | sed -e 's/ .*//')"
+ 	old_md5sum="$(dpkg-query -W -f='${Conffiles}' "$PACKAGE" | \
+ 		sed -n -e "\'^ $CONFFILE ' { s/ obsolete$//; s/.* //; p }")"
+ 	if [ "$md5sum" != "$old_md5sum" ]; then
+-		mv -f "$CONFFILE" "$CONFFILE.dpkg-backup"
++		mv -f "${DPKG_ROOT}$CONFFILE" "${DPKG_ROOT}$CONFFILE.dpkg-backup"
+ 	else
+-		mv -f "$CONFFILE" "$CONFFILE.dpkg-remove"
++		mv -f "${DPKG_ROOT}$CONFFILE" "${DPKG_ROOT}$CONFFILE.dpkg-remove"
+ 	fi
+ }
+ 
+ finish_rm_conffile() {
+ 	local CONFFILE="$1"
+ 
+-	if [ -e "$CONFFILE.dpkg-backup" ]; then
+-		echo "Obsolete conffile $CONFFILE has been modified by you."
+-		echo "Saving as $CONFFILE.dpkg-bak ..."
+-		mv -f "$CONFFILE.dpkg-backup" "$CONFFILE.dpkg-bak"
++	if [ -e "${DPKG_ROOT}$CONFFILE.dpkg-backup" ]; then
++		echo "Obsolete conffile ${DPKG_ROOT}$CONFFILE has been modified by you."
++		echo "Saving as ${DPKG_ROOT}$CONFFILE.dpkg-bak ..."
++		mv -f "${DPKG_ROOT}$CONFFILE.dpkg-backup" "${DPKG_ROOT}$CONFFILE.dpkg-bak"
+ 	fi
+-	if [ -e "$CONFFILE.dpkg-remove" ]; then
+-		echo "Removing obsolete conffile $CONFFILE ..."
+-		rm -f "$CONFFILE.dpkg-remove"
++	if [ -e "${DPKG_ROOT}$CONFFILE.dpkg-remove" ]; then
++		echo "Removing obsolete conffile ${DPKG_ROOT}$CONFFILE ..."
++		rm -f "${DPKG_ROOT}$CONFFILE.dpkg-remove"
+ 	fi
+ }
+ 
+@@ -119,13 +119,13 @@ abort_rm_conffile() {
+ 
+ 	ensure_package_owns_file "$PACKAGE" "$CONFFILE" || return 0
+ 
+-	if [ -e "$CONFFILE.dpkg-remove" ]; then
+-		echo "Reinstalling $CONFFILE that was moved away"
+-		mv "$CONFFILE.dpkg-remove" "$CONFFILE"
++	if [ -e "${DPKG_ROOT}$CONFFILE.dpkg-remove" ]; then
++		echo "Reinstalling ${DPKG_ROOT}$CONFFILE that was moved away"
++		mv "${DPKG_ROOT}$CONFFILE.dpkg-remove" "${DPKG_ROOT}$CONFFILE"
+ 	fi
+-	if [ -e "$CONFFILE.dpkg-backup" ]; then
+-		echo "Reinstalling $CONFFILE that was backupped"
+-		mv "$CONFFILE.dpkg-backup" "$CONFFILE"
++	if [ -e "${DPKG_ROOT}$CONFFILE.dpkg-backup" ]; then
++		echo "Reinstalling ${DPKG_ROOT}$CONFFILE that was backupped"
++		mv "${DPKG_ROOT}$CONFFILE.dpkg-backup" "${DPKG_ROOT}$CONFFILE"
+ 	fi
+ }
+ 
+@@ -188,16 +188,16 @@ prepare_mv_conffile() {
+ 	local CONFFILE="$1"
+ 	local PACKAGE="$2"
+ 
+-	[ -e "$CONFFILE" ] || return 0
++	[ -e "${DPKG_ROOT}$CONFFILE" ] || return 0
+ 
+ 	ensure_package_owns_file "$PACKAGE" "$CONFFILE" || return 0
+ 
+ 	local md5sum old_md5sum
+-	md5sum="$(md5sum "$CONFFILE" | sed -e 's/ .*//')"
++	md5sum="$(md5sum "${DPKG_ROOT}$CONFFILE" | sed -e 's/ .*//')"
+ 	old_md5sum="$(dpkg-query -W -f='${Conffiles}' "$PACKAGE" | \
+ 		sed -n -e "\'^ $CONFFILE ' { s/ obsolete$//; s/.* //; p }")"
+ 	if [ "$md5sum" = "$old_md5sum" ]; then
+-		mv -f "$CONFFILE" "$CONFFILE.dpkg-remove"
++		mv -f "${DPKG_ROOT}$CONFFILE" "${DPKG_ROOT}$CONFFILE.dpkg-remove"
+ 	fi
+ }
+ 
+@@ -206,16 +206,16 @@ finish_mv_conffile() {
+ 	local NEWCONFFILE="$2"
+ 	local PACKAGE="$3"
+ 
+-	rm -f "$OLDCONFFILE.dpkg-remove"
++	rm -f "${DPKG_ROOT}$OLDCONFFILE.dpkg-remove"
+ 
+-	[ -e "$OLDCONFFILE" ] || return 0
++	[ -e "${DPKG_ROOT}$OLDCONFFILE" ] || return 0
+ 	ensure_package_owns_file "$PACKAGE" "$OLDCONFFILE" || return 0
+ 
+-	echo "Preserving user changes to $NEWCONFFILE (renamed from $OLDCONFFILE)..."
+-	if [ -e "$NEWCONFFILE" ]; then
+-		mv -f "$NEWCONFFILE" "$NEWCONFFILE.dpkg-new"
++	echo "Preserving user changes to ${DPKG_ROOT}$NEWCONFFILE (renamed from ${DPKG_ROOT}$OLDCONFFILE)..."
++	if [ -e "${DPKG_ROOT}$NEWCONFFILE" ]; then
++		mv -f "${DPKG_ROOT}$NEWCONFFILE" "${DPKG_ROOT}$NEWCONFFILE.dpkg-new"
+ 	fi
+-	mv -f "$OLDCONFFILE" "$NEWCONFFILE"
++	mv -f "${DPKG_ROOT}$OLDCONFFILE" "${DPKG_ROOT}$NEWCONFFILE"
+ }
+ 
+ abort_mv_conffile() {
+@@ -224,9 +224,9 @@ abort_mv_conffile() {
+ 
+ 	ensure_package_owns_file "$PACKAGE" "$CONFFILE" || return 0
+ 
+-	if [ -e "$CONFFILE.dpkg-remove" ]; then
+-		echo "Reinstalling $CONFFILE that was moved away"
+-		mv "$CONFFILE.dpkg-remove" "$CONFFILE"
++	if [ -e "${DPKG_ROOT}$CONFFILE.dpkg-remove" ]; then
++		echo "Reinstalling ${DPKG_ROOT}$CONFFILE that was moved away"
++		mv "${DPKG_ROOT}$CONFFILE.dpkg-remove" "${DPKG_ROOT}$CONFFILE"
+ 	fi
+ }
+ 
+-- 
+2.8.1
+

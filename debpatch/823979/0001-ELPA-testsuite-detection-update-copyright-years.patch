@@ -1,0 +1,168 @@
+From 2bee7dc0e3f008312774acc04a94df167e804fa1 Mon Sep 17 00:00:00 2001
+From: Sean Whitton <spwhitton@spwhitton.name>
+Date: Tue, 10 May 2016 13:10:27 -0700
+Subject: [PATCH] ELPA testsuite detection & update copyright years
+
+---
+ debian/changelog      |  8 ++++++++
+ debian/control        |  1 +
+ debian/copyright      |  2 +-
+ support/elpa/detect   | 18 +++++++++++++++++
+ support/elpa/generate | 19 ++++++++++++++++++
+ test/elpa_test.sh     | 55 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 102 insertions(+), 1 deletion(-)
+ create mode 100755 support/elpa/detect
+ create mode 100755 support/elpa/generate
+ create mode 100644 test/elpa_test.sh
+
+diff --git a/debian/changelog b/debian/changelog
+index 20fc757..faeb535 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,3 +1,11 @@
++autodep8 (0.6) UNRELEASED; urgency=medium
++
++  * Add support for ELPA package testsuites run by dh_elpa_test.
++  * Add test suite for ELPA package testsuite detection.
++  * Bump copyright years in d/copyright.
++
++ -- Sean Whitton <spwhitton@spwhitton.name>  Tue, 10 May 2016 11:51:14 -0700
++
+ autodep8 (0.5.1) unstable; urgency=medium
+ 
+   * test/helper.sh: include extra information on failed tests to help
+diff --git a/debian/control b/debian/control
+index 6a44ec8..9d0b81b 100644
+--- a/debian/control
++++ b/debian/control
+@@ -24,3 +24,4 @@ Description: DEP-8 test control file generator
+   - NodeJS packages
+   - Kernel module packages using DKMS
+   - R packages
++  - Emacs Lisp ELPA packages
+diff --git a/debian/copyright b/debian/copyright
+index 99b3620..dabe791 100644
+--- a/debian/copyright
++++ b/debian/copyright
+@@ -3,7 +3,7 @@ Upstream-Name: autodep8
+ Source: http://git.debian.org/?p=collab-maint/autodep8.git;a=summary
+ 
+ Files: *
+-Copyright: 2014 the contributing authors. See `git log` for details.
++Copyright: 2014-2016 the contributing authors. See `git log` for details.
+ License: GPL-3.0+
+ 
+ License: GPL-3.0+
+diff --git a/support/elpa/detect b/support/elpa/detect
+new file mode 100755
+index 0000000..7fd6287
+--- /dev/null
++++ b/support/elpa/detect
+@@ -0,0 +1,18 @@
++#!/bin/sh
++
++# Maintainer: Sean Whitton <spwhitton@spwhitton.name>
++
++# We check that: this package uses dh_elpa, debhelper compat level is
++# at least 10 (see dh_elpa_test(1)), and the user hasn't disabled
++# dh_elpa_test, and that there is actually a testsuite to run
++
++set -e
++
++# check that the file exists first, so that if it doesn't cat doesn't
++# produce stderr output which disrupts other test/*_test.sh
++test -e debian/compat
++test "$(cat debian/compat)" -ge 10
++(! grep -q ".*DH_ELPA_TEST_DISABLE.*" debian/rules)
++grep-dctrl -q -F Build-Depends dh-elpa debian/control
++( grep -q -r ".*(ert-deftest.*" . || \
++        grep-dctrl -q -F Build-Depends elpa-buttercup debian/control )
+diff --git a/support/elpa/generate b/support/elpa/generate
+new file mode 100755
+index 0000000..3d89bc7
+--- /dev/null
++++ b/support/elpa/generate
+@@ -0,0 +1,19 @@
++#!/bin/sh
++
++# Maintainer: Sean Whitton <spwhitton@spwhitton.name>
++
++# Remarks:
++
++# 1. Many ELPA test suites write to the build tree, so we need that
++#    restriction in the general case.
++
++# 2. We invoke `debian/rules build' rather than simply `dh_elpa_test'
++#    because that ensures that any DH_ELPA_TEST_* environment
++#    variables the user has specifies in debian/rules are exported
++#    such that dh_elpa_test can see them.  See dh_elpa_test(1).
++
++cat <<EOF
++Test-Command: debian/rules build
++Depends: @, @builddeps@
++Restrictions: rw-build-tree
++EOF
+diff --git a/test/elpa_test.sh b/test/elpa_test.sh
+new file mode 100644
+index 0000000..1666888
+--- /dev/null
++++ b/test/elpa_test.sh
+@@ -0,0 +1,55 @@
++. $(dirname $0)/helper.sh
++
++test_Testsuite_autopkgtest_pkg_elpa() {
++  has debian/control 'Testsuite: autopkgtest-pkg-elpa'
++  check_run autodep8
++}
++
++test_XS_Testsuite_autopkgtest_pkg_elpa() {
++  has debian/control 'XS-Testsuite: autopkgtest-pkg-elpa'
++  check_run autodep8
++}
++
++test_elpa_test_ert() {
++  has debian/control 'Build-Depends: dh-elpa'
++  has debian/rules 'foo'
++  has debian/compat '10'
++  has test.el '(ert-deftest foo)'
++  check_run autodep8
++}
++
++test_elpa_test_buttercup() {
++  has debian/control 'Build-Depends: dh-elpa, elpa-buttercup'
++  has debian/rules 'foo'
++  has debian/compat '10'
++  check_run autodep8
++}
++
++test_elpa_test_disabled() {
++  has debian/control 'Build-Depends: dh-elpa, elpa-buttercup'
++  has debian/rules 'export DH_ELPA_TEST_DISABLE'
++  has debian/compat '10'
++  run autodep8
++  assertEquals 1 "$exitstatus"
++  assertEquals "" "$(cat stdout stderr)"
++}
++
++test_elpa_test_non_elpa() {
++  has debian/control 'Build-Depends: dh-fake-elpa, elpa-buttercup'
++  has debian/rules 'foo'
++  has debian/compat '10'
++  run autodep8
++  assertEquals 1 "$exitstatus"
++  assertEquals "" "$(cat stdout stderr)"
++}
++
++test_elpa_test_bad_compat() {
++  has debian/control 'Build-Depends: dh-elpa, elpa-buttercup'
++  has debian/rules 'foo'
++  has debian/compat '9'
++  run autodep8
++  assertEquals 1 "$exitstatus"
++  assertEquals "" "$(cat stdout stderr)"
++}
++
++. shunit2
+-- 
+2.8.1
+

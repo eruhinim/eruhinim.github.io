@@ -1,0 +1,56 @@
+diff --git a/applications/apt-cudf.ml b/applications/apt-cudf.ml
+index ffbb872..5ae7fdc 100644
+--- a/applications/apt-cudf.ml
++++ b/applications/apt-cudf.ml
+@@ -63,27 +63,37 @@ let print_progress ?i msg =
+     Format.printf "Message: %s@." msg
+ ;;
+ 
++
++(* Debian specific assumption: only one version of a package 
++   can be installed at a given time.
++   Hence, when a remove request is issued without version constraint,
++   we return (candidate.Cudf.package,None) that designates the only
++   package installed.
++ *)
++
+ let make_request tables universe native_arch request = 
+   let to_cudf (p,v) = (p,Debian.Debcudf.get_cudf_version tables (p,v)) in
++  let get_candidate (name,constr) = 
++    try
++      List.find 
++	(fun pkg -> 
++	  try (Cudf.lookup_package_property pkg "apt-candidate") = "true"
++	  with Not_found -> false) 
++	(CudfAdd.who_provides universe (name,constr))
++    with Not_found -> 
++      print_error "Package %s does not have a suitable candidate" name
++  in
+   let select_packages ?(remove=false) l = 
+     List.map (fun ((n,a),c) -> 
+       let (name,constr) = Boilerplate.debvpkg ~native_arch to_cudf ((n,a),c) in
+-      let candidate = 
+-        try
+-          List.find (fun pkg ->
+-            if request.Edsp.strict_pin then
+-              try (Cudf.lookup_package_property pkg "apt-candidate") = "true"
+-              with Not_found -> false
+-            else
+-              true
+-          ) (CudfAdd.who_provides universe (name,constr))
+-        with Not_found -> 
+-          print_error "Package %s does not have a suitable candidate" n
+-      in
+       if remove then
+-        (candidate.Cudf.package,None)
++        (name,None)
+       else
+-        (candidate.Cudf.package,Some(`Eq,candidate.Cudf.version))
++	match constr, request.Edsp.strict_pin with
++          None, false -> (name, None)
++	| _, _ -> (name,Some(`Eq,(get_candidate (name,constr)).Cudf.version))
++        (* FIXME: when apt will accept version constraints different from `Eq,
++           we will need to pass them through. *)
+     ) l 
+   in
+   if request.Edsp.upgrade || request.Edsp.distupgrade then

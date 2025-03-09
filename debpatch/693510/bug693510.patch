@@ -1,0 +1,131 @@
+diff -u parted-2.3/debian/changelog parted-2.3/debian/changelog
+--- parted-2.3/debian/changelog
++++ parted-2.3/debian/changelog
+@@ -1,3 +1,12 @@
++parted (2.3-11.1) UNRELEASED; urgency=low
++
++  * Non-maintainer upload.
++  * Treat adaN devices as SCSI (cam) devices (Closes: #693510)
++  * Fill out the drive model information for ata adaN devices
++  * Fill out the physical sector size information for ata adaN devices
++
++ -- Jeff Epler <jepler@unpythonic.net>  Wed, 19 Dec 2012 20:41:04 -0600
++
+ parted (2.3-11) unstable; urgency=medium
+ 
+   * Non-maintainer upload to fix partitioned md devices (bug #684713)
+diff -u parted-2.3/debian/patches/series parted-2.3/debian/patches/series
+--- parted-2.3/debian/patches/series
++++ parted-2.3/debian/patches/series
+@@ -30,0 +31 @@
++freebsd-cam.diff
+only in patch2:
+unchanged:
+--- parted-2.3.orig/debian/patches/freebsd-cam.diff
++++ parted-2.3/debian/patches/freebsd-cam.diff
+@@ -0,0 +1,105 @@
++Index: b/libparted/arch/freebsd.c
++===================================================================
++--- a/libparted/arch/freebsd.c
+++++ b/libparted/arch/freebsd.c
++@@ -60,6 +60,7 @@
++ 
++ struct _FreeBSDSpecific {
++ 	int	fd;
+++	long long	phys_sector_size;
++ };
++ 
++ static char* _device_get_part_path (PedDevice* dev, int num);
++@@ -108,7 +109,9 @@
++ 	}
++ 	np += 1; /* advance past '/' */
++ 	
++-	if(strncmp(np, "ad", 2) == 0) {
+++	if(strncmp(np, "ada", 3) == 0) {
+++		dev->type = PED_DEVICE_SCSI;
+++	} else if(strncmp(np, "ad", 2) == 0) {
++ 		dev->type = PED_DEVICE_IDE;
++ 	} else if (strncmp(np, "da", 2) == 0) {
++ 		dev->type = PED_DEVICE_SCSI;
++@@ -146,6 +149,9 @@
++ 		dev->sector_size = (long long)sector_size;;
++ 	}
++ 
+++	if (arch_specific->phys_sector_size)
+++		dev->phys_sector_size = arch_specific->phys_sector_size;
+++
++ 	if (sector_size != PED_SECTOR_SIZE_DEFAULT) {
++ 		ped_exception_throw (
++ 			PED_EXCEPTION_WARNING,
++@@ -288,7 +294,8 @@
++ 	int		fd;
++ 	char		result[64];
++ 
++-	if (sscanf (dev->path, "/dev/%2s%u", ccb.cgdl.periph_name, &ccb.cgdl.unit_number) != 2)
+++	if (sscanf (dev->path, "/dev/%2s%u", ccb.cgdl.periph_name, &ccb.cgdl.unit_number) != 2 &&
+++		sscanf (dev->path, "/dev/%3s%u", ccb.cgdl.periph_name, &ccb.cgdl.unit_number) != 2)
++ 		goto error;
++ 
++ 	if ((fd = open("/dev/xpt0", O_RDWR)) < 0)
++@@ -308,9 +315,33 @@
++ 	return NULL;
++ }
++ 
+++// NB should pull this in from libcam
+++static uint32_t
+++local_ata_logical_sector_size(struct ata_params *ident_data)
+++{
+++        if ((ident_data->pss & 0xc000) == 0x4000 &&
+++            (ident_data->pss & ATA_PSS_LSSABOVE512)) {
+++                return ((u_int32_t)ident_data->lss_1 |
+++                    ((u_int32_t)ident_data->lss_2 << 16));
+++        }
+++        return (512);
+++}
+++
+++static uint64_t
+++local_ata_physical_sector_size(struct ata_params *ident_data)
+++{
+++        if ((ident_data->pss & 0xc000) == 0x4000 &&
+++            (ident_data->pss & ATA_PSS_MULTLS)) {
+++                return ((uint64_t)local_ata_logical_sector_size(ident_data) *
+++                    (1 << (ident_data->pss & ATA_PSS_LSPPS)));
+++        }
+++        return (512);
+++}
+++
++ static int
++ init_scsi (PedDevice* dev)
++ {
+++	FreeBSDSpecific*	arch_specific = FREEBSD_SPECIFIC (dev);
++ 	PedExceptionOption 	ex_status;
++ 	struct stat		dev_stat;
++ 	char*			pass_dev;
++@@ -391,10 +422,16 @@
++ 				break;
++ 		}
++ 	} else {
++-		dev->model = (char*) ped_malloc (8 + 16 + 2);
+++		size_t model_length = (8 + 16 + 2);
+++		dev->model = (char*) ped_malloc (model_length);
++ 		if (!dev->model)
++ 			goto error_close_fd_dev;
++-		sprintf (dev->model, "%.8s %.16s", ccb.cgd.inq_data.vendor, ccb.cgd.inq_data.product);
+++		if (ccb.cgd.protocol == PROTO_ATA && *ccb.cgd.ident_data.model) {
+++			snprintf (dev->model, model_length, "%s", ccb.cgd.ident_data.model);
+++			arch_specific->phys_sector_size = local_ata_physical_sector_size(&ccb.cgd.ident_data);
+++		} else {
+++			snprintf (dev->model, model_length, "%.8s %.16s", ccb.cgd.inq_data.vendor, ccb.cgd.inq_data.product);
+++		}
++ 	}
++ 
++ 	if (!_device_probe_geometry (dev))
++@@ -534,6 +571,8 @@
++ 	if (!dev->arch_specific)
++ 		goto error_free_path;
++ 
+++	memset(dev->arch_specific, 0, sizeof(FreeBSDSpecific));
+++
++ 	dev->open_count = 0;
++ 	dev->read_only = 0;
++ 	dev->external_mode = 0;

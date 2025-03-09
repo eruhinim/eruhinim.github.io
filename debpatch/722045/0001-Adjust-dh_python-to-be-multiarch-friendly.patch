@@ -1,0 +1,103 @@
+From 9fa8dff3ae74267f6448d81d4b515ef42e7b4a0f Mon Sep 17 00:00:00 2001
+From: Steve Langasek <steve.langasek@ubuntu.com>
+Date: Fri, 6 Sep 2013 17:02:53 -0700
+Subject: [PATCH] Adjust dh_python to be multiarch-friendly.
+
+To be able to cross-install packages that use python as a shebang,
+dependencies need to be generated on 'python:any' instead of just on
+'python'.  This should work without introducing problems for compiled
+extensions, since those will have dependencies on libpythonX.Y instead of
+just on python.
+---
+ debian/changelog     |  4 ++++
+ dhpython/__init__.py |  4 ++--
+ dhpython/depends.py  | 22 +++++++++++++++++-----
+ 3 files changed, 23 insertions(+), 7 deletions(-)
+
+diff --git a/debian/changelog b/debian/changelog
+index 88e5b8e..1c43eb4 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,7 +1,11 @@
+ dh-python (1.20130913-1) UNRELEASED; urgency=low
+ 
++  [ Piotr Ożarowski ]
+   * dh_py*: add --requires option
+ 
++  [ Steve Langasek ]
++  * Adjust dh_python to be multiarch-friendly.
++
+  -- Piotr Ożarowski <piotr@debian.org>  Fri, 06 Sep 2013 20:27:05 +0200
+ 
+ dh-python (1.20130903-1) unstable; urgency=low
+diff --git a/dhpython/__init__.py b/dhpython/__init__.py
+index b330192..57fcbc4 100644
+--- a/dhpython/__init__.py
++++ b/dhpython/__init__.py
+@@ -25,8 +25,8 @@ PKG_PREFIX_MAP = {'cpython2': 'python',
+                   'pypy': 'pypy'}
+ 
+ # minimum version required for compile/clean scripts:
+-MINPYCDEP = {'cpython2': 'python (>= 2.6.6-3)',
+-             'cpython3': 'python3 (>= 3.2.3-3~)',
++MINPYCDEP = {'cpython2': 'python:any (>= 2.6.6-3)',
++             'cpython3': 'python3:any (>= 3.2.3-3~)',
+              'pypy': 'pypy'}
+ 
+ PUBLIC_DIR_RE = {
+diff --git a/dhpython/depends.py b/dhpython/depends.py
+index 1d93305..989d4fa 100644
+--- a/dhpython/depends.py
++++ b/dhpython/depends.py
+@@ -100,9 +100,21 @@ class Dependencies:
+         vtpl = self.ipkg_vtpl
+         vrange = options.vrange
+ 
++	# Shebang depends are the only things that get python:any
++        if vrange and stats['shebangs']:
++            minv = vrange.minver
++            # note it's an open interval (i.e. do not add 1 here!):
++            maxv = vrange.maxver
++            if minv == maxv:
++                self.depend(vtpl % minv)
++                minv = maxv = None
++            if minv:
++                self.depend("%s:any (>= %s)" % (tpl, minv))
++            if maxv:
++                self.depend("%s:any (<< %s)" % (tpl, maxv))
++
+         if vrange and any((stats['compile'], stats['public_vers'],
+-                          stats['ext_vers'], stats['ext_no_version'],
+-                          stats['shebangs'])):
++                          stats['ext_vers'], stats['ext_no_version'])):
+             minv = vrange.minver
+             # note it's an open interval (i.e. do not add 1 here!):
+             maxv = vrange.maxver
+@@ -140,7 +152,7 @@ class Dependencies:
+             self.depend(MINPYCDEP[self.impl])
+ 
+         for ipreter in stats['shebangs']:
+-            self.depend(str(ipreter))
++            self.depend("%s:any" % str(ipreter))
+ 
+         supported_versions = supported(self.impl)
+         default_version = default(self.impl)
+@@ -149,13 +161,13 @@ class Dependencies:
+ 
+             for v in versions:
+                 if v in supported_versions:
+-                    self.depend(vtpl % v)
++                    self.depend("%s:any" % (vtpl % v))
+                 else:
+                     log.info('dependency on %s (from shebang) ignored'
+                              ' - it\'s not supported anymore', vtpl % v)
+             # /usr/bin/python{,3} shebang → add python{,3} to Depends
+             if any(True for i in details.get('shebangs', []) if i.version is None):
+-                self.depend(tpl)
++                self.depend("%s:any" % tpl)
+ 
+             extensions = sorted(details.get('ext_vers', set()))
+             #self.depend('|'.join(vtpl % i for i in extensions))
+-- 
+1.8.3.2
+

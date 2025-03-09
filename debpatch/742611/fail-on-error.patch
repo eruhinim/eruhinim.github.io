@@ -1,0 +1,234 @@
+From 6f2a04975a95128325b622c63905cc3db1136f92 Mon Sep 17 00:00:00 2001
+From: Maximiliano Curia <maxy@debian.org>
+Date: Wed, 29 Apr 2015 14:44:57 +0200
+Subject: [PATCH 1/3] apt-cache non-zero return code on error option
+
+Add a configuration option to raise the notices to errors, and exit with a
+non-zero return code, making scripting easier. This functionality is disabled
+by default and depends on the APT::Cache::FailOnErrors configuration option, or
+the --fail-on-errors command line option.
+
+This will hopefully be the default behaviour once sbuild can deal with
+non-zero return values.
+---
+ apt-private/private-cmndline.cc | 1 +
+ doc/apt-cache.8.xml             | 9 +++++++++
+ 2 files changed, 10 insertions(+)
+
+diff --git a/apt-private/private-cmndline.cc b/apt-private/private-cmndline.cc
+index 0b5ba5b..3836427 100644
+--- a/apt-private/private-cmndline.cc
++++ b/apt-private/private-cmndline.cc
+@@ -79,6 +79,7 @@ static bool addArgumentsAPTCache(std::vector<CommandLine::Args> &Args, char cons
+ 
+    addArg('p', "pkg-cache", "Dir::Cache::pkgcache", CommandLine::HasArg);
+    addArg('s', "src-cache", "Dir::Cache::srcpkgcache", CommandLine::HasArg);
++   addArg(0, "fail-on-errors", "APT::Cache::FailOnErrors", 0);
+ 
+    return found_something;
+ }
+diff --git a/doc/apt-cache.8.xml b/doc/apt-cache.8.xml
+index a9f6c8d..5ebdd4b 100644
+--- a/doc/apt-cache.8.xml
++++ b/doc/apt-cache.8.xml
+@@ -331,6 +331,15 @@ Reverse Provides:
+       Configuration Item: <literal>APT::Cache::Installed</literal>.</para></listitem>
+       </varlistentry>
+ 
++      <varlistentry><term><option>--fail-on-errors</option></term>
++      <listitem><para>
++      Generate a non-zero return value when an error is encountered, e.g. if a
++      given package doesn't exist. This option is not the current default, for
++      compatibility reasons, but will become the default once most issues are
++      fixed.
++      Configuration Item: <literal>APT::Cache::FailOnErrors</literal>.</para></listitem>
++      </varlistentry>
++
+      &apt-commonoptions;
+      
+    </variablelist>
+-- 
+2.1.4
+
+
+From 231964d96d2aa8d5256e95b76c6dff703d364dd5 Mon Sep 17 00:00:00 2001
+From: Maximiliano Curia <maxy@debian.org>
+Date: Wed, 29 Apr 2015 14:47:38 +0200
+Subject: [PATCH 2/3] apt-cache showsrc non-existent return code
+
+Raise the message to error if the APT::Cache::FailOnError option is set.
+---
+ cmdline/apt-cache.cc | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/cmdline/apt-cache.cc b/cmdline/apt-cache.cc
+index ac0d48a..77aa749 100644
+--- a/cmdline/apt-cache.cc
++++ b/cmdline/apt-cache.cc
+@@ -1517,8 +1517,13 @@ static bool ShowSrcPackage(CommandLine &CmdL)
+         continue;
+       }
+    }
+-   if (found == 0)
++   if (found == 0) {
++      bool const Fail = _config->FindB("APT::Cache::FailOnErrors", false);
++      if (Fail)
++          return _error->Error(_("No packages found"));
++
+       _error->Notice(_("No packages found"));
++   }
+    return true;
+ }
+ 									/*}}}*/
+-- 
+2.1.4
+
+
+From d62e1e8af2425d9d01046e7badffbaaba1926b18 Mon Sep 17 00:00:00 2001
+From: Maximiliano Curia <maxy@debian.org>
+Date: Wed, 29 Apr 2015 16:22:08 +0200
+Subject: [PATCH 3/3] apt-cache cacheset use FailOnErrors
+
+Take into account the value of APT::Cache::FailOnErrors to set the
+corresponding ErrorType, this is related to the commit
+cd7bbc479f8e2f277092a9557bb486ab664deba6, which forces the errors to notices
+to avoid breaking sbuild.
+---
+ apt-private/private-cacheset.h |  3 +--
+ apt-private/private-show.cc    |  6 +++++-
+ cmdline/apt-cache.cc           | 25 +++++++++++++++++--------
+ 3 files changed, 23 insertions(+), 11 deletions(-)
+
+diff --git a/apt-private/private-cacheset.h b/apt-private/private-cacheset.h
+index ca8f4be..8672c68 100644
+--- a/apt-private/private-cacheset.h
++++ b/apt-private/private-cacheset.h
+@@ -70,7 +70,6 @@ bool GetLocalitySortedVersionSet(pkgCacheFile &CacheFile,
+                                     APT::VersionContainerInterface * const vci,
+                                     OpProgress * const progress);
+ 
+-
+ // CacheSetHelper saving virtual packages				/*{{{*/
+ class CacheSetHelperVirtuals: public APT::CacheSetHelper {
+ public:
+@@ -91,7 +90,7 @@ public:
+       CacheSetHelper::canNotFindAllVer(vci, Cache, Pkg);
+    }
+ 
+-   CacheSetHelperVirtuals(bool const ShowErrors = true, GlobalError::MsgType const &ErrorType = GlobalError::NOTICE) : CacheSetHelper(ShowErrors, ErrorType) {}
++   CacheSetHelperVirtuals(bool const ShowErrors = true, GlobalError::MsgType const &ErrorType = GlobalError::ERROR) : CacheSetHelper(ShowErrors, ErrorType) {}
+ };
+ 									/*}}}*/
+ 
+diff --git a/apt-private/private-show.cc b/apt-private/private-show.cc
+index 8ae6a6d..827b109 100644
+--- a/apt-private/private-show.cc
++++ b/apt-private/private-show.cc
+@@ -140,7 +140,11 @@ static bool DisplayRecord(pkgCacheFile &CacheFile, pkgCache::VerIterator V,
+ bool ShowPackage(CommandLine &CmdL)					/*{{{*/
+ {
+    pkgCacheFile CacheFile;
+-   CacheSetHelperVirtuals helper(true, GlobalError::NOTICE);
++   GlobalError::MsgType msgType = GlobalError::NOTICE;
++   bool const Fail = _config->FindB("APT::Cache::FailOnErrors", false);
++   if (Fail)
++      msgType = GlobalError::ERROR;
++   CacheSetHelperVirtuals helper(true, msgType);
+    APT::VersionList::Version const select = _config->FindB("APT::Cache::AllVersions", false) ?
+ 			APT::VersionList::ALL : APT::VersionList::CANDIDATE;
+    APT::VersionList const verset = APT::VersionList::FromCommandLine(CacheFile, CmdL.FileList + 1, select, helper);
+diff --git a/cmdline/apt-cache.cc b/cmdline/apt-cache.cc
+index 77aa749..2b1ec40 100644
+--- a/cmdline/apt-cache.cc
++++ b/cmdline/apt-cache.cc
+@@ -64,6 +64,15 @@
+ 
+ using namespace std;
+ 
++// Get the configured error to use. Used for creating cacheset helpers.
++GlobalError::MsgType GetCacheSetErrorType()
++{
++   bool const Fail = _config->FindB("APT::Cache::FailOnErrors", false);
++   if (Fail)
++      return GlobalError::ERROR;
++   return GlobalError::NOTICE;
++}
++
+ // LocalitySort - Sort a version list by package file locality		/*{{{*/
+ // ---------------------------------------------------------------------
+ /* */
+@@ -189,7 +198,7 @@ static bool UnMet(CommandLine &CmdL)
+    }
+    else
+    {
+-      CacheSetHelperVirtuals helper(true, GlobalError::NOTICE);
++      CacheSetHelperVirtuals helper(true, GetCacheSetErrorType());
+       APT::VersionList verset = APT::VersionList::FromCommandLine(CacheFile, CmdL.FileList + 1,
+ 				APT::VersionList::CANDIDATE, helper);
+       for (APT::VersionList::iterator V = verset.begin(); V != verset.end(); ++V)
+@@ -205,7 +214,7 @@ static bool UnMet(CommandLine &CmdL)
+ static bool DumpPackage(CommandLine &CmdL)
+ {
+    pkgCacheFile CacheFile;
+-   APT::CacheSetHelper helper(true, GlobalError::NOTICE);
++   APT::CacheSetHelper helper(true, GetCacheSetErrorType());
+    APT::PackageList pkgset = APT::PackageList::FromCommandLine(CacheFile, CmdL.FileList + 1, helper);
+ 
+    for (APT::PackageList::const_iterator Pkg = pkgset.begin(); Pkg != pkgset.end(); ++Pkg)
+@@ -578,7 +587,7 @@ static bool ShowDepends(CommandLine &CmdL, bool const RevDepends)
+    if (unlikely(Cache == NULL))
+       return false;
+ 
+-   CacheSetHelperVirtuals helper(false);
++   CacheSetHelperVirtuals helper(false, GetCacheSetErrorType());
+    APT::VersionList verset = APT::VersionList::FromCommandLine(CacheFile, CmdL.FileList + 1, APT::VersionList::CANDIDATE, helper);
+    if (verset.empty() == true && helper.virtualPkgs.empty() == true)
+       return _error->Error(_("No packages found"));
+@@ -760,7 +769,7 @@ static bool XVcg(CommandLine &CmdL)
+    }
+ 
+    // Load the list of packages from the command line into the show list
+-   APT::CacheSetHelper helper(true, GlobalError::NOTICE);
++   APT::CacheSetHelper helper(true, GetCacheSetErrorType());
+    std::list<APT::PackageSet::Modifier> mods;
+    mods.push_back(APT::PackageSet::Modifier(0, ",", APT::PackageSet::Modifier::POSTFIX));
+    mods.push_back(APT::PackageSet::Modifier(1, "^", APT::PackageSet::Modifier::POSTFIX));
+@@ -972,7 +981,7 @@ static bool Dotty(CommandLine &CmdL)
+    }
+ 
+    // Load the list of packages from the command line into the show list
+-   APT::CacheSetHelper helper(true, GlobalError::NOTICE);
++   APT::CacheSetHelper helper(true, GetCacheSetErrorType());
+    std::list<APT::PackageSet::Modifier> mods;
+    mods.push_back(APT::PackageSet::Modifier(0, ",", APT::PackageSet::Modifier::POSTFIX));
+    mods.push_back(APT::PackageSet::Modifier(1, "^", APT::PackageSet::Modifier::POSTFIX));
+@@ -1428,7 +1437,7 @@ static bool ShowAuto(CommandLine &)
+ static bool ShowPackage(CommandLine &CmdL)
+ {
+    pkgCacheFile CacheFile;
+-   CacheSetHelperVirtuals helper(true, GlobalError::NOTICE);
++   CacheSetHelperVirtuals helper(true, GetCacheSetErrorType());
+    APT::VersionList::Version const select = _config->FindB("APT::Cache::AllVersions", true) ?
+ 			APT::VersionList::ALL : APT::VersionList::CANDIDATE;
+    APT::VersionList const verset = APT::VersionList::FromCommandLine(CacheFile, CmdL.FileList + 1, select, helper);
+@@ -1599,7 +1608,7 @@ static bool Policy(CommandLine &CmdL)
+ 		(InstalledLessCandidate > 0 ? (InstalledLessCandidate) : 0) - 1;
+ 
+    // Print out detailed information for each package
+-   APT::CacheSetHelper helper(true, GlobalError::NOTICE);
++   APT::CacheSetHelper helper(true, GetCacheSetErrorType());
+    APT::PackageList pkgset = APT::PackageList::FromCommandLine(CacheFile, CmdL.FileList + 1, helper);
+    for (APT::PackageList::const_iterator Pkg = pkgset.begin(); Pkg != pkgset.end(); ++Pkg)
+    {
+@@ -1673,7 +1682,7 @@ static bool Madison(CommandLine &CmdL)
+    if (_error->PendingError() == true)
+       _error->Discard();
+ 
+-   APT::CacheSetHelper helper(true, GlobalError::NOTICE);
++   APT::CacheSetHelper helper(true, GetCacheSetErrorType());
+    for (const char **I = CmdL.FileList + 1; *I != 0; I++)
+    {
+       _error->PushToStack();
+-- 
+2.1.4
+

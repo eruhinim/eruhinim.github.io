@@ -1,0 +1,132 @@
+diff --git a/doc/cbios.txt b/doc/cbios.txt
+index f0e011b..434f5c0 100644
+--- a/doc/cbios.txt
++++ b/doc/cbios.txt
+@@ -1,4 +1,4 @@
+-C-BIOS 0.27
++C-BIOS 0.28
+ ===========
+ 
+ This software is a substitute BIOS which is can be used for running MSX
+@@ -208,6 +208,9 @@ ver 0.27  2014-11-05(CET)
+           * Fixed bug (regression) in filvrm on non-MSX1-VDP's
+           * Fixed some small bugs in openMSX configs
+           * Fixed line endings of this file
++ver 0.28  2017-07-30(CEST)
++          * Fixed bug that prevented brackets and a few other keys from
++            generating characters when pressed
+ 
+ Special Thanks
+ --------------
+diff --git a/src/main.asm b/src/main.asm
+index 0c6c55e..f9edc07 100644
+--- a/src/main.asm
++++ b/src/main.asm
+@@ -2725,7 +2725,7 @@ key_in:
+                 in      a,(GIO_REGS)
+                 and     $F0
+                 ld      c,a
+-                ld      b,$0B
++                ld      b,11
+                 ld      hl,NEWKEY
+ key_in_lp:
+                 ld      a,c
+@@ -2738,44 +2738,47 @@ key_in_lp:
+ 
+                 ld      ix,OLDKEY
+                 ld      de,NEWKEY
++                ; Use plain or SHIFT version of rows 0-5?
++                ; Note that while we have tables for GRAPH and CODE variants,
++                ; those are not used yet by this routine.
+                 ld      a,(NEWKEY + 6)
+                 rrca
+-                jr      nc,code_shift
+                 ld      hl,scode_tbl
+-                jr      scan_start
+-code_shift:
++                jr      c,scan_start
+                 ld      hl,scode_tbl_shift
+-
+ scan_start:
+-                ld      b,$06                           ; check 'normal' keys
+-                                call    key_chk_lp                              ; (rows 0-5)
+-                                ld              hl,scode_tbl_otherkeys  ; check rest (rows 6-11)
+-                                ld              b,$05
+-
++                ld      c,11
+ key_chk_lp:
+                 ld      a,(de)
+                 cp      (ix+0)
+                 call    nz,key_set_delay
+                 cpl
+                 and     (ix+0)
+-                ex      af,af'          ; Update OLDKEY.
++                ex      af,af'                          ; Update OLDKEY.
+                 ld      a,(de)
+                 ld      (ix+0),a
+                 ex      af,af'
+                 ; TODO: Optimise scanning if no keys are pressed.
+                 ;       That's the most common case by far.
+-                ld      c,$08
++                ld      b,$08
+ key_bit_lp:
+                 rrca
+                 jr      c,key_store
+ key_bit_next:
+                 inc     hl
+-                dec     c
+-                jr      nz,key_bit_lp
++                djnz    key_bit_lp
+                 inc     ix
+                 inc     de
+-                djnz    key_chk_lp
+-                ret
++                dec     c
++                ret     z
++                ld      a,c
++                cp      5
++                jr      nz,key_chk_lp
++                ; Switch to new table for rows 6-11.
++                ; These rows produce the same characters regardless of which
++                ; modifier keys are held.
++                ld      hl,scode_tbl_otherkeys
++                jr      key_chk_lp
+ 
+ key_set_delay:
+                 ; Set the auto-repeat delay.
+@@ -2787,7 +2790,7 @@ key_set_delay:
+ 
+ key_store:
+                 push    af
+-                ld      a,b
++                ld      a,c
+ 
+                 cp      $05
+                 jr      z,key_chk_fnk1
+@@ -2798,7 +2801,7 @@ key_store:
+ ; Put function string into buffer
+ key_chk_fnk1:
+                 ; F1-F3
+-                ld      a,c
++                ld      a,b
+                 cp      $03 ; F1
+                 jr      nz,key_chk_f2
+                 ld      a,$00
+@@ -2815,7 +2818,7 @@ key_chk_f3:
+                 jr      put_key_fnk
+ key_chk_fnk2:
+                 ; F4-F5
+-                ld      a,c
++                ld      a,b
+                 cp      $08 ; F4
+                 jr      nz,key_chk_f5
+                 ld      a,$03
+diff --git a/version.txt b/version.txt
+index 7eb6830..ce9968f 100644
+--- a/version.txt
++++ b/version.txt
+@@ -1 +1 @@
+-0.27
+\ No newline at end of file
++0.28
+\ No newline at end of file

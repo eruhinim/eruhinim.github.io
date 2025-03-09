@@ -1,0 +1,99 @@
+=== modified file 'apt-pkg/contrib/mmap.cc'
+--- apt-pkg/contrib/mmap.cc	2006-03-12 20:18:45 +0000
++++ apt-pkg/contrib/mmap.cc	2007-04-27 13:40:13 +0000
+@@ -175,9 +175,8 @@
+    if (_error->PendingError() == true)
+       return;
+    
+-   Base = new unsigned char[WorkSpace];
+-   memset(Base,0,WorkSpace);
+-   iSize = 0;
++   // use anonymous mmap() to get the memory
++   Base = mmap(0, WorkSpace, PROT_READ|PROT_WRITE, MAP_ANON|MAP_PRIVATE, -1, 0);
+ }
+ 									/*}}}*/
+ // DynamicMMap::~DynamicMMap - Destructor				/*{{{*/
+@@ -187,7 +186,7 @@
+ {
+    if (Fd == 0)
+    {
+-      delete [] (unsigned char *)Base;
++      munmap(Base, WorkSpace);
+       return;
+    }
+    
+@@ -211,8 +210,15 @@
+    // Just in case error check
+    if (Result + Size > WorkSpace)
+    {
+-      _error->Error("Dynamic MMap ran out of room");
+-      return 0;
++      // try to grow the buffer
++      while(Result + Size > WorkSpace)
++      {
++	 if(!Grow())
++	 {
++	    _error->Error("Dynamic MMap ran out of room");
++	    return 0;
++	 }
++      }
+    }
+ 
+    return Result;
+@@ -273,8 +279,15 @@
+    // Just in case error check
+    if (Result + Len > WorkSpace)
+    {
+-      _error->Error("Dynamic MMap ran out of room");
+-      return 0;
++      // try to grow the buffer
++      while(Result + Len > WorkSpace)
++      {
++	 if(!Grow())
++	 {
++	    _error->Error("Dynamic MMap ran out of room");
++	    return 0;
++	 }
++      }
+    }   
+    
+    if (Len == (unsigned long)-1)
+@@ -285,3 +298,24 @@
+    return Result;
+ }
+ 									/*}}}*/
++// DynamicMMap::Grow - Grow the mmap    	                        /*{{{*/
++// ---------------------------------------------------------------------
++bool DynamicMMap::Grow()
++{
++   unsigned long newSize = WorkSpace * 2;
++
++   if(Fd != 0) 
++   {
++      Fd->Seek(newSize - 1);
++      char C = 0;
++      Fd->Write(&C,sizeof(C));
++   }
++   void *newBase = mremap(Base, WorkSpace, newSize, 0);
++   if(newBase == MAP_FAILED) 
++      return false;
++
++   WorkSpace = newSize;
++   return true;
++}
++
++									/*}}}*/
+
+=== modified file 'apt-pkg/contrib/mmap.h'
+--- apt-pkg/contrib/mmap.h	2006-03-12 20:18:45 +0000
++++ apt-pkg/contrib/mmap.h	2007-04-26 09:11:14 +0000
+@@ -87,6 +87,8 @@
+    unsigned long WorkSpace;
+    Pool *Pools;
+    unsigned int PoolCount;
++
++   bool Grow();
+    
+    public:
+ 
+

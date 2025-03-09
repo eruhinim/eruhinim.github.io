@@ -1,0 +1,166 @@
+--- dpkg-1.10.6/main/main.c.orig2	Sat Sep 21 20:33:27 2002
++++ dpkg-1.10.6/main/main.c	Sat Sep 21 20:34:50 2002
+@@ -428,28 +428,65 @@
+   {  0,                   0                                                          }
+ };
+ 
++
++
+ void execbackend(const char *const *argv) {
+   char **nargv;
+-  int i, argc = 1;
++  int i, argc = 0;
++  int extra=0, start;
+   const char *const *arg = argv;
+-  while(*arg != 0) { arg++; argc++; }
+-  nargv= malloc(sizeof(char *) * (argc + 2));
+ 
++
++  if (strcmp(cipaction->parg, DPKGQUERY)==0) {
++      extra=1;
++  }
++  /* Count # of arguments */
++  while(*arg != 0) { arg++; argc++; }
++  
++  /* Allocate buffer for argument vector, with 3 extras (one for
++     argv[0], one for cipaction->olong, one for the admindir
++     switch */
++  nargv= malloc(sizeof(char *) * (argc + 2+extra));
++  /* Old line: I believe this was a bug?!?
++     nargv= malloc(sizeof(char *) * argc + 2);
++  */
+   if (!nargv) ohshite(_("couldn't malloc in execbackend"));
++
++  /* argv[0] is the name of the tool */
+   nargv[0]= strdup(cipaction->parg);
+   if (!nargv[0]) ohshite(_("couldn't strdup in execbackend"));
++
++  /* argv[1] is the olong argument; add 3 to size for '--' and 
++     terminating 0 */
+   nargv[1]= malloc(strlen(cipaction->olong) + 3);
+   if (!nargv[1]) ohshite(_("couldn't malloc in execbackend"));
+   strcpy(nargv[1], "--");
+   strcat(nargv[1], cipaction->olong);
+-  for (i= 2; i <= argc; i++) {
+-    nargv[i]= strdup(argv[i-2]);
++
++  if (extra) {
++      /* argv[2] is --admindir=<admindir>, in case we're not using
++	 the default /var/lib/dpkg */
++#define ADMINDIR_SWITCH "--admindir="
++      nargv[2]=malloc(strlen(ADMINDIR_SWITCH)+strlen(admindir)+1);
++      if (!nargv[2]) ohshite(_("couldn't malloc in execbackend"));
++      strcpy(nargv[2], ADMINDIR_SWITCH);
++      strcat(nargv[2], admindir);
++      start=3;
++  } else 
++      start=2;
++
++  /* Copy remaining arguments from argv vectors */
++  for (i= start; i < argc+start; i++) {
++    nargv[i]= strdup(argv[i-start]);
+     if (!nargv[i]) ohshite(_("couldn't strdup in execbackend"));
+   }
+   nargv[i]= 0;
++
++  /* Horrido! */
+   execvp(cipaction->parg, nargv);
+   ohshite(_("failed to exec %s"),(char *)cipaction->parg);
+ }
++
+ void commandfd(const char *const *argv) {
+   jmp_buf ejbuf;
+   struct varbuf linevb;
+--- dpkg-1.10.6/scripts/dpkg-buildpackage.sh.orig2	Sat Sep 21 20:33:11 2002
++++ dpkg-1.10.6/scripts/dpkg-buildpackage.sh	Sat Sep 21 20:33:30 2002
+@@ -18,6 +18,8 @@
+          -p<sign-command>
+ 	 -d            do not check build dependencies and conflicts
+ 	 -D            check build dependencies and conflicts
++	 -y<dir>       admin directory to use for build dependency 
++		       checking (if different from /var/lib/dpkg)
+ 	 -k<keyid>     the key to use for signing
+          -sgpg         the sign-command is called like GPG
+          -spgp         the sign-command is called like PGP 
+@@ -70,6 +72,7 @@
+ usepause=false
+ warnable_error=0
+ passopts=''
++admindir=''
+ 
+ while [ $# != 0 ]
+ do
+@@ -81,6 +84,7 @@
+ 	-k*)	signkey="$value" ;;
+ 	-d)	checkbuilddep=false ;;
+ 	-D)	checkbuilddep=true ;;
++	-y*)    admindir="$value" ;;
+ 	-sgpg)  forcesigninterface=gpg ;;
+ 	-spgp)  forcesigninterface=pgp ;;
+ 	-us)	signsource=: ;;
+@@ -141,11 +145,17 @@
+ 
+ curd="`pwd`"
+ dirn="`basename \"$curd\"`"
+-mustsetvar package "`dpkg-parsechangelog | sed -n 's/^Source: //p'`" "source package"
+-mustsetvar version "`dpkg-parsechangelog | sed -n 's/^Version: //p'`" "source version"
++if [ -z "$admindir" ]; then
++  pclargs=""
++else
++  pclargs="-L$admindir/../dpkg/parsechangelog"
++fi
++
++mustsetvar package "`dpkg-parsechangelog $pclargs | sed -n 's/^Source: //p'`" "source package"
++mustsetvar version "`dpkg-parsechangelog $pclargs | sed -n 's/^Version: //p'`" "source version"
+ if [ -n "$changedby" ]; then maintainer="$changedby"; 
+ elif [ -n "$maint" ]; then maintainer="$maint"; 
+-else mustsetvar maintainer "`dpkg-parsechangelog | sed -n 's/^Maintainer: //p'`" "source maintainer"; fi
++else mustsetvar maintainer "`dpkg-parsechangelog $pclargs | sed -n 's/^Maintainer: //p'`" "source maintainer"; fi
+ eval `dpkg-architecture -a${targetarch} -t${targetgnusystem} -s -f`
+ 
+ if [ x$sourceonly = x ]; then
+@@ -176,6 +186,9 @@
+ }
+ 
+ if [ "$checkbuilddep" = "true" ]; then
++	if [ "$admindir" != "" ]; then
++		checkbuilddep_args="$checkbuilddep_args -admindir=$admindir"
++	fi
+ 	if ! dpkg-checkbuilddeps $checkbuilddep_args; then
+ 		echo >&2 "$progname: Build dependencies/conflicts unsatisfied; aborting."
+ 		echo >&2 "$progname: (Use -d flag to override.)"
+--- dpkg-1.10.6/scripts/dpkg-checkbuilddeps.pl.orig2	Sat Sep 21 20:32:58 2002
++++ dpkg-1.10.6/scripts/dpkg-checkbuilddeps.pl	Sat Sep 21 20:33:30 2002
+@@ -6,8 +6,9 @@
+ 
+ sub usage {
+ 	print STDERR <<EOF;
+-Usage: dpkg-checkbuild [-B] [control-file]
+-	-B		binary-only, ignore -Indep
++Usage: dpkg-checkbuilddeps [-B] [-admindir=dir] [control-file]
++	-B		  binary-only, ignore -Indep
++	-admindir <dir>  Specify dpkg db dir, default /var/lib/dpkg
+ 	control-file	control file to process [Default: debian/control]
+ EOF
+ }
+@@ -16,8 +17,10 @@
+ 
+ my $binary_only=0;
+ my $want_help=0;
++my $admindir="/var/lib/dpkg";
+ if (! GetOptions('-B' => \$binary_only,
+-		 '-h' => \$want_help)) {
++		 '-h' => \$want_help,
++                 '-admindir=s' => \$admindir)) {
+ 	usage();
+ 	exit(2);
+ }
+@@ -29,7 +32,7 @@
+ my $control=shift || "debian/control";
+ 
+ open (CONTROL, $control) || die "$control: $!\n";
+-my @status=parse_status();
++my @status=parse_status("$admindir/status");
+ my (@unmet, @conflicts);
+ local $/='';
+ my $cdata=<CONTROL>;

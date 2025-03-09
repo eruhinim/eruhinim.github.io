@@ -1,0 +1,269 @@
+diff --git a/debmirror b/debmirror
+index 201b979..ad2ecd2 100755
+--- a/debmirror
++++ b/debmirror
+@@ -68,7 +68,7 @@ Usage: $0 [--progress] [--verbose] [--debug] [--dry-run] [--help]
+           [--rsync-batch=number] [--rsync-options=options]
+           [--postcleanup|--cleanup|--nocleanup] [--skippackages]
+           [--pdiff=use|mirror|none] [--state-cache-days=number]
+-          [--ignore-small-errors] [--allow-dist-rename]
++          [--ignore-small-errors] [--allow-dist-rename] [--debmarshal]
+           <mirrordir>
+ 
+ For details, see man page.
+@@ -377,6 +377,13 @@ An existing symlink 'codename->suite' will be removed, but debmirror will
+ automatically create a new symlink 'suite->codename' (immediately after
+ moving meta files in place). This conversion should only be needed once.
+ 
++=item --debmarshal
++
++On each pull, keep the repository meta data from dists/* in a numbered
++subdirectory, and maintain a symlink latest to the most recent pull.
++This is similar to Debmarshal in tracking mode, see
++debmarshal.debian.net for examples and use.
++
+ =back
+ 
+ =head1 USING DEBMIRROR
+@@ -533,6 +540,7 @@ our $ignore_small_errors=0;
+ our $pdiff_mode="use";
+ our $omit_suite_symlinks=0;
+ our $allow_dist_rename=0;
++our $debmarshal=0;
+ my @errlog;
+ my $HOME;
+ ($HOME = $ENV{'HOME'}) or die "HOME not defined in environment!\n";
+@@ -619,6 +627,7 @@ GetOptions('debug'                  => \$debug,
+ 	   'pdiff=s'                => \$pdiff_mode,
+ 	   'omit-suite-symlinks'    => \$omit_suite_symlinks,
+ 	   'allow-dist-rename'      => \$allow_dist_rename,
++	   'debmarshal'             => \$debmarshal,
+ 	   'help'                   => \$help,
+ ) or usage;
+ usage if $help;
+@@ -695,6 +704,7 @@ if ($post_cleanup) {
+   say("Will NOT clean up.") unless $cleanup;
+ }
+ say("Dry run.") if $dry_run_var;
++say("Debmarshal snapshots kept.") if $debmarshal;
+ 
+ my $md5;
+ $md5=Digest::MD5->new;
+@@ -806,6 +816,19 @@ foreach my $dist (@rdists) {
+   $files{$tempdir."/"."dists/$codename$dist_sdir/Release"}=1;
+   $files{"dists/$codename$dist_sdir/Release.gpg"}=1;
+   $files{$tempdir."/"."dists/$codename$dist_sdir/Release.gpg"}=1;
++  if ($debmarshal) {
++    my $next = get_nextlatest($dist);
++    say("mkdir $mirrordir/dists/$dist/$next");
++    make_dir("$mirrordir/dists/$dist/$next");
++    unlink("$mirrordir/dists/$dist/$next/Release");
++    link("$tempdir/dists/$codename$dist_sdir/Release",
++	 "$mirrordir/dists/$dist/$next/Release")
++      or die "Error while linking $tempdir/dists/$codename$dist_sdir/Release: $!\n";
++    unlink("$mirrordir/dists/$dist/$next/Release.gpg");
++    link("$tempdir/dists/$codename$dist_sdir/Release.gpg",
++	 "$mirrordir/dists/$dist/$next/Release.gpg")
++      or die "Error while linking $tempdir/dists/$codename$dist_sdir/Release.gpg: $!\n";
++  }
+ }
+ 
+ # Check that @di_dists contains valid codenames
+@@ -909,12 +932,14 @@ foreach my $dist (keys %dists) {
+     next if ($section =~ /debian-installer/ && $dist eq "breezy-security" );
+     foreach my $arch (@arches) {
+       get_index("dists/$dist/$section/binary-$arch", "Packages");
++      link_index($dist,$section,$arch) if $debmarshal;
+     }
+     # d-i does not have separate source sections
+     if ($do_source && $section !~ /debian-installer/) {
+       get_index("dists/$dist/$section/source", "Sources");
++      link_index($dist,$section,"source") if $debmarshal;
+     }
+-    get_i18n_index("dists/$dist/$section/i18n") if $i18n;
++    get_i18n_index($dist,"$section/i18n") if $i18n;
+   }
+ }
+ foreach (@extra_dirs) {
+@@ -962,7 +987,7 @@ if ($getcontents || $i18n) {
+     }
+     if ($i18n) {
+       foreach my $section (@sections) {
+-	parse_i18n_index("dists/$dist/$section/i18n");
++	parse_i18n_index($dist,"$section/i18n");
+       }
+     }
+   }
+@@ -1090,7 +1115,7 @@ say("Parse Packages and Sources files and add to the file list everything therei
+ }
+ 
+ # Pre-mirror cleanup
+-cleanup_unknown_files() if ($cleanup && ! $post_cleanup);
++cleanup_unknown_files() if ($cleanup && ! $post_cleanup && !$debmarshal);
+ 
+ say("Download all files that we need to get (".print_dl_size($bytes_to_get - $bytes_meta).").");
+ init_connection;
+@@ -1109,6 +1134,14 @@ if ($getcontents) {
+       }
+       $files{"dists/$dist/Contents-$arch.gz"}=1;
+       $files{$tempdir."/"."dists/$dist/Contents-$arch.gz"}=1;
++      if ($debmarshal) {
++	my $next = get_nextlatest($dist);
++	say("linking $mirrordir/dists/$dist/$next/Contents-$arch.gz");
++	unlink("$mirrordir/dists/$dist/$next/Contents-$arch.gz");
++	link("$tempdir/dists/$dist/Contents-$arch.gz",
++	     "$mirrordir/dists/$dist/$next/Contents-$arch.gz")
++	  or die "Error while linking $tempdir/dists/$dist/Contents-$arch.gz: $!\n";
++      }
+     }
+   }
+ }
+@@ -1268,6 +1301,21 @@ if (! @di_dists) {
+ }
+ 
+ say("Everything OK. Moving meta files.");
++if ($debmarshal) {
++  foreach my $dist (@rdists) {
++    system("diff","-q","$mirrordir/dists/$dist/latest/Release",
++	   "$tempdir/dists/$dist/Release");
++    if ($?) {
++      my $next = get_nextlatest($dist);
++      say("Updating $mirrordir/dists/$dist/latest to $next");
++      unlink("$mirrordir/dists/$dist/latest");
++      symlink($next,"$mirrordir/dists/$dist/latest")
++	or die "Error while symlinking $mirrordir/dists/$dist/latest to $next: $!\n";
++    } else {
++      say("Not updating $mirrordir/dists/$dist/latest");
++    }
++  }
++}
+ chdir($tempdir) or die "unable to chdir($tempdir): $!\n";
+ my $res=0;
+ foreach my $file (`find . -type f`) {
+@@ -1287,6 +1335,7 @@ foreach my $file (`find . -type f`) {
+ }
+ chdir($mirrordir) or die "chdir $mirrordir: $!";
+ 
++
+ # Get optional directories using rsync.
+ rsync_extra(0, @rsync_extra);
+ 
+@@ -1335,7 +1384,7 @@ if (! $dry_run) {
+ }
+ 
+ # Post mirror cleanup
+-cleanup_unknown_files() if ($post_cleanup);
++cleanup_unknown_files() if ($post_cleanup && !$debmarshal);
+ 
+ # mirror cleanup for directories
+ if (! $use_cache && ($cleanup || $post_cleanup)) {
+@@ -1739,6 +1788,17 @@ sub split_dist {
+   return ($dist_raw, $dist_sdir);
+ }
+ 
++sub get_nextlatest {
++  my ($dist) = @_;
++  my $latest = readlink("$mirrordir/dists/$dist/latest");
++  if (defined $latest) {
++    $latest++;
++  } else {
++    $latest = 0;
++  }
++  return $latest;
++}
++
+ sub get_release {
+   my ($tdir, $dist) = @_;
+ 
+@@ -1960,8 +2020,37 @@ sub get_index {
+   $files{"$tempdir/$subdir/Release"}=1;
+ }
+ 
++# hardlink index files from tempdir to next debmarshal snapshot location
++sub link_index {
++  my ($dist,$section,$arch) = @_;
++  my ($file,$archdir);
++  if ($arch eq "source") {
++    $file = "Sources";
++    $archdir = "source";
++  } else {
++    $file = "Packages";
++    $archdir = "binary-$arch";
++  }
++  my $next = get_nextlatest($dist);
++  make_dir("$mirrordir/dists/$dist/$next/$section/$archdir");
++  unlink("$mirrordir/dists/$dist/$next/$section/$archdir/$file");
++  link("$tempdir/dists/$dist/$section/$archdir/$file",
++       "$mirrordir/dists/$dist/$next/$section/$archdir/$file")
++    or die "Error while linking $tempdir/dists/$dist/$section/$archdir/$file: $!\n";
++  unlink("$mirrordir/dists/$dist/$next/$section/$archdir/$file.gz");
++  link("$tempdir/dists/$dist/$section/$archdir/$file.gz",
++       "$mirrordir/dists/$dist/$next/$section/$archdir/$file.gz")
++    or die "Error while linking $tempdir/dists/$dist/$section/$archdir/$file.gz: $!\n";
++  unlink("$mirrordir/dists/$dist/$next/$section/$archdir/$file.bz2");
++  link("$tempdir/dists/$dist/$section/$archdir/$file.bz2",
++       "$mirrordir/dists/$dist/$next/$section/$archdir/$file.bz2")
++    or die "Error while linking $tempdir/dists/$dist/$section/$archdir/$file.bz2: $!\n";
++
++}
++
+ sub get_i18n_index {
+-  my $subdir=shift;
++  my ($dist,$distpath) = @_;
++  my $subdir = "dists/$dist/$distpath";
+   if (exists $file_lists{"$tempdir/$subdir/Index"}) {
+     make_dir($subdir);
+     make_dir("$tempdir/$subdir");
+@@ -1970,6 +2059,13 @@ sub get_i18n_index {
+       say("$subdir/Release needs fetch");
+       if (!remote_get("$subdir/Index")) {
+ 	push (@errlog,"$subdir/Index failed md5sum check, removing\n");
++      } elsif ($debmarshal) {
++	my $next = get_nextlatest($dist);
++	say("linking $mirrordir/dists/$dist/$next/$distpath/Index");
++	unlink("$mirrordir/dists/$dist/$next/$distpath/Index");
++	link("$tempdir/$subdir/Index",
++	     "$mirrordir/dists/$dist/$next/$distpath/Index")
++	  or die "Error while linking $tempdir/$subdir/Index: $!\n";
+       }
+     } else {
+       $bytes_gotten += $file_lists{"$tempdir/$subdir/Index"}{size};
+@@ -1980,7 +2076,8 @@ sub get_i18n_index {
+ }
+ 
+ sub parse_i18n_index {
+-  my $subdir = shift;
++  my ($dist,$distpath) = @_;
++  my $subdir = "dists/$dist/$distpath";
+   my ($sha1, $size, $filename);
+   my $exclude = "(".join("|", @excludes).")" if @excludes;
+   my $include = "(".join("|", @includes).")" if @includes;
+@@ -2004,6 +2101,9 @@ sub parse_i18n_index {
+ 	$bytes_to_get += $size;
+ 	$i18n_get{"$subdir/$filename"}{sha1} = $sha1;
+ 	$i18n_get{"$subdir/$filename"}{size} = $size;
++	$i18n_get{"$subdir/$filename"}{dist} = $dist;
++	$i18n_get{"$subdir/$filename"}{distpath} = $distpath;
++	$i18n_get{"$subdir/$filename"}{filename} = $filename;
+       }
+     }
+     close INDEX;
+@@ -2015,6 +2115,18 @@ sub get_i18n_files {
+   foreach my $file (sort keys %i18n_get) {
+     if (! check_i18n("$tempdir/$file", $i18n_get{$file}{size}, $i18n_get{$file}{sha1})) {
+       remote_get("$file");
++      if ($debmarshal) {
++	my $dist = $i18n_get{$file}{dist};
++	my $distpath = $i18n_get{$file}{distpath};
++	my $filename = $i18n_get{$file}{filename};
++	my $next = get_nextlatest($dist);
++	say("linking $file");
++	unlink("$mirrordir/dists/$dist/$next/$distpath/$filename");
++	link("$tempdir/$file",
++	 "$mirrordir/dists/$dist/$next/$distpath/$filename")
++	  or die "Erorr while linking $tempdir/$file: $!";
++
++      }
+     }
+   }
+ }

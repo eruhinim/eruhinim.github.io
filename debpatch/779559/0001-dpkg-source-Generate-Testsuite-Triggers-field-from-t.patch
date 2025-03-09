@@ -1,0 +1,115 @@
+From c0fb9e65ddcd3f8189b2127653722f99b282e645 Mon Sep 17 00:00:00 2001
+From: Martin Pitt <martin.pitt@ubuntu.com>
+Date: Sun, 1 May 2016 09:43:39 -0500
+Subject: [PATCH 1/2] dpkg-source: Generate Testsuite-Triggers field from test
+ dependencies
+
+Sometimes autopkgtests regress due to change in a package which is only a test
+dependency (Depends: in debian/tests/control), not a build or binary one. It is
+useful to trigger a test if such a test dependency changes.
+
+Record the union of all test dependency packages in a new Testsuite-Triggers:
+field in the .dsc, so that they will be recorded in the Sources package index.
+Ignore versions and flatten OR dependencies as they are not interesting for
+determining reverse test dependencies and should not be (ab)used for replacing
+debian/tests/control parsing.
+
+Closes: #779559
+LP: #1491145
+---
+ debian/changelog                   |  5 +++++
+ scripts/Dpkg/Control/FieldsCore.pm |  4 ++++
+ scripts/dpkg-source.pl             | 39 ++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 48 insertions(+)
+
+diff --git a/debian/changelog b/debian/changelog
+index f963c99..225dad4 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -9,6 +9,11 @@ dpkg (1.18.8) UNRELEASED; urgency=medium
+   [ Updated manpages translations ]
+   * German (Helge Kreutzmann).
+ 
++  [ Martin Pitt ]
++  * dpkg-source: Record the union of all autopkgtest dependency packages in a
++    new Testsuite-Triggers: field in the .dsc, so that they will be recorded
++    in the Sources package index. Closes: #779559, LP: #1491145
++
+  -- Guillem Jover <guillem@debian.org>  Mon, 09 May 2016 05:10:36 +0200
+ 
+ dpkg (1.18.7) unstable; urgency=medium
+diff --git a/scripts/Dpkg/Control/FieldsCore.pm b/scripts/Dpkg/Control/FieldsCore.pm
+index 3af6fa7..36e591d 100644
+--- a/scripts/Dpkg/Control/FieldsCore.pm
++++ b/scripts/Dpkg/Control/FieldsCore.pm
+@@ -332,6 +332,10 @@ our %FIELDS = (
+         allowed => ALL_SRC,
+         separator => FIELD_SEP_COMMA,
+     },
++    'Testsuite-Triggers' => {
++        allowed => ALL_SRC,
++        separator => FIELD_SEP_COMMA,
++    },
+     'Triggers-Awaited' => {
+         allowed => CTRL_FILE_STATUS,
+         separator => FIELD_SEP_SPACE,
+diff --git a/scripts/dpkg-source.pl b/scripts/dpkg-source.pl
+index 89281c1..b2334c9 100755
+--- a/scripts/dpkg-source.pl
++++ b/scripts/dpkg-source.pl
+@@ -359,6 +359,7 @@ if ($options{opmode} =~ /^(build|print-format|(before|after)-build|commit)$/) {
+ 
+     # Check if we have a testsuite, and handle manual and automatic values.
+     set_testsuite_field($fields);
++    set_testsuite_triggers_field($fields, @binarypackages);
+ 
+     # Scan fields of dpkg-parsechangelog
+     foreach (keys %{$changelog}) {
+@@ -513,6 +514,44 @@ sub set_testsuite_field
+     $fields->{'Testsuite'} = join ', ', sort keys %testsuite;
+ }
+ 
++sub set_testsuite_triggers_field
++{
++    my $fields = shift;
++    my @binarypackages = shift;
++    my $tc_path = "$dir/debian/tests/control";
++    my %testdeps;
++
++    # never overwrite a manually defined field
++    return if $fields->{'Testsuite-Triggers'};
++
++    # autopkgtest is the only test we can parse
++    return unless -e $tc_path;
++
++    # parse Tests: from debian/tests/control
++    my $control = Dpkg::Control::HashCore->new(
++        drop_empty => 1,
++        allow_duplicate => 1,
++        name => 'autopkgtest control');
++    open(my $tc_fh, '<', $tc_path)
++        or syserr(g_('cannot read %s'), $tc_path);
++
++    my $cb_dep = sub {
++        # ignore autopkgtest meta-depends like @ or @builddeps@
++        $testdeps{$_[0]->{package}} = 1 unless $_[0]->{package} =~ /^@/;
++    };
++
++    while($control->parse($tc_fh, $tc_path)) {
++        my $deps = deps_parse($control->{'Depends'}, use_arch => 0, tests_dep => 1);
++        deps_iterate($deps, $cb_dep);
++    }
++
++    # remove our own binaries
++    foreach my $p (@binarypackages) {
++        delete $testdeps{$p};
++    }
++    $fields->{'Testsuite-Triggers'} = join(', ', sort keys %testdeps);
++}
++
+ sub setopmode {
+     my $opmode = shift;
+ 
+-- 
+2.7.4
+

@@ -1,0 +1,86 @@
+--- apt-file-2.1.5/apt-file	2008-08-29 15:55:14.000000000 +0200
++++ apt-file	2008-08-29 13:32:06.000000000 +0200
+@@ -245,6 +245,17 @@
+         $cmd = "set -x; $cmd"       if $Conf->{verbose};
+         $cmd = "($cmd) < /dev/null" if $Conf->{non_interactive};
+         system($cmd) if !defined $Conf->{dummy};
++        my $file = "$Conf->{cache}/$_->{dest}";
++        if ( $Conf->{uncompress} ) {
++            system("gunzip", "--force", $file) if -e $file;
++        }
++        else {
++            # If previously we where using uncompressed files and now we changed
++            # our mind we should remove the old files otherwise we will have
++            # both uncompressed and the compressed files in the disk!
++            $file =~ s/\.gz$//;
++            unlink $file;
++        }
+     }
+ }
+ 
+@@ -287,6 +298,7 @@
+         = $Conf->{is_regexp}   ? "zcat"
+         : $Conf->{ignore_case} ? "zfgrep -i $zgrep_pattern"
+         :                        "zfgrep $zgrep_pattern";
++    $zcat =~ s/^z// if $Conf->{uncompress};
+     my $regexp = eval { $Conf->{ignore_case} ? qr/$pattern/i : qr/$pattern/ };
+     error($@) if $@;
+     my $quick_regexp = escape_parens($regexp);
+@@ -294,13 +306,15 @@
+ 
+     foreach (@$data) {
+         my $file = "$Conf->{cache}/$_->{dest}";
++        $file =~ s/\.gz$// if $Conf->{uncompress};
+         next if ( !-f $file );
+ 
+         # Skip already searched files:
+         next if $seen{$file}++;
+-        $file = quotemeta $file;
+         debug "Search in $file using $zcat";
+-        open( ZCAT, "$zcat $file |" )
++        # If the command is 'cat' then bypass the fork and just read the file
++        my $open_cmd = ($zcat eq 'cat') ? $file : "$zcat \Q$file\E |";
++        open( ZCAT, $open_cmd )
+             || warning "Can't $zcat $file";
+         while (<ZCAT>) {
+ 
+@@ -426,10 +440,13 @@
+ sub purge_cache($) {
+     my $data = shift;
+     foreach (@$data) {
+-        debug "Purging $Conf->{cache}/$_->{dest}";
++        my $file = "$Conf->{cache}/$_->{dest}";
++        $file =~ s/\.gz$// if $Conf->{uncompress};
++        debug "Purging $file";
+         next if defined $Conf->{dummy};
+-        next if ( unlink "$Conf->{cache}/$_->{dest}" ) > 0;
+-        warning "Can't remove $Conf->{cache}/$_->{dest}";
++        next unless -e $file;
++        next if ( unlink $file ) > 0;
++        warning "Can't remove $file";
+     }
+ }
+ 
+@@ -522,6 +539,22 @@
+         exit 0;
+     }
+ 
++    if ( defined $Conf->{uncompress} ) {
++        my $uncompress = lc $Conf->{uncompress};
++        if ( $uncompress =~ /^\d+$/ ) {
++            $Conf->{uncompress} = $uncompress;
++        }
++        elsif ( $uncompress eq 'true' or $uncompress eq 'yes' ) {
++            $Conf->{uncompress} = 1;
++        }
++        else {
++            $Conf->{uncompress} =  0;
++        }
++    }
++    else {
++        $Conf->{uncompress} =  0;
++    }
++
+     my $interactive = $Conf->{interactive};
+     defined $interactive or $interactive = "cdrom rsh ssh";
+     $Conf->{interactive} = {};

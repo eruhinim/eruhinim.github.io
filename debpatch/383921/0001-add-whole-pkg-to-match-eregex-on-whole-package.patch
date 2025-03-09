@@ -1,0 +1,139 @@
+From 13cb48a28f20a34a454b97b0b41c02b12733f988 Mon Sep 17 00:00:00 2001
+From: Stefano Zacchiroli <zack@upsilon.cc>
+Date: Thu, 29 Jan 2009 11:21:38 +0100
+Subject: [PATCH] add '--whole-pkg' to match (eregex) on whole package names
+
+Using this flag given extended regex will not match substring of
+package names in fields expressing inter-package relationships (e.g.,
+Depends, Recommends, ...).
+
+Passing '--whole-pkg' implies '-e'.
+
+(Closes: #476861) actually, proposed fix for ...
+---
+ grep-dctrl/grep-dctrl.c |   13 ++++++++++++-
+ lib/predicate.c         |   17 +++++++++++++++--
+ lib/predicate.h         |    2 ++
+ 3 files changed, 29 insertions(+), 3 deletions(-)
+
+diff --git a/grep-dctrl/grep-dctrl.c b/grep-dctrl/grep-dctrl.c
+index 70a1fd1..d5fb5f5 100644
+--- a/grep-dctrl/grep-dctrl.c
++++ b/grep-dctrl/grep-dctrl.c
+@@ -59,7 +59,8 @@ enum {
+         OPT_GE,
+         OPT_MMAP,
+         OPT_IGN_ERRS,
+-        OPT_PATTERN
++        OPT_PATTERN,
++        OPT_WHOLE_PKG
+ };
+ 
+ #undef BANNER
+@@ -139,6 +140,7 @@ static struct argp_option options[] = {
+ 	{ "mmap",           OPT_MMAP, 0,            0, N_("Attempt mmapping input files") },
+ 	{ "ignore-parse-errors", OPT_IGN_ERRS, 0,   0, N_("Ignore parse errors") },
+         { "pattern",        OPT_PATTERN, N_("PATTERN"), 0, N_("Specify the pattern to search for") },
++	{ "whole-pkg",	    OPT_WHOLE_PKG, 0,	    0, N_("Do (eregex) matching on whole package names") },
+ 	{ 0 }
+ };
+ 
+@@ -235,6 +237,7 @@ struct atom * clone_atom(struct arguments * args)
+ 	rv->field_inx = atom->field_inx;
+ 	rv->mode = atom->mode;
+ 	rv->ignore_case = atom->ignore_case;
++	rv->whole_pkg = atom->whole_pkg;
+ 	rv->pat = atom->pat;
+ 	rv->patlen = atom->patlen;
+ 	struct atom_code * ac = args->atom_code[oa];
+@@ -357,6 +360,7 @@ static struct atom * enter_atom(struct arguments * args)
+ 	rv->field_inx = -1;
+ 	rv->mode = M_SUBSTR;
+ 	rv->ignore_case = 0;
++	rv->whole_pkg = 0;
+ 	rv->pat = 0;
+ 	rv->patlen = 0;
+ 	return rv;
+@@ -551,6 +555,12 @@ static error_t parse_opt (int key, char * arg, struct argp_state * state)
+ 		if (atom->pat == 0) fatal_enomem(0);
+ 		strcpy((char*)atom->pat, arg);
+ 		break;
++	case OPT_WHOLE_PKG:
++		debug_message("parse_opt: whole-pkg", 0);
++		atom = ENTER_ATOM;
++		atom->whole_pkg = 1;
++		set_mode(M_EREGEX);
++		break;
+ 	case ARGP_KEY_ARG:
+ 		debug_message("parse_opt: argument", 0);
+ 	redo:
+@@ -620,6 +630,7 @@ static void dump_args(struct arguments * args)
+ 		printf("atoms[%zi].field_name = %s\n", i, args->p.atoms[i].field_name);
+ 		printf("atoms[%zi].mode = %i\n", i, args->p.atoms[i].mode);
+ 		printf("atoms[%zi].ignore_case = %i\n", i, args->p.atoms[i].ignore_case);
++		printf("atoms[%zi].whole_pkg = %i\n", i, args->p.atoms[i].whole_pkg);
+ 		printf("atoms[%zi].pat = %s\n", i, args->p.atoms[i].pat);
+ 	}
+ 	printf("proglen = %zi\n", args->p.proglen);
+diff --git a/lib/predicate.c b/lib/predicate.c
+index 2657457..14f8500 100644
+--- a/lib/predicate.c
++++ b/lib/predicate.c
+@@ -27,6 +27,9 @@
+ #include "strutil.h"
+ #include "version.h"
+ 
++#define RE_PKG_BEGIN	"(^| )"
++#define RE_PKG_END	"([, \\(]|$)"
++
+ void init_predicate(struct predicate * p)
+ {
+ 	p->num_atoms = 0;
+@@ -46,6 +49,8 @@ void addinsn(struct predicate * p, int insn)
+ void predicate_finish_atom(struct predicate * p)
+ {
+ 	struct atom * atom =  get_current_atom(p);
++	char * regex_pat = NULL;
++	int regex_patlen = atom->patlen + 30;
+ 	debug_message("predicate_finish_atom", 0);
+ 	if (atom->field_name != 0) {
+                 char * repl = strchr(atom->field_name, ':');
+@@ -59,12 +64,20 @@ void predicate_finish_atom(struct predicate * p)
+ 	}
+ 
+ 	if (atom->mode == M_REGEX || atom->mode == M_EREGEX) {
++		regex_pat = calloc(1, regex_patlen);
++		if (regex_pat == 0)  fatal_enomem(0);
++		if (atom->whole_pkg)
++			strncat(regex_pat, RE_PKG_BEGIN, strlen(RE_PKG_BEGIN));
++		strncat(regex_pat, atom->pat, atom->patlen);
++		if (atom->whole_pkg)
++			strncat(regex_pat, RE_PKG_END, strlen(RE_PKG_END));
+ 		debug_message("compiling:", 0);
+-		debug_message(atom->pat, 0);
+-		int rerr = regcomp(&atom->regex, atom->pat,
++		debug_message(regex_pat, 0);
++		int rerr = regcomp(&atom->regex, regex_pat,
+ 				   (atom->mode == M_EREGEX ? REG_EXTENDED : 0)
+ 				   | REG_NOSUB
+ 				   | (atom->ignore_case ? REG_ICASE : 0));
++		free(regex_pat);
+ 		if (rerr != 0) {
+ 			char * s;
+ 			s = get_regerror(rerr, &atom->regex);
+diff --git a/lib/predicate.h b/lib/predicate.h
+index 6720ed7..d58b71f 100644
+--- a/lib/predicate.h
++++ b/lib/predicate.h
+@@ -66,6 +66,8 @@ struct atom {
+ 	/* A compiled version of pat; valid only when mode is M_REGEX
+ 	 * or M_EREGEX.  */
+ 	regex_t regex;
++	/* Flag: (extended) regex should match whole package names */
++	unsigned whole_pkg;
+ };
+ 
+ /* A predicate is represented as a set of atomic predicates and a
+-- 
+1.5.6.5
+

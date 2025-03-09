@@ -1,0 +1,354 @@
+From d61adb3e7f7154ade8efd260d6ab4b64bde85d2f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Rapha=C3=ABl=20Hertzog?= <hertzog@debian.org>
+Date: Sun, 2 May 2010 09:59:29 +0200
+Subject: [PATCH 1/2] libdpkg: remember whether a version string had the epoch/revision when parsed
+
+For the epoch, we add a new boolean attribute "epoch_present" to the
+versionrevision struct. For the revision, we ensure that a NULL value
+means "no revision" and that an empty revision really represents an empty
+revision ("1.0-").
+
+Add non-regression tests to check that the output function preserves
+the original string when it has been parsed by parseversion().
+---
+ lib/dpkg/database.c       |    1 +
+ lib/dpkg/dpkg-db.h        |    8 +++-
+ lib/dpkg/parsehelp.c      |   17 +++++--
+ lib/dpkg/test/t-version.c |  118 +++++++++++++++++++++++++++++++++++++--------
+ src/enquiry.c             |    8 ++--
+ 5 files changed, 121 insertions(+), 31 deletions(-)
+
+diff --git a/lib/dpkg/database.c b/lib/dpkg/database.c
+index e982372..3f9d017 100644
+--- a/lib/dpkg/database.c
++++ b/lib/dpkg/database.c
+@@ -59,6 +59,7 @@ static unsigned int hash(const char *name) {
+ void blankversion(struct versionrevision *version) {
+   version->epoch= 0;
+   version->version= version->revision= NULL;
++  version->epoch_present = false;
+ }
+ 
+ void blankpackage(struct pkginfo *pigp) {
+diff --git a/lib/dpkg/dpkg-db.h b/lib/dpkg/dpkg-db.h
+index 9ad461c..6dd01af 100644
+--- a/lib/dpkg/dpkg-db.h
++++ b/lib/dpkg/dpkg-db.h
+@@ -36,6 +36,7 @@ struct versionrevision {
+   unsigned long epoch;
+   const char *version;
+   const char *revision;
++  bool epoch_present;
+ };  
+ 
+ enum deptype {
+@@ -260,7 +261,12 @@ extern const struct namevalue wantinfos[];
+ 
+ int informativeversion(const struct versionrevision *version);
+ 
+-enum versiondisplayepochwhen { vdew_never, vdew_nonambig, vdew_always };
++enum versiondisplayepochwhen {
++  vdew_never,    /* Always hide the epoch */
++  vdew_nonambig, /* Display it only when required (!= 0, other : in version) */
++  vdew_always,   /* Always display it */
++  vdew_parsed    /* Keep same output as what has been parsed */
++};
+ void varbufversion(struct varbuf*, const struct versionrevision*,
+                    enum versiondisplayepochwhen);
+ const char *parseversion(struct versionrevision *rversion, const char*);
+diff --git a/lib/dpkg/parsehelp.c b/lib/dpkg/parsehelp.c
+index a37df93..4c98e21 100644
+--- a/lib/dpkg/parsehelp.c
++++ b/lib/dpkg/parsehelp.c
+@@ -173,21 +173,26 @@ void varbufversion
+  const struct versionrevision *version,
+  enum versiondisplayepochwhen vdew) 
+ {
++  bool epoch_required = version->epoch ||
++    (version->version && strchr(version->version, ':')) ||
++    (version->revision && strchr(version->revision, ':'));
+   switch (vdew) {
+   case vdew_never:
+     break;
+   case vdew_nonambig:
+-    if (!version->epoch &&
+-        (!version->version || !strchr(version->version,':')) &&
+-        (!version->revision || !strchr(version->revision,':'))) break;
++    if (!epoch_required) break;
+   case vdew_always: /* FALL THROUGH */
+     varbufprintf(vb,"%lu:",version->epoch);
+     break;
++  case vdew_parsed:
++    if (version->epoch_present || epoch_required)
++      varbufprintf(vb, "%lu:", version->epoch);
++    break;
+   default:
+     internerr("unknown versiondisplayepochwhen '%d'", vdew);
+   }
+   if (version->version) varbufaddstr(vb,version->version);
+-  if (version->revision && *version->revision) {
++  if (version->revision) {
+     varbufaddc(vb,'-');
+     varbufaddstr(vb,version->revision);
+   }
+@@ -240,14 +245,16 @@ const char *parseversion(struct versionrevision *rversion, const char *string) {
+     if (!*++colon) return _("nothing after colon in version number");
+     string= colon;
+     rversion->epoch= epoch;
++    rversion->epoch_present = true;
+   } else {
+     rversion->epoch= 0;
++    rversion->epoch_present = false;
+   }
+   rversion->version= nfstrnsave(string,end-string);
+   hyphen= strrchr(rversion->version,'-');
+   if (hyphen)
+     *hyphen++ = '\0';
+-  rversion->revision= hyphen ? hyphen : "";
++  rversion->revision = hyphen; /* NULL means no revision */
+   
+   return NULL;
+ }
+diff --git a/lib/dpkg/test/t-version.c b/lib/dpkg/test/t-version.c
+index 8355c6d..950c93d 100644
+--- a/lib/dpkg/test/t-version.c
++++ b/lib/dpkg/test/t-version.c
+@@ -24,8 +24,8 @@
+ #include <dpkg/test.h>
+ #include <dpkg/dpkg-db.h>
+ 
+-#define version(epoch, version, revision) \
+-	(struct versionrevision) { (epoch), (version), (revision) }
++#define version(epoch, version, revision, epoch_present) \
++	(struct versionrevision) { (epoch), (version), (revision), (epoch_present) }
+ 
+ static void
+ test_version_compare(void)
+@@ -41,19 +41,19 @@ test_version_compare(void)
+ 	test_pass(epochsdiffer(&a, &b));
+ 
+ 	/* Test for version equality. */
+-	a = b = version(0, "0", "0");
++	a = b = version(0, "0", "0", false);
+ 	test_pass(versioncompare(&a, &b) == 0);
+ 
+-	a = version(0, "0", "00");
+-	b = version(0, "00", "0");
++	a = version(0, "0", "00", false);
++	b = version(0, "00", "0", true);
+ 	test_pass(versioncompare(&a, &b) == 0);
+ 
+-	a = b = version(1, "2", "3");
++	a = b = version(1, "2", "3", true);
+ 	test_pass(versioncompare(&a, &b) == 0);
+ 
+ 	/* Test for epoch difference. */
+-	a = version(0, "0", "0");
+-	b = version(1, "0", "0");
++	a = version(0, "0", "0", false);
++	b = version(1, "0", "0", true);
+ 	test_pass(versioncompare(&a, &b) < 0);
+ 	test_pass(versioncompare(&b, &a) > 0);
+ 
+@@ -67,68 +67,72 @@ test_version_parse(void)
+ 
+ 	/* Test 0 versions. */
+ 	blankversion(&a);
+-	b = version(0, "0", "");
++	b = version(0, "0", "", false);
+ 
+ 	test_pass(parseversion(&a, "0") == NULL);
+ 	test_pass(versioncompare(&a, &b) == 0);
++	test_pass(a.epoch_present == false);
+ 
+ 	test_pass(parseversion(&a, "0:0") == NULL);
+ 	test_pass(versioncompare(&a, &b) == 0);
++	test_pass(a.epoch_present == true);
++	test_pass(a.revision == NULL);
+ 
+ 	test_pass(parseversion(&a, "0:0-") == NULL);
++	test_pass(a.revision && *a.revision == '\0');
+ 	test_pass(versioncompare(&a, &b) == 0);
+ 
+-	b = version(0, "0", "0");
++	b = version(0, "0", "0", false);
+ 	test_pass(parseversion(&a, "0:0-0") == NULL);
+ 	test_pass(versioncompare(&a, &b) == 0);
+ 
+-	b = version(0, "0.0", "0.0");
++	b = version(0, "0.0", "0.0", false);
+ 	test_pass(parseversion(&a, "0:0.0-0.0") == NULL);
+ 	test_pass(versioncompare(&a, &b) == 0);
+ 
+ 	/* Test epoched versions. */
+-	b = version(1, "0", "");
++	b = version(1, "0", "", true);
+ 	test_pass(parseversion(&a, "1:0") == NULL);
+ 	test_pass(versioncompare(&a, &b) == 0);
+ 
+-	b = version(5, "1", "");
++	b = version(5, "1", "", true);
+ 	test_pass(parseversion(&a, "5:1") == NULL);
+ 	test_pass(versioncompare(&a, &b) == 0);
+ 
+ 	/* Test multiple dashes. */
+-	b = version(0, "0-0", "0");
++	b = version(0, "0-0", "0", false);
+ 	test_pass(parseversion(&a, "0:0-0-0") == NULL);
+ 	test_pass(versioncompare(&a, &b) == 0);
+ 
+-	b = version(0, "0-0-0", "0");
++	b = version(0, "0-0-0", "0", false);
+ 	test_pass(parseversion(&a, "0:0-0-0-0") == NULL);
+ 	test_pass(versioncompare(&a, &b) == 0);
+ 
+ 	/* Test multiple colons. */
+-	b = version(0, "0:0", "0");
++	b = version(0, "0:0", "0", false);
+ 	test_pass(parseversion(&a, "0:0:0-0") == NULL);
+ 	test_pass(versioncompare(&a, &b) == 0);
+ 
+-	b = version(0, "0:0:0", "0");
++	b = version(0, "0:0:0", "0", false);
+ 	test_pass(parseversion(&a, "0:0:0:0-0") == NULL);
+ 	test_pass(versioncompare(&a, &b) == 0);
+ 
+ 	/* Test multiple dashes and colons. */
+-	b = version(0, "0:0-0", "0");
++	b = version(0, "0:0-0", "0", false);
+ 	test_pass(parseversion(&a, "0:0:0-0-0") == NULL);
+ 	test_pass(versioncompare(&a, &b) == 0);
+ 
+-	b = version(0, "0-0:0", "0");
++	b = version(0, "0-0:0", "0", false);
+ 	test_pass(parseversion(&a, "0:0-0:0-0") == NULL);
+ 	test_pass(versioncompare(&a, &b) == 0);
+ 
+ 	/* Test valid characters in upstream version. */
+-	b = version(0, "azAZ09.-+~:", "0");
++	b = version(0, "azAZ09.-+~:", "0", false);
+ 	test_pass(parseversion(&a, "0:azAZ09.-+~:-0") == NULL);
+ 	test_pass(versioncompare(&a, &b) == 0);
+ 
+ 	/* Test valid characters in revision. */
+-	b = version(0, "0", "azAZ09.+~");
++	b = version(0, "0", "azAZ09.+~", false);
+ 	test_pass(parseversion(&a, "0:0-azAZ09.+~") == NULL);
+ 	test_pass(versioncompare(&a, &b) == 0);
+ 
+@@ -149,9 +153,81 @@ test_version_parse(void)
+ }
+ 
+ static void
++test_version_output(void)
++{
++	struct versionrevision a;
++	struct varbuf output = VARBUF_INIT;
++	const char * string;
++
++	/* Test how epoch is handled on output */
++	string = "0:2-3";
++	parseversion(&a, string);
++	varbufreset(&output);
++	varbufversion(&output, &a, vdew_parsed);
++	varbufaddc(&output, '\0');
++	test_pass(strcmp(string, output.buf) == 0);
++
++	varbufreset(&output);
++	varbufversion(&output, &a, vdew_always);
++	varbufaddc(&output, '\0');
++	test_pass(strcmp(string, output.buf) == 0);
++
++	varbufreset(&output);
++	varbufversion(&output, &a, vdew_never);
++	varbufaddc(&output, '\0');
++	test_pass(strcmp("2-3", output.buf) == 0);
++
++	varbufreset(&output);
++	varbufversion(&output, &a, vdew_nonambig);
++	varbufaddc(&output, '\0');
++	test_pass(strcmp("2-3", output.buf) == 0);
++
++	string = "1:2-3";
++	parseversion(&a, string);
++	varbufreset(&output);
++	varbufversion(&output, &a, vdew_nonambig);
++	varbufaddc(&output, '\0');
++	test_pass(strcmp("1:2-3", output.buf) == 0);
++
++	a = version(0, "1:a", "2", false); /* Can't happen with parseversion */
++	varbufreset(&output);
++	varbufversion(&output, &a, vdew_parsed);
++	varbufaddc(&output, '\0');
++	test_pass(strcmp("0:1:a-2", output.buf) == 0);
++	varbufreset(&output);
++	varbufversion(&output, &a, vdew_nonambig);
++	varbufaddc(&output, '\0');
++	test_pass(strcmp("0:1:a-2", output.buf) == 0);
++
++	a = version(0, "1", "2:3", false); /* Can't happen with parseversion */
++	varbufreset(&output);
++	varbufversion(&output, &a, vdew_parsed);
++	varbufaddc(&output, '\0');
++	test_pass(strcmp("0:1-2:3", output.buf) == 0);
++	varbufreset(&output);
++	varbufversion(&output, &a, vdew_nonambig);
++	varbufaddc(&output, '\0');
++	test_pass(strcmp("0:1-2:3", output.buf) == 0);
++
++	/* Test how revision is output */
++	a = version(0, "1", "", false);
++	varbufreset(&output);
++	varbufversion(&output, &a, vdew_parsed);
++	varbufaddc(&output, '\0');
++	test_pass(strcmp("1-", output.buf) == 0);
++
++	a = version(0, "1", NULL, false);
++	varbufreset(&output);
++	varbufversion(&output, &a, vdew_parsed);
++	varbufaddc(&output, '\0');
++	test_pass(strcmp("1", output.buf) == 0);
++}
++
++static void
+ test(void)
+ {
+ 	test_version_compare();
+ 	test_version_parse();
++	test_version_output();
+ }
+ 
+diff --git a/src/enquiry.c b/src/enquiry.c
+index 6441082..a43c562 100644
+--- a/src/enquiry.c
++++ b/src/enquiry.c
+@@ -289,22 +289,22 @@ assert_version_support(const char *const *argv,
+ }
+ 
+ void assertpredep(const char *const *argv) {
+-  struct versionrevision version = { 0, "1.1.0", NULL };
++  struct versionrevision version = { 0, "1.1.0", NULL, false };
+   assert_version_support(argv, &version, _("Pre-Depends field"));
+ }
+ 
+ void assertepoch(const char *const *argv) {
+-  struct versionrevision version = { 0, "1.4.0.7", NULL };
++  struct versionrevision version = { 0, "1.4.0.7", NULL, false };
+   assert_version_support(argv, &version, _("epoch"));
+ }
+ 
+ void assertlongfilenames(const char *const *argv) {
+-  struct versionrevision version = { 0, "1.4.1.17", NULL };
++  struct versionrevision version = { 0, "1.4.1.17", NULL, false };
+   assert_version_support(argv, &version, _("long filenames"));
+ }
+ 
+ void assertmulticonrep(const char *const *argv) {
+-  struct versionrevision version = { 0, "1.4.1.19", NULL };
++  struct versionrevision version = { 0, "1.4.1.19", NULL, false };
+   assert_version_support(argv, &version, _("multiple Conflicts and Replaces"));
+ }
+ 
+-- 
+1.7.0.5
+

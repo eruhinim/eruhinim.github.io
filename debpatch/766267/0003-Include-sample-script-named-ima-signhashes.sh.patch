@@ -1,0 +1,116 @@
+>From 730d6b2ca37d36ef96e07f9cb21cbcaf4a9ea230 Mon Sep 17 00:00:00 2001
+From: Mimi Zohar <zohar@linux.vnet.ibm.com>
+Date: Tue, 14 Oct 2014 08:15:21 -0400
+Subject: [PATCH 3/3] Include sample script named ima-signhashes.sh
+
+This script extracts the checksums file named DEBIAN/<algo sums>
+from the deb package, appends the file signature using the
+ima-evm-utils package, and inserts the modified checksums file
+containing the signatures in the package.
+
+(The public key used to sign files should be stored safely.)
+
+Changelog v1:
+- Use the checksums stored in the algorithm specific file
+  (eg.  DEBIAN/sha256sums, DEBIAN/sha512sums).
+---
+ examples/ima-signhashes.sh | 87 ++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 87 insertions(+)
+ create mode 100755 examples/ima-signhashes.sh
+
+diff --git a/examples/ima-signhashes.sh b/examples/ima-signhashes.sh
+new file mode 100755
+index 0000000..3faf2e0
+--- /dev/null
++++ b/examples/ima-signhashes.sh
+@@ -0,0 +1,87 @@
++#!/bin/bash
++#
++# ima-signhashes.sh - replace the checksums file in the .deb package with
++# a version containing the file signatures.  The file signatures provide
++# file authenticity and provenance.  As part of the package install process,
++# the file signatures are stored as extended attributes associated with
++# the file. IMA-appraisal, if enabled, will appraise file integrity based
++# on these file signatures.
++#
++# Mimi Zohar <zohar@linux.vnet.ibm.com>
++
++# format: <debian package pathname> <private key pathname>
++
++set -e
++DEBPACKAGE="${1}"
++PRIVKEY="$2"
++tmpdir="${DEBPACKAGE}.tmp"
++
++if [ $# -ne 2 ]; then
++	echo "$0: <debian package pathname> <private key pathname>"
++	exit -1
++fi
++
++if [ ! -f "${DEBPACKAGE}" ]; then
++	echo ".deb package not found: ${DEBPACKAGE}"
++	exit -1
++fi
++
++if [ ! -f "${PRIVKEY}" ]; then
++	echo "Private key not found: ${PRIVKEY}"
++	exit -1
++fi
++
++# extract files from the .deb archive into a temporary directory
++if [ -d "${tmpdir}" ]; then
++	rm -rf "${tmpdir}"
++	if [ $? -ne 0 ]; then
++		echo "Deleting directory failed: ${tmpdir}"
++		exit -1
++	fi
++fi
++mkdir -p "${tmpdir/DEBIAN}"
++if [ $? -ne 0 ]; then
++	echo "Creating directory failed: ${tmpdir}/DEBIAN"
++	exit -1
++fi
++
++cd $tmpdir
++ar -x "../$DEBPACKAGE"
++#ls -lat
++
++# untar the control file in the DEBIAN subdirectory
++if [ ! -f ./control.tar.gz ]; then
++	echo ".deb package missing 'control.tar.gz' file"
++	exit -1
++fi
++mkdir -p DEBIAN
++cd DEBIAN
++tar -xvzf ../control.tar.gz
++if [ -f ./sha256sums ]; then
++	# Replace sha256sums with one containing file signatures
++	cat ./sha256sums | evmctl sign_hash -a sha256 --key "${PRIVKEY}" > sha256sums.sig
++	if [ $? == 0 ]; then
++		cp ./sha256sums.sig ./sha256sums
++		rm ./sha256sums.sig
++		cat sha256sums
++	fi
++elif [ -f ./sha512sums ]; then
++	# Replace sha256sums with one containing file signatures
++	cat ./sha512sums | evmctl sign_hash -a sha512 --key "${PRIVKEY}" > sha512sums.sig
++	if [ $? == 0 ]; then
++		cp ./sha512sums.sig ./sha512sums
++		rm ./sha512sums.sig
++	fi
++else
++	echo "'control.tar.gz' missing check sums file"
++	ls -lat
++	exit -1
++fi
++
++
++# create the control tar containing the new sha256sums with the signatures
++tar -cvzf ../control.tar.gz ./*
++
++# replace the existing compressed tar file in the  .deb package
++cd ..
++ar -r "../$DEBPACKAGE" control.tar.gz
+-- 
+1.9.1
+

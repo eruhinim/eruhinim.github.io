@@ -1,0 +1,160 @@
+From e60ad90917c727b607975c4077b5b4e1bc85b316 Mon Sep 17 00:00:00 2001
+From: Dennis Kaarsemaker <dennis@kaarsemaker.net>
+Date: Fri, 30 Nov 2012 15:33:41 +0100
+Subject: [PATCH 2/2] Support tftp wraparound when sending files (tftpd only)
+
+gpxe hardcodes a block size of 1408, presumably to avoid fragmentation.
+This limits the size of a file it can receive to 88MB when adhering
+strictly to the rfc's.
+
+However, there is a non-standard extension, supported by gpxe and other
+tftp(d) implementations: block-id wraparound. This lets block id's wrap
+around, effectively making the file size unlimited.
+
+Unfortunately I now need this as HP's scripting toolkit now has a 120MB
+initrd.
+---
+ atftpd.8     |  7 +++++++
+ tftp_def.c   |  1 +
+ tftp_def.h   |  3 ++-
+ tftpd.c      |  5 +++++
+ tftpd_file.c | 34 +++++++++++++++++++++-------------
+ 5 files changed, 36 insertions(+), 14 deletions(-)
+
+diff --git a/atftpd.8 b/atftpd.8
+index 2c3293c..1977aea 100644
+--- a/atftpd.8
++++ b/atftpd.8
+@@ -73,6 +73,13 @@ acknowledging the 'tsize' option requested by the client.
+ disable 'blksize' from RFC2348. This will prevent the server from
+ acknowledging the 'blksize' request by the client.
+ 
++.TP
++.B \-\-allow\-wraparound
++Allow block ID wraparound when sending files. This allows you to send
++files larger than 2^16 * blksize if the client supports wraparound too
++pxelinux.0 needs this to use an initrd larger than 88MB as it hardcodes
++a blksize of 1492
++
+ .TP
+ .B \-\-no\-multicast
+ disable 'multicast' from RFC2090. This will prevent the server from
+diff --git a/tftp_def.c b/tftp_def.c
+index 96abdc5..f4132fa 100644
+--- a/tftp_def.c
++++ b/tftp_def.c
+@@ -40,6 +40,7 @@ struct tftp_opt tftp_default_options[OPT_NUMBER] = {
+      { "blksize", "512", 0, 1 }, /* This is the default option */
+      { "multicast", "", 0, 1 }, /* structure */
+      { "password", "", 0, 1},   /* password */
++     { "wraparound", "", 0, 0 },/* Allow block id wraparound in send (default: no) */
+      { "", "", 0, 0}
+ };
+ 
+diff --git a/tftp_def.h b/tftp_def.h
+index e4b338d..865948d 100644
+--- a/tftp_def.h
++++ b/tftp_def.h
+@@ -41,7 +41,8 @@
+ #define OPT_BLKSIZE   4
+ #define OPT_MULTICAST 5
+ #define OPT_PASSWORD  6
+-#define OPT_NUMBER    7         /* number of OPT_xx options */
++#define OPT_WRAPAROUND 7
++#define OPT_NUMBER    8         /* number of OPT_xx options */
+ 
+ #define OPT_SIZE     12
+ #define VAL_SIZE     MAXLEN
+diff --git a/tftpd.c b/tftpd.c
+index 7306f5a..7ee137b 100644
+--- a/tftpd.c
++++ b/tftpd.c
+@@ -890,6 +890,7 @@ int tftpd_cmd_line_options(int argc, char **argv)
+           { "no-timeout", 0, NULL, 'T' },
+           { "no-tsize", 0, NULL, 'S' },
+           { "no-blksize", 0, NULL, 'B' },
++          { "allow-wraparound", 0, NULL, 'W' },
+           { "no-multicast", 0, NULL, 'M' },
+           { "logfile", 1, NULL, 'L' },
+           { "pidfile", 1, NULL, 'I'},
+@@ -966,6 +967,9 @@ int tftpd_cmd_line_options(int argc, char **argv)
+           case 'B':
+                tftp_default_options[OPT_BLKSIZE].enabled = 0;
+                break;
++          case 'W':
++               tftp_default_options[OPT_WRAPAROUND].enabled = 1;
++               break;
+           case 'M':
+                tftp_default_options[OPT_MULTICAST].enabled = 0;
+                break;
+@@ -1219,6 +1223,7 @@ void tftpd_usage(void)
+             "  --no-timeout               : disable 'timeout' from RFC2349\n"
+             "  --no-tsize                 : disable 'tsize' from RFC2349\n"
+             "  --no-blksize               : disable 'blksize' from RFC2348\n"
++            "  --allow-wraparound         : allow block ID's to wrap around when sending\n"
+             "  --no-multicast             : disable 'multicast' from RFC2090\n"
+             "  --logfile <file>           : logfile to log logs to ;-) (use - for stdout)\n"
+             "  --pidfile <file>           : write PID to this file\n"
+diff --git a/tftpd_file.c b/tftpd_file.c
+index b8ff1fc..a29a343 100644
+--- a/tftpd_file.c
++++ b/tftpd_file.c
+@@ -411,6 +411,8 @@ int tftpd_send_file(struct thread_data *data)
+      int timeout_state = state;
+      int result;
+      int block_number = 0;
++     unsigned short recv_number = 0;
++     int wraparound_offset = 0;
+      int last_block = -1;
+      int data_size;
+      struct sockaddr_storage *sa = &data->client_info->client;
+@@ -618,16 +620,18 @@ int tftpd_send_file(struct thread_data *data)
+           logger(LOG_INFO, "blksize option -> %d", result);
+      }
+ 
+-     /* Verify that the file can be sent in 2^16 block of BLKSIZE octets */
+-     if ((file_stat.st_size / (data->data_buffer_size - 4)) > 65535)
+-     {
+-          tftp_send_error(sockfd, sa, EUNDEF, data->data_buffer, data->data_buffer_size);
+-          logger(LOG_NOTICE, "Requested file to big, increase BLKSIZE");
+-          if (data->trace)
+-               logger(LOG_DEBUG, "sent ERROR <code: %d, msg: %s>", EUNDEF,
+-                      tftp_errmsg[EUNDEF]);
+-          fclose(fp);
+-          return ERR;
++     if(!data->tftp_options[OPT_WRAPAROUND].enabled) {
++         /* Verify that the file can be sent in 2^16 block of BLKSIZE octets */
++         if ((file_stat.st_size / (data->data_buffer_size - 4)) > 65535)
++         {
++              tftp_send_error(sockfd, sa, EUNDEF, data->data_buffer, data->data_buffer_size);
++              logger(LOG_NOTICE, "Requested file to big, increase BLKSIZE");
++              if (data->trace)
++                   logger(LOG_DEBUG, "sent ERROR <code: %d, msg: %s>", EUNDEF,
++                          tftp_errmsg[EUNDEF]);
++              fclose(fp);
++              return ERR;
++         }
+      }
+ 
+      /* multicast option */
+@@ -933,10 +937,14 @@ int tftpd_send_file(struct thread_data *data)
+                     }
+                     /* The ACK is from the current client */
+                     number_of_timeout = 0;
+-                    block_number = ntohs(tftphdr->th_block);
++                    recv_number = ntohs(tftphdr->th_block);
++                    if(recv_number == 0 && block_number) {
++                        wraparound_offset += 0x10000;
++                    }
++                    block_number = wraparound_offset + recv_number;
+                     if (data->trace)
+-                         logger(LOG_DEBUG, "received ACK <block: %d>",
+-                                block_number);
++                         logger(LOG_DEBUG, "received ACK <block: %d/%d>",
++                                recv_number, block_number);
+                     if ((last_block != -1) && (block_number > last_block))
+                     {
+                          state = S_END;
+-- 
+2.17.1
+

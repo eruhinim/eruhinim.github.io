@@ -1,0 +1,78 @@
+From a3f2ee086ad73659782f1d8620745ff8e2371cb6 Mon Sep 17 00:00:00 2001
+From: Colin Watson <cjwatson@ubuntu.com>
+Date: Fri, 4 Mar 2016 22:17:12 -0300
+Subject: [PATCH] Fix lzma write support to handle "try again" case
+
+The liblzma-based write code needs the same tweaks that the read code
+already has to cope with the situation where lzma_code returns zero the
+first time through because avail_out is zero, but will do more work if
+called again.
+
+This ports the read tweaks to the write code as closely as possible
+(including matching comments etc.).
+
+Closes: #751688
+---
+ apt-pkg/contrib/fileutl.cc | 29 +++++++++++++++++++++++++----
+ 1 file changed, 25 insertions(+), 4 deletions(-)
+
+diff --git a/apt-pkg/contrib/fileutl.cc b/apt-pkg/contrib/fileutl.cc
+index eae4d23..b7c7b23 100644
+--- a/apt-pkg/contrib/fileutl.cc
++++ b/apt-pkg/contrib/fileutl.cc
+@@ -1816,6 +1816,7 @@ public:
+    }
+    virtual ssize_t InternalWrite(void const * const From, unsigned long long const Size) override
+    {
++      ssize_t Res;
+       lzma->stream.next_in = (uint8_t *)From;
+       lzma->stream.avail_in = Size;
+       lzma->stream.next_out = lzma->buffer;
+@@ -1826,9 +1827,21 @@ public:
+       size_t const n = sizeof(lzma->buffer)/sizeof(lzma->buffer[0]) - lzma->stream.avail_out;
+       size_t const m = (n == 0) ? 0 : fwrite(lzma->buffer, 1, n, lzma->file);
+       if (m != n)
+-	 return -1;
++      {
++	 Res = -1;
++	 errno = 0;
++      }
+       else
+-	 return Size - lzma->stream.avail_in;
++      {
++	 Res = Size - lzma->stream.avail_in;
++	 if (Res == 0)
++	 {
++	    // lzma run was okay, but produced no output…
++	    Res = -1;
++	    errno = EINTR;
++	 }
++      }
++      return Res;
+    }
+    virtual bool InternalWriteError() override
+    {
+@@ -2425,10 +2438,18 @@ bool FileFd::Write(const void *From,unsigned long long Size)
+    while (Res > 0 && Size > 0)
+    {
+       Res = d->InternalWrite(From, Size);
+-      if (Res < 0 && errno == EINTR)
+-	 continue;
++
+       if (Res < 0)
++      {
++	 if (errno == EINTR)
++	 {
++	    // trick the while-loop into running again
++	    Res = 1;
++	    errno = 0;
++	    continue;
++	 }
+ 	 return d->InternalWriteError();
++      }
+ 
+       From = (char const *)From + Res;
+       Size -= Res;
+-- 
+2.7.0
+

@@ -1,0 +1,128 @@
+From d6b67aba318ab83752f10adabf1b0490d2c88b39 Mon Sep 17 00:00:00 2001
+From: "Manuel A. Fernandez Montecelo" <manuel.montezelo@gmail.com>
+Date: Wed, 14 Oct 2015 23:53:44 +0100
+Subject: [PATCH 1/2] Fix for circular dependencies in internal_mark_delete()
+ (Closes: #801430)
+
+Under some circumstances, when following reverse dependencies of packages to
+be deleted to see if they are automatically installed and unused (so they
+can be pro-actively marked for deletion as well), the function calls itself
+recursively.  In this case, it uses this version with an extra parameter to
+detect when packages were already visited, to avoid infinite loops in the
+case of circular dependencies (bug #801430).
+---
+ NEWS                        |  9 +++++++++
+ src/generic/apt/aptcache.cc | 28 ++++++++++++++++++++++++++--
+ src/generic/apt/aptcache.h  | 15 +++++++++++++++
+ 3 files changed, 50 insertions(+), 2 deletions(-)
+
+diff --git a/NEWS b/NEWS
+index c8f49b1..7187b05 100644
+--- a/NEWS
++++ b/NEWS
+@@ -19,6 +19,15 @@ Version 0.7.4 UNRELEASED
+     errors, but didn't retrieve long descriptions anymore (it did for short
+     ones).
+ 
++  * Fix for circular dependencies in internal_mark_delete() (Closes: #801430)
++
++    Under some circumstances, when following reverse dependencies of packages to
++    be deleted to see if they are automatically installed and unused (so they
++    can be pro-actively marked for deletion as well), the function calls itself
++    recursively.  In this case, it uses this version with an extra parameter to
++    detect when packages were already visited, to avoid infinite loops in the
++    case of circular dependencies (bug #801430).
++
+ - User visible changes:
+ 
+   * [cmdline] In versioned provides, include '=' symbol (Closes: #767393)
+diff --git a/src/generic/apt/aptcache.cc b/src/generic/apt/aptcache.cc
+index 838c1da..7cec034 100644
+--- a/src/generic/apt/aptcache.cc
++++ b/src/generic/apt/aptcache.cc
+@@ -1231,6 +1231,15 @@ void aptitudeDepCache::internal_mark_delete(const PkgIterator &Pkg,
+ 					    bool Purge,
+ 					    bool unused_delete)
+ {
++  std::vector<unsigned int> unused_already_visited;
++  internal_mark_delete(Pkg, Purge, unused_delete, unused_already_visited);
++}
++
++void aptitudeDepCache::internal_mark_delete(const PkgIterator &Pkg,
++					    bool Purge,
++					    bool unused_delete,
++					    std::vector<unsigned int>& unused_already_visited)
++{
+   // honour ::Purge-Unused in the main entry point for removing packages, it
+   // should catch cases of automatically installed and unused packages not
+   // purged (#724034 and others)
+@@ -1275,6 +1284,21 @@ void aptitudeDepCache::internal_mark_delete(const PkgIterator &Pkg,
+   if (Pkg.CurrentVer().end())
+     return;
+ 
++  // to avoid endless recursion/crashes, check if this package has already been
++  // visited for this purpose (the container has to be empty at the start of
++  // each run)
++  auto it = std::find(unused_already_visited.begin(), unused_already_visited.end(), Pkg->ID);
++  if (it == std::end(unused_already_visited))
++    {
++      // not previously visited, register
++      unused_already_visited.push_back(Pkg->ID);
++    }
++  else
++    {
++      // already visited
++      return;
++    }
++
+   // from now and for the remaining of this function, these are "unused
+   // deletes", so set variable accordingly
+   unused_delete = true;
+@@ -1326,7 +1350,7 @@ void aptitudeDepCache::internal_mark_delete(const PkgIterator &Pkg,
+ 
+ 	      // if we reach here, can delete the real package providing the
+ 	      // dependency
+-	      internal_mark_delete(dep_prv.OwnerPkg(), Purge, unused_delete);
++	      internal_mark_delete(dep_prv.OwnerPkg(), Purge, unused_delete, unused_already_visited);
+ 	    }
+ 
+ 	  // it was a virtual package -- so stop processing the considered
+@@ -1356,7 +1380,7 @@ void aptitudeDepCache::internal_mark_delete(const PkgIterator &Pkg,
+ 	    continue;
+ 	  }
+ 
+-	  internal_mark_delete(dep_pkg, Purge, unused_delete);
++	  internal_mark_delete(dep_pkg, Purge, unused_delete, unused_already_visited);
+ 	}
+     }
+ }
+diff --git a/src/generic/apt/aptcache.h b/src/generic/apt/aptcache.h
+index 51a0990..a7d716c 100644
+--- a/src/generic/apt/aptcache.h
++++ b/src/generic/apt/aptcache.h
+@@ -330,7 +330,22 @@ private:
+    * package's auto flag is set properly.
+    */
+   void internal_mark_install(const PkgIterator &Pkg, bool AutoInst, bool ReInstall);
++
++  /** Internally marking packages for deletion -- main entry point
++   */
+   void internal_mark_delete(const PkgIterator &Pkg, bool Purge, bool unused_delete);
++  /** Internally marking packages for deletion -- recursive
++   *
++   * When following reverse dependencies to see if they are automatically
++   * installed and unused (so they can be pro-actively marked for deletion as
++   * well), the function calls itself recursively.  In this case, it uses this
++   * version with an extra parameter to detect when packages were already
++   * visited, to avoid infinite loops in the case of circular dependencies (bug
++   * #801430).
++   */
++  void internal_mark_delete(const PkgIterator &Pkg, bool Purge, bool unused_delete,
++			    std::vector<unsigned int>& unused_already_visited);
++
+   void internal_mark_keep(const PkgIterator &Pkg, bool Automatic, bool SetHold);
+ 
+   /** Handle changing package states to take into account the garbage
+-- 
+2.6.1
+

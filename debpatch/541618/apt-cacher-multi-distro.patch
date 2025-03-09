@@ -1,0 +1,864 @@
+apt-cacher-cleanup.pl:
+
+* Handle conversion of "::" (along with "_") into "/", and at the same 
+  time, make the regexes a little easier to read (no leaning toothpicks)
+
+* Insert "::" instead of "_" when appropriate
+
+* get() takes two arguments, not one
+
+* Tweaked comments/warnings to refer to diff/Index files as "diff*Index", 
+  since these can live on disk as *.diff_Index or *.diff::Index
+
+* The "my $pdiff = $basename..." bit was rather crotchety
+
+
+apt-cacher-import.pl:
+
+* Updated the comment up top, since headers are no longer prepended to 
+  cached packages (thank God)
+
+* $quiet is used
+
+* Scrum of changes: First, read through all the index files to build up a 
+  reverse hash (MD5 -> filename) of all known packages. Second, MD5-hash 
+  each package to be imported. Third, import-packages with a known hash are 
+  (sym)linked/copied in to the associated filename(s). (All of this only in 
+  multi-distro mode, natch.)
+
+
+apt-cacher-lib.pl:
+
+* Added some comments to help ensure the regexes in this file and the 
+  commented-out defaults in the .conf file remain in sync
+
+* Added regex case for Translation-*.gz (this came up at some point)
+
+* Added index-parsing cases to get SHA1 and SHA256 sums for files listed in 
+  diff*Index/Release/Sources files. I changed how it does the "retrieve a 
+  previously-read MD5 sum" bit, moving that down to just before the 
+  hash-record freeze, so that this is more straightforward.
+
+  The database dumps are ~25% larger with this change, and the extra info 
+  may be unnecessary, but if so I'd rather have the code to read them 
+  commented out rather than just not being there at all
+
+* Do ($indexbase && REGEX) instead of (REGEX && $indexbase), so that
+  short-circuiting makes things more efficient
+
+* Scrum of changes: Keep track of the "repository base" (i.e. the server 
+  and host path up to just before /dists|pool/); $indexbase no longer 
+  contains a trailing underscore; keep track of the Directory: fields in 
+  Sources files; $file is assigned a value containing one or more slashes 
+  that are later converted to "_" or "::"
+
+
+apt-cacher.conf:
+
+* Added new options and descriptive blurbs: multi_distro, path_map_only, 
+  installer_files_regexp (okay, that last one a bit less new)
+
+* Added Translation-*.gz case to commented-out value for index_files_regexp
+
+
+apt-cacher2:
+
+* Warnings are good!
+
+* I found that having http_proxy set in the environment interferes with
+  apt-cacher's configured proxy settings. I had use_proxy=0, and then I got 
+  mysterious "failed connect to apt-cacher.example.com:1080" errors, and 
+  only with debug=1 did it become clear that it was trying to connect to 
+  the host given in $http_proxy.
+
+* Disallow any source paths containing double-colons, as that will futz up
+  later parsing of the filenames
+
+* path_map_only now provides a way to prevent random clients from bringing 
+  detritus (i.e. files with odd server prefixes) into the cache
+
+* Ensure that everything fetched is somewhere under dists/ or pool/, as we 
+  look for this element in the path to tell where the actual package 
+  repository path-part begins
+
+* Is there a better way than doing two reverse() calls like that?
+
+* The part that identifies what kind of file is being requested is a bit 
+  simpler, now that most of the cases are being handled similarly (i.e. 
+  keeping the full paths, at least in multi_distro mode). I factored out 
+  the slash-conversion and debug_message() bits.
+
+* The changes to return_file() don't have to do with multi-distro support; 
+  I was just annoyed at how the sleep(1) calls prevented cache-miss 
+  downloads from going any faster than one per second. I found that 
+  select() was useless to avoid sysread() returning 0 (i.e. EOF), so I did 
+  an exponential-backoff-ish thing.
+
+  This change exposes some errors in the locking logic that were previously 
+  glossed over by the one-second-sleeps. I have a setup that can reproduce 
+  these pretty easily, so when you feel comfortable with all the other 
+  stuff here, I'm hoping you can have a look at this.
+
+
+apt-cacher.1:
+
+* Document the new path_map_only and multi_distro options.
+
+
+Only in apt-cacher-1.6.12: README.multi-distro
+diff -ru apt-cacher-1.6.12.orig/apt-cacher-cleanup.pl apt-cacher-1.6.12/apt-cacher-cleanup.pl
+--- apt-cacher-1.6.12.orig/apt-cacher-cleanup.pl	2010-09-24 21:48:31.000000000 -0400
++++ apt-cacher-1.6.12/apt-cacher-cleanup.pl	2010-09-24 16:35:11.000000000 -0400
+@@ -136,8 +136,8 @@
+     }
+     else {
+ 	$path_info=$file;
+-	$path_info=~s/^/\//;
+-	$path_info=~s/_/\//g;
++	$path_info=~s!^!/!;
++	$path_info=~s!(?:_|::)!/!g;
+     }
+     open($fh, "| REMOTE_ADDR=CLEANUPREFRESH /usr/share/apt-cacher/apt-cacher -i -c $configfile >/dev/null");
+     printmsg "GET $path_info\n";
+@@ -159,13 +159,16 @@
+ 	printmsg "Upstream repository for $name not recognised layout, skipping attempting to patch\n";
+ 	return;
+     }
++
++    my $sep = ($name =~ /::/) ? '::' : '_';
++
+     my ($basename,$type) = ($name =~ /(^.+?)(\.(?:bz2|gz))?$/);
+-    (my $release = $basename) =~ s/(?:main|contrib|non-free).*$/Release/;
+-    (my $diffindex = $basename) .= '.diff_Index';
++    (my $release = $basename) =~ s/_(?:main|contrib|non-free)_.*$/${sep}Release/;
++    (my $diffindex = $basename) =~ s/$sep(Packages|Sources)$/_$1.diff${sep}Index/;
+ 
+     for ($release, $diffindex) {
+ 	if (!-f $_ && !$offline) { # Refresh unless offline
+-	    &get($_);
++	    &get($_, 1);
+ 	}
+ 	if (!-f $_) {
+ 	    printmsg("$_ not available, aborting patch\n");
+@@ -177,7 +180,7 @@
+     (my $diffindex_patt = $diffindex) =~ s/^.*(main|contrib|non-free.*)/$1/;
+     (my $name_patt = $name) =~ s/^.*(main|contrib|non-free.*)/$1/;
+     for ($diffindex_patt, $name_patt) {
+-	s/_/\//g;
++	s!(?:_|::)!/!g;
+     }
+ #    printmsg "Searching $release for $diffindex_patt and $name_patt\n";
+     open(my $rfh, $release) || die "Unable to open $release: $!";
+@@ -253,7 +256,7 @@
+     $digest = $sha1->hexdigest;
+ #    printmsg "$basename SHA1: $digest\n";
+ 
+-    # Read diff.Index
++    # Read diff*Index
+     my (@hist, @patch);
+ 
+     open(DIFFIN, $diffindex) || die("Cannot open $diffindex: $!");
+@@ -310,7 +313,7 @@
+ 	$count++;
+     }
+     if (!defined $diff) {
+-	warn "Existing SHA1 not found in diff_Index, aborting patch\n";
++	warn "Existing SHA1 not found in diff*Index, aborting patch\n";
+ 	return;
+     }
+ 
+@@ -319,10 +322,10 @@
+     open(DIFFS, ">", \$diffs);
+     for (@patch[$diff .. $#patch]) {
+ 	my ($pdiffsha1, $size, $suff) = split;
+-	my $pdiff = $basename.".diff_".(split)[2].'.gz';
++	(my $pdiff = $basename) =~ s/$sep(Packages|Sources)$/_$1.diff$sep$suff.gz/;
+ 	if (!-f $pdiff) {
+ 	    if (!$offline) {
+-		&get($pdiff);
++		&get($pdiff, 1);
+ 	    }
+ 	    if (!-f $pdiff) {
+ 		warn("$pdiff not available, aborting patch");
+@@ -482,7 +485,7 @@
+   SWITCH:
+     for (@db_mode) {
+ 	/^import/ && do {
+-	    for (<*es.bz2>, <*es.gz>, <*es>, <*Release>, <*diff_Index>) {
++	    for (<*es.bz2>, <*es.gz>, <*es>, <*Release>, <*Index>) {
+ 		printmsg "Importing checksums from $_\n";
+ 		&import_sums($_,\$dbh) if !$sim_mode;
+ 	    }
+@@ -580,8 +583,8 @@
+ 
+ # Ensure corresponding Packages/Sources is present for each diff_Index
+ DIFFINDEX:
+-for (<*diff_Index>) {
+-    if (/^(.+)\.diff_Index/) {
++for (<*Index>) {
++    if (/^(.+)\.diff(?:_|::)Index$/) {
+ 	printmsg "Checking for $1 for $_\n";
+ 	for ($1,"$1.gz", "$1.bz2") {
+ 	    if ( -f $_ ) {
+@@ -591,13 +594,13 @@
+ 	}
+ 	printmsg ("Not found. Downloading\n");
+ 	# Might as well use bzipped files
+-	&get("$1.bz2");
++	&get("$1.bz2", 1);
+     }
+ }
+ 
+ # file state decisions, lock that area
+ set_global_lock(": file state decision");
+-my @ifiles=(<*Release>, <*_Index> , <*es.gz>, <*es.bz2>, <*es>);
++my @ifiles=(<*Release>, <*Index>, <*es.gz>, <*es.bz2>, <*es>);
+ release_global_lock();
+ 
+ for my $file (@ifiles) {
+@@ -614,7 +617,7 @@
+    # If patching failed download them, unless offline
+    if (!$patched) {
+        if(!$offline) {
+-	   &get($file);
++	   &get($file, 1);
+        }
+        else {
+ 	   printmsg "Offline: Reusing existing $file\n";
+diff -ru apt-cacher-1.6.12.orig/apt-cacher-import.pl apt-cacher-1.6.12/apt-cacher-import.pl
+--- apt-cacher-1.6.12.orig/apt-cacher-import.pl	2008-04-05 18:02:44.000000000 -0400
++++ apt-cacher-1.6.12/apt-cacher-import.pl	2010-09-28 22:55:20.000000000 -0400
+@@ -4,24 +4,21 @@
+ # Script to import .deb packages into the Apt-cacher package caching system.
+ # This script does not need to be run when setting up Apt-cacher for the first
+ # time: its purpose is to initialise .deb packages that have been copied in
+-# from some other source, such as a local mirror. Apt-cacher doesn't store
+-# it's cached .debs in plain format, it prepends HTTP headers to them to send
+-# out to clients when a package is requested. It also keeps track of which
+-# packages are fully downloaded by touching a '.complete' file in the 'private'
+-# directory in the cache. If .debs are just copied straight into the cache
+-# dir Apt-cacher won't use them because it thinks they are both corrupt (no
+-# headers) and incomplete (no .complete file). This script allows you to
+-# copy a bunch of .debs into an import dir, then run this script to prepend
+-# the HTTP headers and touch the .complete file after moving them to the cache
+-# dir.
++# from some other source, such as a local mirror. Apt-cacher keeps track of
++# which packages are fully downloaded by creating a '.complete' file in the
++# 'private' directory in the cache. If .debs are just copied straight into the
++# cache dir Apt-cacher won't use them because it thinks they are incomplete (no
++# .complete file). You can copy a bunch of .debs into an import dir, then run
++# this script to move them into the cache dir and create the .complete files.
+ #
+ # Usage:
+ # 1. Place your plain debs into /var/cache/apt-cacher/import (or where-ever
+ #    you set the cache dir to be)
+-# 2. Run this script: /usr/share/apt-cacher-import.pl
++# 2. Run this script: /usr/share/apt-cacher/apt-cacher-import.pl
+ #
+ # Copyright (C) 2004, Jonathan Oxer <jon@debian.org>
+ # Copyright (C) 2005, Eduard Bloch <blade@debian.org>
++# Copyright (C) 2010, Daniel Richard G. <skunk@iSKUNK.ORG>
+ 
+ # Distributed under the terms of the GNU Public Licence (GPL).
+ 
+@@ -35,6 +32,7 @@
+ use File::Basename;
+ use File::Copy;
+ use Cwd 'abs_path';
++use Digest::MD5;
+ use HTTP::Date;
+ 
+ use strict;
+@@ -42,7 +40,7 @@
+ 
+ my $configfile = '/etc/apt-cacher/apt-cacher.conf';
+ my $help;
+-my $quiet; # both not used yet
++my $quiet;
+ my $noact;
+ my $recmode;
+ my $ro_mode;
+@@ -71,14 +69,23 @@
+ # not sure what to do if we can't read the config file...
+ die "Could not read config file: $@" if $@;
+ 
++# multi-distro mode requires either symlinking or hard-linking, because an
++# imported package file can have multiple destinations
++$symlink_mode = 1 if $cfg->{multi_distro} && ! $ro_mode && ! $symlink_mode;
++
+ # change uid and gid
+ setup_ownership($cfg);
+ 
++# output data as soon as we print it
++$| = 1;
++
+ my $private_dir = "$cfg->{cache_dir}/private";
+ my $import_dir = "$cfg->{cache_dir}/import";
+ my $target_dir = "$cfg->{cache_dir}/packages";
+ my $header_dir = "$cfg->{cache_dir}/headers";
+ 
++my %reverse_hash_md5;
++
+ my $packagesimported = 0;
+ 
+ #############################################################################
+@@ -115,14 +122,30 @@
+     }
+ 
+     ### Loop through all the .debs in the import dir
+-    foreach my $packagefile ( <*.deb>, <*.udeb>, <*.dsc>, <*.diff.gz>, <*_*tar.gz>, <*diff.bz2>, <*_*.tar.bz2> ) {
++    foreach my $frompackagefile ( <*.deb>, <*.udeb>, <*.dsc>, <*.diff.gz>, <*_*.tar.gz>, <*.diff.bz2>, <*_*.tar.bz2> ) {
++	my @packagefile_list;
++
++	if($cfg->{multi_distro}) {
++	    my $md5 = Digest::MD5->new;
++	    open(PKG, $frompackagefile);
++	    $md5->addfile(\*PKG);
++	    close(PKG);
++	    my $md5sum = $md5->hexdigest;
++	    if (! exists $reverse_hash_md5{$md5sum}) {
++		print "Cannot import $frompackagefile, hash not found\n";
++		next;
++	    }
++	    push @packagefile_list, @{ $reverse_hash_md5{$md5sum} };
++	}
++	else {
++	    (my $pf = $frompackagefile) =~ s/_\d+%3a/_/;	# ???
++	    push @packagefile_list, $pf;
++	}
+ 
+ 	# Get some things we need to insert into the header
+-	my $headerlength = (stat($packagefile))[7];
++	my $headerlength = (stat($frompackagefile))[7];
+ 	my $headeretag = int(rand(100000))."-".int(rand(1000))."-".int(rand(100000000));
+ 	$headeretag =~ s/^\s*(.*?)\s*$/$1/;
+-	my $frompackagefile=$packagefile; # backup of the original name
+-	$packagefile=~s/_\d+%3a/_/;
+ 
+ 	# Generate a header
+ 	my $httpheader = "HTTP/1.1 200 OK
+@@ -136,38 +159,62 @@
+ Connection: Keep-Alive
+ Content-Type: application/x-debian-package
+ 
+-"
+-; # there are TWO new lines
++" ; # there are TWO newlines at the end
+ 
+-	# Then cat the header to a temp file
+-	print "Importing: $packagefile\n" if !$quiet;
+-	unlink "$header_dir/$packagefile", "$target_dir/$packagefile",  "$private_dir/$packagefile.complete"; # just to be sure
+-	if($symlink_mode) {
+-	    symlink(abs_path($frompackagefile), "$target_dir/$packagefile") ||
+-	    (unlink("$target_dir/$packagefile") && symlink(abs_path($frompackagefile), "$target_dir/$packagefile")) ||
+-	    die "Failed to create the symlink $target_dir/$packagefile";
+-	}
+-	elsif($ro_mode) {
+-	    link($frompackagefile, "$target_dir/$packagefile") || copy($frompackagefile, "$target_dir/$packagefile") || die "Failed to copy $frompackagefile";
+-	}
+-	else {
+-	    rename($frompackagefile, "$target_dir/$packagefile") || die "Failed to rename $frompackagefile. Try read-only (-r) or symlink (-s) options.";
+-	}
++	print "Importing: $frompackagefile\n" if !$quiet;
+ 
+-	open(my $headfile, ">$header_dir/$packagefile");
+-	print $headfile $httpheader;
+-	close $headfile;
+-
+-	my $completefile = "$private_dir/$packagefile.complete";
+-	open(MF, ">$completefile");
+-	close(MF);
+-	# copy the ownership of the private directory
+-	chown $info[4], $info[5], "$header_dir/$packagefile", "$target_dir/$packagefile",  "$private_dir/$packagefile.complete";
++	for my $packagefile (@packagefile_list) {
++
++	    last if $noact;
++
++	    unlink "$header_dir/$packagefile", "$target_dir/$packagefile", "$private_dir/$packagefile.complete"; # just to be sure
++	    if($symlink_mode) {
++		symlink(abs_path($frompackagefile), "$target_dir/$packagefile")
++		|| die "Failed to create the symlink $target_dir/$packagefile";
++	    }
++	    elsif($ro_mode) {
++		link($frompackagefile, "$target_dir/$packagefile")
++		|| copy($frompackagefile, "$target_dir/$packagefile")
++		|| die "Failed to copy $frompackagefile";
++	    }
++	    else {
++		rename($frompackagefile, "$target_dir/$packagefile")
++		|| die "Failed to rename $frompackagefile. Try read-only (-r) or symlink (-s) options.\n";
++	    }
++
++	    open(my $headfile, ">$header_dir/$packagefile");
++	    print $headfile $httpheader;
++	    close $headfile;
++
++	    my $completefile = "$private_dir/$packagefile.complete";
++	    open(MF, ">$completefile");
++	    close(MF);
++	    # copy the ownership of the private directory
++	    chown $info[4], $info[5], "$header_dir/$packagefile", "$target_dir/$packagefile",  "$private_dir/$packagefile.complete";
++	}
+ 
+ 	$packagesimported++;
+     }
+ }
+ 
++if($cfg->{multi_distro}) {
++    foreach my $indexfile ( <$target_dir/*es.bz2>, <$target_dir/*es.gz>, <$target_dir/*es> ) {
++	my %sums;
++	print "Reading: $indexfile\n" if !$quiet;
++	extract_sums($indexfile, \%sums) || die("Error processing $indexfile, import stopped.\nRemove the file if the packages to be imported are not associated with this repository.\n");
++
++	while (my ($package, $info_frozen) = each %sums) {
++	    my $md5sum = hashify(\$info_frozen)->{md5};
++	    die "No MD5 hash for $package\n" unless defined $md5sum;
++	    if (! exists $reverse_hash_md5{$md5sum}) {
++		my @target_list;
++		$reverse_hash_md5{$md5sum} = \@target_list;
++	    }
++	    push @{ $reverse_hash_md5{$md5sum} }, $package;
++	}
++    }
++}
++
+ importrec($import_dir);
+ 
+ print "Done.\n" if !$quiet;
+diff -ru apt-cacher-1.6.12.orig/apt-cacher-lib.pl apt-cacher-1.6.12/apt-cacher-lib.pl
+--- apt-cacher-1.6.12.orig/apt-cacher-lib.pl	2010-09-24 21:48:31.000000000 -0400
++++ apt-cacher-1.6.12/apt-cacher-lib.pl	2010-09-28 21:26:39.000000000 -0400
+@@ -38,6 +38,8 @@
+ 		  daemon_port => 3142,
+ 		  fetch_timeout => 300, # five minutes from now
+ 		  curl_idle_timeout => 120,
++		  # if you modify this regex, don't forget to update the
++		  # commented-out default in apt-cacher.conf
+ 		  index_files_regexp => '(?:' . join('|',
+ 						     ('Index',
+ 						      'Packages\.gz',
+@@ -54,8 +56,11 @@
+ 						      'release\..*',
+ 						      'srclist.*\.bz2',
+ 						      'Translation-.+\.bz2',
++						      'Translation-.+\.gz',
+ 						     )
+ 						    ) . ')$',
++		  # if you modify this regex, don't forget to update the
++		  # commented-out default in apt-cacher.conf
+ 		  package_files_regexp => '(?:' . join('|',
+ 						       ('\.deb',
+ 							'\.rpm',
+@@ -69,6 +74,8 @@
+ 							'\.template'
+ 						       )
+ 						      ) .')$',
++		  # if you modify this regex, don't forget to update the
++		  # commented-out default in apt-cacher.conf
+ 		  installer_files_regexp => '^(?:' . join('|',
+ 							 ('vmlinuz',
+ 							  'linux',
+@@ -218,7 +225,7 @@
+ # Stores data flattened for use in tied hashes
+ sub extract_sums {
+    my ($name, $hashref) = @_;
+-   my $indexbase;
++   my ($repobase, $indexbase);
+ 
+    seek($name,0,0) if fileno($name);
+    my $raw = new IO::Uncompress::AnyUncompress $name
+@@ -227,37 +234,69 @@
+    # If arg is fd get filename
+    $name = readlink('/proc/self/fd/'.fileno($name)) if fileno($name);
+ 
+-   if($name=~/^.*\/(.*_)(?:Index|Release)(?: \(deleted\))?$/) {
++   if($name =~ m!^.*/(.*?)::!) {
++       $repobase=$1;
++   }
++
++   if($name =~ m!^.*/(.*)(?:_|::)(?:Index|Release)(?: \(deleted\))?$!) {
+        $indexbase=$1;
+    }
+ 
+-   my ($file,$complete,$sha1,$sha256,$md5,$size);
++   my ($file,$dir,$complete,$sha1,$sha256,$md5,$size);
+    while(<$raw>) {
+        last if $AnyUncompressError;
+-       if(/^\s(\w{40})\s+(\d+)\s(\S+)\n/ && $indexbase) { # diff_Index/Release SHA1
++       if($indexbase && /^\s(\w{32})\s+(\d+)\s(\S+)\n/) { # diff*Index/Release MD5
++	   $md5=$1;
++	   $size=$2;
++	   $file=$indexbase.'/'.$3;
++	   $file.=".gz" if $name=~/Index$/;
++	   $complete=1;
++       }
++       elsif($indexbase && /^\s(\w{40})\s+(\d+)\s(\S+)\n/) { # diff*Index/Release SHA1
+ 	   $sha1=$1;
+-	   $size =$2;
+-	   $file=$indexbase.$3;
+-	   if ($name=~/Release$/) {
+-	       $file=~s!/!_!g;
+-	       # MD5 are listed first, so this should already have been set
+-	       $md5=hashify(\$hashref->{$file})->{md5};
+-	   }
++	   $size=$2;
++	   $file=$indexbase.'/'.$3;
+ 	   $file.=".gz" if $name=~/Index$/;
+ 	   $complete=1;
+        }
+-       elsif(/^\s(\w{32})\s+(\d+)\s(\S+)\n/ && $indexbase) { # diff_Index/Release MD5
+-	   $md5=$1;
++       elsif($indexbase && /^\s(\w{64})\s+(\d+)\s(\S+)\n/) { # diff*Index/Release SHA256
++	   $sha256=$1;
+ 	   $size=$2;
+-	   $file=$indexbase.$3;
+-	   $file=~s!/!_!g if $name=~/Release$/;
++	   $file=$indexbase.'/'.$3;
+ 	   $file.=".gz" if $name=~/Index$/;
+ 	   $complete=1;
+        }
+-       elsif(/^\s(\w{32})\s+(\d+)\s(\S+)\n/) { # Sources
++       elsif($dir && /^\s(\w{32})\s+(\d+)\s(\S+)\n/) { # Sources MD5
+ 	   $md5=$1;
+ 	   $size=$2;
+-	   $file=$3;
++	   if ($repobase && $dir) {
++	       $file=$repobase.'::'.$dir.'/'.$3;
++	   }
++	   else {
++	       $file=$3;
++	   }
++	   $complete=1;
++       }
++       elsif($dir && /^\s(\w{40})\s+(\d+)\s(\S+)\n/) { # Sources SHA1
++	   $sha1=$1;
++	   $size=$2;
++	   if ($repobase && $dir) {
++	       $file=$repobase.'::'.$dir.'/'.$3;
++	   }
++	   else {
++	       $file=$3;
++	   }
++	   $complete=1;
++       }
++       elsif($dir && /^\s(\w{64})\s+(\d+)\s(\S+)\n/) { # Sources SHA256
++	   $sha256=$1;
++	   $size=$2;
++	   if ($repobase && $dir) {
++	       $file=$repobase.'::'.$dir.'/'.$3;
++	   }
++	   else {
++	       $file=$3;
++	   }
+ 	   $complete=1;
+        }
+        elsif(/^MD5sum:\s+(.*)$/) { # Packages
+@@ -273,19 +312,40 @@
+ 	   $size=$1;
+        }
+        elsif(/^Filename:\s+(.*)$/) {
+-	   $file=$1;
+-	   $file=~s/.*\///;
++	   if ($repobase) {
++	       $file=$repobase.'::'.$1;
++	   }
++	   else {
++	       $file=$1;
++	       $file=~s!.*/!!;
++	   }
++       }
++       elsif(/^Directory:\s+(.*)$/) { # Sources
++	   $dir=$1;
++       }
++       elsif(/^Package:.*$/) {
++	   undef $dir;
+        }
+        elsif(/^Description:.*$/) {
+ 	   $complete=1;
+        }
++
+        if(defined($file) && $complete) {
+-	   $hashref->{$file}= freeze {
++	   $file =~ s!/([^/]+)$!::$1! if $repobase; # last '/' becomes '::'
++	   $file =~ s!/!_!g;
++	   if (!defined($md5) && exists $hashref->{$file}) {
++	       $md5 = hashify(\$hashref->{$file})->{md5};
++	   }
++	   if (!defined($sha1) && exists $hashref->{$file}) {
++	       $sha1 = hashify(\$hashref->{$file})->{sha1};
++	   }
++	   $hashref->{$file} = freeze {
+ 	       size => $size,
+ 		 md5 => $md5,
+ 		   sha1 => $sha1,
+ 		     sha256 => $sha256
+ 		   };
++	   # note: don't undef $dir here, it is used multiple times
+ 	   for ($file, $size, $md5, $sha1, $sha256, $complete) {
+ 	       undef $_
+ 	   }
+Only in apt-cacher-1.6.12: apt-cacher-multi-distro.pl
+diff -ru apt-cacher-1.6.12.orig/apt-cacher.conf apt-cacher-1.6.12/apt-cacher.conf
+--- apt-cacher-1.6.12.orig/apt-cacher.conf	2010-09-24 21:48:31.000000000 -0400
++++ apt-cacher-1.6.12/apt-cacher.conf	2010-09-24 16:57:26.000000000 -0400
+@@ -140,6 +140,15 @@
+ #cgi_advise_to_use = Please use http://cacheserver:3142/ as apt-cacher access URL
+ #cgi_advise_to_use = Server relocated. To change sources.list, run perl -pe "s,/apt-cacher\??,:3142," -i /etc/apt/sources.list
+ 
++# A single instance of apt-cacher can cache packages from multiple distinct
++# distributions (e.g. Debian and Ubuntu), but must store them using a
++# different scheme to avoid collisions. This scheme is incompatible with the
++# normal one, and presents a few tradeoffs in functionality; refer to
++# README.multi-distro for details. If you have an existing cache without this
++# feature enabled, apt-cacher-multi-distro.pl may be able to convert it to
++# the required scheme. Acceptable values are 0 or 1.
++multi_distro=0
++
+ # Server mapping - this allows to hide real server names behind virtual paths
+ # that appear in the access URL. This method is known from apt-proxy. This is
+ # also the only method to use FTP access to the target hosts. The syntax is
+@@ -150,14 +159,26 @@
+ # each other. FTP access method not supported yet, maybe in the future.
+ # path_map = debian ftp.uni-kl.de/pub/linux/debian ftp2.de.debian.org/debian ; ubuntu archive.ubuntu.com/ubuntu ; security security.debian.org/debian-security ftp2.de.debian.org/debian-security
+ 
+-# Permitted package files - this is a perl regular expression which matches all
+-# package-type files (files that are uniquely identified by their filename).
++# Apt-cacher can be restricted to serve packages only through a path_map server
++# mapping (i.e. no arbitrary host names in the path). This keeps the cache a
++# bit more orderly, and is recommended if you are using multi_distro support.
++# Acceptable values are 0 or 1.
++path_map_only=0
++
++# Permitted package files - this is a perl regular expression which matches
++# all package-type files (files that are uniquely identified by their filename
++# within a given distribution).
+ # The default is:
+ #package_files_regexp = (?:\.deb|\.rpm|\.dsc|\.tar\.gz|\.diff\.gz|\.udeb|index\.db-.+\.gz|\.jigdo|\.template)$
+ 
+-# Permitted Index files - this is the perl regular expression which matches all
++# Permitted index files - this is a perl regular expression which matches all
+ # index-type files (files that are uniquely identified by their full path and
+ # need to be checked for freshness).
+-#The default is:
+-#index_files_regexp = (?:Index|Packages\.gz|Packages\.bz2|Release|Release\.gpg|Sources\.gz|Sources\.bz2|Contents-.+\.gz|pkglist.*\.bz2|release|release\..*|srclist.*\.bz2|Translation-.+\.bz2)$
++# The default is:
++#index_files_regexp = (?:Index|Packages\.gz|Packages\.bz2|Release|Release\.gpg|Sources\.gz|Sources\.bz2|Contents-.+\.gz|pkglist.*\.bz2|release|release\..*|srclist.*\.bz2|Translation-.+\.bz2|Translation-.+\.gz)$
+ 
++# Permitted installer files - this is a perl regular expression which matches
++# all installer-related files (these files are uniquely identified by their
++# full path and may need to be checked for freshness).
++# The default is:
++#installer_files_regexp = (?:vmlinuz|linux|initrd\.gz)$
+diff -ru apt-cacher-1.6.12.orig/apt-cacher2 apt-cacher-1.6.12/apt-cacher2
+--- apt-cacher-1.6.12.orig/apt-cacher2	2010-09-24 21:48:31.000000000 -0400
++++ apt-cacher-1.6.12/apt-cacher2	2010-09-28 23:13:44.000000000 -0400
+@@ -48,6 +48,7 @@
+ # ----------------------------------------------------------------------------
+ 
+ use strict;
++use warnings;
+ use lib '/usr/share/apt-cacher/';
+ 
+ use Fcntl qw(:DEFAULT :flock);
+@@ -59,11 +60,15 @@
+ use HTTP::Response;
+ use HTTP::Date;
+ use Sys::Hostname;
++use Time::HiRes 'usleep';
+ use Filesys::DiskSpace;
+ 
+ # Include the library for the config file parser
+ require 'apt-cacher-lib.pl';
+ 
++# Libcurl will use the http_proxy environment variable if it is set
++delete $ENV{http_proxy};
++
+ # Set some defaults
+ my $version='0.1'; # this will be auto-replaced when the Debian package is being built
+ my $configfile_default = '/etc/apt-cacher/apt-cacher.conf';
+@@ -503,6 +508,12 @@
+ 	    usage_error($client);
+ 	}
+ 
++	if ($path =~ /::/) {
++	    debug_message("Sorry, path cannot contain double-colons: $path");
++	    &sendrsp(403, "Sorry, path cannot contain double-colons: $path");
++	    exit(4);
++	}
++
+ 	REPARSE:
+ 	my($host,$uri) = ($path =~ m#^/?([^/]+)(/.+)#);
+ 
+@@ -510,7 +521,20 @@
+ 	    usage_error($client);
+ 	}
+ 
++	if($cfg->{path_map_only} && !exists $pathmap{$host}) {
++	    debug_message("Sorry, not allowed to fetch from arbitrary host: $host");
++	    &sendrsp(403, "Sorry, not allowed to fetch from arbitrary host: $host");
++	    exit(4);
++	}
++
+ 	$uri =~ s#/{2,}#/#g; # Remove multiple separators
++
++	unless ($uri =~ m!/(?:dists|pool)/!) {
++	    debug_message("Sorry, not allowed to fetch that path: $uri");
++	    &sendrsp(403, "Sorry, not allowed to fetch that path: $uri");
++	    exit(4);
++	}
++
+ 	($filename) = ($uri =~ /\/?([^\/]+)$/);
+ 
+ 	unless ($filename) {
+@@ -544,32 +568,41 @@
+ 	}
+ 	location_allowed:
+ 
++	$new_filename = $host.$uri;
++
++	if($cfg->{multi_distro}) {
++	    # m!/(dists|pool)/! might occur more than once in
++	    # $new_filename, so only act on the last instance
++	    # (e.g. example.com/pub/linux/dists/debian/dists/...)
++	    $new_filename = reverse $new_filename;
++	    $new_filename =~ s!/(loop|stsid)/!/${1}::!;
++	    $new_filename = reverse $new_filename;
++	}
++
++	my $file_type;
++
+ 	if (&is_package_file($filename)){
+ 	    # We must be fetching a .deb or a .rpm or some other recognised
+ 	    # file, so let's cache it.
+-	    # Place the file in the cache with just its basename
+-	    $new_filename = $filename;
+-	    debug_message("new base file: $new_filename");
++	    if(! $cfg->{multi_distro}) {
++		# Place the file in the cache with just its basename
++		$new_filename = $filename;
++	    }
++	    $file_type = 'package';
+ 	}
+ 	elsif ($filename =~ /2\d\d\d-\d\d-\d\d.*\.gz$/) {
+ 	    # a patch file. Needs a unique filename but no freshness checks
+-	    $new_filename = "$host$uri";
+-	    $new_filename =~ s/\//_/g;
+-	    debug_message("new pdiff file: $new_filename");
++	    $file_type = 'pdiff';
+ 	}
+ 	elsif (is_installer_file($filename)) {
+ 	    # Installer or Debian-live files
+ 	    # Need to be long names, but not index
+-	    $new_filename = "$host$uri";
+-	    $new_filename =~ s/\//_/g;
+-	    debug_message("new installer file: $new_filename");
++	    $file_type = 'installer';
+ 	}
+ 	elsif (&is_index_file($filename)) {
+ 	    # It's a Packages.gz or related file: make a long filename so we can
+ 	    # cache these files without the names colliding
+-	    $new_filename = "$host$uri";
+-	    $new_filename =~ s/\//_/g;
+-	    debug_message("new index file: $new_filename");
++	    $file_type = 'index';
+ 	} else {
+ 	    # Maybe someone's trying to use us as a general purpose proxy / relay.
+ 	    # Let's stomp on that now.
+@@ -578,6 +611,11 @@
+ 	    exit(4);
+ 	}
+ 
++	$new_filename =~ s!/([^/]+)$!::$1! if ($cfg->{multi_distro});
++	$new_filename =~ s!/!_!g;
++
++	debug_message("new $file_type file: $new_filename");
++
+ 	$cached_file = "$cfg->{cache_dir}/packages/$new_filename";
+ 	$cached_head = "$cfg->{cache_dir}/headers/$new_filename";
+ 	$complete_file = "$cfg->{cache_dir}/private/$new_filename.complete";
+@@ -789,6 +827,7 @@
+     &data_init;
+ 
+     my $abort_time = get_abort_time();
++    my $sleep_us = 15625; # 1/64 sec
+     my $buf;
+ 
+     my $geslen=0;
+@@ -886,7 +925,6 @@
+ 
+ 	    }
+ 	    else {
+-		sleep(1);
+ 		next CHUNK;
+ 	    }
+ 
+@@ -896,6 +934,7 @@
+ 	    debug_message("ready to send contents of $cached_file");
+ 	}
+ 
++	usleep($sleep_us) if $sleep_us; # try to avoid hitting EOF
+ 	my $n = sysread($fromfile, $buf, 65536);
+ 	debug_message("read $n bytes");
+ 
+@@ -904,10 +943,10 @@
+ 	    exit(4); # Header already sent, can't notify error
+ 	}
+ 
+-	if($n==0) {
++	if($n == 0) { # EOF
+ 
+ 	    if($fetcher_done) {
+-		# comlete file was found in the previous iteration
++		# complete file was found in the previous iteration
+ 		# this is the loop exit condition
+ 		#
+ 		# final check on size
+@@ -934,11 +973,9 @@
+ 		next CHUNK;
+ 	    }
+ 
+-	    # debug_message('waiting for new data');
+-	    # wait for fresh data
+-	    sleep(1);
++	    $sleep_us *= 2 if $sleep_us < 1000000; # max 1 sec
++	    $sleep_us = 62500 if ! $sleep_us; # 1/16 sec
+ 	    next CHUNK;
+-
+ 	}
+ 	else {
+ 	    $curlen+=$n;
+@@ -954,6 +991,7 @@
+ 	    debug_message("wrote $n (sum: $curlen) bytes");
+ 	    $abort_time = get_abort_time();
+ 	    data_feed(\$buf);
++	    $sleep_us = 0;
+ 	}
+     }
+ }
+diff -ru apt-cacher-1.6.12.orig/debian/apt-cacher.1 apt-cacher-1.6.12/debian/apt-cacher.1
+--- apt-cacher-1.6.12.orig/debian/apt-cacher.1	2010-09-07 04:43:23.000000000 -0400
++++ apt-cacher-1.6.12/debian/apt-cacher.1	2010-09-24 16:15:38.000000000 -0400
+@@ -159,6 +159,10 @@
+ will actually fetch
+ .IP "" 9
+ http://apt\-cacher.server:3142/\:ftp.debian.org/debian/dists/stable/Release 
++.TP
++.B path_map_only [0]
++Only allow access through URLs rewritten by path_map. This prohibits clients
++from specifying an arbitrary server in the URL.
+ .TP  7
+ .BI "package_files_regexp [" "see http://apt\-cacher.server:port/" "]"
+ Perl regular expression (perlre(1)) which matches all package-type files (files
+@@ -242,6 +246,12 @@
+ Switches on experimental checksum validation of files. Requires
+ libberkeleydb-perl.
+ .TP
++.B multi_distro [0]
++Enable support for caching multiple distinct distributions (e.g. Debian and
++Ubuntu). Refer to
++.B README.multi-distro
++for more details on the implications of this option.
++.TP
+ .B debug [0]
+ Whether debug mode is enabled. Off by default. When turned on (non-nil), lots of
+ extra debug information will be written to the error log. This can make the

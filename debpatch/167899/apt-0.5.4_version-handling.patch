@@ -1,0 +1,115 @@
+diff -ur apt-0.5.4/apt-pkg/pkgcachegen.cc apt-0.5.4.new/apt-pkg/pkgcachegen.cc
+--- apt-0.5.4/apt-pkg/pkgcachegen.cc	2001-07-02 00:28:24.000000000 +0200
++++ apt-0.5.4.new/apt-pkg/pkgcachegen.cc	2003-01-22 15:56:36.000000000 +0100
+@@ -139,38 +139,47 @@
+ 	    break;
+       }
+       
+-      /* We already have a version for this item, record that we
+-         saw it */
++      /* We already have a version for this item, 
++	   move on through the same version set */
+       unsigned long Hash = List.VersionHash();
+-      if (Res == 0 && Ver->Hash == Hash)
++      while (Res == 0)
+       {
+-	 if (List.UsePackage(Pkg,Ver) == false)
+-	    return _error->Error(_("Error occured while processing %s (UsePackage2)"),PackageName.c_str());
+-
+-	 if (NewFileVer(Ver,List) == false)
+-	    return _error->Error(_("Error occured while processing %s (NewFileVer1)"),PackageName.c_str());
+-	 
+-	 // Read only a single record and return
+-	 if (OutVer != 0)
++	 // Stop if we found an identical version
++	 if (Ver->Hash == Hash)
+ 	 {
+-	    *OutVer = Ver;
+-	    return true;
++	    if (List.UsePackage(Pkg,Ver) == false)
++	       return _error->Error(_("Error occured while processing %s (UsePackage2)"),PackageName.c_str());
++	    
++	    if (NewFileVer(Ver,List) == false)
++	       return _error->Error(_("Error occured while processing %s (NewFileVer1)"),PackageName.c_str());
++	    
++	    // Read only a single record and return
++	    if (OutVer != 0)
++	    {
++	       *OutVer = Ver;
++	       return true;
++	    }
++	    
++	    break;
+ 	 }
+-	 
+-	 continue;
+-      }      
+-
+-      // Skip to the end of the same version set.
+-      if (Res == 0)
+-      {
+-	 for (; Ver.end() == false; Last = &Ver->NextVer, Ver++)
++	 else
+ 	 {
+-	    Res = Cache.VS->CmpVersion(Version,Ver.VerStr());
+-	    if (Res != 0)
++	    _error->Warning("Warning: There are different versions of %s with the same version string!",PackageName.c_str());
++	    
++	    // Move on towards the end of the same version set	     
++	    Last = &Ver->NextVer;
++	    Ver++;
++	    if (Ver.end()) 
+ 	       break;
++	    
++	    Res = Cache.VS->CmpVersion(Version,Ver.VerStr());
+ 	 }
+       }
+ 
++      // An identical version had been found and handled
++      if (Res == 0 && Ver.end() == false && Ver->Hash == Hash)
++	 continue;
++      
+       // Add a new version
+       *Last = NewVersion(Ver,Version,*Last);
+       Ver->ParentPkg = Pkg.Index();
+diff -ur apt-0.5.4/apt-pkg/policy.cc apt-0.5.4.new/apt-pkg/policy.cc
+--- apt-0.5.4/apt-pkg/policy.cc	2001-05-28 01:40:56.000000000 +0200
++++ apt-0.5.4.new/apt-pkg/policy.cc	2003-01-22 16:15:04.000000000 +0100
+@@ -32,6 +32,7 @@
+ #include <apt-pkg/strutl.h>
+ #include <apt-pkg/error.h>
+ #include <apt-pkg/sptr.h>
++#include <apt-pkg/version.h>
+     
+ #include <apti18n.h>
+ 
+@@ -134,6 +135,7 @@
+       tracks the default when the default is taken away, and a permanent
+       pin that stays at that setting.
+     */
++   string CurrentVersion;
+    for (pkgCache::VerIterator Ver = Pkg.VersionList(); Ver.end() == false; Ver++)
+    {
+       for (pkgCache::VerFileIterator VF = Ver.FileList(); VF.end() == false; VF++)
+@@ -156,11 +158,20 @@
+       }      
+       
+       if (Pkg.CurrentVer() == Ver && Max < 1000)
++	 CurrentVersion = Ver.VerStr();
++      else if (CurrentVersion.empty())
++	 continue;
++      
++      /* We have come to the currently installed version. Continue if
++	 there are more versions with the same version string. */
++      pkgCache::VerIterator Next = Ver;
++      Next++;
++      if (Next.end() || Cache->VS->CmpVersion(CurrentVersion,Next.VerStr()) != 0)
+       {
+ 	 /* Elevate our current selection (or the status file itself)
+ 	    to the Pseudo-status priority. */
+ 	 if (Pref.end() == true)
+-	    Pref = Ver;
++	    Pref = Pkg.CurrentVer();
+ 	 Max = 1000;
+ 	 
+ 	 // Fast path optimize.

@@ -1,0 +1,277 @@
+diff --git a/debmirror b/debmirror
+index e7e8035..81c7a11 100755
+--- a/debmirror
++++ b/debmirror
+@@ -69,7 +69,7 @@ Usage: $0 [--progress] [--verbose] [--debug] [--dry-run] [--help]
+           [--postcleanup|--cleanup|--nocleanup] [--skippackages]
+           [--diff=use|mirror|none] [--gzip-options=options]
+           [--state-cache-days=number]
+-          [--ignore-small-errors] [--allow-dist-rename]
++          [--ignore-small-errors] [--allow-dist-rename] [--debmarshal]
+           <mirrordir>
+ 
+ For details, see man page.
+@@ -401,6 +401,13 @@ An existing symlink S<codename -E<gt> suite> will be removed, but debmirror
+ will automatically create a new symlink S<suite -E<gt> codename> (immediately
+ after moving meta files in place). This conversion should only be needed once.
+ 
++=item --debmarshal
++
++On each pull, keep the repository meta data from dists/* in a numbered
++subdirectory, and maintain a symlink latest to the most recent pull.
++This is similar to Debmarshal in tracking mode, see
++debmarshal.debian.net for examples and use.
++
+ =back
+ 
+ =head1 USING DEBMIRROR
+@@ -559,6 +566,7 @@ our $diff_mode="use";
+ our $gzip_options="-9 -n --rsyncable";
+ our $omit_suite_symlinks=0;
+ our $allow_dist_rename=0;
++our $debmarshal=0;
+ my @errlog;
+ my $HOME;
+ ($HOME = $ENV{'HOME'}) or die "HOME not defined in environment!\n";
+@@ -654,6 +662,7 @@ GetOptions('debug'                  => \$debug,
+ 	   'diff=s'                 => \$diff_mode,
+ 	   'omit-suite-symlinks'    => \$omit_suite_symlinks,
+ 	   'allow-dist-rename'      => \$allow_dist_rename,
++	   'debmarshal'             => \$debmarshal,
+ 	   'help'                   => \$help,
+ ) or usage;
+ usage if $help;
+@@ -733,6 +742,7 @@ if ($post_cleanup) {
+   say("Will NOT clean up.") unless $cleanup;
+ }
+ say("Dry run.") if $dry_run_var;
++say("Debmarshal snapshots kept.") if $debmarshal;
+ 
+ my $md5;
+ $md5=Digest::MD5->new;
+@@ -838,17 +848,32 @@ foreach my $dist (@dists) {
+   my ($codename, $suite, $dist_sdir) = name_release("mirror", $tdir, $dist);
+ 
+   if ($have_release) {
++    my $next;
+     make_dir ("dists/$codename$dist_sdir");
+     make_dir ("$tempdir/dists/$codename$dist_sdir");
+     rename("$tdir/Release", "$tempdir/dists/$codename$dist_sdir/Release")
+       or die "Error while moving $tdir/Release: $!\n";
+     $files{"dists/$codename$dist_sdir/Release"}=1;
+     $files{$tempdir."/"."dists/$codename$dist_sdir/Release"}=1;
++    if ($debmarshal) {
++      $next = get_nextlatest($dist);
++      make_dir("$mirrordir/dists/$dist/$next");
++      unlink("$mirrordir/dists/$dist/$next/Release");
++      link("$tempdir/dists/$codename$dist_sdir/Release",
++	   "$mirrordir/dists/$dist/$next/Release")
++        or die "Error while linking $tempdir/dists/$codename$dist_sdir/Release: $!\n";
++    }
+     if (-f "$tdir/Release.gpg") {
+       rename("$tdir/Release.gpg", "$tempdir/dists/$codename$dist_sdir/Release.gpg")
+ 	or die "Error while moving $tdir/Release.gpg: $!\n";
+       $files{"dists/$codename$dist_sdir/Release.gpg"}=1;
+       $files{$tempdir."/"."dists/$codename$dist_sdir/Release.gpg"}=1;
++      if ($debmarshal) {
++        unlink("$mirrordir/dists/$dist/$next/Release.gpg");
++	link("$tempdir/dists/$codename$dist_sdir/Release.gpg",
++	     "$mirrordir/dists/$dist/$next/Release.gpg")
++	  or die "Error while linking $tempdir/dists/$codename$dist_sdir/Release.gpg: $!\n";
++      }
+     }
+   }
+ }
+@@ -954,12 +979,14 @@ foreach my $dist (keys %distset) {
+     next if ($section =~ /debian-installer/ && $dist eq "breezy-security" );
+     foreach my $arch (@arches) {
+       get_index("dists/$dist/$section/binary-$arch", "Packages");
++      link_index($dist,$section,$arch) if $debmarshal;
+     }
+     # d-i does not have separate source sections
+     if ($do_source && $section !~ /debian-installer/) {
+       get_index("dists/$dist/$section/source", "Sources");
++      link_index($dist,$section,"source") if $debmarshal;
+     }
+-    get_i18n_index("dists/$dist/$section/i18n") if $i18n;
++    get_i18n_index($dist,"$section/i18n") if $i18n;
+   }
+ }
+ foreach (@extra_dirs) {
+@@ -1016,7 +1043,7 @@ if ($i18n) {
+   foreach my $dist (keys %distset) {
+     next unless exists $distset{$dist}{mirror};
+     foreach my $section (@sections) {
+-      parse_i18n_index("dists/$dist/$section/i18n");
++      parse_i18n_index($dist,"$section/i18n");
+     }
+   }
+ }
+@@ -1143,7 +1170,7 @@ say("Parse Packages and Sources files and add to the file list everything therei
+ }
+ 
+ # Pre-mirror cleanup
+-cleanup_unknown_files() if ($cleanup && ! $post_cleanup);
++cleanup_unknown_files() if ($cleanup && ! $post_cleanup && !$debmarshal);
+ 
+ say("Download all files that we need to get (".print_dl_size($bytes_to_get - $bytes_gotten).").");
+ init_connection;
+@@ -1306,6 +1333,21 @@ if (! @di_dists) {
+ }
+ 
+ say("Everything OK. Moving meta files.");
++if ($debmarshal) {
++  foreach my $dist (@dists) {
++    system("diff","-q","$mirrordir/dists/$dist/latest/Release",
++	   "$tempdir/dists/$dist/Release");
++    if ($?) {
++      my $next = get_nextlatest($dist);
++      say("Updating $mirrordir/dists/$dist/latest to $next");
++      unlink("$mirrordir/dists/$dist/latest");
++      symlink($next,"$mirrordir/dists/$dist/latest")
++	or die "Error while symlinking $mirrordir/dists/$dist/latest to $next: $!\n";
++    } else {
++      say("Not updating $mirrordir/dists/$dist/latest");
++    }
++  }
++}
+ chdir($tempdir) or die "unable to chdir($tempdir): $!\n";
+ my $res=0;
+ foreach my $file (`find . -type f`) {
+@@ -1325,6 +1367,7 @@ foreach my $file (`find . -type f`) {
+ }
+ chdir($mirrordir) or die "chdir $mirrordir: $!";
+ 
++
+ # Get optional directories using rsync.
+ rsync_extra(0, @rsync_extra);
+ 
+@@ -1373,7 +1416,7 @@ if (! $dry_run) {
+ }
+ 
+ # Post mirror cleanup
+-cleanup_unknown_files() if ($post_cleanup);
++cleanup_unknown_files() if ($post_cleanup && !$debmarshal);
+ 
+ # mirror cleanup for directories
+ if (! $use_cache && ($cleanup || $post_cleanup)) {
+@@ -1777,6 +1820,17 @@ sub split_dist {
+   return ($dist_raw, $dist_sdir);
+ }
+ 
++sub get_nextlatest {
++  my ($dist) = @_;
++  my $latest = readlink("$mirrordir/dists/$dist/latest");
++  if (defined $latest) {
++    $latest++;
++  } else {
++    $latest = 0;
++  }
++  return $latest;
++}
++
+ sub get_release {
+   my ($tdir, $dist) = @_;
+ 
+@@ -2076,12 +2130,47 @@ sub get_contents_files {
+       }
+       $files{"dists/$dist/Contents-$arch.gz"}=1;
+       $files{$tempdir."/"."dists/$dist/Contents-$arch.gz"}=1;
++      if ($debmarshal) {
++	my $next = get_nextlatest($dist);
++	unlink("$mirrordir/dists/$dist/$next/Contents-$arch.gz");
++	link("$tempdir/dists/$dist/Contents-$arch.gz",
++	     "$mirrordir/dists/$dist/$next/Contents-$arch.gz")
++	  or die "Error while linking $tempdir/dists/$dist/Contents-$arch.gz: $!\n";
++      }
+     }
+   }
+ }
+ 
++# hardlink index files from tempdir to next debmarshal snapshot location
++sub link_index {
++  my ($dist,$section,$arch) = @_;
++  my ($file,$archdir);
++  if ($arch eq "source") {
++    $file = "Sources";
++    $archdir = "source";
++  } else {
++    $file = "Packages";
++    $archdir = "binary-$arch";
++  }
++  my $next = get_nextlatest($dist);
++  make_dir("$mirrordir/dists/$dist/$next/$section/$archdir");
++  unlink("$mirrordir/dists/$dist/$next/$section/$archdir/$file");
++  link("$tempdir/dists/$dist/$section/$archdir/$file",
++       "$mirrordir/dists/$dist/$next/$section/$archdir/$file")
++    or warn "Error while linking $tempdir/dists/$dist/$section/$archdir/$file: $!\n";
++  unlink("$mirrordir/dists/$dist/$next/$section/$archdir/$file.gz");
++  link("$tempdir/dists/$dist/$section/$archdir/$file.gz",
++       "$mirrordir/dists/$dist/$next/$section/$archdir/$file.gz")
++    or die "Error while linking $tempdir/dists/$dist/$section/$archdir/$file.gz: $!\n";
++  unlink("$mirrordir/dists/$dist/$next/$section/$archdir/$file.bz2");
++  link("$tempdir/dists/$dist/$section/$archdir/$file.bz2",
++       "$mirrordir/dists/$dist/$next/$section/$archdir/$file.bz2")
++    or die "Error while linking $tempdir/dists/$dist/$section/$archdir/$file.bz2: $!\n";
++}
++
+ sub get_i18n_index {
+-  my $subdir=shift;
++  my ($dist,$distpath) = @_;
++  my $subdir = "dists/$dist/$distpath";
+   if (exists $file_lists{"$tempdir/$subdir/Index"}) {
+     make_dir($subdir);
+     make_dir("$tempdir/$subdir");
+@@ -2090,6 +2179,13 @@ sub get_i18n_index {
+       say("$subdir/Release needs fetch");
+       if (!remote_get("$subdir/Index")) {
+ 	push (@errlog,"$subdir/Index failed md5sum check, removing\n");
++      } elsif ($debmarshal) {
++	my $next = get_nextlatest($dist);
++	say("linking $mirrordir/dists/$dist/$next/$distpath/Index");
++	unlink("$mirrordir/dists/$dist/$next/$distpath/Index");
++	link("$tempdir/$subdir/Index",
++	     "$mirrordir/dists/$dist/$next/$distpath/Index")
++	  or die "Error while linking $tempdir/$subdir/Index: $!\n";
+       }
+     } else {
+       $bytes_gotten += $file_lists{"$tempdir/$subdir/Index"}{size};
+@@ -2100,7 +2196,8 @@ sub get_i18n_index {
+ }
+ 
+ sub parse_i18n_index {
+-  my $subdir = shift;
++  my ($dist,$distpath) = @_;
++  my $subdir = "dists/$dist/$distpath";
+   my ($sha1, $size, $filename);
+   my $exclude = "(".join("|", @excludes).")" if @excludes;
+   my $include = "(".join("|", @includes).")" if @includes;
+@@ -2124,6 +2221,9 @@ sub parse_i18n_index {
+ 	$bytes_to_get += $size;
+ 	$i18n_get{"$subdir/$filename"}{sha1} = $sha1;
+ 	$i18n_get{"$subdir/$filename"}{size} = $size;
++	$i18n_get{"$subdir/$filename"}{dist} = $dist;
++	$i18n_get{"$subdir/$filename"}{distpath} = $distpath;
++	$i18n_get{"$subdir/$filename"}{filename} = $filename;
+       }
+     }
+     close INDEX;
+@@ -2135,6 +2235,18 @@ sub get_i18n_files {
+   foreach my $file (sort keys %i18n_get) {
+     if (! check_i18n("$tempdir/$file", $i18n_get{$file}{size}, $i18n_get{$file}{sha1})) {
+       remote_get("$file");
++      if ($debmarshal) {
++	my $dist = $i18n_get{$file}{dist};
++	my $distpath = $i18n_get{$file}{distpath};
++	my $filename = $i18n_get{$file}{filename};
++	my $next = get_nextlatest($dist);
++	say("linking $file");
++	unlink("$mirrordir/dists/$dist/$next/$distpath/$filename");
++	link("$tempdir/$file",
++	 "$mirrordir/dists/$dist/$next/$distpath/$filename")
++	  or die "Erorr while linking $tempdir/$file: $!";
++
++      }
+     }
+   }
+ }

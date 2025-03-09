@@ -1,0 +1,215 @@
+From 4693317d5eef79acd5d36e0c7f99d76c70b6e6d5 Mon Sep 17 00:00:00 2001
+From: Thierry Fauck <thierry@linux.vnet.ibm.com>
+Date: Fri, 19 Apr 2019 11:20:40 +0200
+Subject: [PATCH] Work on multiple scripts related to #926843
+
+Signed-off-by: Thierry Fauck <thierry@linux.vnet.ibm.com>
+---
+ backends/lxc/test-package     | 16 +++++++++++++++-
+ backends/schroot/test-package |  6 ++++--
+ lib/environment.sh            |  4 +++-
+ tools/analysis/Rakefile       |  3 ++-
+ tools/gen-fake-data.sh        | 19 +++++++++++++++----
+ tools/indexer.sh              |  4 ++--
+ tools/init-dev.sh             | 12 ++++++++----
+ tools/purge-package.sh        |  3 +++
+ tools/workers.sh              |  6 ++++++
+ 9 files changed, 58 insertions(+), 15 deletions(-)
+
+diff --git a/backends/lxc/test-package b/backends/lxc/test-package
+index 18223fe..a73ceb8 100755
+--- a/backends/lxc/test-package
++++ b/backends/lxc/test-package
+@@ -10,7 +10,21 @@ $@
+ EOF
+ }
+ 
++param=$@
++param1=${1#--output-dir*}
++
++if [ -z $param1 ];then
++	mkdir -p $2
++	shift
++	shift
++	param=$*
++fi
++
+ container_name=$(date +ci-%s)
+ 
+-debci-autopkgtest --user debci --apt-upgrade "$@" \
++debci_base_dir=$(readlink -f $(dirname $(readlink -f $0))/../..)
++
++. $debci_base_dir/lib/environment.sh
++
++debci-autopkgtest --user debci --apt-upgrade "$param" \
+   -- lxc --sudo --name "${container_name}" "autopkgtest-${debci_suite}-${debci_arch}"
+diff --git a/backends/schroot/test-package b/backends/schroot/test-package
+index f8341d4..69607e4 100755
+--- a/backends/schroot/test-package
++++ b/backends/schroot/test-package
+@@ -10,10 +10,12 @@ $@
+ EOF
+ }
+ 
++param=$*
+ backend="$(dirname "$0")"
++. "${backend}/../../lib/environment.sh"
+ . "${backend}/environment.sh"
+ 
+-session_id="${debci_chroot_name}-$(basename "$debci_test_package")"
++session_id="${debci_chroot_name}-$(basename "$0")"
+ 
+-debci-autopkgtest --user debci --apt-upgrade "$@" \
++debci-autopkgtest --user debci --apt-upgrade "$param" \
+   -- schroot --session-id="${session_id}" "${debci_chroot_name}"
+diff --git a/lib/environment.sh b/lib/environment.sh
+index 7569fa5..b2148dd 100644
+--- a/lib/environment.sh
++++ b/lib/environment.sh
+@@ -14,6 +14,8 @@ export LANG=C.UTF-8
+ if [ -z "${debci_base_dir:-}" ]; then
+   if [ -f lib/environment.sh ]; then
+     debci_base_dir="$(pwd)"
++  elif [ -f /usr/share/debci/lib/environment.sh ]; then
++    debci_base_dir="/usr/share/debci"
+   else
+     echo "E: no \$debci_base_dir not set!"
+     return 1
+@@ -81,7 +83,7 @@ usage_shared_options="Common options:
+   --help                    show this usage message
+ "
+ 
+-program_name=${0##*/}
++program_name=$debci_base_dir/backends/$debci_backend/${0##*/}
+ TEMP=`getopt --name $program_name -o ${shared_short_options}${short_options:-} --long ${shared_long_options},${long_options:-} -- "$@"`
+ 
+ if [ $? != 0 ]; then
+diff --git a/tools/analysis/Rakefile b/tools/analysis/Rakefile
+index 16c2e16..70fe0b2 100644
+--- a/tools/analysis/Rakefile
++++ b/tools/analysis/Rakefile
+@@ -19,7 +19,8 @@ file 'failing.json' => ['packages.json'] do |task|
+ end
+ 
+ file 'packages.json' do
+-  sh 'wget', 'http://ci.debian.net/data/status/unstable/amd64/packages.json'
++  ARCH=process.arch
++  sh 'wget',"http://ci.debian.net/data/status/unstable/$ARCH/packages.json"
+ end
+ 
+ desc 'clean'
+diff --git a/tools/gen-fake-data.sh b/tools/gen-fake-data.sh
+index 2057f3c..05272e3 100755
+--- a/tools/gen-fake-data.sh
++++ b/tools/gen-fake-data.sh
+@@ -2,13 +2,24 @@
+ 
+ set -eu
+ 
++if [[ -f $(which debci) ];then
++ bindir=$(dirname $(which debci))
++elif [ -f bin/debci ];then
++ bindir=$(pwd)/bin
++elif [ -f ../bin/debci ];then
++ bindir=$(pwd)/../bin
++else
++ echo "Can't find debci binary"
++ exit 1
++fi
++
+ ./tools/init-dev.sh
+ 
+-configdir=`./bin/debci config --values-only config_dir`
++configdir=`$bindir/debci config --values-only config_dir`
+ 
+-for suite in $(./bin/debci config --values-only suite_list); do
+-  for arch in $(./bin/debci config --values-only arch_list); do
++for suite in $($bindir/debci config --values-only suite_list); do
++  for arch in $($bindir/debci config --values-only arch_list); do
+     shuf --head-count=50 config/whitelist \
+-      | xargs ./bin/debci enqueue --arch="$arch" --suite="$suite"
++      | xargs $bindir/debci enqueue --arch="$arch" --suite="$suite"
+   done
+ done
+diff --git a/tools/indexer.sh b/tools/indexer.sh
+index 00b5a53..3290b0d 100755
+--- a/tools/indexer.sh
++++ b/tools/indexer.sh
+@@ -6,11 +6,11 @@ incoming=`$(dirname $0)/../bin/debci config --values-only autopkgtest_incoming_b
+ 
+ mkdir -p "$incoming"
+ 
+-./bin/debci migrate
++$(dirname $0)/../bin/debci migrate
+ 
+ exec rerun \
+   --no-notify \
+   --exit \
+   --dir "$incoming" \
+   --pattern '**/exitcode' \
+-  -- ./bin/debci update
++  -- $(dirname $0)/../bin/debci update
+diff --git a/tools/init-dev.sh b/tools/init-dev.sh
+index b3f9949..34a3b69 100755
+--- a/tools/init-dev.sh
++++ b/tools/init-dev.sh
+@@ -2,7 +2,7 @@
+ 
+ set -eu
+ 
+-configdir=`./bin/debci config --values-only config_dir`
++configdir=`$(dirname $0)/../bin/debci config --values-only config_dir`
+ 
+ WHITELIST='autodep8
+ pinpoint
+@@ -16,12 +16,16 @@ if [ ! -f $configdir/whitelist ]; then
+ fi
+ 
+ if [ ! -f $configdir/conf.d/dev.conf ]; then
+-  echo "debci_arch_list='amd64 arm64'" > $configdir/conf.d/dev.conf
++  if [ $(dpkg --print-architecture) == amd64 ];then
++     echo "debci_arch_list='amd64 arm64'" > $configdir/conf.d/dev.conf
++  else
++     echo "debci_arch_list=\'$(dpkg --print-architecture)\'" > $configdir/conf.d/dev.conf
++  fi
+   echo "debci_suite_list='unstable testing'" >> $configdir/conf.d/dev.conf
+   echo "debci_backend=fake" >> $configdir/conf.d/dev.conf
+ fi
+ 
+-tail -n 1000 config/whitelist config/conf.d/*.conf
++tail -n 1000 $configdir/whitelist $configdir/conf.d/*.conf
+ echo
+ 
+-./bin/debci migrate
++$(dirname $0)/../bin/debci migrate
+diff --git a/tools/purge-package.sh b/tools/purge-package.sh
+index 9960f10..7a4b5c9 100755
+--- a/tools/purge-package.sh
++++ b/tools/purge-package.sh
+@@ -3,6 +3,9 @@
+ set -eu
+ 
+ debci_base_dir=$(readlink -f $(dirname $(readlink -f $0))/..)
++if [[ -z  $debci_base_dir ];then
++   debci_base_dir=/usr/share/debci
++fi
+ cd $debci_base_dir
+ . lib/environment.sh
+ prepare_args
+diff --git a/tools/workers.sh b/tools/workers.sh
+index b9aae4b..755eed1 100755
+--- a/tools/workers.sh
++++ b/tools/workers.sh
+@@ -1,3 +1,9 @@
+ #!/bin/sh
+ 
++set -eu
++
++debci_base_dir=$(readlink -f $(dirname $(readlink -f $0))/..)
++cd $debci_base_dir
++. lib/environment.sh
++
+ parallel ./bin/debci worker --arch -- $(./bin/debci config --values-only arch_list)
+-- 
+2.21.0.352.gf09ad66450
+

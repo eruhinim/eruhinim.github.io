@@ -1,0 +1,168 @@
+commit b1ca98314847ef5db77983122ab855be5b6ff8b7
+Author: Gerald Turner <gturner@unzane.com>
+Date:   Thu May 11 17:15:09 2017 -0700
+
+    Install AppArmor profiles for /usr/sbin/swanctl and /usr/sbin/charon-systemd.
+    
+    The AppArmor profile for charon-systemd was copied from the existing profile
+    for /usr/lib/ipsec/charon without much scrutiny other than testing basic IPsec
+    tunnels (no fancy plugin options were tested).  It appears that the team at
+    Canonical that had written the /usr/lib/ipsec/charon policy had done extensive
+    testing with several plugins, and it seems likely that applying the same
+    profile to charon-systemd will allow those plugins to continue to work.
+    
+    The AppArmor profile for swanctl was written from scratch and well tested.  It
+    turns out that swanctl unnecessarily loads plugins by default, so a bit of
+    frivolous access has been granted.
+
+diff --git a/debian/charon-systemd.install b/debian/charon-systemd.install
+index 6ab3af8f..a1424ab8 100644
+--- a/debian/charon-systemd.install
++++ b/debian/charon-systemd.install
+@@ -2,3 +2,4 @@ etc/strongswan.d/charon-systemd.conf
+ lib/systemd/system/strongswan-swanctl.service
+ usr/sbin/charon-systemd
+ usr/share/strongswan/templates/config/strongswan.d/charon-systemd.conf
++debian/usr.sbin.charon-systemd /etc/apparmor.d/
+diff --git a/debian/rules b/debian/rules
+index dacdb645..184abc7c 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -195,6 +195,8 @@ endif
+ 	dh_apparmor --profile-name=usr.lib.ipsec.charon -p strongswan-charon
+ 	dh_apparmor --profile-name=usr.lib.ipsec.lookip -p libcharon-extra-plugins
+ 	dh_apparmor --profile-name=usr.lib.ipsec.stroke -p strongswan-starter
++	dh_apparmor --profile-name=usr.sbin.swanctl -p strongswan-swanctl
++	dh_apparmor --profile-name=usr.sbin.charon-systemd -p charon-systemd
+ 
+ 	# add additional files not covered by upstream makefile...
+ 	install --mode=0600 $(CURDIR)/debian/ipsec.secrets.proto $(CURDIR)/debian/strongswan-starter/etc/ipsec.secrets
+diff --git a/debian/strongswan-swanctl.install b/debian/strongswan-swanctl.install
+index 483b0385..561b9d5b 100644
+--- a/debian/strongswan-swanctl.install
++++ b/debian/strongswan-swanctl.install
+@@ -8,3 +8,4 @@ usr/share/man/man8/swanctl.8
+ usr/sbin/swanctl
+ usr/lib/ipsec/libvici.so*
+ usr/lib/ipsec/plugins/libstrongswan-vici.so
++debian/usr.sbin.swanctl /etc/apparmor.d/
+diff --git a/debian/usr.sbin.charon-systemd b/debian/usr.sbin.charon-systemd
+new file mode 100644
+index 00000000..e1769f29
+--- /dev/null
++++ b/debian/usr.sbin.charon-systemd
+@@ -0,0 +1,76 @@
++# ------------------------------------------------------------------
++#
++#   Copyright (C) 2016 Canonical Ltd.
++#
++#   This program is free software; you can redistribute it and/or
++#   modify it under the terms of version 2 of the GNU General Public
++#   License published by the Free Software Foundation.
++#
++#   Author: Jonathan Davies <jonathan.davies@canonical.com>
++#           Ryan Harper <ryan.harper@canonical.com>
++#
++# ------------------------------------------------------------------
++
++#include <tunables/global>
++
++/usr/sbin/charon-systemd flags=(complain,attach_disconnected) {
++  #include <abstractions/base>
++  #include <abstractions/nameservice>
++  #include <abstractions/authentication>
++  #include <abstractions/openssl>
++  #include <abstractions/p11-kit>
++
++  capability ipc_lock,
++  capability net_admin,
++  capability net_raw,
++
++  # allow priv dropping (LP: #1333655)
++  capability chown,
++  capability setgid,
++  capability setuid,
++
++  # libcharon-extra-plugins: xauth-pam
++  capability audit_write,
++
++  # libstrongswan-standard-plugins: agent
++  capability dac_override,
++
++  capability net_admin,
++  capability net_raw,
++
++  network,
++  network raw,
++
++  /bin/dash                 rmPUx,
++
++  # libchron-extra-plugins: kernel-libipsec
++  /dev/net/tun              rw,
++
++  /etc/ipsec.conf           r,
++  /etc/ipsec.secrets        r,
++  /etc/ipsec.*.secrets      r,
++  /etc/ipsec.d/             r,
++  /etc/ipsec.d/**           r,
++  /etc/ipsec.d/crls/*       rw,
++  /etc/opensc/opensc.conf   r,
++  /etc/strongswan.conf      r,
++  /etc/strongswan.d/        r,
++  /etc/strongswan.d/**      r,
++  /etc/tnc_config           r,
++
++  /proc/sys/net/core/xfrm_acq_expires   w,
++
++  /run/charon.*             rw,
++  /run/pcscd/pcscd.comm     rw,
++
++  /usr/lib/ipsec/charon     rmix,
++  /usr/lib/ipsec/imcvs/     r,
++  /usr/lib/ipsec/imcvs/**   rm,
++
++  /usr/lib/*/opensc-pkcs11.so rm,
++
++  /var/lib/strongswan/*     r,
++
++  # Site-specific additions and overrides. See local/README for details.
++  #include <local/usr.sbin.charon-systemd>
++}
+diff --git a/debian/usr.sbin.swanctl b/debian/usr.sbin.swanctl
+new file mode 100644
+index 00000000..627f5c0b
+--- /dev/null
++++ b/debian/usr.sbin.swanctl
+@@ -0,0 +1,32 @@
++#include <tunables/global>
++
++/usr/sbin/swanctl {
++  #include <abstractions/base>
++
++  # Allow /etc/swanctl/x509ca/ files to symlink to system-wide ca-certificates
++  #include <abstractions/ssl_certs>
++
++  # CAP_DAC_OVERRIDE is needed for optional charon.user/charon.group
++  # configuration
++  capability dac_override,
++
++  # Allow reading strongswan.conf configuration files
++  /etc/strongswan.conf          r,
++  /etc/strongswan.d/            r,
++  /etc/strongswan.d/**          r,
++
++  # All reading configuration, certificate, and key files beneath /etc/swanctl/
++  /etc/swanctl/**               r,
++
++  # Allow communication with VICI plugin UNIX domain socket
++  /run/charon.vici              rw,
++
++  # As of 5.5.2, swanctl unnecessarily loads plugins by default, even though no
++  # plugins are actually used by swanctl.  The following can be removed if
++  # plugin loading is disabled.
++  #include <abstractions/nameservice>
++  #include <abstractions/openssl>
++
++  # Site-specific additions and overrides. See local/README for details.
++  #include <local/usr.sbin.swanctl>
++}

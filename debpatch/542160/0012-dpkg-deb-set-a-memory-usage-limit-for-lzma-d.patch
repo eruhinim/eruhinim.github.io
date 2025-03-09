@@ -1,0 +1,416 @@
+From 9058ea9f977bda02deb466b4bb0e7ba201002bc5 Mon Sep 17 00:00:00 2001
+From: Jonathan Nieder <jrnieder@gmail.com>
+Date: Sat, 17 Oct 2009 05:59:08 -0500
+Subject: [PATCH 12/15] dpkg-deb: set a memory usage limit for lzma -d
+
+Unlike gzip and bzip2, LZ77-based compressors can continue to
+improve their compression ratio quite a bit in some cases by
+using more memory.  For this reason, the .lzma format allows a
+dictionary size (and thus memory usage) up to 4 GiB, which can
+present problems for the decompressor, including making a system
+unresponsive or summoning the dreaded Linux OOM killer.  Make
+sure dpkg does not use more than 100 MiB, nor 40% of available
+RAM, when decompressing an lzma-compressed package to unpack it
+or examine its contents.
+
+If the lzma command is provided by XZ Utils, also make sure _not_
+to set a memory usage limit below 10 MiB.  Without this change,
+dpkg would refuse to install packages compressed with the default
+lzma settings on memory-starved systems (with less than 20 MiB of
+physical memory).
+
+Add a --memlimit command-line option to allow overriding the
+memory usage limit in case it is too low.
+
+Signed-off-by: Jonathan Nieder <jrnieder@gmail.com>
+---
+ configure.ac                   |    2 +
+ dpkg-deb/dpkg-deb.h            |    3 +
+ dpkg-deb/extract.c             |    2 +-
+ dpkg-deb/main.c                |   24 ++++++++++
+ lib/dpkg/Makefile.am           |    5 ++
+ lib/dpkg/compression-backend.c |  100 +++++++++++++++++++++++++++++++++++++++-
+ lib/dpkg/compression-backend.h |    6 ++-
+ lib/dpkg/compression.c         |    8 ++-
+ lib/dpkg/dpkg.h                |    4 +-
+ man/dpkg-deb.1                 |    8 +++
+ 10 files changed, 153 insertions(+), 9 deletions(-)
+
+diff --git a/configure.ac b/configure.ac
+index 52f019c..7a7458c 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -75,6 +75,7 @@ fi
+ 
+ # Checks for header files.
+ AC_HEADER_STDC
++AC_HEADER_STDBOOL
+ AC_CHECK_HEADERS([stddef.h error.h locale.h libintl.h kvm.h \
+                   sys/cdefs.h sys/syscall.h])
+ DPKG_CHECK_DEFINE(TIOCNOTTY, [sys/ioctl.h])
+@@ -102,6 +103,7 @@ DPKG_CHECK_DECL([WCOREDUMP], [sys/wait.h])
+ DPKG_CHECK_COMPAT_FUNCS([getopt getopt_long obstack_free \
+                          strnlen strerror strsignal \
+                          scandir alphasort unsetenv])
++TUKLIB_PHYSMEM
+ AC_CHECK_FUNCS([strtoul isascii bcopy memcpy lchown setsid getdtablesize])
+ 
+ DPKG_COMPILER_WARNINGS
+diff --git a/dpkg-deb/dpkg-deb.h b/dpkg-deb/dpkg-deb.h
+index 2bd6d88..edb8a8f 100644
+--- a/dpkg-deb/dpkg-deb.h
++++ b/dpkg-deb/dpkg-deb.h
+@@ -22,6 +22,8 @@
+ #ifndef DPKG_DEB_H
+ #define DPKG_DEB_H
+ 
++#include <stdint.h>
++
+ typedef void dofunction(const char *const *argv);
+ dofunction do_build DPKG_ATTR_NORET;
+ dofunction do_contents, do_control, do_showinfo;
+@@ -37,6 +39,7 @@ void extracthalf(const char *debar, const char *directory,
+ extern const char *compression;
+ extern const char* showformat;
+ extern enum compress_type compress_type;
++extern uint64_t compress_memlimit;
+ 
+ #define ARCHIVEVERSION		"2.0"
+ 
+diff --git a/dpkg-deb/extract.c b/dpkg-deb/extract.c
+index 4c429d7..f0abce8 100644
+--- a/dpkg-deb/extract.c
++++ b/dpkg-deb/extract.c
+@@ -292,7 +292,7 @@ void extracthalf(const char *debar, const char *directory,
+     m_dup2(readfromfd,0);
+     if (admininfo) close(p1[0]);
+     if (taroption) { m_dup2(p2[1],1); close(p2[0]); close(p2[1]); }
+-    decompress_cat(compress_type, 0, 1, _("data"));
++    decompress_cat(compress_type, 0, 1, compress_memlimit, _("data"));
+   }
+   if (readfromfd != fileno(ar)) close(readfromfd);
+   if (taroption) close(p2[1]);
+diff --git a/dpkg-deb/main.c b/dpkg-deb/main.c
+index b478ba9..0f2ef19 100644
+--- a/dpkg-deb/main.c
++++ b/dpkg-deb/main.c
+@@ -25,6 +25,7 @@
+ 
+ #include <stdio.h>
+ #include <string.h>
++#include <stdint.h>
+ #include <stdlib.h>
+ #include <signal.h>
+ #include <sys/stat.h>
+@@ -107,6 +108,8 @@ usage(const struct cmdinfo *cip, const char *value)
+ "  -z#                              Set the compression level when building.\n"
+ "  -Z<type>                         Set the compression type used when building.\n"
+ "                                     Allowed values: gzip, bzip2, lzma, none.\n"
++"  -M, --memlimit=<bytes>           Set the memory usage limit used when\n"
++"                                     examining lzma compressed packages.\n"
+ "\n"));
+ 
+   printf(_(
+@@ -137,11 +140,13 @@ const char printforhelp[]=
+ int debugflag=0, nocheckflag=0, oldformatflag=BUILDOLDPKGFORMAT;
+ const char* compression=NULL;
+ enum compress_type compress_type = compress_type_gzip;
++uint64_t compress_memlimit = 0;
+ const struct cmdinfo *cipaction = NULL;
+ dofunction *action = NULL;
+ 
+ static void setaction(const struct cmdinfo *cip, const char *value);
+ static void setcompresstype(const struct cmdinfo *cip, const char *value);
++static void setmemlimit(const struct cmdinfo *cip, const char *value);
+ 
+ static dofunction *const dofunctions[]= {
+   do_build,
+@@ -174,6 +179,7 @@ static const struct cmdinfo cmdinfos[]= {
+   { "nocheck",       0,   0, &nocheckflag,   NULL,         NULL,          1 },
+   { "compression",   'z', 1, NULL,           &compression, NULL,          1 },
+   { "compress_type", 'Z', 1, NULL,           NULL,         setcompresstype  },
++  { "memlimit",      'M', 1, NULL,           NULL,         setmemlimit      },
+   { "showformat",    0,   1, NULL,           &showformat,  NULL             },
+   { "help",          'h', 0, NULL,           NULL,         usage            },
+   { "version",       0,   0, NULL,           NULL,         printversion     },
+@@ -206,6 +212,24 @@ static void setcompresstype(const struct cmdinfo *cip, const char *value) {
+     ohshit(_("unknown compression type `%s'!"), value);
+ }
+ 
++static void setmemlimit(const struct cmdinfo *cip, const char *value) {
++  const char *endp;
++  unsigned long long limit;
++
++  if (strchr(value, '-') != NULL)
++    ohshit(_("invalid integer for -M: '%s'"), value);
++
++  errno = 0;
++  limit = strtoull(value, (char **)&endp, 10);
++
++  if (value == endp || *endp != '\0')
++    ohshit(_("invalid integer for -M: '%s'"), value);
++  if (errno == ERANGE || limit > UINT64_MAX)
++    ohshit(_("argument to -M out of range: '%s'"), value);
++
++  compress_memlimit = (uint64_t)limit;
++}
++
+ int main(int argc, const char *const *argv) {
+   jmp_buf ejbuf;
+ 
+diff --git a/lib/dpkg/Makefile.am b/lib/dpkg/Makefile.am
+index 7428f7c..22cbeff 100644
+--- a/lib/dpkg/Makefile.am
++++ b/lib/dpkg/Makefile.am
+@@ -23,6 +23,11 @@ libdpkg_a_SOURCES = \
+ 	cleanup.c \
+ 	compression.c \
+ 	compression-backend.c compression-backend.h \
++	$(top_srcdir)/lib/tuklib/tuklib_physmem.c \
++	$(top_srcdir)/lib/tuklib/tuklib_physmem.h \
++	$(top_srcdir)/lib/tuklib/tuklib_common.h \
++	$(top_srcdir)/lib/tuklib/tuklib_config.h \
++	$(top_srcdir)/lib/tuklib/sysdefs.h \
+ 	database.c \
+ 	dbmodify.c \
+ 	dump.c \
+diff --git a/lib/dpkg/compression-backend.c b/lib/dpkg/compression-backend.c
+index af263cc..666e893 100644
+--- a/lib/dpkg/compression-backend.c
++++ b/lib/dpkg/compression-backend.c
+@@ -4,9 +4,12 @@
+ #include <dpkg/i18n.h>
+ 
+ #include <stdarg.h>
++#include <stdint.h>
++#include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
++#include <sys/resource.h>
+ #include <errno.h>
+ 
+ #ifdef WITH_ZLIB
+@@ -15,10 +18,12 @@
+ #ifdef WITH_BZ2
+ #include <bzlib.h>
+ #endif
++#include <tuklib/tuklib_physmem.h>
+ 
+ #include <dpkg/dpkg.h>
+ #include <dpkg/varbuf.h>
+ #include <dpkg/buffer.h>
++#include <dpkg/subproc.h>
+ #include <dpkg/macros.h>
+ 
+ #include "compression-backend.h"
+@@ -62,6 +67,29 @@ fd_fd_filter(int fd_in, int fd_out, const char *desc,
+ 	varbuffree(&argbuf);
+ }
+ 
++/* Default memory usage limit for LZ77-based decompressors. */
++static uint64_t
++default_memlimit()
++{
++	/*
++	 * The command-line decoder from XZ Utils limits itself to 40% of
++	 * available RAM, so take that as a reasonable default memory
++	 * limit.  If tuklib_physmem() fails, this is zero.
++	 */
++	uint64_t limit = tuklib_physmem() * 2 / 5;
++
++	/*
++	 * Assume one can manage to find 10 MiB even on memory-starved
++	 * systems, so dpkg won’t refuse to unpack packages shipped by
++	 * Debian.  Do not use more than 100 MiB, as a safety measure
++	 * for servers processing untrusted packages.
++	 */
++	limit = max(limit, 10 << 20);
++	limit = min(limit, 100 << 20);
++
++	return limit;
++}
++
+ #define DECOMPRESS(format, zFile, zdopen, zread, zerror, ERR_ERRNO, \
+ 		fd_in, fd_out, desc) do \
+ { \
+@@ -198,10 +226,78 @@ compress_bzip2(int fd_in, int fd_out, char compression, const char *desc)
+ }
+ #endif
+ 
++static bool
++input_matches(FILE *in, const char *str)
++{
++	char ch;
++
++	while (ch = *str++)
++		if (fgetc(in) != ch)
++			return false;
++
++	return true;
++}
++
++static bool
++lzma_is_xz(const char *desc)
++{
++	int pipefd[2];
++	pid_t cpid;
++
++	m_pipe(pipefd);
++	cpid = m_fork();
++
++	if (cpid == 0) {
++		m_dup2(pipefd[1], 1);
++		close(pipefd[0]);
++		close(pipefd[1]);
++		execlp(LZMA, "lzma", "--version", NULL);
++		ohshite(_("%s: failed to exec '%s %s'"),
++			desc, "lzma", "--version");
++	} else {
++		FILE *pipef;
++		bool ret;
++
++		close(pipefd[1]);
++		pipef = fdopen(pipefd[0], "r");
++
++		ret = input_matches(pipef, "xz ");
++
++		if (ferror(pipef))
++			ohshite(_("%s: error reading lzma's pipe"), desc);
++		if (fclose(pipef))
++			ohshite(_("%s: error closing lzma's pipe"), desc);
++		waitsubproc(cpid, "lzma --version", PROCPIPE);
++
++		return ret;
++	}
++}
++
+ void
+-decompress_lzma(int fd_in, int fd_out, const char *desc)
++decompress_lzma(int fd_in, int fd_out, uint64_t memlimit, const char *desc)
+ {
+-	fd_fd_filter(fd_in, fd_out, desc, LZMA, "lzma", "-dc");
++	if (memlimit == 0)
++		memlimit = default_memlimit();
++
++	if (lzma_is_xz(desc)) {
++		fd_fd_filter(fd_in, fd_out, desc, LZMA, "lzma",
++			"-dcM%" PRIu64, memlimit);
++	} else {
++		struct rlimit lim;
++
++		if (getrlimit(RLIMIT_AS, &lim))
++			ohshite(_("%s: failed to get address space limit"),
++				desc);
++		if (memlimit > lim.rlim_max)
++			lim.rlim_cur = lim.rlim_max;
++		else
++			lim.rlim_cur = (rlim_t)memlimit;
++
++		if (setrlimit(RLIMIT_AS, &lim))
++			ohshite(_("%s: failed to set address space limit"),
++				desc);
++		fd_fd_filter(fd_in, fd_out, desc, LZMA, "lzma", "-dc");
++	}
+ }
+ 
+ void
+diff --git a/lib/dpkg/compression-backend.h b/lib/dpkg/compression-backend.h
+index 7f3c5d6..86c55f2 100644
+--- a/lib/dpkg/compression-backend.h
++++ b/lib/dpkg/compression-backend.h
+@@ -12,14 +12,16 @@
+ #include <config.h>
+ #include <compat.h>
+ 
++#include <stdint.h>
++
+ #include <dpkg/macros.h>
+ 
+ void decompress_gzip(int fd_in, int fd_out, const char *desc)
+ 	DPKG_ATTR_NORET;
+ void decompress_bzip2(int fd_in, int fd_out, const char *desc)
+ 	DPKG_ATTR_NORET;
+-void decompress_lzma(int fd_in, int fd_out, const char *desc)
+-	DPKG_ATTR_NORET;
++void decompress_lzma(int fd_in, int fd_out, uint64_t memlimit,
++	const char *desc) DPKG_ATTR_NORET;
+ void decompress_noop(int fd_in, int fd_out, const char *desc)
+ 	DPKG_ATTR_NORET;
+ 
+diff --git a/lib/dpkg/compression.c b/lib/dpkg/compression.c
+index c8a6b75..847d318 100644
+--- a/lib/dpkg/compression.c
++++ b/lib/dpkg/compression.c
+@@ -1,14 +1,16 @@
+ #include <config.h>
+ #include <compat.h>
+ 
+-#include <stdlib.h>
+ #include <stdarg.h>
++#include <stdint.h>
++#include <stdlib.h>
+ 
+ #include <dpkg/dpkg.h>
+ #include <dpkg/varbuf.h>
+ #include <dpkg/compression-backend.h>
+ 
+-void decompress_cat(enum compress_type type, int fd_in, int fd_out, char *desc, ...) {
++void decompress_cat(enum compress_type type, int fd_in, int fd_out,
++                    uint64_t memlimit, char *desc, ...) {
+   va_list al;
+   struct varbuf v = VARBUF_INIT;
+ 
+@@ -22,7 +24,7 @@ void decompress_cat(enum compress_type type, int fd_in, int fd_out, char *desc,
+     case compress_type_bzip2:
+       decompress_bzip2(fd_in, fd_out, v.buf);
+     case compress_type_lzma:
+-      decompress_lzma(fd_in, fd_out, v.buf);
++      decompress_lzma(fd_in, fd_out, memlimit, v.buf);
+     case compress_type_cat:
+       decompress_noop(fd_in, fd_out, v.buf);
+     default:
+diff --git a/lib/dpkg/dpkg.h b/lib/dpkg/dpkg.h
+index afe650f..94a5214 100644
+--- a/lib/dpkg/dpkg.h
++++ b/lib/dpkg/dpkg.h
+@@ -30,6 +30,7 @@ DPKG_BEGIN_DECLS
+ #include <setjmp.h>
+ #include <stdarg.h>
+ #include <stdio.h>
++#include <stdint.h>
+ #include <sys/types.h>
+ 
+ #ifdef HAVE_SYS_CDEFS_H
+@@ -224,7 +225,8 @@ enum compress_type {
+ };
+ 
+ void decompress_cat(enum compress_type type, int fd_in, int fd_out,
+-                    char *desc, ...) DPKG_ATTR_NORET DPKG_ATTR_PRINTF(4);
++                    uint64_t memlimit, char *desc, ...)
++                    DPKG_ATTR_NORET DPKG_ATTR_PRINTF(5);
+ void compress_cat(enum compress_type type, int fd_in, int fd_out,
+                   const char *compression, char *desc, ...)
+                   DPKG_ATTR_NORET DPKG_ATTR_PRINTF(5);
+diff --git a/man/dpkg-deb.1 b/man/dpkg-deb.1
+index bb08dc9..37b43b3 100644
+--- a/man/dpkg-deb.1
++++ b/man/dpkg-deb.1
+@@ -197,6 +197,14 @@ Specify which compression type to use when building a package. Allowed
+ values are \fIgzip\fP, \fIbzip2\fP, \fIlzma\fP, and \fInone\fP (default
+ is \fIgzip\fP).
+ .TP
++.BR \-M ", " \-\-memlimit= \fImemory_limit\fP
++Specify a maximum in bytes for memory usage when decompressing an lzma
++or xz compressed package.  The default is 40% of the installed RAM,
++clamped to at most 100 MiB and at least 10 MiB, which allows
++decompression of any package built at the default compression level.
++This option allows one to increase the limit to allow decompression of
++packages built with a higher compression level than the default.
++.TP
+ .BR \-\-new
+ Ensures that
+ .B dpkg\-deb
+-- 
+1.6.5.rc1.199.g596ec
+

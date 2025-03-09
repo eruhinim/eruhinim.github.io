@@ -1,0 +1,141 @@
+--- a/elisp/debian-el/debian-bug.el	2007-09-25 00:25:00.000000000 +0000
++++ b/elisp/debian-el/debian-bug.el	2008-07-06 22:21:00.000000000 +0000
+@@ -515,6 +515,11 @@
+   "Buffer-local variable holding the package name for this submission.")
+ (make-variable-buffer-local 'debian-bug-package-name)
+ 
++(defvar debian-bug-bts-address "bugs.debian.org"
++  "Buffer-local variable holding the name of BTS to which the bug
++report will be submitted.")
++(make-variable-buffer-local 'debian-bug-bts-address)
++
+ (defvar debian-bug-easymenu-list nil
+   "Holds the dynamically built easymenu list.")
+ (defvar debian-bug-bugs-menu nil
+@@ -598,6 +603,64 @@
+        (t
+         'none))))
+ 
++(defun debian-bug-read-control-file-field (package field)
++  "Return the value of FIELD in the control file of PACKAGE. This is
++achieved by parsing the output of dpkg -s. If the field doesn't exist,
++nil is returned."
++  (let ((case-fold-search t))
++    (with-temp-buffer
++      (call-process "dpkg" nil '(t nil) nil "-s" package)
++      (goto-char (point-min))
++      (if (re-search-forward
++           (concat "^" field " *: *\\(.+\\)$") nil t)
++          (match-string 1)))))
++
++(defun debian-bug-read-bug-control-file-field (package field)
++  "Return the value of FIELD in the bug control file of PACKAGE, if it
++exists. Otherwise nil is returned."
++  (let ((control (concat "/usr/share/bug/" package "/control"))
++        (case-fold-search t))
++    (if (file-readable-p control)
++        (with-temp-buffer
++          (insert-file-contents-literally control)
++          (goto-char (point-min))
++          (if (re-search-forward
++               (concat "^" field " *: *\\(.+\\)$") nil t)
++              (match-string 1))))))
++
++(defun debian-bug-find-bts-address (package)
++  "Return the address of the BTS where bug reports on PACKAGE
++should be submitted, as specified by either the Bugs field in
++the control file for PACKAGE, or the Send-To field in the file
++/usr/share/bug/PACKAGE/control. If neither of these fields have
++been specified, the address of the Debian BTS is returned. Note
++that the address returned can be either a complete e-mail address
++or the host address of the BTS. In the latter case the address must
++be expanded, by prepending \"submit\", \"maintonly\" or \"quiet\",
++as appropriate, followed by the at-sign, before it can be used to
++submit bug reports."
++  (let ((bugs-field (debian-bug-read-control-file-field
++                     package "Bugs"))
++        (send-to-field (debian-bug-read-bug-control-file-field
++                        package "Send-To")))
++    (cond
++     ((and bugs-field (string-match "^\\(debbugs://\\|mailto:\\)\\(.+\\)$"
++                                    bugs-field))
++      (match-string 2 bugs-field))
++     (send-to-field send-to-field)
++     (t "bugs.debian.org"))))
++
++(defun debian-bug-bts-mail (type bts-address)
++  "Construct and return the complete e-mail address which should be
++used to submit the bug report to the BTS according to TYPE. The TYPE
++parameter is typically either of the strings \"submit\", \"quiet\" or
++\"maintonly\".  However, if BTS-ADDRESS is already a complete e-mail
++address, the TYPE parameter is ignored, and this function simply
++returns BTS-ADDRESS."
++  (if (string-match "@" bts-address)
++      bts-address
++    (concat type "@" bts-address)))
++
+ (defun debian-bug-prefill-report (package severity)
+   "Prefill bug report for PACKAGE at SEVERITY, calling bug or reportbug."
+   (cond
+@@ -630,7 +693,9 @@
+    ;; neither reportbug nor bug
+    (t
+     (insert
+-     "\nPackage: " package
++     "Package: " (or (debian-bug-read-bug-control-file-field
++                      package "Submit-As")
++                     package)
+      "\nVersion: " (let ((sym (intern-soft package debian-bug-packages-obarray)))
+ 		     (or (if (boundp sym) (symbol-value sym))
+ 			 (format-time-string "+N/A; reported %Y-%m-%d")))
+@@ -684,6 +749,8 @@
+       (when (re-search-forward "^cc:" nil t)
+         (delete-region (match-beginning 0)(match-end 0))
+         (insert "X-Debbugs-CC:"))
++      (setq debian-bug-bts-address
++            (debian-bug-find-bts-address package))
+       (goto-char (point-min))
+       (cond
+        ((re-search-forward "To: " nil t)
+@@ -693,7 +760,10 @@
+        (t
+         (insert "To: " debian-bug-mail-address)))
+       (if (string-equal severity "minor")
+-          (debian-bug--set-bts-address "maintonly@bugs.debian.org"))
++          (debian-bug--set-bts-address
++           (debian-bug-bts-mail "maintonly" debian-bug-bts-address))
++        (debian-bug--set-bts-address
++         (debian-bug-bts-mail "submit" debian-bug-bts-address)))
+       (goto-char (point-min))
+       (cond
+        ((re-search-forward "Subject: " nil t)
+@@ -1301,17 +1371,23 @@
+       :selected (debian-bug--is-custom-From)]
+      "--"
+      ["To BTS, Maintainer and Mailing Lists"
+-      (debian-bug--set-bts-address "submit@bugs.debian.org")
++      (debian-bug--set-bts-address
++       (debian-bug-bts-mail "submit" debian-bug-bts-address))
+       :style radio
+-      :selected (debian-bug--is-bts-address debian-bug-mail-address)]
++      :selected (debian-bug--is-bts-address
++                 (debian-bug-bts-mail "submit" debian-bug-bts-address))]
+      ["To BTS and Maintainer Only"
+-     (debian-bug--set-bts-address "maintonly@bugs.debian.org")
++      (debian-bug--set-bts-address
++       (debian-bug-bts-mail "maintonly" debian-bug-bts-address))
+      :style radio
+-     :selected (debian-bug--is-bts-address debian-bug-mail-maintonly-address)]
++     :selected (debian-bug--is-bts-address
++                (debian-bug-bts-mail "maintonly" debian-bug-bts-address))]
+      ["To BTS Only"
+-      (debian-bug--set-bts-address "quiet@bugs.debian.org")
++      (debian-bug--set-bts-address
++       (debian-bug-bts-mail "quiet" debian-bug-bts-address))
+       :style radio
+-      :selected (debian-bug--is-bts-address debian-bug-mail-quiet-address)]
++      :selected (debian-bug--is-bts-address
++                 (debian-bug-bts-mail "quiet" debian-bug-bts-address))]
+      "--"
+      ["CC debian-devel" (debian-bug--toggle-CC-devel)
+       :style toggle

@@ -1,0 +1,111 @@
+diff --git a/debian/changelog b/debian/changelog
+index 296af42..baf4040 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,3 +1,13 @@
++dictionaries-common (1.12.11+deb7u1) unstable; urgency=low
++
++  * Improve general behavior on debconf database corruption:
++    - update-default.in: Use /var/lib/dictionaries-common info as last
++      resource to try getting a default in case of debconf database
++      corruption. This should work around installation error better.
++    - Use a debconf question to warn about debconf database corruption.
++
++ -- Agustin Martin Domingo <agmartin@debian.org>  Tue, 22 Jul 2014 15:52:50 +0200
++
+ dictionaries-common (1.12.11) unstable; urgency=low
+ 
+   * debian/control: Add Breaks against ancient myspell-cs-cz,
+diff --git a/debian/dictionaries-common.templates b/debian/dictionaries-common.templates
+index 965ec8f..b20d568 100644
+--- a/debian/dictionaries-common.templates
++++ b/debian/dictionaries-common.templates
+@@ -1,3 +1,19 @@
++Template: dictionaries-common/debconf_database_corruption
++Type: note
++Description: Possible debconf database corruption
++ The setting for "${question}" is missing, but packages providing
++ candidates are installed.
++ .
++ This may be due to corruption in the debconf database. See
++ "/usr/share/doc/dictionaries-common/README.problems" on "Debconf
++ database corruption".
++ .
++ In this case, running "/usr/share/debconf/fix_db.pl" can help to put
++ the debconf database in a consistent state.
++ .
++ Some questions are likely to be asked after this message in order to
++ leave the dictionaries system in a (provisionally) working state.
++
+ Template: dictionaries-common/invalid_debconf_value
+ Type: note
+ _Description: An invalid debconf value [${value}] has been found
+@@ -108,4 +124,3 @@ _Description: Default values for ispell dictionary/wordlist are not set here
+  will not set the default ispell dictionary.
+  .
+  Use instead 'select-default-ispell' or 'select-default-wordlist' scripts.
+-
+diff --git a/scripts/system/update-default.in b/scripts/system/update-default.in
+index 8333713..6b1bbe2 100644
+--- a/scripts/system/update-default.in
++++ b/scripts/system/update-default.in
+@@ -74,17 +74,13 @@ if ( $ret == 0 && $value ){
+   $manual++;
+ } else {
+   # Question is empty, but $class elements are installed. Two possibilities.
+-  if ( -x "/usr/bin/apt-extracttemplates" ){
+-    # apt-utils is installed. Other possibility is debconf database corruption.
+-    my $shared_question = "shared/packages-$class";
+-    print STDERR "$program: Question empty but elements installed for class \"$class\"\n";
+-    print STDERR "  $question: return code: \"$ret\", value: \"$value\"\n";
+-    print STDERR "  Choices: " . metaget ($question, "choices") . "\n";
+-    my ($shared_ret,$shared_owners) = metaget ($shared_question, "owners");
+-    print STDERR "  $shared_question: return code: \"$shared_ret\" owners/error: \"$shared_owners\"\n";
+-    print STDERR "  Installed elements: " . join(', ',sort keys %{$dictionaries}) . "\n\n";
+-    print STDERR "  Please see \"/usr/share/doc/dictionaries-common/README.problems\", section\n";
+-    print STDERR "  \"Debconf database corruption\" for recovery info.\n\n";
++  if ( -x "/usr/bin/apt-extracttemplates" ){ # apt-utils is installed.
++    # This seems to be debconf database corruption. Warn loudly about it.
++    my $debconf_dbase_corruption_question = "dictionaries-common/debconf_database_corruption";
++    subst($debconf_dbase_corruption_question,"question",$question);
++    input("high",$debconf_dbase_corruption_question);
++    title ("dictionaries-common: [I:ispell dictionaries:I][W:wordlists:W]");
++    go ();
+   } else {
+     # apt-utils is not installed, so $class templates may not have been parsed at preconfigure stage.
+     # Delay settings until ispell dictionaries/wordlists are configured and their debconf templates parsed.
+@@ -96,22 +92,24 @@ if ( $ret == 0 && $value ){
+ unless ( $manual ){
+   # Handle invalid debconf values
+   if ( not exists $dictionaries->{$value} ){
+-    my @available_keys = ();
+-    foreach ( split (/\s*,\s*/, metaget ($question, "choices")) ){
+-      # strip leading/trailing whitespace and create a list of available keys
+-      s/^\s+//;
+-      s/\s+$//;
+-      push (@available_keys,$_) if ( defined $dictionaries->{$_} );
+-    }
++    # debconf database is presumably corrupted. Try after stored values.
++    my @available_keys = sort {lc $a cmp lc $b} keys %$dictionaries;
+     my $choices    = join (', ', sort {lc $a cmp lc $b} @available_keys);
++    print STDERR "$program: Trying to get a default value from \"$choices\"\n";
+     my $forced_key = $available_keys[0] ||
+       die "$program: Selected [I:ispell dictionary:I][W:wordlist:W]" .
+       " \"$value\" \n" .
+       "does not correspond to any installed package in the system\n" .
+       "and no alternative [I:ispell dictionary:I][W:wordlist:W] could be selected.\n";
+-    subst($iquestion,"value",$value);
+-    fset ($iquestion,"seen","false");
+-    input("high",$iquestion);                # Warn about what happened
++
++    # Warn about what might have happened if not debconf database corruption
++    if ( $value ){
++      subst($iquestion,"value",$value);
++      fset ($iquestion,"seen","false");
++      input("high",$iquestion);
++    }
++
++    # Prepare a selection box to get a default.
+     subst ($question, "choices", $choices);  # Put sane values in debconf choices field
+     subst ($question, "echoices", $choices); # Put sane values in debconf echoices field
+     set ($question, $forced_key);            # Set debconf value to a sane one

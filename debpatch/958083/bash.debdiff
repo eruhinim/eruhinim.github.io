@@ -1,0 +1,261 @@
+diff -Nru bash-5.1/debian/bash.preinst.c bash-5.1/debian/bash.preinst.c
+--- bash-5.1/debian/bash.preinst.c	2021-10-23 11:36:25.000000000 +0200
++++ bash-5.1/debian/bash.preinst.c	1970-01-01 01:00:00.000000000 +0100
+@@ -1,46 +0,0 @@
+-/*
+- * This file is in the public domain.
+- * You may freely use, modify, distribute, and relicense it.
+- */
+-
+-#include "bash.preinst.h"
+-#include <errno.h>
+-#include <unistd.h>
+-
+-static void backup(const char *file, const char *dest)
+-{
+-	const char * const cmd[] = {"cp", "-dp", file, dest, NULL};
+-	if (exists(file))
+-		run(cmd);
+-}
+-
+-static void force_symlink(const char *target, const char *link,
+-						const char *temp)
+-{
+-	/*
+-	 * Forcibly create a symlink to "target" from "link".
+-	 * This is performed in two stages with an
+-	 * intermediate temporary file because symlink(2) cannot
+-	 * atomically replace an existing file.
+-	 */
+-	if ((unlink(temp) && errno != ENOENT) ||
+-	    symlink(target, temp) ||
+-	    rename(temp, link))
+-		die_errno("cannot create symlink %s -> %s", link, target);
+-}
+-
+-int main(int argc, char *argv[])
+-{
+-	/* /bin/sh needs to point to a valid target. */
+-
+-	if (access("/bin/sh", X_OK)) {
+-		backup("/bin/sh", "/bin/sh.distrib");
+-		backup("/usr/share/man/man1/sh.1.gz",
+-			"/usr/share/man/man1/sh.distrib.1.gz");
+-
+-		force_symlink("bash", "/bin/sh", "/bin/sh.temp");
+-		force_symlink("bash.1.gz", "/usr/share/man/man1/sh.1.gz",
+-			"/usr/share/man/man1/sh.1.gz.temp");
+-	}
+-	return 0;
+-}
+diff -Nru bash-5.1/debian/bash.preinst.h bash-5.1/debian/bash.preinst.h
+--- bash-5.1/debian/bash.preinst.h	2021-10-23 11:36:25.000000000 +0200
++++ bash-5.1/debian/bash.preinst.h	1970-01-01 01:00:00.000000000 +0100
+@@ -1,27 +0,0 @@
+-#ifndef BASH_PREINST_H
+-#define BASH_PREINST_H
+-
+-/*
+- * This file is in the public domain.
+- * You may freely use, modify, distribute, and relicense it.
+- */
+-
+-#define _XOPEN_SOURCE 700
+-#include <stdio.h>
+-#include <stdarg.h>
+-#include <sys/types.h>
+-
+-#if !defined(__GNUC__) && !defined(__attribute__)
+-# define __attribute__(x)
+-#endif
+-#define NORETURN __attribute__((__noreturn__))
+-#define PRINTFLIKE __attribute__((format(printf, 1, 2)))
+-
+-extern NORETURN PRINTFLIKE void die_errno(const char *fmt, ...);
+-extern NORETURN PRINTFLIKE void die(const char *fmt, ...);
+-
+-extern int exists(const char *path);
+-
+-extern void run(const char * const cmd[]);	/* spawn and wait */
+-
+-#endif
+diff -Nru bash-5.1/debian/bash.preinst-lib.c bash-5.1/debian/bash.preinst-lib.c
+--- bash-5.1/debian/bash.preinst-lib.c	2021-10-23 11:36:25.000000000 +0200
++++ bash-5.1/debian/bash.preinst-lib.c	1970-01-01 01:00:00.000000000 +0100
+@@ -1,96 +0,0 @@
+-/*
+- * This file is in the public domain.
+- * You may freely use, modify, distribute, and relicense it.
+- */
+-
+-#include "bash.preinst.h"
+-#include <stdio.h>
+-#include <stdlib.h>
+-#include <stdarg.h>
+-#include <string.h>
+-#include <errno.h>
+-#include <sys/types.h>
+-#include <sys/stat.h>
+-#include <sys/wait.h>
+-#include <unistd.h>
+-#include <spawn.h>
+-
+-extern char **environ;
+-
+-__attribute__((format(printf, 1, 0)))
+-static void vreportf(const char *err, va_list params, int errnum)
+-{
+-	fprintf(stderr, "bash.preinst: ");
+-	vfprintf(stderr, err, params);
+-	if (errnum)
+-		fprintf(stderr, ": %s", strerror(errnum));
+-	fprintf(stderr, "\n");
+-}
+-
+-__attribute__((format(printf, 1, 2)))
+-NORETURN void die_errno(const char *fmt, ...)
+-{
+-	va_list params;
+-	va_start(params, fmt);
+-	vreportf(fmt, params, errno);
+-	va_end(params);
+-	exit(1);
+-}
+-
+-__attribute__((format(printf, 1, 2)))
+-NORETURN void die(const char *fmt, ...)
+-{
+-	va_list params;
+-	va_start(params, fmt);
+-	vreportf(fmt, params, 0);
+-	va_end(params);
+-	exit(1);
+-}
+-
+-int exists(const char *file)
+-{
+-	struct stat sb;
+-	if (!lstat(file, &sb))
+-		return 1;
+-	if (errno == ENOENT)
+-		return 0;
+-	die_errno("cannot get status of %s", file);
+-}
+-
+-static void wait_or_die(pid_t child, const char *name)
+-{
+-	int status;
+-	if (waitpid(child, &status, 0) != child)
+-		die_errno("cannot wait for %s", name);
+-	if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+-		return;
+-
+-	if (WIFEXITED(status))
+-		die("%s exited with status %d", name, WEXITSTATUS(status));
+-	if (WIFSIGNALED(status))
+-		die("%s killed by signal %d", name, WTERMSIG(status));
+-	if (WIFSTOPPED(status))
+-		die("%s stopped by signal %d", name, WSTOPSIG(status));
+-	die("waitpid is confused (status=%d)", status);
+-}
+-
+-static pid_t spawn(const char * const cmd[], int out, int err)
+-{
+-	pid_t child;
+-	posix_spawn_file_actions_t redir;
+-
+-	if (posix_spawn_file_actions_init(&redir) ||
+-	    (out >= 0 && posix_spawn_file_actions_adddup2(&redir, out, 1)) ||
+-	    (err >= 0 && posix_spawn_file_actions_adddup2(&redir, err, 2)) ||
+-	    posix_spawnp(&child, cmd[0], &redir, NULL,
+-						(char **) cmd, environ) ||
+-	    posix_spawn_file_actions_destroy(&redir))
+-		die_errno("cannot run %s", cmd[0]);
+-	return child;
+-}
+-
+-void run(const char * const cmd[])
+-{
+-	pid_t child = spawn(cmd, -1, -1);
+-	wait_or_die(child, cmd[0]);
+-}
+diff -Nru bash-5.1/debian/changelog bash-5.1/debian/changelog
+--- bash-5.1/debian/changelog	2021-10-23 11:36:52.000000000 +0200
++++ bash-5.1/debian/changelog	2021-11-03 22:32:03.000000000 +0100
+@@ -1,3 +1,10 @@
++bash (5.1-3.2) unstable; urgency=medium
++
++  * Non-maintainer upload.
++  * remove preinst since "dash-as-sh"-transition is done. Closes: #958083
++
++ -- Johannes Schauer Marin Rodrigues <josch@debian.org>  Wed, 03 Nov 2021 22:32:03 +0100
++
+ bash (5.1-3.1) unstable; urgency=medium
+ 
+   [ Helmut Grohne ]
+diff -Nru bash-5.1/debian/rules bash-5.1/debian/rules
+--- bash-5.1/debian/rules	2020-10-15 19:11:50.000000000 +0200
++++ bash-5.1/debian/rules	2021-11-03 22:29:56.000000000 +0100
+@@ -89,8 +89,8 @@
+ static_conf_args := $(conf_args) \
+ 	--enable-static-link \
+ 
+-#build: bash-build static-build preinst-build check
+-build: before-build bash-build static-build preinst-build check
++#build: bash-build static-build check
++build: before-build bash-build static-build check
+ build-arch: build
+ build-indep: build
+ 
+@@ -167,24 +167,12 @@
+ 	dh_testdir
+ 	dh_testroot
+ 	rm -rf stamps build-*
+-	rm -f debian/bash.preinst debian/*.o
+ 	rm -f debian/README.Debian
+ 	rm -rf locales
+ 	rm -f clear_console
+ 	dh_autotools-dev_restoreconfig
+ 	dh_clean
+ 
+-preinst-build: debian/bash.preinst
+-
+-PREINST_OBJECTS = debian/bash.preinst.o debian/bash.preinst-lib.o
+-
+-$(PREINST_OBJECTS): %.o: %.c debian/bash.preinst.h
+-	$(CC) -c -o $@ $(CFLAGS) $(CPPFLAGS) $<
+-
+-debian/bash.preinst: $(PREINST_OBJECTS)
+-	$(CC) -o $@ $(CFLAGS) $(LDFLAGS) $(PREINST_OBJECTS)
+-	$(STRIP) -R .comment -R .note debian/bash.preinst
+-
+ # ---------------------------------------------------------------------------
+ 
+ 
+@@ -305,7 +293,7 @@
+ 	dh_md5sums -p$(p_doc)
+ 	dh_builddeb -p$(p_doc)
+ 
+-binary-bash: bash-install debian/bash.preinst
++binary-bash: bash-install
+ 	dh_testdir
+ 	dh_testroot
+ 	dh_installchangelogs -p$(p)
+@@ -322,7 +310,7 @@
+ 	dh_strip -p$(p)
+ 	dh_compress -p$(p)
+ 	dh_fixperms -p$(p)
+-	dh_shlibdeps -p$(p) -- -dPre-Depends $(d)/bin/bash debian/bash.preinst
++	dh_shlibdeps -p$(p) -- -dPre-Depends $(d)/bin/bash
+ 	dh_installdeb -p$(p)
+ 	dh_gencontrol -p$(p)
+ 	dh_md5sums -p$(p)
+@@ -449,7 +437,7 @@
+ 
+ .NOTPARALLEL: build
+ .PHONY: unpack binary binary-arch binary-indep clean \
+-    build bash-build static-build preinst-build \
++    build bash-build static-build \
+     check \
+     bash-configure static-configure \
+     binary-doc binary-bash binary-builtins binary-static \

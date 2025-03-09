@@ -1,0 +1,75 @@
+From 9b284029b29b3f27cc478198f7de73dfed61cf6d Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Fri, 16 Aug 2024 19:59:51 +0200
+Subject: [PATCH] Dpkg::Control::HashCore: Restrict field names
+
+FIXME: discuss, update manual pages, extend commit message.
+---
+ scripts/Dpkg/Control/HashCore.pm |  4 ++--
+ scripts/t/Dpkg_Control.t         | 28 +++++++++++++++++++++++++++-
+ 2 files changed, 29 insertions(+), 3 deletions(-)
+
+diff --git a/scripts/Dpkg/Control/HashCore.pm b/scripts/Dpkg/Control/HashCore.pm
+index 08f35c57b..cea329cf4 100644
+--- a/scripts/Dpkg/Control/HashCore.pm
++++ b/scripts/Dpkg/Control/HashCore.pm
+@@ -221,8 +221,8 @@ sub parse {
+         my ($name, $value) = split /\s*:\s*/, $_, 2;
+         if (defined $name and $name =~ m/^\S+?$/) {
+ 	    $parabody = 1;
+-            if ($lead eq '-') {
+-		$self->parse_error($desc, g_('field cannot start with a hyphen'));
++            if ($name !~ m{^[_]*[A-Za-z]+[A-Za-z0-9-]*[A-Za-z0-9]+$}) {
++                $self->parse_error($desc, g_('field name %s uses invalid format'), $name);
+ 	    }
+ 	    if (exists $self->{$name}) {
+ 		unless ($$self->{allow_duplicate}) {
+diff --git a/scripts/t/Dpkg_Control.t b/scripts/t/Dpkg_Control.t
+index 29311b8c8..8df78c227 100644
+--- a/scripts/t/Dpkg_Control.t
++++ b/scripts/t/Dpkg_Control.t
+@@ -20,7 +20,7 @@ use Test::More;
+ use Test::Dpkg qw(:needs :paths);
+ 
+ BEGIN {
+-    plan tests => 24;
++    plan tests => 35;
+ 
+     use_ok('Dpkg::Control');
+     use_ok('Dpkg::Control::Info');
+@@ -116,6 +116,32 @@ Architecture: all
+ Depends: hello
+ ', "Dump of second binary package of $datadir/control-1");
+ 
++# Check parsing deb822 data.
++my %deb822_bogus = (
++    no_separator => 'SomethingNotAField = with a value',
++    no_field => ': only value',
++    bad_start_hyphen => '-Bad-Field: hyphen-value',
++    bad_cont_line => ' continuation line outside of field',
++    bad_dup_field => "Duped-Field: value-1\n" .
++                     "Duped-Field: value-2\n",
++    bad_short_field => 'A: short',
++    bad_end_hyphen => 'Field-: value-',
++    bad_end_underscore => 'Field-End-Underscore_: value',
++    bad_prefix_number => '0field: 0value',
++    bad_prefix_special => '$field: $value',
++    bad_middle_special => 'Field$name: value$mixed',
++);
++
++while (my ($name, $data) = each %deb822_bogus) {
++    open $io, '<', \$data or die "canno open io string\n";
++    $c = Dpkg::Control::Hash->new();
++    eval {
++        $c->parse($io, "parse bogus deb822 data $name");
++    };
++    ok($@, "failed to parse bogus deb822 data $name");
++    close $io;
++}
++
+ # Check OpenPGP armored signatures in source control files
+ 
+ my $dsc;
+-- 
+2.45.2
+

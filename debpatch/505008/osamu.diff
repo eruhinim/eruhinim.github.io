@@ -1,0 +1,380 @@
+diff -Nru ecryptfs-utils-65/src/utils/ecryptfs-mount-private ecryptfs-utils-65-osamu/src/utils/ecryptfs-mount-private
+--- ecryptfs-utils-65/src/utils/ecryptfs-mount-private	2008-11-13 05:23:16.000000000 +0900
++++ ecryptfs-utils-65-osamu/src/utils/ecryptfs-mount-private	2008-11-18 23:19:18.000000000 +0900
+@@ -15,12 +15,72 @@
+ PRIVATE_DIR="Private"
+ WRAPPING_PASS="LOGIN"
+ PW_ATTEMPTS=3
+-MESSAGE="Enter your login passphrase: "
++MESSAGE="Enter your login passphrase"
++TTY_ORIG=$(stty -g)
++TITLE=$(basename $0)
++if [ -n "$XAUTHORITY" ] && [ -x /usr/bin/zenity ]; then
++	MODE0="GTK"
++else
++	MODE0="TERM"
++fi
++MODE=${MODE:-$MODE0}
++
++error_message() {
++	# display error message but return normal
++	if [ "$MODE" = "GTK" ]; then
++		zenity --error --title "$TITLE" --text "ERROR: $1"
++	else
++		echo "ERROR: $1" >&2
++	fi
++
++}
++
++error() {
++	# display error message and exit
++	error_message "$1"
++	exit 1
++}
++
++password_entry() {
++	# display $1 and return password entry.  If GTK, without showing on screen
++	if [ "$MODE" = "GTK" ]; then
++		ENTERED_TEXT=$(zenity --entry --hide-text --title "$TITLE" --text "$1")
++	else
++		stty -echo
++		read -p "$1" -r ENTERED_TEXT
++		stty $TTY_ORIG
++	fi
++	echo -n "$ENTERED_TEXT" | tr -d "\n"
++}
++
++echo_term() {
++	# send newline on terminal
++	if [ ! "$MODE" = "GTK" ]; then
++		echo $1
++	fi
++}
++
++while [ ! -z "$1" ]; do
++	case "$1" in
++		-a|--auto)
++			MODE=$MODE0
++			shift 1
++		;;
++		-t|--terminal)
++			MODE="TERM"
++			shift 1
++		;;
++		-g|--gtk|--gnome)
++			MODE="GTK"
++			shift 1
++		;;
++	esac
++done
+ 
+ if [ -f $HOME/.ecryptfs/wrapping-independent ]; then
+ 	# use a wrapping passphrase different from the login passphrase
+ 	WRAPPING_PASS="INDEPENDENT"
+-	MESSAGE="Enter your wrapping passphrase: "
++	MESSAGE="Enter your wrapping passphrase"
+ fi
+ 
+ WRAPPED_PASSPHRASE_FILE="$HOME/.ecryptfs/wrapped-passphrase"
+@@ -35,27 +95,22 @@
+ # Otherwise, interactively prompt for the user's password
+ if [ -f "$WRAPPED_PASSPHRASE_FILE" -a -f "$MOUNT_PASSPHRASE_SIG_FILE" ]; then
+ 	tries=0
+-	stty_orig=`stty -g`
+ 	while [ $tries -lt $PW_ATTEMPTS ]; do
+-		stty -echo
+-		read -p "$MESSAGE" -r LOGINPASS
+-		stty $stty_orig
+-		echo
++		LOGINPASS=$(password_entry "$MESSAGE: ")
++		echo_term
+ 		if echo "$LOGINPASS" | ecryptfs-insert-wrapped-passphrase-into-keyring "$WRAPPED_PASSPHRASE_FILE" - ; then
+ 			break
+ 		else
+-			echo "ERROR: Your passphrase is incorrect"
++			error_message "Your passphrase is incorrect"
+ 			tries=$(($tries + 1))
+ 			continue
+ 		fi
+ 	done
+ 	if [ $tries -ge $PW_ATTEMPTS ]; then
+-		echo "ERROR: Too many incorrect password attempts, exiting"
+-		exit 1
++		error "Too many incorrect password attempts, exiting"
+ 	fi
+ 	/sbin/mount.ecryptfs_private
+ else
+-	echo "ERROR: Encrypted $PRIVATE_DIR is not setup properly"
+-	exit 1
++	error "Encrypted $PRIVATE_DIR is not setup properly"
+ fi
+ exit 0
+diff -Nru ecryptfs-utils-65/src/utils/ecryptfs-setup-private ecryptfs-utils-65-osamu/src/utils/ecryptfs-setup-private
+--- ecryptfs-utils-65/src/utils/ecryptfs-setup-private	2008-11-13 08:54:34.000000000 +0900
++++ ecryptfs-utils-65-osamu/src/utils/ecryptfs-setup-private	2008-11-18 23:26:39.000000000 +0900
+@@ -10,7 +10,15 @@
+ WRAPPING_PASS="LOGIN"
+ PW_ATTEMPTS=3
+ MESSAGE="Enter your login passphrase"
++TTY_ORIG=$(stty -g)
++TITLE=$(basename $0)
+ 
++if [ -n "$XAUTHORITY" ] && [ -x /usr/bin/zenity ]; then
++	MODE0="GTK"
++else
++	MODE0="TERM"
++fi
++MODE=${MODE:-$MODE0}
+ # Zero out user-defined GREP_OPTIONS, such as --line-number
+ GREP_OPTIONS=
+ 
+@@ -40,11 +48,30 @@
+ 	echo "     2) specified on the command line"
+ 	echo "     3) left empty and interactively prompted"
+ 	echo
+-	exit 1
++}
++
++text_info() {
++	# displays text fed into stdin
++	if [ "$MODE" = "GTK" ]; then
++		zenity --text-info --title "$TITLE" --width=640 --height=400
++	else
++		cat -
++	fi
++}
++
++error_message() {
++	# display error message but return normal
++	if [ "$MODE" = "GTK" ]; then
++		zenity --error --title "$TITLE" --text "ERROR: $1"
++	else
++		echo "ERROR: $1" >&2
++	fi
++
+ }
+ 
+ error() {
+-	echo "ERROR: $1"
++	# display error message and exit
++	error_message "$1"
+ 	exit 1
+ }
+ 
+@@ -52,9 +79,38 @@
+ 	rm -f "$1" >/dev/null
+ 	/sbin/umount.ecryptfs_private >/dev/null
+ 	error "$2"
+-	exit 1
+ }
+ 
++text_entry() {
++	# display $1 and return entry
++	if [ "$MODE" = "GTK" ]; then
++		ENTERED_TEXT=$(zenity --entry --title "$TITLE" --text "$1")
++	else
++		read -p "$1" -r ENTERED_TEXT
++	fi
++	echo -n "$ENTERED_TEXT" | tr -d "\n"
++}
++
++password_entry() {
++	# display $1 and return password entry.  If GTK, without showing on screen
++	if [ "$MODE" = "GTK" ]; then
++		ENTERED_TEXT=$(zenity --entry --hide-text --title "$TITLE" --text "$1")
++	else
++		stty -echo
++		read -p "$1" -r ENTERED_TEXT
++		stty $TTY_ORIG
++	fi
++	echo -n "$ENTERED_TEXT" | tr -d "\n"
++}
++
++echo_term() {
++	# send newline on terminal
++	if [ ! "$MODE" = "GTK" ]; then
++		echo $1
++	fi
++}
++
++# progress displayed from here
+ if [ ! -z "$SUDO_USER" ]; then
+ 	USER="$SUDO_USER"
+ fi
+@@ -78,12 +134,25 @@
+ 			MESSAGE="Enter your wrapping passphrase"
+ 			shift 1
+ 		;;
++		-a|--auto)
++			MODE=$MODE0
++			shift 1
++		;;
++		-t|--terminal)
++			MODE="TERM"
++			shift 1
++		;;
++		-g|--gtk|--gnome)
++			MODE="GTK"
++			shift 1
++		;;
+ 		-f|--force)
+ 			FORCE=1
+ 			shift 1
+ 		;;
+ 		*)
+-			usage
++			usage | text_info
++			exit 1
+ 		;;
+ 	esac
+ done
+@@ -91,14 +160,14 @@
+ # Prompt for the USER name, if not on the command line and not in the environment
+ if [ -z "$USER" ]; then
+ 	while [ true ]; do
+-		read -p "Enter the username: " -r USER
++		USER=$(text_entry "Enter the username: ")
+ 		if [ -z "$USER" ]; then
+-			echo "ERROR: You must provide a username"
++			error_message "You must provide a username"
+ 			continue
+ 		else
+ 			# Verify that the user exists
+ 			if ! id "$USER" >/dev/null; then
+-				echo "ERROR: User [$USER] does not exist"
++				error_message "User [$USER] does not exist"
+ 				continue
+ 			fi
+ 			break
+@@ -141,22 +210,17 @@
+ 	error "$CRYPTDIR must be empty before proceeding"
+ fi
+ 
+-stty_orig=`stty -g`
+ # Prompt for the LOGINPASS, if not on the command line and not in the environment
+ if [ -z "$LOGINPASS" ]; then
+ 	tries=0
+ 	while [ $tries -lt $PW_ATTEMPTS ]; do
+-		stty -echo
+-		read -p "$MESSAGE: " -r LOGINPASS
+-		stty $stty_orig
+-		echo
++		LOGINPASS=$(password_entry "$MESSAGE: ")
++		echo_term
+ 		if [ $WRAPPING_PASS != "LOGIN" ]; then
+-			stty -echo
+-			read -p "$MESSAGE (again): " -r LOGINPASS2
+-			stty $stty_orig
+-			echo
++			LOGINPASS2=$(password_entry "$MESSAGE: (again)")
++			echo_term
+ 			if [ "$LOGINPASS" != "$LOGINPASS2" ]; then
+-				echo "ERROR: Wrapping passphrases must match"
++				error_message "Wrapping passphrases must match"
+ 			else
+ 				break
+ 			fi
+@@ -164,20 +228,19 @@
+ 			continue
+ 		fi
+ 		if [ -z "$LOGINPASS" ]; then
+-			echo "ERROR: You must provide a login passphrase"
++			error_message "You must provide a login passphrase"
+ 			tries=$(($tries + 1))
+ 		else
+ 			if printf "%s\0" "$LOGINPASS" | /sbin/unix_chkpwd "$USER" nullok; then
+ 				break
+ 			else
+-				echo "ERROR: Your login passphrase is incorrect"
++				error_message "Your login passphrase is incorrect"
+ 				tries=$(($tries + 1))
+ 			fi
+ 		fi
+ 	done
+ 	if [ $tries -ge $PW_ATTEMPTS ]; then
+-		echo "ERROR: Too many incorrect password attempts, exiting"
+-		exit 1
++		error "Too many incorrect password attempts, exiting"
+ 	fi
+ fi
+ 
+@@ -185,10 +248,8 @@
+ if [ -z "$MOUNTPASS" ]; then
+ 	tries=0
+ 	while [ $tries -lt $PW_ATTEMPTS ]; do
+-		stty -echo
+-		read -p "Enter your mount passphrase [leave blank to generate one]: " -r MOUNTPASS
+-		stty $stty_orig
+-		echo
++		MOUNTPASS=$(password_entry "Enter your mount passphrase [leave blank to generate one]: ")
++		echo_term
+ 		if [ -z "$MOUNTPASS" ]; then
+ 			# Pull 128 bits of random data from /dev/urandom, and convert
+ 			# to a string of 32 hex digits
+@@ -196,12 +257,10 @@
+ 			RANDOM_MOUNTPASS=1
+ 			break
+ 		else
+-			stty -echo
+-			read -p "Enter your mount passphrase (again): " -r MOUNTPASS2
+-			stty $stty_orig
+-			echo
++			MOUNTPASS2=$(password_entry "Enter your mount passphrase (again): ")
++			echo_term
+ 			if [ "$MOUNTPASS" != "$MOUNTPASS2" ]; then
+-				echo "ERROR: Mount passphrases do not match"
++				error_message "Mount passphrases do not match"
+ 				tries=$(($tries + 1))
+ 			else
+ 				break
+@@ -209,11 +268,12 @@
+ 		fi
+ 	done
+ 	if [ $tries -ge $PW_ATTEMPTS ]; then
+-		echo "ERROR: Too many incorrect passphrase attempts, exiting"
+-		exit 1
++		error "Too many incorrect passphrase attempts, exiting"
+ 	fi
+ fi
+ 
++(
++# information display
+ #echo
+ #echo "Using username [$USER]"
+ #echo "Using mount passphrase [$MOUNTPASS]"
+@@ -235,6 +295,7 @@
+ echo "THIS WILL BE REQUIRED IF YOU NEED TO RECOVER YOUR DATA AT A LATER TIME."
+ echo "************************************************************************"
+ echo
++) | text_info
+ 
+ ###############################################################################
+ 
+@@ -282,12 +343,12 @@
+ fi
+ echo "$sig" > "$HOME/.ecryptfs/$PRIVATE_DIR.sig" || error "Could not create signature file [$HOME/.ecryptfs/$PRIVATE_DIR.sig]"
+ 
+-echo
+-echo "Done configuring."
+-echo
++echo_term
++echo_term "Done configuring."
++echo_term
+ 
+ # Now let's perform some basic mount/write/umount/read sanity testing...
+-echo "Testing mount/write/umount/read..."
++echo_term "Testing mount/write/umount/read..."
+ /sbin/mount.ecryptfs_private || error "Could not mount private ecryptfs directory"
+ temp=`mktemp "$HOME/$PRIVATE_DIR/ecryptfs.test.XXXXXX"` || error_testing "$temp" "Could not create empty file"
+ random_data=`head -c 16000 /dev/urandom | od -x` || error_testing "$temp" "Could not generate random data"
+@@ -301,8 +362,8 @@
+ if [ "$md5sum1" != "$md5sum2" ]; then
+ 	error "Testing failed."
+ else
+-	echo "Testing succeeded."
++	echo_term "Testing succeeded."
+ fi
+ 
+-echo
++echo_term
+ exit 0

@@ -1,0 +1,112 @@
+From 9e861b5dd7d1c0ca9a0acff9a49d0dbf94e13441 Mon Sep 17 00:00:00 2001
+From: Jari Aalto <jari.aalto@cante.net>
+Date: Mon, 20 Dec 2010 12:41:01 +0200
+Subject: [PATCH 1/2] dh_installman: Support manual pages in *.pod format
+Organization: Private
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+In foreach loop, if $page matched *.pod, then call function podpage to
+generate respective manual page from POD source. New functions: isodate()
+and podpage().
+
+Signed-off-by: Jari Aalto <jari.aalto@cante.net>
+---
+ dh_installman |   60 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 files changed, 60 insertions(+), 0 deletions(-)
+
+diff --git a/dh_installman b/dh_installman
+index fb7c8eb..815e0b1 100755
+--- a/dh_installman
++++ b/dh_installman
+@@ -9,6 +9,7 @@ dh_installman - install man pages into package build directories
+ use strict;
+ use File::Find;
+ use Debian::Debhelper::Dh_Lib;
++use Pod::Man;
+ 
+ =head1 SYNOPSIS
+ 
+@@ -87,6 +88,55 @@ interface. Use this program instead.
+ 
+ =cut
+ 
++
++sub isodate {
++    my (@time)	  = localtime(time);
++    my $YY	  = 1900 + $time[5];
++    my ($DD, $MM) = @time[3..4];
++    my ($mm, $hh) = @time[1..2];
++
++    #	Count from zero, That's why +1.
++
++    sprintf "%d-%02d-%02d", $YY, $MM + 1, $DD;
++}
++
++sub podpage {
++	my $path = shift;
++	my $file = $path;
++
++	$file =~ s/\.pod$//;
++
++	my ($name, $section) = ($file =~ /(.+)\.(.+)/ );
++
++	die "Malformed $file file name. Not <name>.<section>.pod" unless $section;
++
++	my %options = ( name	=> $name,
++			date	=> isodate(),
++			section => $section,
++			center	=> "User Command",
++			release => "$name($section)" );
++
++	# See of file has pod2man_* directives
++
++	open my $FILE, "<", $path or die "Open failed $! for $path";
++
++	local $/;	    # enable "slurp" mode
++	local $_ = <$FILE>;
++	close $FILE;
++
++	while ( /^ \s* \# \s* pod2man_(\w+) \s* = \s* (.*\w)/gmx ) {
++	    my ($key, $value) = ($1, $2);
++	    $options{ $key } = $value;
++	}
++
++	my $pod = "$name.$section";
++
++	my $parser = Pod::Man->new (%options);
++	$parser->parse_from_file ($path, $pod);
++
++	$pod;
++}
++
+ init(options => {
+ 	"language=s" => \$dh{LANGUAGE},
+ });
+@@ -108,6 +158,14 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 	}
+ 
+ 	foreach my $page (@manpages) {
++
++		my $clean = "";
++
++		if ( $page =~ /\.pod$/ ) {
++		    $page = podpage $page;	# Make page *.<section>
++		    $clean = $page;
++		}
++
+ 		my $basename=basename($page);
+ 
+ 		# Support compressed pages.
+@@ -181,6 +239,8 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 		else {
+ 			doit "install","-p","-m644",$page,$instpage;
+ 		}
++
++		unlink $clean if $clean;
+ 	}
+ 
+ 	# Now the .so conversion.
+-- 
+1.7.2.3
+

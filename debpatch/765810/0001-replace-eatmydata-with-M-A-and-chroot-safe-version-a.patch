@@ -1,0 +1,166 @@
+From 0a1d2146ff766a7f110ba4600c08587949ba419a Mon Sep 17 00:00:00 2001
+From: Thorsten Glaser <t.glaser@tarent.de>
+Date: Mon, 17 Nov 2014 16:14:51 +0100
+Subject: [PATCH] replace eatmydata with M-A and chroot safe version; add
+ missing Pre-Depends
+
+Signed-off-by: Thorsten Glaser <t.glaser@tarent.de>
+---
+ debian/changelog         | 11 +++++--
+ debian/control           |  1 +
+ debian/eatmydata.install |  1 -
+ debian/eatmydata.sh      | 84 ++++++++++++++++++++++++++++++++++++++++++++++++
+ debian/rules             |  3 ++
+ 5 files changed, 97 insertions(+), 3 deletions(-)
+ delete mode 100644 debian/eatmydata.install
+ create mode 100644 debian/eatmydata.sh
+
+diff --git a/debian/changelog b/debian/changelog
+index a72cc61..078218e 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,9 +1,16 @@
+-libeatmydata (82-4) UNRELEASED; urgency=medium
++libeatmydata (82-3.1) unstable; urgency=medium
+ 
++  [ Mattia Rizzolo ]
+   * [c6fde16] Fix FTBFS on hurd-i386 and kfreebsd-* due to missing strace (used
+     by the test suite) (Closes: #769605).
+ 
+- -- Mattia Rizzolo <mattia@mapreri.org>  Sat, 15 Nov 2014 21:13:48 +0100
++  [ Thorsten Glaser ]
++  * Non-maintainer upload.
++  * Add missing Pre-Depends on multiarch-support
++  * Replace eatmydata executable with one both Multi-Arch safe and
++    compatible with older eatmydata versions in chroots (Closes: #765810)
++
++ -- Thorsten Glaser <tg@mirbsd.de>  Mon, 17 Nov 2014 16:13:36 +0100
+ 
+ libeatmydata (82-3) unstable; urgency=low
+ 
+diff --git a/debian/control b/debian/control
+index 544aea7..fad32ae 100644
+--- a/debian/control
++++ b/debian/control
+@@ -36,6 +36,7 @@ Description: Library and utilities designed to disable fsync and friends
+ 
+ Package: libeatmydata1
+ Architecture: any
++Pre-Depends: ${misc:Pre-Depends}
+ Depends: ${misc:Depends},
+          ${shlibs:Depends}
+ Breaks: eatmydata (<< 82-1)
+diff --git a/debian/eatmydata.install b/debian/eatmydata.install
+deleted file mode 100644
+index 1bcb5da..0000000
+--- a/debian/eatmydata.install
++++ /dev/null
+@@ -1 +0,0 @@
+-usr/bin/eatmydata
+diff --git a/debian/eatmydata.sh b/debian/eatmydata.sh
+new file mode 100644
+index 0000000..558122b
+--- /dev/null
++++ b/debian/eatmydata.sh
+@@ -0,0 +1,84 @@
++#!/bin/sh
++#-
++# Copyright Â© 2014
++#	Thorsten âmirabilosâ Glaser <t.glaser@tarent.de>
++#
++# Provided that these terms and disclaimer and all copyright notices
++# are retained or reproduced in an accompanying document, permission
++# is granted to deal in this work without restriction, including unâ
++# limited rights to use, publicly perform, distribute, sell, modify,
++# merge, give away, or sublicence.
++#
++# This work is provided âAS ISâ and WITHOUT WARRANTY of any kind, to
++# the utmost extent permitted by applicable law, neither express nor
++# implied; without malicious intent or gross negligence. In no event
++# may a licensor, author or contributor be held liable for indirect,
++# direct, other damage, loss, or other issues arising in any way out
++# of dealing in the work, even if advised of the possibility of such
++# damage or existence of a defect, except proven that it results out
++# of said personâs immediate fault when using the work as intended.
++#-
++# eatmydata utility / wrapper compatible with both 26 and 82 series,
++# but only on Debian systems.
++
++usage() {
++	echo >&2 "usage: $0 [--] command [arg ...]"
++	exit 2
++}
++
++# everything in a function to avoid environment pollution
++runprog() {
++	local cmd me spath saveIFS pathelem tgt
++
++	# Detect operation mode. If this script is run via a symbolic link,
++	# look for the basename in the PATH and execute that.
++	if test -L "$0"; then
++		# symlink mode
++		cmd=$(basename "$0")
++	else
++		# regular mode
++		test x"$1" = x"--" && shift
++		test -n "$1" || usage
++		cmd=$1
++		shift
++	fi
++
++	# detect command to run, if necessary
++	case $cmd in
++	(*/*) ;;
++	(*)
++		# $cmd does not contain a '/'
++		# look in the PATH but avoid loops with myself
++		me=$(readlink -f "$0")
++		# append :/dev/null both to catch a trailing colon
++		# and for an easy abort condition
++		spath=$PATH:/dev/null
++		saveIFS=$IFS
++		IFS=:
++		for pathelem in $PATH; do
++			if test x"$pathelem" = x"/dev/null"; then
++				echo >&2 E: eatmydata: \
++				    "unable to find '$cmd' in PATH"
++				exit 1
++			fi
++			tgt=${pathelem:-.}/$cmd
++			if test -x "$tgt"; then
++				tgt=$(readlink -f "$tgt")
++				test x"$tgt" = x"$me" || break
++			fi
++		done
++		IFS=$saveIFS
++		cmd=$tgt
++		;;
++	esac
++
++	# set up environment
++	LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+"$LD_LIBRARY_PATH:"}/usr/lib/libeatmydata
++	LD_PRELOAD=${LD_PRELOAD:+"$LD_PRELOAD "}libeatmydata.so
++	export LD_LIBRARY_PATH LD_PRELOAD
++
++	# execute the command
++	exec "$cmd" "$@"
++}
++
++runprog "$@"
+diff --git a/debian/rules b/debian/rules
+index e205654..a860f3b 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -7,6 +7,9 @@ override_dh_installdirs:
+ 
+ override_dh_install:
+ 	find $(CURDIR)/debian/tmp -name *.la -delete
++	rm -f $(CURDIR)/debian/tmp/usr/bin/eatmydata
++	install -D $(CURDIR)/debian/eatmydata.sh \
++	    $(CURDIR)/debian/eatmydata/usr/bin/eatmydata
+ 	dh_install --list-missing
+ 
+ %:
+-- 
+2.1.3
+

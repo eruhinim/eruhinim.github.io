@@ -1,0 +1,210 @@
+commit 31be38d205406d4c756684e20b93d62c4701e091
+Author: David Kalnischkies <david@kalnischkies.de>
+Date:   Fri Jan 9 01:03:31 2015 +0100
+
+    128 KiB DSC files ought to be enough for everyone
+    
+    Your mileage may vary, but don't worry: There is more than one way to
+    do it, but our one size fits all is not a bigger hammer, but an entire
+    roundhouse kick! So brace yourself for the tl;dr: The limit is gone.*
+    
+    Beware: This fixes also the problem that a double newline is
+    unconditionally added 'later' which is an overcommitment in case
+    the dsc filesize is limit-2 <= x <= limit.
+    
+    * limited to numbers fitting into an unsigned long long.
+    
+    Closes: 774893
+
+diff --git a/ftparchive/cachedb.cc b/ftparchive/cachedb.cc
+index 0901492..c73a64f 100644
+--- a/ftparchive/cachedb.cc
++++ b/ftparchive/cachedb.cc
+@@ -328,12 +328,12 @@ bool CacheDB::LoadSource()
+    if (Dsc.Read(FileName) == false)
+       return false;
+ 
+-   if (Dsc.Data == 0)
++   if (Dsc.Length == 0)
+       return _error->Error(_("Failed to read .dsc"));
+-   
++
+    // Write back the control information
+    InitQuerySource();
+-   if (Put(Dsc.Data, Dsc.Length) == true)
++   if (Put(Dsc.Data.c_str(), Dsc.Length) == true)
+       CurStat.Flags |= FlSource;
+ 
+    return true;
+diff --git a/ftparchive/sources.cc b/ftparchive/sources.cc
+index d0878a7..ab976b4 100644
+--- a/ftparchive/sources.cc
++++ b/ftparchive/sources.cc
+@@ -1,5 +1,5 @@
+ #include <string>
+-#include <iostream>
++#include <sstream>
+ 
+ // for memcpy
+ #include <cstring>
+@@ -9,17 +9,19 @@
+ 
+ #include "sources.h"
+ 
+-bool DscExtract::TakeDsc(const void *newData, unsigned long newSize)
++bool DscExtract::TakeDsc(const void *newData, unsigned long long newSize)
+ {
+-   if(newSize > maxSize)
+-     return _error->Error("DSC data is too large %lu!", newSize);
+-
+    if (newSize == 0)
+    {
++      // adding two newlines 'off record' for pkgTagSection.Scan() calls
++      Data = "\n\n";
+       Length = 0;
+       return true;
+    }
+-   memcpy(Data, newData, newSize);
++
++   Data = std::string((const char*)newData, newSize);
++   // adding two newlines 'off record' for pkgTagSection.Scan() calls
++   Data.append("\n\n");
+    Length = newSize;
+ 
+    return true;
+@@ -27,20 +29,31 @@ bool DscExtract::TakeDsc(const void *newData, unsigned long newSize)
+ 
+ bool DscExtract::Read(std::string FileName)
+ {
++   Data.clear();
++   Length = 0;
++
+    FileFd F;
+    if (OpenMaybeClearSignedFile(FileName, F) == false)
+       return false;
+-   
+-   unsigned long long const FSize = F.FileSize();
+-   if(FSize > maxSize)
+-     return _error->Error("DSC file '%s' is too large!",FileName.c_str());
+-
+-   if (F.Read(Data, FSize) == false)
+-      return false;
+-   Length = FSize;
+ 
+    IsClearSigned = (FileName != F.Name());
+ 
++   std::ostringstream data;
++   char buffer[1024];
++   do {
++      unsigned long long actual = 0;
++      if (F.Read(buffer, sizeof(buffer)-1, &actual) == false)
++	 return _error->Errno("read", "Failed to read dsc file %s", FileName.c_str());
++      if (actual == 0)
++	 break;
++      Length += actual;
++      buffer[actual] = '\0';
++      data << buffer;
++   } while(true);
++
++   // adding two newlines 'off record' for pkgTagSection.Scan() calls
++   data << "\n\n";
++   Data = data.str();
+    return true;
+ }
+ 
+diff --git a/ftparchive/sources.h b/ftparchive/sources.h
+index 91e0b13..a125ec6 100644
+--- a/ftparchive/sources.h
++++ b/ftparchive/sources.h
+@@ -3,29 +3,21 @@
+ 
+ #include <apt-pkg/tagfile.h>
+ 
+-class DscExtract 
++#include <string>
++
++class DscExtract
+ {
+  public:
+-   //FIXME: do we really need to enforce a maximum size of the dsc file?
+-   static const int maxSize = 128*1024;
+-
+-   char *Data;
++   std::string Data;
+    pkgTagSection Section;
+-   unsigned long Length;
++   unsigned long long Length;
+    bool IsClearSigned;
+ 
+-   bool TakeDsc(const void *Data, unsigned long Size);
++   bool TakeDsc(const void *Data, unsigned long long Size);
+    bool Read(std::string FileName);
+-   
+-   DscExtract() : Data(0), Length(0) {
+-     Data = new char[maxSize];
+-   };
+-   ~DscExtract() { 
+-      if(Data != NULL) {
+-         delete [] Data;
+-         Data = NULL;
+-      } 
+-   };
++
++   DscExtract() : Length(0), IsClearSigned(false) {};
++   ~DscExtract() {};
+ };
+ 
+ 
+diff --git a/ftparchive/writer.cc b/ftparchive/writer.cc
+index 7c1c9cc..0f6cc17 100644
+--- a/ftparchive/writer.cc
++++ b/ftparchive/writer.cc
+@@ -634,18 +634,10 @@ bool SourcesWriter::DoPackage(string FileName)
+    // the "db cursor"
+    Db.Finish();
+ 
+-   // read stuff
+-   char *Start = Db.Dsc.Data;
+-   char *BlkEnd = Db.Dsc.Data + Db.Dsc.Length;
+-
+-   // Add extra \n to the end, just in case (as in clearsigned they are missing)
+-   *BlkEnd++ = '\n';
+-   *BlkEnd++ = '\n';
+-
+    pkgTagSection Tags;
+-   if (Tags.Scan(Start,BlkEnd - Start) == false)
++   if (Tags.Scan(Db.Dsc.Data.c_str(), Db.Dsc.Data.length()) == false)
+       return _error->Error("Could not find a record in the DSC '%s'",FileName.c_str());
+-   
++
+    if (Tags.Exists("Source") == false)
+       return _error->Error("Could not find a Source entry in the DSC '%s'",FileName.c_str());
+    Tags.Trim();
+diff --git a/test/integration/framework b/test/integration/framework
+index c944506..70ad381 100644
+--- a/test/integration/framework
++++ b/test/integration/framework
+@@ -780,7 +780,7 @@ buildaptarchivefromincoming() {
+ 	[ -e ftparchive.conf ] || createaptftparchiveconfig
+ 	[ -e dists ] || buildaptftparchivedirectorystructure
+ 	msgninfo "\tGenerate Packages, Sources and Contents files… "
+-	aptftparchive -qq generate ftparchive.conf
++	testsuccess aptftparchive generate ftparchive.conf
+ 	cd - > /dev/null
+ 	msgdone "info"
+ 	generatereleasefiles
+diff --git a/test/integration/test-apt-ftparchive-src-cachedb b/test/integration/test-apt-ftparchive-src-cachedb
+index adcca62..0ac4d55 100755
+--- a/test/integration/test-apt-ftparchive-src-cachedb
++++ b/test/integration/test-apt-ftparchive-src-cachedb
+@@ -180,10 +180,6 @@ testequal "
+ E: Could not find a Source entry in the DSC 'aptarchive/pool/invalid/invalid_1.0.dsc'" aptftparchive sources aptarchive/pool/invalid
+ rm -f aptarchive/pool/invalid/invalid_1.0.dsc
+ 
+-dd if=/dev/zero of="aptarchive/pool/invalid/toobig_1.0.dsc" bs=1k count=129 2>/dev/null
+-testequal "
+-E: DSC file 'aptarchive/pool/invalid/toobig_1.0.dsc' is too large!" aptftparchive sources aptarchive/pool/invalid
+-
+ # ensure clean works
+ rm -f aptarchive/pool/main/*
+ aptftparchive clean apt-ftparchive.conf -o Debug::APT::FTPArchive::Clean=1 > clean-out.txt 2>&1 

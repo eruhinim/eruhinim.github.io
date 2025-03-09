@@ -1,0 +1,83 @@
+--- /usr/bin/di-netboot-assistant	2013-07-13 10:31:11.000000000 +0200
++++ di-netboot-assistant.patched	2014-11-21 22:05:13.102987843 +0100
+@@ -200,12 +200,13 @@
+ # ------------------------------------------------------------ #
+ # find_file()
+ #	Return the name of the first file matching criteria.
+-# Parameters: dir name
++# Parameters: name dir [dir...]
+ # Returns: (STRING) file
+ # ------------------------------------------------------------ #
+ find_file() {
+ 	if [ "$1" -a "$2" ]; then
+-		find "$2" -type f -name $1 | head -n 1
++		local name=$1; shift
++		find "$@" -type f -name "$name" | head -n 1
+ 	else
+ 		echo ""
+ 	fi
+@@ -241,7 +242,14 @@
+ 
+ 	[ ! "$src" -o ! "$dst" ] && return 1
+ 
+-	newbin=$(find_file pxelinux.0 "$src" 2>/dev/null)
++	if [ "$SYSLINUX" = "$src" ]; then
++		# avoid recent SYSLINUX EFI binaries incompatible with PXELINUX
++		[ ! -d "$src/modules/bios" ] || src="$src/modules/bios"
++		# recent SYSLINUX ships PXELINUX at separate location
++		newbin=$(find_file pxelinux.0 /usr/lib/PXELINUX "$SYSLINUX" 2>/dev/null)
++	else
++		newbin=$(find_file pxelinux.0 "$src" 2>/dev/null)
++	fi
+ 	[ ! -f "$dst/pxelinux.0" -a ! -f "$newbin" ] && return 1
+ 
+ 	pxe_new_ver="$(pxelinux_version "$newbin")"
+@@ -253,7 +261,11 @@
+ 	echo "I: Upgrading PXELinux ($pxe_cur_ver to $pxe_new_ver)"
+ 
+ 	for f in pxelinux.0 menu.c32 vesamenu.c32; do
+-		srcf="$(find_file $f "$src")"
++		if [ pxelinux.0 = "$f" ]; then
++			srcf="$newbin"
++		else
++			srcf="$(find_file $f "$src")"
++		fi
+ 		[ "${f#*c32}" ] || f="pxelinux.cfg/$f"
+ 		[ -L "$dst/$f" ] && rm "$dst/$f"
+ 		if [ -f "$srcf" ]; then
+@@ -264,6 +276,13 @@
+ 	done
+ 	# Smooth transition to vesamenu
+ 	[ ! -f "$c32_dir/menu.c32" ] && ln -s "vesamenu.c32" $c32_dir/menu.c32
++	# Add core modules at root (see <https://bugs.debian.org/756275#49>)
++	if [ "$TFTP_ROOT/debian-installer/" = "$dst" ]; then
++		for f in ldlinux.c32 libcom32.c32 libutil.c32; do
++			srcf="$(find_file $f "$src")"
++			[ -z "$srcf" ] || cp -np "$srcf" "$TFTP_ROOT/debian-installer/$f"
++		done
++	fi
+ 	return 0
+ }
+ 
+@@ -907,6 +926,21 @@
+ 	if ! copy_syslinux_bin "$expand_dir" "$TFTP_ROOT/debian-installer/" ; then
+ 		echo "E: No PXELinux menu installed. Please file a bug." 1>&2
+ 	fi
++	# ensure only a single PXELINUX version is used for all its modules
++	for f in $(find "$expand_dir" -type f -name '*.c32'); do
++		case $(basename "$f") in
++		  vesamenu.c32|menu.c32)
++			cp -pft "$(dirname "$f")" "$TFTP_ROOT/debian-installer/pxelinux.cfg/$(basename "$f")"
++			;;
++		  ldlinux.c32|libcom32.c32|libutil.c32)
++			cp -pft "$(dirname "$f")" "$TFTP_ROOT/debian-installer/$(basename "$f")"
++			;;
++		  *)
++			echo "W: Unusual PXELINUX module \"$f\" may not work." 1>&2
++			continue
++			;;
++		esac
++	done
+ 
+ 	for f in $(find "$expand_dir" -type f -a \( -name "default" -o -name "boot.txt" -o -name '*.cfg' \) ); do
+ 		mv "$f" "$f.ORIG"

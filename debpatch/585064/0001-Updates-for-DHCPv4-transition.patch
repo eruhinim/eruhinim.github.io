@@ -1,0 +1,565 @@
+From 9d340ca3cb18b33df74f24f218c7ba4dd6d7a139 Mon Sep 17 00:00:00 2001
+From: Mehdi Dogguy <mehdi@debian.org>
+Date: Wed, 14 Jul 2010 12:47:19 +0200
+Subject: [PATCH] Updates for DHCPv4 transition
+
+---
+ Makefile                                           |   10 ++--
+ README                                             |    2 +-
+ bin/debian-edu-pxelinux.cfg                        |    4 +-
+ cf/cf.dhcpserver                                   |   16 +++---
+ cf/cf.ltsp                                         |    8 +-
+ cf/cfrunhosts.pl                                   |    2 +-
+ debian/changelog                                   |    7 +-
+ debian/control                                     |    1 +
+ debian/debian-edu-config.fetch-ldap-cert           |    4 +-
+ debian/debian-edu-config.links                     |    3 +
+ debian/debian-edu-config.postinst                  |    6 ++
+ debian/debian-edu-config.postrm                    |    9 +++
+ debian/debian-edu-config.preinst                   |    6 ++
+ etc/dhcp/dhclient-debian-edu.conf                  |   18 ++++++
+ etc/dhcp/dhclient-exit-hooks.d/.svn/entries        |   62 ++++++++++++++++++++
+ .../.svn/text-base/wpad-proxy-update.svn-base      |   15 +++++
+ etc/dhcp/dhclient-exit-hooks.d/wpad-proxy-update   |   15 +++++
+ etc/dhcp/dhcpd-debian-edu.conf                     |    7 ++
+ etc/dhcp3/dhclient-debian-edu.conf                 |   18 ------
+ etc/dhcp3/dhclient-exit-hooks.d/wpad-proxy-update  |   15 -----
+ etc/dhcp3/dhcpd-debian-edu.conf                    |    7 --
+ etc/insserv/overrides/dhcp3-server                 |   12 ----
+ etc/insserv/overrides/isc-dhcp-server              |   12 ++++
+ testsuite/dhcpd                                    |    2 +-
+ 24 files changed, 182 insertions(+), 79 deletions(-)
+ create mode 100644 debian/debian-edu-config.postrm
+ create mode 100644 etc/dhcp/dhclient-debian-edu.conf
+ create mode 100644 etc/dhcp/dhclient-exit-hooks.d/.svn/entries
+ create mode 100644 etc/dhcp/dhclient-exit-hooks.d/.svn/text-base/wpad-proxy-update.svn-base
+ create mode 100644 etc/dhcp/dhclient-exit-hooks.d/wpad-proxy-update
+ create mode 100644 etc/dhcp/dhcpd-debian-edu.conf
+ delete mode 100644 etc/dhcp3/dhclient-debian-edu.conf
+ delete mode 100644 etc/dhcp3/dhclient-exit-hooks.d/wpad-proxy-update
+ delete mode 100644 etc/dhcp3/dhcpd-debian-edu.conf
+ delete mode 100644 etc/insserv/overrides/dhcp3-server
+ create mode 100644 etc/insserv/overrides/isc-dhcp-server
+
+diff --git a/Makefile b/Makefile
+index 38984a6..9c27c59 100644
+--- a/Makefile
++++ b/Makefile
+@@ -30,7 +30,7 @@ mandir     = $(prefix)/share/man
+ gosadir    = $(sysconfdir)/gosa
+ ldapdir    = $(sysconfdir)/ldap
+ schemadir  = $(ldapdir)/schema
+-dhcp3dir   = $(sysconfdir)/dhcp3
++dhcp3dir   = $(sysconfdir)/dhcp
+ libdir     = /usr/lib
+ pkglibdir  = $(libdir)/debian-edu-config
+ mailcapdir = $(libdir)/mime/packages
+@@ -89,14 +89,14 @@ SYSCONFFILES = \
+ 	cfengine/inputs/cfagent.conf \
+ 	cups/cupsd-debian-edu.conf \
+ 	dhclient-exit-hooks \
+-	dhcp3/dhclient-exit-hooks.d/wpad-proxy-update \
+-	dhcp3/dhcpd-debian-edu.conf \
+-	dhcp3/dhclient-debian-edu.conf \
++	dhcp/dhclient-exit-hooks.d/wpad-proxy-update \
++	dhcp/dhcpd-debian-edu.conf \
++	dhcp/dhclient-debian-edu.conf \
+ 	exim4/exim-ldap-client-v4.conf \
+ 	exim4/exim-ldap-server-v4.conf \
+ 	filesystems \
+ 	gosa/gosa.conf \
+-	insserv/overrides/dhcp3-server \
++	insserv/overrides/isc-dhcp-server \
+ 	insserv/overrides/kdm \
+ 	insserv/overrides/nslcd \
+ 	insserv/overrides/ntp \
+diff --git a/README b/README
+index 64a5bc3..9de2b86 100644
+--- a/README
++++ b/README
+@@ -67,7 +67,7 @@ DNS server (powerdns)
+   (without the domain name) thus making it easy for schools to change either 
+   their domain (if they have an own DNS domain), or the IP addresses they use.
+ 
+-DHCP server (dhcp3)
++DHCP server (dhcp)
+ -------------------
+ 
+   Contains info on the IP range and DNS server used on the network,
+diff --git a/bin/debian-edu-pxelinux.cfg b/bin/debian-edu-pxelinux.cfg
+index 0e1b3ae..0cdba60 100755
+--- a/bin/debian-edu-pxelinux.cfg
++++ b/bin/debian-edu-pxelinux.cfg
+@@ -10,12 +10,12 @@ SYSPXELINUX=/opt/ltsp/i386/usr/lib/syslinux/pxelinux.0
+ 
+ # Find out where dhcpd.conf thinks pxelinux lives. 
+ PXELOCATION=$(sed  -ne 's:^ *filename *"\(/.*pxelinux.0\)".*:\1:p' \
+-              /etc/dhcp3/dhcpd.conf   | head -1)
++              /etc/dhcp/dhcpd.conf   | head -1)
+ PXEDIR=$(dirname $PXELOCATION)
+ 
+ # Make sure dhcpd.conf mentions a pxelinux.0
+ if [ ! "$PXELOCATION" ] ; then 
+-  echo "Cant find no sign of pxelinux.0 in /etc/dhcp3/dhcpd.conf" >&2
++  echo "Cant find no sign of pxelinux.0 in /etc/dhcp/dhcpd.conf" >&2
+   exit 9
+ fi
+ 
+diff --git a/cf/cf.dhcpserver b/cf/cf.dhcpserver
+index 42cf68f..9f0e6ed 100644
+--- a/cf/cf.dhcpserver
++++ b/cf/cf.dhcpserver
+@@ -2,29 +2,29 @@ links:
+ 
+   debian.server::
+ 
+-	/etc/dhcp3/dhcpd.conf ->! /etc/dhcp3/dhcpd-debian-edu.conf
++	/etc/dhcp/dhcpd.conf ->! /etc/dhcp/dhcpd-debian-edu.conf
+ 		nofile=force
+ 
+   debian::
+ 
+-	/etc/dhcp3/dhclient.conf ->! /etc/dhcp3/dhclient-debian-edu.conf
++	/etc/dhcp/dhclient.conf ->! /etc/dhcp/dhclient-debian-edu.conf
+ 		nofile=force
+ 
+ editfiles:
+ 
+   debian.server::
+ 
+-        # The file /etc/default/dhcp3-server3-server3-server controls
+-        # what interface the dhcp server will listen on.  We will have
+-        # one monster dhcpd.conf file that contains definitions for both
+-        # the eth0 and eth1 interfaces and control which is active by
+-        # manipulating this /etc/default/dhcp3-server
++        # The file /etc/default/isc-dhcp-server controls what interface the
++        # dhcp server will listen on.  We will have one monster dhcpd.conf file
++        # that contains definitions for both the eth0 and eth1 interfaces and
++        # control which is active by manipulating this
++        # /etc/default/isc-dhcp-server
+         #
+         # Make sure this is synced with cf.ltsp (LTSP server)
+ 
+ 
+ 	# Enable DHCP server on eth0
+-        { /etc/default/dhcp3-server
++        { /etc/default/isc-dhcp-server
+               BeginGroupIfNoMatch 'INTERFACES="eth0"'
+                   LocateLineMatching 'INTERFACES=""'
+                   ReplaceLineWith 'INTERFACES="eth0"'
+diff --git a/cf/cf.ltsp b/cf/cf.ltsp
+index b7ec574..6d3952f 100644
+--- a/cf/cf.ltsp
++++ b/cf/cf.ltsp
+@@ -5,7 +5,7 @@ links:
+     # The dhcpd.conf will be be installed in by the server profile scripts
+     # But what the heck, just to be sure we do it again
+ 
+-    /etc/dhcp3/dhcpd.conf ->! /etc/dhcp3/dhcpd-debian-edu.conf
++    /etc/dhcp/dhcpd.conf ->! /etc/dhcp/dhcpd-debian-edu.conf
+ 		nofile=force
+  
+     # the cleanup script for network swap 
+@@ -47,11 +47,11 @@ editfiles:
+ 
+   debian.ltspserver::
+ 
+-    # The file /etc/default/dhcp3-server controls what interface the dhcp
++    # The file /etc/default/isc-dhcp-server controls what interface the dhcp
+     # server will listen on. We will have one monster dhcpd.conf file
+     # that contains definitions for both the eth0 and eth1 interfaces
+     # and control which is active by manipulating this
+-    # /etc/default/dhcp3-server
++    # /etc/default/isc-dhcp-server
+ 
+     # If this host is the primary server, then cf.dhcpserver will
+     # Replace 'INTERFACES=""' with 'INTERFACES="eth0".  This rule will
+@@ -61,7 +61,7 @@ editfiles:
+     # Make sure this is synced with cf.dhcpserver
+ 
+     
+-    { /etc/default/dhcp3-server
++    { /etc/default/isc-dhcp-server
+       AppendIfNoSuchLine 'INTERFACES="$INTERFACES eth1"'
+     }
+ 
+diff --git a/cf/cfrunhosts.pl b/cf/cfrunhosts.pl
+index 7ae0afa..d6f32d3 100755
+--- a/cf/cfrunhosts.pl
++++ b/cf/cfrunhosts.pl
+@@ -3,7 +3,7 @@
+ # Generates cfrun.hosts from dhcpd.conf
+ 
+ $CFRUN = "/etc/cfengine/cfrun.hosts";
+-$DHCPD = "/etc/dhcp3/dhcpd.conf";
++$DHCPD = "/etc/dhcp/dhcpd.conf";
+ $range = "";
+ 
+ # Test if cfrun.hosts already exists
+diff --git a/debian/changelog b/debian/changelog
+index 14672e6..f60375c 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,13 +1,14 @@
+ debian-edu-config (1.443~svn66305) UNRELEASED; urgency=low
+ 
++  [ Petter Reinholdtsen ]
+   * Continue development.  Merge svn versions before uploading to
+     to unstable.  This version is inteded for Squeeze.  Do not
+     upload to lenny without close checking.
+ 
+- -- Petter Reinholdtsen <pere@debian.org>  Wed, 14 Jul 2010 11:46:59 +0200
+-
+-  [ Petter Reinholdtsen ]
++  [ Mehdi Dogguy ]
++  * Update for DHCPv4 transition (Closes: #585064).
+ 
++ -- Petter Reinholdtsen <pere@debian.org>  Wed, 14 Jul 2010 11:46:59 +0200
+ 
+ debian-edu-config (1.443~svn66304) squeeze-test; urgency=low
+ 
+diff --git a/debian/control b/debian/control
+index 283b58d..8c7456e 100644
+--- a/debian/control
++++ b/debian/control
+@@ -13,6 +13,7 @@ XS-DM-Upload-Allowed: yes
+ 
+ Package: debian-edu-config
+ Architecture: all
++Pre-Depends: dpkg (>= 1.15.7.2)
+ Depends: ${misc:Depends}, cfengine2, libconfig-inifiles-perl, mime-support, libnet-ldap-perl, ng-utils, host, desktop-profiles, lsb-base, ssl-cert, openssl, libfilesys-df-perl, libtext-unaccent-perl, libhtml-fromtext-perl, libio-socket-ssl-perl, lsof, discover | discover1, tftp | tftp-hpa, debian-edu-artwork, education-tasks (>= 0.842~svn60380), net-tools, patch, libjavascript-perl, base-files (>= 5.3), python-notify
+ Recommends: resolvconf, xresprobe, syslinux, memtest86+
+ Suggests: atftpd | tftpd-hpa
+diff --git a/debian/debian-edu-config.fetch-ldap-cert b/debian/debian-edu-config.fetch-ldap-cert
+index c0f1024..29c43d7 100644
+--- a/debian/debian-edu-config.fetch-ldap-cert
++++ b/debian/debian-edu-config.fetch-ldap-cert
+@@ -8,10 +8,10 @@
+ # Default-Stop:
+ # Short-Description: Fetch LDAP SSL public key from the server
+ # Description:
+-# Start before dhcp3-server to give pdns time to become operational
++# Start before isc-dhcp-server to give pdns time to become operational
+ # before the dhcp server start looking for the LDAP server using DNS.
+ # Workaround for #585966:
+-# X-Start-Before:    dhcp3-server
++# X-Start-Before:    isc-dhcp-server
+ ### END INIT INFO
+ #
+ # Author: Petter Reinholdtsen <pere@hungry.com>
+diff --git a/debian/debian-edu-config.links b/debian/debian-edu-config.links
+index 3d6d482..25ea87a 100644
+--- a/debian/debian-edu-config.links
++++ b/debian/debian-edu-config.links
+@@ -1,2 +1,5 @@
+ usr/share/debian-edu-config/tools/ldapdump.sh etc/slbackup/pre.d/ldapdump.sh
+ etc/apache2/mods-available/userdir.load etc/apache2/mods-available/debian-edu-userdir.load
++etc/dhcp/dhclient-exit-hooks.d/wpad-proxy-update etc/dhcp3/dhclient-exit-hooks.d/wpad-proxy-update
++etc/dhcp/dhcpd-debian-edu.conf etc/dhcp3/dhcpd-debian-edu.conf
++etc/dhcp/dhclient-debian-edu.conf etc/dhcp3/dhclient-debian-edu.conf
+diff --git a/debian/debian-edu-config.postinst b/debian/debian-edu-config.postinst
+index ce90e66..0211f5a 100644
+--- a/debian/debian-edu-config.postinst
++++ b/debian/debian-edu-config.postinst
+@@ -117,6 +117,12 @@ if [ ! -e "$KIOSK_CONFIG_FILE" ] ; then
+         update-ini-file $KIOSK_CONFIG_FILE 'Directories-debian_edu_root' 'prefixes' '/usr/share/debian-edu/root'
+ fi
+ 
++if dpkg-maintscript-helper supports mv_conffile; then
++	for file in dhclient-debian-edu.conf dhcpd-debian-edu.conf; do
++		dpkg-maintscript-helper mv_conffile /etc/dhcp3/$file /etc/dhcp/$file 1.442 -- "$@";
++	done
++fi
++
+ case "$1" in
+ configure)
+     if dpkg --compare-versions "$2" le "1.431~svn60646"; then
+diff --git a/debian/debian-edu-config.postrm b/debian/debian-edu-config.postrm
+new file mode 100644
+index 0000000..2ac795e
+--- /dev/null
++++ b/debian/debian-edu-config.postrm
+@@ -0,0 +1,9 @@
++#!/bin/sh -e
++
++if dpkg-maintscript-helper supports mv_conffile; then
++	for file in dhclient-debian-edu.conf dhcpd-debian-edu.conf; do
++		dpkg-maintscript-helper mv_conffile /etc/dhcp3/$file /etc/dhcp/$file 1.442 -- "$@";
++	done
++fi
++
++#DEBHELPER#
+diff --git a/debian/debian-edu-config.preinst b/debian/debian-edu-config.preinst
+index 3d38cdb..9428e75 100644
+--- a/debian/debian-edu-config.preinst
++++ b/debian/debian-edu-config.preinst
+@@ -35,6 +35,12 @@ prep_mv_conffile() {
+     fi
+ }
+ 
++if dpkg-maintscript-helper supports mv_conffile; then
++	for file in dhclient-debian-edu.conf dhcpd-debian-edu.conf; do
++		dpkg-maintscript-helper mv_conffile /etc/dhcp3/$file /etc/dhcp/$file 1.442 -- "$@";
++	done
++fi
++
+ case "$1" in
+ install)
+     ;;
+diff --git a/etc/dhcp/dhclient-debian-edu.conf b/etc/dhcp/dhclient-debian-edu.conf
+new file mode 100644
+index 0000000..72f7aa6
+--- /dev/null
++++ b/etc/dhcp/dhclient-debian-edu.conf
+@@ -0,0 +1,18 @@
++# This was the default in dhcp3-client version 3.1.3-2
++#request subnet-mask, broadcast-address, time-offset, routers,
++#        domain-name, domain-name-servers, domain-search, host-name,
++#        netbios-name-servers, netbios-scope, interface-mtu,
++#        rfc3442-classless-static-routes, ntp-servers;
++
++# This one is in the debian package
++option rfc3442-classless-static-routes code 121 = array of unsigned integer 8;
++
++# This one is added by Debian Edu
++option wpad-url code 252 = text;
++
++# For Debian Edu, we added log-servers, smtp-server, wpad-url
++request subnet-mask, broadcast-address, time-offset, routers,
++        domain-name, domain-name-servers, domain-search, host-name,
++        netbios-name-servers, netbios-scope, interface-mtu,
++        rfc3442-classless-static-routes, ntp-servers,
++        log-servers, smtp-server, wpad-url;
+diff --git a/etc/dhcp/dhclient-exit-hooks.d/.svn/entries b/etc/dhcp/dhclient-exit-hooks.d/.svn/entries
+new file mode 100644
+index 0000000..c073c20
+--- /dev/null
++++ b/etc/dhcp/dhclient-exit-hooks.d/.svn/entries
+@@ -0,0 +1,62 @@
++10
++
++dir
++66370
++svn://svn.debian.org/debian-edu/trunk/src/debian-edu-config/etc/dhcp3/dhclient-exit-hooks.d
++svn://svn.debian.org/debian-edu
++
++
++
++2010-07-05T09:01:47.458772Z
++65795
++pere
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++6e500793-9bee-0310-a5b0-9d0909bd054d
++
++wpad-proxy-update
++file
++
++
++
++
++2010-07-14T09:54:11.000000Z
++0d175767daca24e12060977c6e2d9e73
++2010-07-05T09:01:47.458772Z
++65795
++pere
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++475
++
+diff --git a/etc/dhcp/dhclient-exit-hooks.d/.svn/text-base/wpad-proxy-update.svn-base b/etc/dhcp/dhclient-exit-hooks.d/.svn/text-base/wpad-proxy-update.svn-base
+new file mode 100644
+index 0000000..86515bd
+--- /dev/null
++++ b/etc/dhcp/dhclient-exit-hooks.d/.svn/text-base/wpad-proxy-update.svn-base
+@@ -0,0 +1,15 @@
++update_proxy_from_wpad() {
++    # Not comparing the old and new URL, as the URL might be the same
++    # but the content of the WPAD file changed.  If the option is not
++    # set and no wpad file is available from http://wpad/wpad.dat ,
++    # the use of a proxy should be disabled.
++    /usr/share/debian-edu-config/tools/update-proxy-from-wpad "$new_wpad_url"
++}
++
++case $reason in
++    BOUND|RENEW|REBIND|REBOOT)
++	update_proxy_from_wpad
++	;;
++    EXPIRE|FAIL|RELEASE|STOP)
++	;;
++esac
+diff --git a/etc/dhcp/dhclient-exit-hooks.d/wpad-proxy-update b/etc/dhcp/dhclient-exit-hooks.d/wpad-proxy-update
+new file mode 100644
+index 0000000..86515bd
+--- /dev/null
++++ b/etc/dhcp/dhclient-exit-hooks.d/wpad-proxy-update
+@@ -0,0 +1,15 @@
++update_proxy_from_wpad() {
++    # Not comparing the old and new URL, as the URL might be the same
++    # but the content of the WPAD file changed.  If the option is not
++    # set and no wpad file is available from http://wpad/wpad.dat ,
++    # the use of a proxy should be disabled.
++    /usr/share/debian-edu-config/tools/update-proxy-from-wpad "$new_wpad_url"
++}
++
++case $reason in
++    BOUND|RENEW|REBIND|REBOOT)
++	update_proxy_from_wpad
++	;;
++    EXPIRE|FAIL|RELEASE|STOP)
++	;;
++esac
+diff --git a/etc/dhcp/dhcpd-debian-edu.conf b/etc/dhcp/dhcpd-debian-edu.conf
+new file mode 100644
+index 0000000..8972603
+--- /dev/null
++++ b/etc/dhcp/dhcpd-debian-edu.conf
+@@ -0,0 +1,7 @@
++lease-file-name "/var/lib/dhcp3/dhcpd.leases";
++ldap-server "ldap";
++ldap-port 389;
++ldap-base-dn  "dc=skole,dc=skolelinux,dc=no";
++ldap-dhcp-server-cn "dhcp";
++ldap-method dynamic;
++ddns-update-style none;
+diff --git a/etc/dhcp3/dhclient-debian-edu.conf b/etc/dhcp3/dhclient-debian-edu.conf
+deleted file mode 100644
+index 72f7aa6..0000000
+--- a/etc/dhcp3/dhclient-debian-edu.conf
++++ /dev/null
+@@ -1,18 +0,0 @@
+-# This was the default in dhcp3-client version 3.1.3-2
+-#request subnet-mask, broadcast-address, time-offset, routers,
+-#        domain-name, domain-name-servers, domain-search, host-name,
+-#        netbios-name-servers, netbios-scope, interface-mtu,
+-#        rfc3442-classless-static-routes, ntp-servers;
+-
+-# This one is in the debian package
+-option rfc3442-classless-static-routes code 121 = array of unsigned integer 8;
+-
+-# This one is added by Debian Edu
+-option wpad-url code 252 = text;
+-
+-# For Debian Edu, we added log-servers, smtp-server, wpad-url
+-request subnet-mask, broadcast-address, time-offset, routers,
+-        domain-name, domain-name-servers, domain-search, host-name,
+-        netbios-name-servers, netbios-scope, interface-mtu,
+-        rfc3442-classless-static-routes, ntp-servers,
+-        log-servers, smtp-server, wpad-url;
+diff --git a/etc/dhcp3/dhclient-exit-hooks.d/wpad-proxy-update b/etc/dhcp3/dhclient-exit-hooks.d/wpad-proxy-update
+deleted file mode 100644
+index 86515bd..0000000
+--- a/etc/dhcp3/dhclient-exit-hooks.d/wpad-proxy-update
++++ /dev/null
+@@ -1,15 +0,0 @@
+-update_proxy_from_wpad() {
+-    # Not comparing the old and new URL, as the URL might be the same
+-    # but the content of the WPAD file changed.  If the option is not
+-    # set and no wpad file is available from http://wpad/wpad.dat ,
+-    # the use of a proxy should be disabled.
+-    /usr/share/debian-edu-config/tools/update-proxy-from-wpad "$new_wpad_url"
+-}
+-
+-case $reason in
+-    BOUND|RENEW|REBIND|REBOOT)
+-	update_proxy_from_wpad
+-	;;
+-    EXPIRE|FAIL|RELEASE|STOP)
+-	;;
+-esac
+diff --git a/etc/dhcp3/dhcpd-debian-edu.conf b/etc/dhcp3/dhcpd-debian-edu.conf
+deleted file mode 100644
+index 8972603..0000000
+--- a/etc/dhcp3/dhcpd-debian-edu.conf
++++ /dev/null
+@@ -1,7 +0,0 @@
+-lease-file-name "/var/lib/dhcp3/dhcpd.leases";
+-ldap-server "ldap";
+-ldap-port 389;
+-ldap-base-dn  "dc=skole,dc=skolelinux,dc=no";
+-ldap-dhcp-server-cn "dhcp";
+-ldap-method dynamic;
+-ddns-update-style none;
+diff --git a/etc/insserv/overrides/dhcp3-server b/etc/insserv/overrides/dhcp3-server
+deleted file mode 100644
+index 4acc1d2..0000000
+--- a/etc/insserv/overrides/dhcp3-server
++++ /dev/null
+@@ -1,12 +0,0 @@
+-# BTS #586035
+-### BEGIN INIT INFO
+-# Provides:          dhcp3-server
+-# Required-Start:    $remote_fs $network $syslog
+-# Required-Stop:     $remote_fs $network $syslog
+-# Should-Start:      $local_fs slapd $named
+-# Should-Stop:       $local_fs slapd
+-# Default-Start:     2 3 4 5
+-# Default-Stop:      1
+-# Short-Description: DHCP server
+-# Description:       Dynamic Host Configuration Protocol Server
+-### END INIT INFO
+diff --git a/etc/insserv/overrides/isc-dhcp-server b/etc/insserv/overrides/isc-dhcp-server
+new file mode 100644
+index 0000000..ce263e0
+--- /dev/null
++++ b/etc/insserv/overrides/isc-dhcp-server
+@@ -0,0 +1,12 @@
++# BTS #586035
++### BEGIN INIT INFO
++# Provides:          isc-dhcp-server
++# Required-Start:    $remote_fs $network $syslog
++# Required-Stop:     $remote_fs $network $syslog
++# Should-Start:      $local_fs slapd $named
++# Should-Stop:       $local_fs slapd
++# Default-Start:     2 3 4 5
++# Default-Stop:      0 1 6
++# Short-Description: DHCP server
++# Description:       Dynamic Host Configuration Protocol Server
++### END INIT INFO
+diff --git a/testsuite/dhcpd b/testsuite/dhcpd
+index 131f7f3..f11fef3 100755
+--- a/testsuite/dhcpd
++++ b/testsuite/dhcpd
+@@ -13,7 +13,7 @@ else
+     exit 0
+ fi
+ 
+-cfg=/etc/default/dhcp3-server
++cfg=/etc/default/isc-dhcp-server
+ 
+ if [ -f $cfg ] ; then
+     . $cfg
+-- 
+1.7.1
+

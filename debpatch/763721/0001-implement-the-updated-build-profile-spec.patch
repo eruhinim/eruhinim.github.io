@@ -1,0 +1,320 @@
+>From 41476a4583aba05f27cfc241c099fff7ce3e7f79 Mon Sep 17 00:00:00 2001
+From: josch <j.schauer@email.de>
+Date: Tue, 19 Aug 2014 10:29:29 +0200
+Subject: [PATCH] implement the updated build profile spec
+
+---
+ apt-pkg/deb/deblistparser.cc                       | 112 ++++++++++++---------
+ .../test-bug-661537-build-profiles-support         |  84 ++++++++--------
+ test/libapt/parsedepends_test.cc                   |  29 ++++--
+ 3 files changed, 129 insertions(+), 96 deletions(-)
+
+diff --git a/apt-pkg/deb/deblistparser.cc b/apt-pkg/deb/deblistparser.cc
+index 7d4fd52..8311b5d 100644
+--- a/apt-pkg/deb/deblistparser.cc
++++ b/apt-pkg/deb/deblistparser.cc
+@@ -635,72 +635,94 @@ const char *debListParser::ParseDepends(const char *Start,const char *Stop,
+ 
+    if (ParseRestrictionsList == true)
+    {
+-      // Parse a restrictions list
+-      if (I != Stop && *I == '<')
++      // Parse a restrictions formula which is in disjunctive normal form:
++      // (foo AND bar) OR (blub AND bla)
++
++      std::vector<string> const profiles = APT::Configuration::getBuildProfiles();
++
++      // if the next character is a restriction list, then by default the
++      // dependency does not apply and the conditions have to be checked
++      // if the next character is not a restriction list, then by default the
++      // dependency applies
++      bool applies1 = (*I != '<');
++      while (I != Stop)
+       {
++	 if (*I != '<')
++	     break;
++
+ 	 ++I;
+ 	 // malformed
+ 	 if (unlikely(I == Stop))
+ 	    return 0;
+ 
+-	 std::vector<string> const profiles = APT::Configuration::getBuildProfiles();
+-
+ 	 const char *End = I;
+-	 bool Found = false;
+-	 bool NegRestriction = false;
+-	 while (I != Stop)
+-	 {
+-	    // look for whitespace or ending '>'
+-	    for (;End != Stop && !isspace(*End) && *End != '>'; ++End);
+ 
+-	    if (unlikely(End == Stop))
+-	       return 0;
+-
+-	    if (*I == '!')
++	 // if of the prior restriction list is already fulfilled, then
++	 // we can just skip to the end of the current list
++	 if (applies1) {
++	    for (;End != Stop && *End != '>'; ++End);
++	    I = ++End;
++	    // skip whitespace
++	    for (;I != Stop && isspace(*I) != 0; I++);
++	 } else {
++	    bool applies2 = true;
++	    // all the conditions inside a restriction list have to be
++	    // met so once we find one that is not met, we can skip to
++	    // the end of this list
++	    while (I != Stop)
+ 	    {
+-	       NegRestriction = true;
+-	       ++I;
+-	    }
++	       // look for whitespace or ending '>'
++	       // End now points to the character after the current term
++	       for (;End != Stop && !isspace(*End) && *End != '>'; ++End);
+ 
+-	    std::string restriction(I, End);
++	       if (unlikely(End == Stop))
++		  return 0;
+ 
+-	    std::string prefix = "profile.";
+-	    // only support for "profile" prefix, ignore others
+-	    if (restriction.size() > prefix.size() &&
+-		  restriction.substr(0, prefix.size()) == prefix)
+-	    {
+-	       // get the name of the profile
+-	       restriction = restriction.substr(prefix.size());
++	       bool NegRestriction = false;
++	       if (*I == '!')
++	       {
++		  NegRestriction = true;
++		  ++I;
++	       }
++
++	       std::string restriction(I, End);
+ 
+ 	       if (restriction.empty() == false && profiles.empty() == false &&
+-		     std::find(profiles.begin(), profiles.end(), restriction) != profiles.end())
++		  std::find(profiles.begin(), profiles.end(), restriction) != profiles.end())
+ 	       {
+-		  Found = true;
+-		  if (I[-1] != '!')
+-		     NegRestriction = false;
+-		  // we found a match, so fast-forward to the end of the wildcards
+-		  for (; End != Stop && *End != '>'; ++End);
++		  if (NegRestriction) {
++		     applies2 = false;
++		     // since one of the terms does not apply we don't have to check the others
++		     for (; End != Stop && *End != '>'; ++End);
++		  }
++	       } else {
++		  if (!NegRestriction) {
++		     applies2 = false;
++		     // since one of the terms does not apply we don't have to check the others
++		     for (; End != Stop && *End != '>'; ++End);
++		  }
++	       }
++
++	       if (*End++ == '>') {
++		  I = End;
++		  // skip whitespace
++		  for (;I != Stop && isspace(*I) != 0; I++);
++		  break;
+ 	       }
+-	    }
+ 
+-	    if (*End++ == '>') {
+ 	       I = End;
+-	       break;
++	       // skip whitespace
++	       for (;I != Stop && isspace(*I) != 0; I++);
++	    }
++	    if (applies2) {
++	       applies1 = true;
+ 	    }
+-
+-	    I = End;
+-	    for (;I != Stop && isspace(*I) != 0; I++);
+ 	 }
+-
+-	 if (NegRestriction == true)
+-	    Found = !Found;
+-
+-	 if (Found == false)
+-	    Package = ""; /* not for this restriction */
+       }
+ 
+-      // Skip whitespace
+-      for (;I != Stop && isspace(*I) != 0; I++);
++      if (applies1 == false) {
++	 Package = ""; //not for this restriction
++      }
+    }
+ 
+    if (I != Stop && *I == '|')
+diff --git a/test/integration/test-bug-661537-build-profiles-support b/test/integration/test-bug-661537-build-profiles-support
+index ae1403f..10064a2 100755
+--- a/test/integration/test-bug-661537-build-profiles-support
++++ b/test/integration/test-bug-661537-build-profiles-support
+@@ -11,18 +11,16 @@ insertinstalledpackage 'build-essential' 'all' '0' 'Multi-Arch: foreign'
+ insertpackage 'unstable' 'foo' 'all' '1.0'
+ insertpackage 'unstable' 'bar' 'all' '1.0'
+ 
+-insertsource 'unstable' 'buildprofiles' 'any' '1' 'Build-Depends: foo (>= 1.0) [i386 arm] <!profile.stage1 !profile.cross>, bar'
++insertsource 'unstable' 'buildprofiles' 'any' '1' 'Build-Depends: foo (>= 1.0) [i386 arm] <!stage1 !cross>, bar'
+ 
+ # table from https://wiki.debian.org/BuildProfileSpec
+-insertsource 'unstable' 'spec-1' 'any' '1' 'Build-Depends: foo <!profile.stage1>'
+-insertsource 'unstable' 'spec-2' 'any' '1' 'Build-Depends: foo <profile.stage1>'
+-insertsource 'unstable' 'spec-3' 'any' '1' 'Build-Depends: foo <!profile.stage1 !profile.notest>'
+-insertsource 'unstable' 'spec-4' 'any' '1' 'Build-Depends: foo <profile.stage1 profile.notest>'
+-insertsource 'unstable' 'spec-5' 'any' '1' 'Build-Depends: foo <!profile.stage1 profile.notest>'
+-insertsource 'unstable' 'spec-6' 'any' '1' 'Build-Depends: foo <profile.stage1 !profile.notest>'
+-# multiple stanzas not supported: error out
+-insertsource 'unstable' 'spec-7' 'any' '1' 'Build-Depends: foo <profile.stage1><!profile.notest>'
+-insertsource 'unstable' 'spec-8' 'any' '1' 'Build-Depends: foo <profile.stage1> <!profile.notest>'
++insertsource 'unstable' 'spec-1' 'any' '1' 'Build-Depends: foo <!stage1>'
++insertsource 'unstable' 'spec-2' 'any' '1' 'Build-Depends: foo <stage1>'
++insertsource 'unstable' 'spec-3' 'any' '1' 'Build-Depends: foo <!stage1 !notest>'
++insertsource 'unstable' 'spec-4' 'any' '1' 'Build-Depends: foo <stage1 notest>'
++insertsource 'unstable' 'spec-5' 'any' '1' 'Build-Depends: foo <!stage1 notest>'
++insertsource 'unstable' 'spec-6' 'any' '1' 'Build-Depends: foo <stage1 !notest>'
++insertsource 'unstable' 'spec-7' 'any' '1' 'Build-Depends: foo <stage1> <!notest>'
+ 
+ setupaptarchive
+ 
+@@ -113,35 +111,37 @@ testprofile() {
+ 	testwithdpkg "$2" "$3" "$4"
+ }
+ 
+-testprofile 'spec-1' 'foo <!profile.stage1>' '' "$KEEP"
+-testprofile 'spec-1' 'foo <!profile.stage1>' 'stage1' "$DROP"
+-testprofile 'spec-1' 'foo <!profile.stage1>' 'notest' "$KEEP"
+-testprofile 'spec-1' 'foo <!profile.stage1>' 'stage1,notest' "$DROP"
+-
+-testprofile 'spec-2' 'foo <profile.stage1>' '' "$DROP"
+-testprofile 'spec-2' 'foo <profile.stage1>' 'stage1' "$KEEP"
+-testprofile 'spec-2' 'foo <profile.stage1>' 'notest' "$DROP"
+-testprofile 'spec-2' 'foo <profile.stage1>' 'stage1,notest' "$KEEP"
+-
+-testprofile 'spec-3' 'foo <!profile.stage1 !profile.notest>' '' "$KEEP"
+-testprofile 'spec-3' 'foo <!profile.stage1 !profile.notest>' 'stage1' "$DROP"
+-testprofile 'spec-3' 'foo <!profile.stage1 !profile.notest>' 'notest' "$DROP"
+-testprofile 'spec-3' 'foo <!profile.stage1 !profile.notest>' 'stage1,notest' "$DROP"
+-
+-testprofile 'spec-4' 'foo <profile.stage1 profile.notest>' '' "$DROP"
+-testprofile 'spec-4' 'foo <profile.stage1 profile.notest>' 'stage1' "$KEEP"
+-testprofile 'spec-4' 'foo <profile.stage1 profile.notest>' 'notest' "$KEEP"
+-testprofile 'spec-4' 'foo <profile.stage1 profile.notest>' 'stage1,notest' "$KEEP"
+-
+-testprofile 'spec-5' 'foo <!profile.stage1 profile.notest>' '' "$KEEP"
+-testprofile 'spec-5' 'foo <!profile.stage1 profile.notest>' 'stage1' "$DROP"
+-testprofile 'spec-5' 'foo <!profile.stage1 profile.notest>' 'notest' "$KEEP"
+-testprofile 'spec-5' 'foo <!profile.stage1 profile.notest>' 'stage1,notest' "$DROP"
+-
+-testprofile 'spec-6' 'foo <profile.stage1 !profile.notest>' '' "$KEEP"
+-testprofile 'spec-6' 'foo <profile.stage1 !profile.notest>' 'stage1' "$KEEP"
+-testprofile 'spec-6' 'foo <profile.stage1 !profile.notest>' 'notest' "$DROP"
+-testprofile 'spec-6' 'foo <profile.stage1 !profile.notest>' 'stage1,notest' "$KEEP"
+-
+-testfailure aptget build-dep spec-7 -s
+-testfailure aptget build-dep spec-8 -s
++testprofile 'spec-1' 'foo <!stage1>' '' "$KEEP"
++testprofile 'spec-1' 'foo <!stage1>' 'stage1' "$DROP"
++testprofile 'spec-1' 'foo <!stage1>' 'notest' "$KEEP"
++testprofile 'spec-1' 'foo <!stage1>' 'stage1,notest' "$DROP"
++
++testprofile 'spec-2' 'foo <stage1>' '' "$DROP"
++testprofile 'spec-2' 'foo <stage1>' 'stage1' "$KEEP"
++testprofile 'spec-2' 'foo <stage1>' 'notest' "$DROP"
++testprofile 'spec-2' 'foo <stage1>' 'stage1,notest' "$KEEP"
++
++testprofile 'spec-3' 'foo <!stage1 !notest>' '' "$KEEP"
++testprofile 'spec-3' 'foo <!stage1 !notest>' 'stage1' "$DROP"
++testprofile 'spec-3' 'foo <!stage1 !notest>' 'notest' "$DROP"
++testprofile 'spec-3' 'foo <!stage1 !notest>' 'stage1,notest' "$DROP"
++
++testprofile 'spec-4' 'foo <stage1 notest>' '' "$DROP"
++testprofile 'spec-4' 'foo <stage1 notest>' 'stage1' "$DROP"
++testprofile 'spec-4' 'foo <stage1 notest>' 'notest' "$DROP"
++testprofile 'spec-4' 'foo <stage1 notest>' 'stage1,notest' "$KEEP"
++
++testprofile 'spec-5' 'foo <!stage1 notest>' '' "$DROP"
++testprofile 'spec-5' 'foo <!stage1 notest>' 'stage1' "$DROP"
++testprofile 'spec-5' 'foo <!stage1 notest>' 'notest' "$KEEP"
++testprofile 'spec-5' 'foo <!stage1 notest>' 'stage1,notest' "$DROP"
++
++testprofile 'spec-6' 'foo <stage1 !notest>' '' "$DROP"
++testprofile 'spec-6' 'foo <stage1 !notest>' 'stage1' "$KEEP"
++testprofile 'spec-6' 'foo <stage1 !notest>' 'notest' "$DROP"
++testprofile 'spec-6' 'foo <stage1 !notest>' 'stage1,notest' "$DROP"
++
++testprofile 'spec-7' 'foo <stage1> <!notest>' '' "$KEEP"
++testprofile 'spec-7' 'foo <stage1> <!notest>' 'stage1' "$KEEP"
++testprofile 'spec-7' 'foo <stage1> <!notest>' 'notest' "$DROP"
++testprofile 'spec-7' 'foo <stage1> <!notest>' 'stage1,notest' "$KEEP"
+diff --git a/test/libapt/parsedepends_test.cc b/test/libapt/parsedepends_test.cc
+index 52eac82..f644599 100644
+--- a/test/libapt/parsedepends_test.cc
++++ b/test/libapt/parsedepends_test.cc
+@@ -33,9 +33,10 @@ static void parseDependency(bool const StripMultiArch,  bool const ParseArchFlag
+       "os-for-me [ linux-any ], "
+       "cpu-not-for-me [ any-armel ], "
+       "os-not-for-me [ kfreebsd-any ], "
+-      "not-in-stage1 <!profile.stage1>, "
+-      "not-in-stage1-or-nodoc <!profile.nodoc !profile.stage1>, "
+-      "only-in-stage1 <unknown.unknown profile.stage1>, "
++      "not-in-stage1 <!stage1>, "
++      "not-stage1-and-not-nodoc <!nodoc !stage1>, "
++      "not-stage1-or-not-nodoc <!nodoc> <!stage1>, "
++      "unknown-profile <unknown stage1>, "
+       "overlord-dev:any (= 7.15.3~) | overlord-dev:native (>> 7.15.5), "
+       ;
+ 
+@@ -184,7 +185,7 @@ static void parseDependency(bool const StripMultiArch,  bool const ParseArchFlag
+ 
+    if (ParseRestrictionsList == true) {
+       Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+-      EXPECT_EQ("", Package); // not-in-stage1-or-in-nodoc
++      EXPECT_EQ("", Package); // not-stage1-and-not-nodoc
+    } else {
+       EXPECT_EQ(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList));
+       Start = strstr(Start, ",");
+@@ -193,7 +194,16 @@ static void parseDependency(bool const StripMultiArch,  bool const ParseArchFlag
+ 
+    if (ParseRestrictionsList == true) {
+       Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
+-      EXPECT_EQ("only-in-stage1", Package);
++      EXPECT_EQ("not-stage1-or-not-nodoc", Package);
++   } else {
++      EXPECT_EQ(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList));
++      Start = strstr(Start, ",");
++      Start++;
++   }
++
++   if (ParseRestrictionsList == true) {
++      Start = debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList);
++      EXPECT_EQ("", Package); // unknown-profile
+    } else {
+       EXPECT_EQ(true, 0 == debListParser::ParseDepends(Start, End, Package, Version, Op, ParseArchFlags, StripMultiArch, ParseRestrictionsList));
+       Start = strstr(Start, ",");
+@@ -232,10 +242,11 @@ test:
+       SCOPED_TRACE(std::string("ParseRestrictionsList: ") + (ParseRestrictionsList ? "true" : "false"));
+       parseDependency(StripMultiArch, ParseArchFlags, ParseRestrictionsList);
+    }
+-   if (StripMultiArch == false)
+-      if (ParseArchFlags == false)
+-	 ParseRestrictionsList = !ParseRestrictionsList;
+-   ParseArchFlags = !ParseArchFlags;
++   if (StripMultiArch == false) {
++       if (ParseArchFlags == false)
++           ParseRestrictionsList = !ParseRestrictionsList;
++       ParseArchFlags = !ParseArchFlags;
++   }
+    StripMultiArch = !StripMultiArch;
+ 
+    runner++;
+-- 
+2.0.1
+

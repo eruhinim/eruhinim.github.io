@@ -1,0 +1,164 @@
+From c3a3e94a87946d0eb782b3147409ac37123febdf Mon Sep 17 00:00:00 2001
+From: Jonas Meurer <jonas@freesources.org>
+Date: Sun, 17 Jun 2018 01:37:03 +0200
+Subject: [PATCH] Add support for locales and gettext to initramfs
+
+---
+ conf/initramfs.conf |  8 ++++++++
+ hooks/locales       | 47 +++++++++++++++++++++++++++++++++++++++++++++++
+ initramfs-tools.8   | 11 +++++++++++
+ initramfs.conf.5    |  5 +++++
+ mkinitramfs         |  1 +
+ scripts/functions   | 16 ++++++++++++++++
+ 6 files changed, 88 insertions(+)
+ create mode 100755 hooks/locales
+
+diff --git a/conf/initramfs.conf b/conf/initramfs.conf
+index 1319536..12a361c 100644
+--- a/conf/initramfs.conf
++++ b/conf/initramfs.conf
+@@ -38,6 +38,14 @@ BUSYBOX=auto
+ KEYMAP=n
+ 
+ #
++# LOCALES: [ y | n ]
++#
++# Add locales and gettext to the initramfs.
++#
++
++LOCALES=n
++
++#
+ # COMPRESS: [ gzip | bzip2 | lzma | lzop | xz ]
+ #
+ 
+diff --git a/hooks/locales b/hooks/locales
+new file mode 100755
+index 0000000..8320f67
+--- /dev/null
++++ b/hooks/locales
+@@ -0,0 +1,47 @@
++#!/bin/sh
++
++PREREQ=""
++
++prereqs()
++{
++	echo "$PREREQ"
++}
++
++case $1 in
++# get pre-requisites
++prereqs)
++	prereqs
++	exit 0
++	;;
++esac
++
++# Hook to load locales and gettext into initramfs if requested by LOCALES=y
++if [ "$LOCALES" != "y" ] && [ "$LOCALES" != "Y" ]; then
++	exit 0
++fi
++
++if [ ! -x /usr/bin/locale ]; then
++	echo "locale is missing. Please install the 'locales' package."
++	exit 0
++fi
++
++. /usr/share/initramfs-tools/hook-functions
++
++# Copy binaries required for gettext support
++copy_exec /usr/bin/envsubst
++copy_exec /usr/bin/gettext
++copy_exec /usr/bin/gettext.sh
++copy_exec /usr/bin/ngettext
++
++# Copy locale files except LC_COLLATE. It's not needed for localized string
++# support and usually is by far the biggest locale file.
++for file in $(find /usr/lib/locale -type f \! -name LC_COLLATE 2>/dev/null); do
++	copy_file locale_file $file
++done
++
++# Write locale variables to initramfs conf.d
++for line in $(locale); do
++	if [ "${line#LC_COLLATE}" = "$line" ]; then
++		echo "export $line" >>${DESTDIR}/conf/conf.d/locales
++	fi
++done
+diff --git a/initramfs-tools.8 b/initramfs-tools.8
+index 32cce2d..0481131 100644
+--- a/initramfs-tools.8
++++ b/initramfs-tools.8
+@@ -424,6 +424,17 @@ user to investigate the situation.
+ panic "Frobnication failed"
+ .RE
+ 
++.TP
++\fB\fI
++gettext_support
++Either loads /usr/bin/gettext.sh (if available) or provides dummy functions
++eval_gettext() and eval_ngettext() functions otherwise.
++.RS
++.PP
++.B Example:
++gettext_support
++.RE
++
+ .SS Subdirectories
+ Both /usr/share/initramfs-tools/scripts and /etc/initramfs-tools/scripts
+ contains the following subdirectories.
+diff --git a/initramfs.conf.5 b/initramfs.conf.5
+index 569834c..4587e2f 100644
+--- a/initramfs.conf.5
++++ b/initramfs.conf.5
+@@ -57,6 +57,11 @@ that might need input will normally set this variable automatically, so there
+ should normally be no need to set this.
+ 
+ .TP
++\fB LOCALES
++If set to 'y', locales and gettext will be installed into the initramfs and
++locale environment variables will be set.
++
++.TP
+ \fB COMPRESS
+ Specifies the compression method used for the initramfs image.
+ .B mkinitramfs
+diff --git a/mkinitramfs b/mkinitramfs
+index 24715d5..ab9ede5 100755
+--- a/mkinitramfs
++++ b/mkinitramfs
+@@ -203,6 +203,7 @@ export DESTDIR
+ export DPKG_ARCH
+ export verbose
+ export KEYMAP
++export LOCALES
+ export MODULES
+ export BUSYBOX
+ export RESUME
+diff --git a/scripts/functions b/scripts/functions
+index 0b7ca10..d6d18ae 100644
+--- a/scripts/functions
++++ b/scripts/functions
+@@ -463,3 +463,19 @@ mount_bottom()
+ {
+ 	:
+ }
++
++# Load /usr/bin/gettext.sh if available, provide dummy functions eval_gettext()
++# and eval_ngettext() otherwise.
++gettext_support()
++{
++	if [ -f "/usr/bin/gettext.sh" ]; then
++		. /usr/bin/gettext.sh
++	else
++		eval_gettext() {
++			eval echo "$1"
++		}
++		eval_ngettext() {
++			eval echo "$1"
++		}
++	fi
++}
+-- 
+2.11.0
+

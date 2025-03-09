@@ -1,0 +1,94 @@
+From 3a2acbce4e606ac60f4eb116ecb981a31257d0a8 Mon Sep 17 00:00:00 2001
+From: Gergely Nagy <algernon@madhouse-project.org>
+Date: Sun, 17 Jul 2011 20:48:05 +0200
+Subject: [PATCH] dh_builddeb: support for parallel builds of debs
+
+Implement support for parallel deb builds, when DEB_BUILD_OPTIONS has
+parallels=N - limiting the number of forked processes to N.
+
+Requested-By: Kari Pahula <kaol@debian.org>
+Signed-Off-By: Gergely Nagy <algernon@madhouse-project.org>
+---
+ dh_builddeb |   59 ++++++++++++++++++++++++++++++++++++++++++-----------------
+ 1 files changed, 42 insertions(+), 17 deletions(-)
+
+diff --git a/dh_builddeb b/dh_builddeb
+index b15c943..26e1274 100755
+--- a/dh_builddeb
++++ b/dh_builddeb
+@@ -63,30 +63,55 @@ else {
+ 	$dh{FILENAME}="/$dh{FILENAME}";
+ }
+ 
++my $processes=1;
++my $max_procs=1;
++if (defined $ENV{DEB_BUILD_OPTIONS} && $ENV{DEB_BUILD_OPTIONS}=~/parallel=(\d+)/) {
++	$max_procs=$1;
++}
++
+ foreach my $package (@{$dh{DOPACKAGES}}) {
+-	my $tmp=tmpdir($package);
+-	if (exists $ENV{DH_ALWAYS_EXCLUDE} && length $ENV{DH_ALWAYS_EXCLUDE}) {
+-		if (! compat(5)) {
+-			complex_doit("find $tmp $dh{EXCLUDE_FIND} | xargs rm -rf");
++	my $pid=0;
++
++	if ($max_procs > 1) {
++		while ($processes > $max_procs) {
++			wait;
++			$processes--;
++		}
++		$pid=fork();
++	}
++
++	if ($pid == 0) {
++		my $tmp=tmpdir($package);
++		if (exists $ENV{DH_ALWAYS_EXCLUDE} && length $ENV{DH_ALWAYS_EXCLUDE}) {
++			if (! compat(5)) {
++				complex_doit("find $tmp $dh{EXCLUDE_FIND} | xargs rm -rf");
++			}
++			else {
++				# Old broken code here for compatibility. Does not
++				# remove everything.
++				complex_doit("find $tmp -name $_ | xargs rm -rf")
++					foreach split(":", $ENV{DH_ALWAYS_EXCLUDE});
++			}
++		}
++		if (! is_udeb($package)) {
++			doit("dpkg-deb", @{$dh{U_PARAMS}}, "--build", $tmp, $dh{DESTDIR}.$dh{FILENAME});
+ 		}
+ 		else {
+-			# Old broken code here for compatibility. Does not
+-			# remove everything.
+-			complex_doit("find $tmp -name $_ | xargs rm -rf")
+-				foreach split(":", $ENV{DH_ALWAYS_EXCLUDE});
++			my $filename=$dh{FILENAME};
++			if (! $filename) {
++				$filename="/".udeb_filename($package);
++			}
++			doit("dpkg-deb", @{$dh{U_PARAMS}}, "--build", $tmp, $dh{DESTDIR}.$filename);
+ 		}
+-	}
+-	if (! is_udeb($package)) {
+-		doit("dpkg-deb", @{$dh{U_PARAMS}}, "--build", $tmp, $dh{DESTDIR}.$dh{FILENAME});
+-	}
+-	else {
+-		my $filename=$dh{FILENAME};
+-		if (! $filename) {
+-			$filename="/".udeb_filename($package);
++		exit (0) if ($max_procs > 1);
++	} else {
++		if (!defined $pid) {
++			error("fork failed!");
+ 		}
+-		doit("dpkg-deb", @{$dh{U_PARAMS}}, "--build", $tmp, $dh{DESTDIR}.$filename);
++		$processes++;
+ 	}
+ }
++while (($max_procs > 0) && (wait != -1)) {}
+ 
+ =head1 SEE ALSO
+ 
+-- 
+1.7.2.5
+

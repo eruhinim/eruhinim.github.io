@@ -1,0 +1,109 @@
+From 7ca2a38fc33930be015e23d25a74bd37925694cb Mon Sep 17 00:00:00 2001
+From: Osamu Aoki <osamu@debian.org>
+Date: Sun, 23 Jul 2017 21:17:00 +0900
+Subject: [PATCH 3/5] Message submission to each mail account
+
+Instead of the traditional smarthost serving host to host base, the new
+message submission supports each external server for each "From:"
+address.  This solves problem for multiple gmail related email addresses
+and provides robust way to send mails without labeled as spams.
+---
+ .../debconf/conf.d/auth/30_exim4-config_examples   |  5 ++--
+ .../debconf/conf.d/router/200_exim4-config_primary |  9 +++++++
+ .../30_exim4-config_remote_smtp_submission         | 28 ++++++++++++++++++++++
+ debian/passwd.client                               | 10 ++++++++
+ 4 files changed, 50 insertions(+), 2 deletions(-)
+ create mode 100644 debian/debconf/conf.d/transport/30_exim4-config_remote_smtp_submission
+
+diff --git a/debian/debconf/conf.d/auth/30_exim4-config_examples b/debian/debconf/conf.d/auth/30_exim4-config_examples
+index 4680b27..cd5da9b 100644
+--- a/debian/debconf/conf.d/auth/30_exim4-config_examples
++++ b/debian/debconf/conf.d/auth/30_exim4-config_examples
+@@ -204,8 +204,9 @@
+ # You can set AUTH_CLIENT_ALLOW_NOTLS_PASSWORDS to allow unencrypted
+ # clear text password authentication on all connections.
+ 
+-# this returns the matching line from passwd.client (by smarthost)
+-PASSWDLINE  =  ${lookup{$host}nwildlsearch{CONFDIR/passwd.client}{$value}fail}
++# this returns the matching line from passwd.client (by mail "From:" account or smarthost)
++PASSWDLINE  =  ${lookup{${address:$h_from:}}lsearch{CONFDIR/passwd.client}{$value}\
++              {${lookup{$host}nwildlsearch{CONFDIR/passwd.client}{$value}fail}}}
+ 
+ cram_md5:
+   driver = cram_md5
+diff --git a/debian/debconf/conf.d/router/200_exim4-config_primary b/debian/debconf/conf.d/router/200_exim4-config_primary
+index 7681d91..8fee21c 100644
+--- a/debian/debconf/conf.d/router/200_exim4-config_primary
++++ b/debian/debconf/conf.d/router/200_exim4-config_primary
+@@ -73,6 +73,15 @@ nonlocal:
+ # domains, you'll need to copy the dnslookup_relay_to_domains router
+ # here so that mail to relay_domains is handled separately.
+ 
++SUBMISSIONHOST = ${listextract{3}{${lookup{${address:$h_from:}}lsearch{CONFDIR/passwd.client}{$value}fail}}{$value}fail}
++
++submission:
++  debug_print = "R: submission for $local_part@$domain from ${address:$h_from:}"
++  driver = manualroute
++  domains = ! +local_domains
++  transport = remote_smtp_submission
++  route_list = * SUBMISSIONHOST byname
++
+ smarthost:
+   debug_print = "R: smarthost for $local_part@$domain"
+   driver = manualroute
+diff --git a/debian/debconf/conf.d/transport/30_exim4-config_remote_smtp_submission b/debian/debconf/conf.d/transport/30_exim4-config_remote_smtp_submission
+new file mode 100644
+index 0000000..5b485c8
+--- /dev/null
++++ b/debian/debconf/conf.d/transport/30_exim4-config_remote_smtp_submission
+@@ -0,0 +1,28 @@
++
++### transport/30_exim4-config_remote_smtp_submission
++#################################
++
++remote_smtp_submission:
++  debug_print = "T: remote_smtp_submission for $local_part@$domain"
++  driver = smtp
++  port = 587
++  hosts_require_auth = *
++  hosts_require_tls = *
++.ifdef REMOTE_SMTP_HEADERS_REWRITE
++  headers_rewrite = REMOTE_SMTP_HEADERS_REWRITE
++.endif
++.ifdef REMOTE_SMTP_RETURN_PATH
++  return_path = REMOTE_SMTP_RETURN_PATH
++.endif
++.ifdef REMOTE_SMTP_HELO_DATA
++  helo_data=REMOTE_SMTP_HELO_DATA
++.endif
++.ifdef TLS_DH_MIN_BITS
++tls_dh_min_bits = TLS_DH_MIN_BITS
++.endif
++.ifdef REMOTE_SMTP_SMARTHOST_TLS_CERTIFICATE
++tls_certificate = REMOTE_SMTP_SMARTHOST_TLS_CERTIFICATE
++.endif
++.ifdef REMOTE_SMTP_SMARTHOST_PRIVATEKEY
++tls_privatekey = REMOTE_SMTP_SMARTHOST_PRIVATEKEY
++.endif
+diff --git a/debian/passwd.client b/debian/passwd.client
+index 2f06b8d..1157975 100644
+--- a/debian/passwd.client
++++ b/debian/passwd.client
+@@ -4,4 +4,14 @@
+ # see exim4_passwd_client(5) for more documentation
+ #
+ # Example:
++# Use message submission port 578 for each "From:" email account
++#      (4 data list, Good for services like gmail)
++### target@mail.server.example:login:password:submission.host.example
++### foo.bar@gmail.com:foo.bar@gmail.com:<application_password>:smtp.gmail.com
++#
++# Use a smarthost for all "From:" email accounts (wildcard accepted)
++#      (3 data list, Good for most connection ISP provided SMTP servers.)
++#      (Need to specify submission port as ::587 if not port 25)
+ ### target.mail.server.example:login:password
++###*.so-net.ne.jp:my.name@tc4.so-net.ne.jp::587:secret
++
+-- 
+2.11.0
+

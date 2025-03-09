@@ -1,0 +1,472 @@
+From ca0a4ac31a68f7aa706157c2670779c097c17a61 Mon Sep 17 00:00:00 2001
+From: YunQiang Su <syq@debian.org>
+Date: Mon, 3 Feb 2020 09:41:14 +0800
+Subject: [PATCH] add binutils64 package -- host 64bit, target 32bit
+
+This package is built with multilib, and with option
+  --host 64bit --target 32bit
+It diverts non-multiarch programs with dpkg-divert
+  as c++filt dwp elfedit ld.bfd ld.gold
+Add a with_host64 option -- default off
+
+We will have a src:binutils64, while will use these code.
+---
+ debian/binutils-multiarch.postrm.in  |   4 +-
+ debian/binutils-multiarch.preinst.in |   4 +-
+ debian/binutils64.postrm.in          |  47 +++++++++
+ debian/binutils64.preinst.in         |  29 ++++++
+ debian/control.host64.in             |  19 ++++
+ debian/control.in                    |   2 +-
+ debian/rules                         | 146 ++++++++++++++++++++++++++-
+ 7 files changed, 245 insertions(+), 6 deletions(-)
+ create mode 100644 debian/binutils64.postrm.in
+ create mode 100644 debian/binutils64.preinst.in
+ create mode 100644 debian/control.host64.in
+
+diff --git a/debian/binutils-multiarch.postrm.in b/debian/binutils-multiarch.postrm.in
+index 7b94385..bde103b 100644
+--- a/debian/binutils-multiarch.postrm.in
++++ b/debian/binutils-multiarch.postrm.in
+@@ -3,6 +3,7 @@ set -e
+ this_ver=@DEB_VER@; # this version
+ ma=@DEB_MULTIARCH@
+ triplet=@DEB_TRIPLET@
++prog_multiarch="@PROG_MULTIARCH@"
+ # action: upgrade, abort-upgrade, remove, abort-install, disappear,
+ # purge, or failed-upgrade.
+ context=$1
+@@ -40,8 +41,7 @@ diversion() {
+ }
+ 
+ 
+-for prog in nm objdump objcopy strings strip size \
+-            ar ranlib addr2line gprof readelf
++for prog in $prog_multiarch
+ do
+ 	diversion 2.27-8 "/usr/bin/$triplet-$prog"
+ done
+diff --git a/debian/binutils-multiarch.preinst.in b/debian/binutils-multiarch.preinst.in
+index 385f625..62547f3 100644
+--- a/debian/binutils-multiarch.preinst.in
++++ b/debian/binutils-multiarch.preinst.in
+@@ -3,6 +3,7 @@ set -e
+ new_ver=@DEB_VER@; # this version
+ ma=@DEB_MULTIARCH@
+ triplet=@DEB_TRIPLET@
++prog_multiarch="@PROG_MULTIARCH@"
+ context=$1; # why to install (install, upgrade, or abort-upgrade)
+ old_ver=$2; # version being replaced, if any
+ 
+@@ -22,8 +23,7 @@ diversion() {
+ 	fi
+ }
+ 
+-for prog in nm objdump objcopy strings strip size \
+-            ar ranlib addr2line gprof readelf
++for prog in $prog_multiarch
+ do
+ 	diversion 2.27-8 "/usr/bin/$triplet-$prog"
+ done
+diff --git a/debian/binutils64.postrm.in b/debian/binutils64.postrm.in
+new file mode 100644
+index 0000000..f8df5c7
+--- /dev/null
++++ b/debian/binutils64.postrm.in
+@@ -0,0 +1,47 @@
++#! /bin/sh
++set -e
++this_ver=@DEB_VER@; # this version
++ma=@DEB_MULTIARCH@
++triplet=@DEB_TRIPLET@
++prog_targetonly="@prog_TARGETONLY@"
++# action: upgrade, abort-upgrade, remove, abort-install, disappear,
++# purge, or failed-upgrade.
++context=$1
++if
++	test "$context" = failed-upgrade &&
++	dpkg --compare-versions "$this_ver" lt "$2"
++then
++	# postrm of the future failed.
++	# Who knows what it was supposed to do?  Abort.
++	exit 1
++fi
++new_ver=; # version replacing this one, if any.
++case "$context" in
++failed-upgrade)
++	new_ver=$this_ver ;;
++abort-install|disappear)
++	new_ver= ;;
++*)
++	new_ver=$2 ;;
++esac
++
++diversion() {
++	local added_ver divertto file
++	added_ver=$1
++	file=$2
++	divertto=${3-$file.32}
++
++	if
++		test "$context" != purge &&
++		dpkg --compare-versions "$new_ver" lt "$added_ver"
++	then
++		dpkg-divert --package binutils64 \
++			--remove --rename --divert "$divertto" "$file"
++	fi
++}
++
++
++for prog in $prog_targetonly
++do
++	diversion 2.33.1-2 "/usr/bin/$triplet-$prog"
++done
+diff --git a/debian/binutils64.preinst.in b/debian/binutils64.preinst.in
+new file mode 100644
+index 0000000..b104291
+--- /dev/null
++++ b/debian/binutils64.preinst.in
+@@ -0,0 +1,29 @@
++#! /bin/sh
++set -e
++new_ver=@DEB_VER@; # this version
++ma=@DEB_MULTIARCH@
++triplet=@DEB_TRIPLET@
++prog_targetonly="@prog_TARGETONLY@"
++context=$1; # why to install (install, upgrade, or abort-upgrade)
++old_ver=$2; # version being replaced, if any
++
++diversion() {
++	local added_ver divertto file
++	added_ver=$1
++	file=$2
++	divertto=${3-$file.32}
++
++	if
++		test "$context" = install ||
++		dpkg --compare-versions "$old_ver" lt "$added_ver" ||
++		dpkg --compare-versions "$new_ver" le "$old_ver"
++	then
++		dpkg-divert --package binutils64 \
++			--add --rename --divert "$divertto" "$file"
++	fi
++}
++
++for prog in as $prog_targetonly
++do
++	diversion 2.33.1-2 "/usr/bin/$triplet-$prog"
++done
+diff --git a/debian/control.host64.in b/debian/control.host64.in
+new file mode 100644
+index 0000000..b2de0f2
+--- /dev/null
++++ b/debian/control.host64.in
+@@ -0,0 +1,19 @@
++
++Package: binutils64
++Architecture: @host64_archs@
++Depends: ${shlibs:Depends}, binutils-common (= ${binary:Version}),
++  binutils (= ${binary:Version})
++Suggests: binutils-doc (>= ${source:Version})
++Description: GNU assembler, linker and binary utilities (64bit for 32bit)
++ The programs in this package are used to assemble, link and manipulate
++ binary and object files.  They may be used in conjunction with a compiler
++ and various libraries to build programs.
++ .
++ This is built target for 32bit, while host for 64bit.
++
++Package: binutils64-dbg
++Section: debug
++Architecture: @host64_archs@
++Depends: binutils64 (= ${binary:Version})
++Description: GNU assembler, linker and binary utilities (64bit for 32bit, debug symbols)
++ This package provides debug symbols for binutils64.
+diff --git a/debian/control.in b/debian/control.in
+index 81849c8..ebdcddd 100644
+--- a/debian/control.in
++++ b/debian/control.in
+@@ -4,7 +4,7 @@ Priority: optional
+ Maintainer: Matthias Klose <doko@debian.org>
+ Uploaders: James Troup <binutils@elmo.tasta.io>
+ Standards-Version: 4.5.0
+-Build-Depends: autoconf (>= 2.64), @dpkg_dev@
++Build-Depends: autoconf (>= 2.64), @dpkg_dev@@lib64_host64@
+   bison, flex, gettext, texinfo, dejagnu, quilt, chrpath, dwz,
+   python3:any, file, xz-utils, lsb-release, zlib1g-dev, procps,
+   g++-aarch64-linux-gnu [amd64 i386 x32] <!nocheck>,
+diff --git a/debian/rules b/debian/rules
+index 1acbe57..9b759b1 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -44,11 +44,13 @@ p_bin = binutils
+ p_com = $(p_bin)-common
+ p_lib = lib$(p_bin)
+ p_nat = $(p_bin)-$(subst _,-,$(DEB_HOST_GNU_TYPE))
++p_nat64 = $(p_bin)64-$(subst _,-,$(DEB_HOST_GNU_TYPE))
+ p_dev = $(p_bin)-dev
+ p_mul = $(p_bin)-multiarch
+ p_mdev = $(p_mul)-dev
+ p_doc = $(p_bin)-doc
+ p_hppa64 = $(p_bin)-hppa64-linux-gnu
++p_host64 = $(p_bin)64
+ p_src = $(p_bin)-source
+ 
+ p_ctf = libctf0
+@@ -87,6 +89,7 @@ d_mul = debian/$(p_mul)
+ d_mdev = debian/$(p_mdev)
+ d_doc = debian/$(p_doc)
+ d_hppa64 = debian/$(p_hppa64)
++d_host64 = debian/$(p_host64)
+ d_src = debian/$(p_src)
+ 
+ d_ctf = debian/$(p_ctf)
+@@ -180,6 +183,8 @@ ifneq (,$(filter $(DEB_HOST_ARCH),amd64 i386 x32 hppa))
+ endif
+ 
+ with_multiarch := yes
++with_host64 := no
++HOST64_ARCHS = i386 powerpc mips mipsel mips mipsn32 mipsn32el mipsr6 mipsr6el mipsn32r6 mipsn32r6el x32
+ 
+ # disabled: no build-needed restriction used in the autopkg test
+ ifeq (0,1)
+@@ -342,6 +347,7 @@ endif
+ SINGLE_VERSION= -system
+ MULTI_VERSION = -multiarch
+ HPPA64_VERSION= -hppa64
++HOST64_VERSION= -host64
+ 
+ ifeq (,$(filter $(distrelease),squeeze wheezy precise trusty))
+   DPKG_DEV = dpkg-dev (>= 1.17.11),
+@@ -393,6 +399,14 @@ programs += nm objcopy objdump ranlib readelf size strings strip
+ ifeq ($(with_gold),yes)
+ programs += gold ld.gold dwp
+ endif
++prog_multiarch = nm objdump objcopy strings strip size \
++            ar ranlib addr2line gprof readelf
++# ld and gold is symbol link in binutils, so not need be here
++prog_targetonly = as c++filt dwp elfedit ld.bfd
++ifeq ($(with_gold),yes)
++prog_targetonly += ld.gold
++endif
++
+ 
+ ########################################
+ 
+@@ -580,7 +594,7 @@ clean:
+ 	rm -f test-summary*
+ 	rm -rf $(d_bin) $(d_com) $(d_lib) $(d_lib)-dbg $(d_nat) $(d_nat)-dbg \
+ 	  $(d_hst) $(d_dev) $(d_mul) $(d_mul)-dbg $(d_mdev) $(d_doc) \
+-	  $(d_hppa64) $(d_hppa64)-dbg $(d_src) $(d_bld) \
++	  $(d_hppa64) $(d_hppa64)-dbg $(d_host64) $(d_host64)-dbg $(d_src) $(d_bld) \
+ 	  $(d_ctf) $(d_ctf)-dbg $(d_ctfn) $(d_ctfn)-dbg
+ 	$(foreach ca,$(CROSS_ARCHS), rm -rf debian/binutils-$(shell echo $(call _gnu_type,$(ca)) | sed 's/_/-/g;s/i586/i686/'){,-dbg}; )
+ 	rm -rf debian/tmp debian/files* debian/substvars
+@@ -601,6 +615,7 @@ endif
+ stamps/control: debian/control.in $(if $(TARGET),debian/control.cross.in) $(if $(filter yes, $(with_cross)),debian/control.cross.in)
+ ifneq (,$(TARGET))
+ 	sed -n -e 's/@dpkg_dev@/$(DPKG_DEV)/;/^Package: binutils-for-build$$/q;p' \
++		-e 's/@lib64_host64@//' \
+ 		< debian/control.in > debian/control
+ 	sed -e "s/@target@/$$(echo -n $(TARGET) | sed s/_/-/g)/" \
+ 		-e "s/@host_archs@/any/" \
+@@ -618,6 +633,15 @@ else
+ 	    | $(if $(filter yes,$(same_source)), grep -v '^Built-Using', cat) \
+ 	    >> debian/control; \
+ 	)
++ifeq (yes, $(with_host64))
++	sed -e 's/@host64_archs@/$(HOST64_ARCHS)/' \
++		debian/control.host64.in >> debian/control
++	sed -i -e 's/@lib64_host64@/ lib64z1-dev [$(HOST64_ARCHS)], lib64stdc++-9-dev [$(HOST64_ARCHS)],/' \
++		-e "/^  g++-.*nocheck.*,$$/d" \
++		debian/control
++else
++	sed -i -e 's/@lib64_host64@//' debian/control
++endif
+ endif
+ 	@mkdir -p stamps
+ 	touch $@
+@@ -966,6 +990,65 @@ stamps/build-hppa64: stamps/configure-hppa64
+ 
+ ###############################################################################
+ 
++#################
++# host64 target #
++#################
++ifeq (yes, $(with_host64))
++  ifneq (,$(filter $(DEB_HOST_ARCH), mips mipsn32))
++    confargs_host64_gnu_type=mips64-linux-gnuabi64
++    CFLAGS_64 = -mabi=64
++    CXXFLAGS_64 += -mabi=64
++  else ifneq (,$(filter $(DEB_HOST_ARCH), mipsel mipsn32el))
++    confargs_host64_gnu_type=mips64el-linux-gnuabi64
++    CFLAGS_64 = -mabi=64
++    CXXFLAGS_64 = -mabi=64
++  else ifneq (,$(filter $(DEB_HOST_ARCH), mipsr6 mipsn32r6))
++    confargs_host64_gnu_type=mipsisa64-linux-gnuabi64
++    CFLAGS_64 = -mabi=64
++    CXXFLAGS_64 += -mabi=64
++  else ifneq (,$(filter $(DEB_HOST_ARCH), mipsr6el mipsn32r6el))
++    confargs_host64_gnu_type=mipsisa64el-linux-gnuabi64
++    CFLAGS_64 = -mabi=64
++    CXXFLAGS_64 = -mabi=64
++  else ifneq (,$(filter $(DEB_HOST_ARCH), i386 x32))
++    confargs_host64_gnu_type=x86_64-linux-gnu
++    CFLAGS_64 = -m64
++    CXXFLAGS_64 = -m64
++  else ifneq (,$(filter $(DEB_HOST_ARCH), powerpc))
++    confargs_host64_gnu_type=powerpc64-linux-gnu
++    CFLAGS_64 = -m64
++    CXXFLAGS_64 = -m64
++  endif
++endif
++
++ifeq ($(with_gold),yes)
++  HOST64_CONFARGS += --enable-ld=default --enable-gold
++endif
++stamps/configure-host64:
++	$(checkdir)
++	@echo BEGIN $@
++	rm -rf stamps/configure-host64 builddir-host64
++	mkdir builddir-host64
++	cd builddir-host64 && ln -sf /usr/include/$(DEB_HOST_MULTIARCH)/asm . \
++	    && env CC="$(CC)" CXX="$(CXX)" AR="$(AR)" AS="$(AS)" CFLAGS="$(CFLAGS) $(CFLAGS_64) -I$(CURDIR)/builddir-host64" CXXFLAGS="$(CXXFLAGS) $(CXXFLAGS_64) -I$(CURDIR)/builddir-host64" LDFLAGS="$(LDFLAGS)" ../configure \
++		$(filter-out --enable-targets=%, $(CONFARGS)) \
++		$(filter-out --enable-host=%, $(CONFARGS)) \
++		$(HOST64_CONFARGS) \
++		--libdir=/$(PF)/lib/$(DEB_HOST_MULTIARCH) \
++		--host=$(confargs_host64_gnu_type) \
++		--target=$(DEB_HOST_GNU_TYPE)
++	@mkdir -p stamps
++	touch $@
++
++stamps/build-host64: stamps/configure-host64
++	$(checkdir)
++	@echo BEGIN $@
++	env BFD_SOVER_EXT="$(HOST64_VERSION)" CTF_SOVER_EXT="$(HOST64_VERSION)" \
++	  $(MAKE) $(NJOBS) -C builddir-host64 \
++	    LDFLAGS="-Wl,-z,relro"
++	touch $@
++###############################################################################
++
+ pre-build:
+ #ifneq (,$(filter $(DEB_HOST_ARCH), armel powerpc))
+ #	@echo Build it ...
+@@ -981,6 +1064,9 @@ endif
+ ifeq ($(with_hppa64),yes)
+        build_stamps += stamps/build-hppa64
+ endif
++ifeq ($(with_host64),yes)
++       build_stamps += stamps/build-host64
++endif
+ ifeq ($(with_cross),yes)
+        build_stamps += $(foreach ca,$(CROSS_ARCHS), stamps/build.$(ca))
+ endif
+@@ -1012,6 +1098,9 @@ install_stamps =
+ ifeq ($(with_hppa64),yes)
+        install_stamps += stamps/install-hppa64
+ endif
++ifeq ($(with_host64),yes)
++       install_stamps += stamps/install-host64
++endif
+ ifeq ($(with_cross),yes)
+        install_stamps += $(foreach ca,$(CROSS_ARCHS), stamps/install.$(ca))
+ endif
+@@ -1330,6 +1419,31 @@ stamps/install-hppa64: checkroot stamps/build-hppa64
+ 
+ 	touch $@
+ 
++stamps/install-host64: checkroot stamps/build-host64
++	$(checkdir)
++
++	rm -fr $(d_host64)
++	$(install_dir) $(d_host64)
++
++	: # install binutils64 stuff
++	env MAKE="$(MAKE) VERSION=$(SINGLE_VERSION)" \
++          $(MAKE) -C builddir-host64 \
++		CFLAGS="$(CFLAGS)" \
++		CXXFLAGS="$(CXXFLAGS)" \
++		LDFLAGS="$(LDFLAGS)" \
++		DESTDIR=$(CURDIR)/$(d_host64) install
++
++	# some arch (like powerpc) doesn't have host64 libraries.
++	-mv -f $(d_host64)/$(PF)/$(confargs_host64_gnu_type)/$(DEB_HOST_GNU_TYPE)/lib/lib*$(HOST64_VERSION).*.so $(d_host64)/$(PF)/lib/$(DEB_HOST_MULTIARCH)
++	rm -f $(d_host64)/$(PF)/lib/$(DEB_HOST_MULTIARCH)/*.{a,la}
++	rm -rf $(d_host64)/$(PF)/{share,include,$(confargs_host64_gnu_type),lib/$(DEB_HOST_MULTIARCH)/ldscripts}
++	$(call strip_package, $(p_host64), $(d_host64))
++
++	cd $(d_host64)/$(PF)/bin; \
++	  rm -f $(DEB_HOST_GNU_TYPE)-ld; \
++	  for i in $(prog_multiarch); do \
++	    rm -f $(DEB_HOST_GNU_TYPE)-$$i; \
++	  done
+ ###############################################################################
+ 
+ #######################
+@@ -1555,6 +1669,8 @@ else
+ 		-e 's/@DEB_ARCH@/$(DEB_HOST_ARCH)/g' \
+ 		-e 's/@DEB_MULTIARCH@/$(DEB_HOST_MULTIARCH)/g' \
+ 		-e 's/@DEB_TRIPLET@/$(DEB_HOST_GNU_TYPE)/g' \
++		-e 's/@prog_MULTIARCH@/$(prog_multiarch)/g' \
++		-e 's/@prog_TARGETONLY@/$(prog_targetonly)/g' \
+ 		-e "s/@dpkg_dev@/$(DPKG_DEV)/" \
+ 		$$i > $${i%*.in}; \
+ 	    case "$$i" in *.post*|*.pre*) chmod 755 $${i%*.in}; esac; \
+@@ -1629,6 +1745,13 @@ ifeq ($(with_hppa64),yes)
+ 	$(install_dir) $(d_hppa64)/DEBIAN $(d_hppa64)-dbg/DEBIAN
+ 	$(install_file) debian/binutils.triggers $(d_hppa64)/DEBIAN/triggers
+ endif
++ifeq ($(with_host64),yes)
++	$(install_dir) $(d_host64)/DEBIAN $(d_host64)-dbg/DEBIAN
++	$(install_file) debian/binutils.triggers $(d_host64)/DEBIAN/triggers
++	$(install_script) debian/binutils64.preinst $(d_host64)/DEBIAN/preinst
++	$(install_script) debian/binutils64.postrm $(d_host64)/DEBIAN/postrm
++	rm -f $(d_host64)/$(PF)/$(confargs_host64_gnu_type)/$(DEB_HOST_GNU_TYPE)/lib/*.la
++endif
+ 
+ 	: # install docs
+ 	$(install_dir) $(d_bin)/$(PF)/share/doc/$(p_bin)/
+@@ -1779,6 +1902,14 @@ ifeq ($(with_multiarch),yes)
+ 	dpkg-gencontrol -P$(d_mdev) -p$(p_mdev)
+ 	cd $(d_mdev) && find -type f  ! -regex './DEBIAN/.*' -printf '%P\n' | LC_ALL=C sort | xargs -r md5sum > DEBIAN/md5sums
+ endif
++ifeq ($(with_host64),yes)
++	rm -f debian/substvars
++	find $(d_host64) -type f | xargs file | grep ELF | cut -d: -f 1 | xargs dpkg-shlibdeps
++	dpkg-gencontrol -P$(d_host64) -p$(p_host64)
++	cd $(d_host64) && find -type f  ! -regex './DEBIAN/.*' -printf '%P\n' | LC_ALL=C sort | xargs md5sum > DEBIAN/md5sums
++	dpkg-gencontrol -P$(d_host64)-dbg -p$(p_host64)-dbg
++	cd $(d_host64)-dbg && find -type f  ! -regex './DEBIAN/.*' -printf '%P\n' | LC_ALL=C sort | xargs md5sum > DEBIAN/md5sums
++endif
+ 
+ ifeq ($(with_hppa64),yes)
+ 	rm -f debian/substvars
+@@ -1849,6 +1980,16 @@ ifeq ($(with_hppa64),yes)
+ 	find $(d_hppa64)-dbg -depth -newermt '$(BUILD_DATE)' -print0 | \
+ 		xargs -0r touch --no-dereference --date='$(BUILD_DATE)'
+ 	dpkg --build $(d_hppa64)-dbg ..
++endif
++ifeq ($(with_host64),yes)
++	chown -R root:root $(d_host64)-dbg
++	chmod -R go=rX  $(d_host64) $(d_host64)-dbg
++	find $(d_host64) -depth -newermt '$(BUILD_DATE)' -print0 | \
++		xargs -0r touch --no-dereference --date='$(BUILD_DATE)'
++	dpkg --build $(d_host64) ..
++	find $(d_host64)-dbg -depth -newermt '$(BUILD_DATE)' -print0 | \
++		xargs -0r touch --no-dereference --date='$(BUILD_DATE)'
++	dpkg --build $(d_host64)-dbg ..
+ endif
+ 	@echo '==================== Build finished ===================='
+ 	ps aux
+@@ -1878,6 +2019,9 @@ define strip_package
+ 	  $(strip $2)/$(PF)/lib/$(DEB_HOST_MULTIARCH)/libbfd-*so \
+ 	  $(strip $2)/$(PF)/lib/$(DEB_HOST_MULTIARCH)/libopcodes-*so \
+ 	  $(strip $2)/$(PF)/lib/$(DEB_HOST_MULTIARCH)/libctf*.so.0.0.0 \
++	  $(strip $2)/$(PF)/$(confargs_host64_gnu_type)/$(DEB_HOST_MULTIARCH)/lib/libbfd-*so \
++	  $(strip $2)/$(PF)/$(confargs_host64_gnu_type)/$(DEB_HOST_MULTIARCH)/lib/libopcodes-*so \
++	  $(strip $2)/$(PF)/$(confargs_host64_gnu_type)/$(DEB_HOST_MULTIARCH)/lib/libctf*.so.0.0.0 \
+ 	  $$(file $(strip $2)/$(PF)/bin/* |awk -F: '$$0 !~ /script/ {print $$1}'); \
+ 	do \
+ 	  test ! -h $$i || continue; test -f $$i || continue; \
+-- 
+2.25.0
+

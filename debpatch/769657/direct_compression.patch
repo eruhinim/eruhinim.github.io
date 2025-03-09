@@ -1,0 +1,168 @@
+diff --git a/automysqlbackup b/automysqlbackup
+index ddbea01..c9bbcd1 100755
+--- a/automysqlbackup
++++ b/automysqlbackup
+@@ -79,6 +79,9 @@ DOWEEKLY=6
+ # Choose Compression type. (gzip or bzip2)
+ COMP=gzip
+ 
++# Compress backups on the fly with gzip or bzip2 (yes or no)
++COMPDIRECT=no
++
+ # Compress communications between backup server and MySQL server?
+ COMMCOMP=no
+ 
+@@ -250,8 +253,10 @@ fi
+ # Change Log
+ #=====================================================================
+ #
++# VER 2.6 - (2014-12-18)
++#    Added direct compression support to save diskspace
+ # VER 2.5 - (2006-01-15)
+-#		Added support for setting MAXIMUM_PACKET_SIZE and SOCKET parameters (suggested by Yvo van Doorn)
++#    Added support for setting MAXIMUM_PACKET_SIZE and SOCKET parameters (suggested by Yvo van Doorn)
+ # VER 2.4 - (2006-01-23)
+ #    Fixed bug where weekly backups were not being rotated. (Fix by wolf02)
+ #    Added hour an min to backup filename for the case where backups are taken multiple
+@@ -350,7 +355,7 @@ DNOW=`date +%u`						# Day number of the week 1 to 7 where 1 represents Monday
+ DOM=`date +%d`							# Date of the Month e.g. 27
+ M=`date +%B`							# Month e.g January
+ W=`date +%V`							# Week Number e.g 37
+-VER=2.5									# Version Number
++VER=2.6									# Version Number
+ LOGFILE=$BACKUPDIR/$DBHOST-`date +%N`.log		# Logfile Name
+ LOGERR=$BACKUPDIR/ERRORS_$DBHOST-`date +%N`.log		# Logfile Name
+ BACKUPFILES=""
+@@ -420,26 +425,54 @@ exec 2> $LOGERR     # stderr replaced with file $LOGERR.
+ 
+ # Functions
+ 
++SUFFIX=""
++
+ # Database dump function
+ dbdump () {
+-	touch $2
+-	chmod 600 $2
+ 	if [ $1 = "information_schema" ] ; then
+ 		NEWOPT="--skip-opt ${OPT}"
+ 	else
+ 		NEWOPT="--opt $OPT"
+ 	fi
+ 
+-	if [ -z "${USERNAME}" -o -z "${PASSWORD}" ] ; then
+-		mysqldump --defaults-file=/etc/mysql/debian.cnf $NEWOPT $1 > $2
++	if [ "$COMPDIRECT" = "yes" ] && ( [ "$COMP" = "gzip" ] || [ "$COMP" = "bzip2" ] ); then
++		if [ "$COMP" = "gzip" ]; then
++			SUFFIX=".gz"
++			touch "$2.gz"
++			chmod 600 "$2.gz"
++			if [ -z "${USERNAME}" -o -z "${PASSWORD}" ] ; then
++				mysqldump --defaults-file=/etc/mysql/debian.cnf $NEWOPT $1 | gzip -f > "$2.gz"
++			else
++				mysqldump --user=$USERNAME --password=$PASSWORD --host=$DBHOST $NEWOPT $1  | gzip -f > "$2.gz"
++			fi
++		elif [ "$COMP" = "bzip2" ]; then
++			SUFFIX=".bz2"
++			touch "$2.bz2"
++                        chmod 600 "$2.bz2"
++			if [ -z "${USERNAME}" -o -z "${PASSWORD}" ] ; then
++                                mysqldump --defaults-file=/etc/mysql/debian.cnf $NEWOPT $1 | gzip -f > "$2.bz2"
++                        else
++                                mysqldump --user=$USERNAME --password=$PASSWORD --host=$DBHOST $NEWOPT $1  | gzip -f > "$2.bz2"
++                        fi
++		fi
+ 	else
+-		mysqldump --user=$USERNAME --password=$PASSWORD --host=$DBHOST $NEWOPT $1 > $2
++	        touch $2
++		chmod 600 $2
++		if [ -z "${USERNAME}" -o -z "${PASSWORD}" ] ; then
++			mysqldump --defaults-file=/etc/mysql/debian.cnf $NEWOPT $1 > $2
++			compression $2
++		else
++			mysqldump --user=$USERNAME --password=$PASSWORD --host=$DBHOST $NEWOPT $1 > $2
++			compression $2
++		fi
++	fi
++	if [ "$LATEST" = "yes" ]; then
++		cp $1$SUFFIX "$BACKUPDIR/latest/"
+ 	fi
+ 	return 0
+ }
+ 
+ # Compression function plus latest copy
+-SUFFIX=""
+ compression () {
+ if [ "$COMP" = "gzip" ]; then
+ 	gzip -f "$1"
+@@ -454,9 +487,6 @@ elif [ "$COMP" = "bzip2" ]; then
+ else
+ 	echo "No compression option set, check advanced settings"
+ fi
+-if [ "$LATEST" = "yes" ]; then
+-	cp $1$SUFFIX "$BACKUPDIR/latest/"
+-fi	
+ return 0
+ }
+ 
+@@ -536,7 +566,6 @@ echo ======================================================================
+ 			fi
+ 			echo Monthly Backup of $MDB...
+ 				dbdump "$MDB" "$BACKUPDIR/monthly/$MDB/${MDB}_$DATE.$M.$MDB.sql"
+-				compression "$BACKUPDIR/monthly/$MDB/${MDB}_$DATE.$M.$MDB.sql"
+ 				BACKUPFILES="$BACKUPFILES $BACKUPDIR/monthly/$MDB/${MDB}_$DATE.$M.$MDB.sql$SUFFIX"
+ 			echo ----------------------------------------------------------------------
+ 		done
+@@ -572,7 +601,6 @@ echo ======================================================================
+ 		rm -fv "$BACKUPDIR/weekly/$DB/${DB}_week.$REMW".*
+ 		echo
+ 			dbdump "$DB" "$BACKUPDIR/weekly/$DB/${DB}_week.$W.$DATE.sql"
+-			compression "$BACKUPDIR/weekly/$DB/${DB}_week.$W.$DATE.sql"
+ 			BACKUPFILES="$BACKUPFILES $BACKUPDIR/weekly/$DB/${DB}_week.$W.$DATE.sql$SUFFIX"
+ 		echo ----------------------------------------------------------------------
+ 	
+@@ -583,7 +611,6 @@ echo ======================================================================
+ 		rm -fv "$BACKUPDIR/daily/$DB"/*."$DOW".sql.*
+ 		echo
+ 			dbdump "$DB" "$BACKUPDIR/daily/$DB/${DB}_$DATE.$DOW.sql"
+-			compression "$BACKUPDIR/daily/$DB/${DB}_$DATE.$DOW.sql"
+ 			BACKUPFILES="$BACKUPFILES $BACKUPDIR/daily/$DB/${DB}_$DATE.$DOW.sql$SUFFIX"
+ 		echo ----------------------------------------------------------------------
+ 	fi
+@@ -599,7 +626,6 @@ echo ======================================================================
+ 	if [ "$DOM" = "01" ]; then
+ 		echo Monthly full Backup of \( $MDBNAMES \)...
+ 			dbdump "$MDBNAMES" "$BACKUPDIR/monthly/$DATE.$M.all-databases.sql"
+-			compression "$BACKUPDIR/monthly/$DATE.$M.all-databases.sql"
+ 			BACKUPFILES="$BACKUPFILES $BACKUPDIR/monthly/$DATE.$M.all-databases.sql$SUFFIX"
+ 		echo ----------------------------------------------------------------------
+ 	fi
+@@ -619,7 +645,6 @@ echo ======================================================================
+ 		rm -fv "$BACKUPDIR/weekly/week.$REMW".*
+ 		echo
+ 			dbdump "$DBNAMES" "$BACKUPDIR/weekly/week.$W.$DATE.sql"
+-			compression "$BACKUPDIR/weekly/week.$W.$DATE.sql"
+ 			BACKUPFILES="$BACKUPFILES $BACKUPDIR/weekly/week.$W.$DATE.sql$SUFFIX"
+ 		echo ----------------------------------------------------------------------
+ 		
+@@ -631,7 +656,6 @@ echo ======================================================================
+ 		rm -fv "$BACKUPDIR"/daily/*."$DOW.sql".*
+ 		echo
+ 			dbdump "$DBNAMES" "$BACKUPDIR/daily/$DATE.$DOW.sql"
+-			compression "$BACKUPDIR/daily/$DATE.$DOW.sql"
+ 			BACKUPFILES="$BACKUPFILES $BACKUPDIR/daily/$DATE.$DOW.sql$SUFFIX"
+ 		echo ----------------------------------------------------------------------
+ 	fi
+diff --git a/debian/defaults b/debian/defaults
+index 549e87c..c1d9e61 100644
+--- a/debian/defaults
++++ b/debian/defaults
+@@ -67,6 +67,9 @@ DOWEEKLY=6
+ # Choose Compression type. (gzip or bzip2)
+ COMP=gzip
+ 
++# Compress backups on the fly with gzip or bzip2 (yes or no)
++COMPDIRECT=no
++
+ # Compress communications between backup server and MySQL server?
+ COMMCOMP=no
+ 

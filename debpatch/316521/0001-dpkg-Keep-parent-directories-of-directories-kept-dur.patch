@@ -1,0 +1,103 @@
+From ceb32da57317215d9f4635ca801537546f058827 Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Fri, 6 May 2011 06:08:30 +0200
+Subject: [PATCH] dpkg: Keep parent directories of directories kept during
+ removal
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+When a directory is kept during removal to be later dealt with during
+purge, it might be due to the directory containing conffiles from the
+same package, it not being empty, etc. In any case we should keep all
+its parent to make sure when the subsequent trial is performed they
+are properly cleaned up.
+
+Closes: #316521, #348133, #454694, #538429, #625241
+
+Based-on-patch-by: Ondřej Surý <ondrej@debian.org>
+---
+ src/help.c   |   26 ++++++++++++++++++++++++++
+ src/main.h   |    2 ++
+ src/remove.c |    8 ++++++++
+ 3 files changed, 36 insertions(+), 0 deletions(-)
+
+diff --git a/src/help.c b/src/help.c
+index 4a2256f..5b0fd39 100644
+--- a/src/help.c
++++ b/src/help.c
+@@ -512,6 +512,32 @@ dir_is_used_by_others(struct filenamenode *file, struct pkginfo *pkg)
+   return false;
+ }
+ 
++bool
++dir_is_used_by_pkg(struct filenamenode *file, struct pkginfo *pkg,
++                   struct fileinlist *list)
++{
++  struct fileinlist *node;
++  size_t namelen;
++
++  debug(dbg_veryverbose, "dir_is_used_by_pkg '%s' (by %s)",
++        file->name, pkg ? pkg->name : "<none>");
++
++  namelen = strlen(file->name);
++
++  for (node = list; node; node = node->next) {
++    debug(dbg_veryverbose, "dir_is_used_by_pkg considering %s ...",
++          node->namenode->name);
++
++    if (strncmp(file->name, node->namenode->name, namelen) == 0 &&
++        node->namenode->name[namelen] == '/')
++      return true;
++  }
++
++  debug(dbg_veryverbose, "dir_is_used_by_pkg no");
++
++  return false;
++}
++
+ void oldconffsetflags(const struct conffile *searchconff) {
+   struct filenamenode *namenode;
+ 
+diff --git a/src/main.h b/src/main.h
+index 12d12e7..3b8e094 100644
+--- a/src/main.h
++++ b/src/main.h
+@@ -249,6 +249,8 @@ void post_postinst_tasks(struct pkginfo *pkg, enum pkgstatus new_status);
+ 
+ void clear_istobes(void);
+ bool dir_is_used_by_others(struct filenamenode *namenode, struct pkginfo *pkg);
++bool dir_is_used_by_pkg(struct filenamenode *namenode, struct pkginfo *pkg,
++                        struct fileinlist *list);
+ bool dir_has_conffiles(struct filenamenode *namenode, struct pkginfo *pkg);
+ 
+ void log_action(const char *action, struct pkginfo *pkg);
+diff --git a/src/remove.c b/src/remove.c
+index a33518d..9e2e3a9 100644
+--- a/src/remove.c
++++ b/src/remove.c
+@@ -257,6 +257,10 @@ removal_bulk_remove_files(struct pkginfo *pkg)
+ 	  push_leftover(&leftover,namenode);
+ 	  continue;
+ 	}
++        if (dir_is_used_by_pkg(namenode, pkg, leftover)) {
++          push_leftover(&leftover, namenode);
++          continue;
++        }
+         if (dir_is_used_by_others(namenode, pkg))
+           continue;
+       }
+@@ -337,6 +341,10 @@ static void removal_bulk_remove_leftover_dirs(struct pkginfo *pkg) {
+ 	push_leftover(&leftover,namenode);
+ 	continue;
+       }
++      if (dir_is_used_by_pkg(namenode, pkg, leftover)) {
++        push_leftover(&leftover, namenode);
++        continue;
++      }
+       if (dir_is_used_by_others(namenode, pkg))
+         continue;
+     }
+-- 
+1.7.5
+

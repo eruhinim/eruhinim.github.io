@@ -1,0 +1,151 @@
+From 1b77732a7ab316ca7d71f8db62b5079aa5915adc Mon Sep 17 00:00:00 2001
+From: Raphael Hertzog <hertzog@debian.org>
+Date: Sat, 19 Jan 2008 21:53:18 +0100
+Subject: [PATCH] dpkg-buildpackage: add a new -R option and allow parameters in -r
+
+* scripts/dpkg-buildpackage.pl: Add a new -R option to be able to replace
+"debian/rules" by something else. The replacement command can contain
+parameters (and thus spaces). Fix -r option to also accept parameters.
+* man/dpkg-buildpackage.1: Document the new option and the changed
+behaviour of -r.
+---
+ man/dpkg-buildpackage.1      |   20 +++++++++++++-------
+ scripts/dpkg-buildpackage.pl |   26 +++++++++++++++-----------
+ 2 files changed, 28 insertions(+), 18 deletions(-)
+
+diff --git a/man/dpkg-buildpackage.1 b/man/dpkg-buildpackage.1
+index 2a84119..e0a16b7 100644
+--- a/man/dpkg-buildpackage.1
++++ b/man/dpkg-buildpackage.1
+@@ -117,24 +117,30 @@ command it executes with
+ if one has been specified. Otherwise, if none has been specified,
+ \fBfakeroot\fP will be used by default, if the command is present.
+ .I gain-root-command
+-should be the name of a program on the
++should start with the name of a program on the
+ .B PATH
+ and will get as arguments the name of the real command to run and the
+ arguments it should take.
+ .I gain-root-command
+-should not contain spaces or any other shell metacharacters.
+-.\" what happens, if it contains spaces? (hs)
++can include parameters but no shell metacharacters.
+ .I gain-root-command
+ might typically be
+ .BR fakeroot ", " sudo ", " super " or " really .
+ .B su
+-is not suitable, since it requires a
+-.B \-c
+-option to run a command and even then it can only invoke the user's
+-shell with
++is not suitable, since it can only invoke the user's shell with
+ .B \-c
+ instead of passing arguments individually to the command to be run.
+ .TP
++.BI \-R rules-file
++Building a Debian package usually involves invoking
++.B debian/rules
++as a command with several standard parameters. With this option it's
++possible to use another executable as rules file to build the package.
++Alternatively it can be used to execute the standard rules file with
++another make program (for example by using
++.B /usr/local/bin/make -f debian/rules
++as \fIrules-file\fR).
++.TP
+ .BI \-p sign-command
+ When
+ .B dpkg\-buildpackage
+diff --git a/scripts/dpkg-buildpackage.pl b/scripts/dpkg-buildpackage.pl
+index a841e3d..2c8911f 100755
+--- a/scripts/dpkg-buildpackage.pl
++++ b/scripts/dpkg-buildpackage.pl
+@@ -38,6 +38,7 @@ Usage: %s [<options> ...]
+ Options:
+   -r<gain-root-command>
+                  command to gain root privileges (default is fakeroot).
++  -R<rules>      rules file to execute (default is debian/rules).
+   -p<sign-command>
+   -d             do not check build dependencies and conflicts.
+   -D             check build dependencies and conflicts.
+@@ -86,7 +87,8 @@ sub testcommand {
+     return $fullcmd && -x $fullcmd;
+ }
+ 
+-my $rootcommand = '';
++my @debian_rules = ("debian/rules");
++my @rootcommand = ();
+ my $signcommand = '';
+ if ( ( ($ENV{GNUPGHOME} && -e $ENV{GNUPGHOME})
+        || ($ENV{HOME} && -e "$ENV{HOME}/.gnupg") )
+@@ -122,7 +124,7 @@ while (@ARGV) {
+     } elsif (/^-j(\d*)$/) {
+ 	$parallel = $1 || '-1';
+     } elsif (/^-r(.*)$/) {
+-	$rootcommand = $1;
++	@rootcommand = split /\s+/, $1;
+     } elsif (/^-p(.*)$/) {
+ 	$signcommand = $1;
+     } elsif (/^-k(.*)$/) {
+@@ -203,23 +205,25 @@ while (@ARGV) {
+     } elsif (/^-E$/) {
+ 	$warnable_error = 0;
+ 	push @passopts, '-E';
++    } elsif (/^-R(.*)$/) {
++	@debian_rules = split /\s+/, $1;
+     } else {
+ 	usageerr(_g("unknown option or argument %s"), $_);
+     }
+ }
+ 
+ if ($< == 0) {
+-    warning(_g("using a gain-root-command while being root")) if ($rootcommand);
++    warning(_g("using a gain-root-command while being root")) if (@rootcommand);
+ } else {
+-    $rootcommand ||= 'fakeroot';
++    push @rootcommand, "fakeroot" unless @rootcommand;
+ 
+-    if (!testcommand($rootcommand)) {
+-	if ($rootcommand eq 'fakeroot') {
++    if (!testcommand($rootcommand[0])) {
++	if ($rootcommand[0] eq 'fakeroot') {
+ 	    error(_g("fakeroot not found, either install the fakeroot\n" .
+ 	             "package, specify a command with the -r option, " .
+ 	             "or run this as root"));
+ 	} else {
+-	    error(_g("gain-root-commmand '%s' not found"), $rootcommand);
++	    error(_g("gain-root-commmand '%s' not found"), $rootcommand[0]);
+ 	}
+     }
+ }
+@@ -354,7 +358,7 @@ if ($checkbuilddep) {
+ }
+ 
+ unless ($noclean) {
+-    withecho($rootcommand, 'debian/rules', 'clean');
++    withecho(@rootcommand, @debian_rules, 'clean');
+ }
+ unless ($binaryonly) {
+     chdir('..') or failure('chdir ..');
+@@ -365,8 +369,8 @@ unless ($binaryonly) {
+     chdir($dir) or failure("chdir $dir");
+ }
+ unless ($sourceonly) {
+-    withecho('debian/rules', 'build');
+-    withecho($rootcommand, 'debian/rules', $binarytarget);
++    withecho(@debian_rules, 'build');
++    withecho(@rootcommand, @debian_rules, $binarytarget);
+ }
+ if ($usepause &&
+     ($signchanges || ( !$binaryonly && $signsource )) ) {
+@@ -451,7 +455,7 @@ if ($signchanges && signfile("$pva.changes")) {
+ }
+ 
+ if ($cleansource) {
+-    withecho($rootcommand, 'debian/rules', 'clean');
++    withecho(@rootcommand, @debian_rules, 'clean');
+ }
+ 
+ print "$progname: $srcmsg\n";
+-- 
+1.5.3.8
+

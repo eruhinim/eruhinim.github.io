@@ -1,0 +1,121 @@
+diff -u dnsmasq-2.76/debian/changelog dnsmasq-2.76/debian/changelog
+--- dnsmasq-2.76/debian/changelog
++++ dnsmasq-2.76/debian/changelog
+@@ -1,3 +1,13 @@
++dnsmasq (2.76-4.1) unstable; urgency=medium
++
++  * Non-maintainer upload.
++  * Add two upstream patches to fix binding to an interface being
++    destroyed and recreated. Closes: #834722.
++      + 2675f2061525bc954be14988d64384b74aa7bf8b
++      + 16800ea072dd0cdf14d951c4bb8d2808b3dfe53d
++
++ -- Vincent Bernat <bernat@debian.org>  Sat, 26 Nov 2016 20:15:34 +0100
++
+ dnsmasq (2.76-4) unstable; urgency=medium
+ 
+   * Non-maintainer upload.
+only in patch2:
+unchanged:
+--- dnsmasq-2.76.orig/src/dnsmasq.h
++++ dnsmasq-2.76/src/dnsmasq.h
+@@ -487,6 +487,7 @@
+   int fd;
+   union mysockaddr source_addr;
+   char interface[IF_NAMESIZE+1];
++  unsigned int ifindex, used;
+   struct serverfd *next;
+ };
+ 
+only in patch2:
+unchanged:
+--- dnsmasq-2.76.orig/src/network.c
++++ dnsmasq-2.76/src/network.c
+@@ -1204,6 +1204,7 @@
+ static struct serverfd *allocate_sfd(union mysockaddr *addr, char *intname)
+ {
+   struct serverfd *sfd;
++  unsigned int ifindex = 0;
+   int errsave;
+ 
+   /* when using random ports, servers which would otherwise use
+@@ -1224,11 +1225,15 @@
+ 	return NULL;
+ #endif
+     }
++
++  if (intname && strlen(intname) != 0)
++    ifindex = if_nametoindex(intname); /* index == 0 when not binding to an interface */
+       
+   /* may have a suitable one already */
+   for (sfd = daemon->sfds; sfd; sfd = sfd->next )
+     if (sockaddr_isequal(&sfd->source_addr, addr) &&
+-	strcmp(intname, sfd->interface) == 0)
++	strcmp(intname, sfd->interface) == 0 &&
++	ifindex == sfd->ifindex) 
+       return sfd;
+   
+   /* need to make a new one. */
+@@ -1250,11 +1255,13 @@
+       errno = errsave;
+       return NULL;
+     }
+-    
++
+   strcpy(sfd->interface, intname); 
+   sfd->source_addr = *addr;
+   sfd->next = daemon->sfds;
++  sfd->ifindex = ifindex;
+   daemon->sfds = sfd;
++
+   return sfd; 
+ }
+ 
+@@ -1429,12 +1436,16 @@
+ {
+   struct irec *iface;
+   struct server *serv;
++  struct serverfd *sfd, *tmp, **up;
+   int port = 0, count;
+ 
+   /* interface may be new since startup */
+   if (!option_bool(OPT_NOWILD))
+     enumerate_interfaces(0);
+   
++  for (sfd = daemon->sfds; sfd; sfd = sfd->next)
++    sfd->used = 0;
++
+ #ifdef HAVE_DNSSEC
+  /* Disable DNSSEC validation when using server=/domain/.... servers
+     unless there's a configured trust anchor. */
+@@ -1505,6 +1516,9 @@
+ 	      serv->flags |= SERV_MARK;
+ 	      continue;
+ 	    }
++	  
++	  if (serv->sfd)
++	    serv->sfd->used = 1;
+ 	}
+       
+       if (!(serv->flags & SERV_NO_REBIND) && !(serv->flags & SERV_LITERAL_ADDRESS))
+@@ -1547,6 +1561,20 @@
+   if (count - 1 > SERVERS_LOGGED)
+     my_syslog(LOG_INFO, _("using %d more nameservers"), count - SERVERS_LOGGED - 1);
+ 
++  /* Remove unused sfds */
++  for (sfd = daemon->sfds, up = &daemon->sfds; sfd; sfd = tmp)
++    {
++       tmp = sfd->next;
++       if (!sfd->used) 
++	{
++	  *up = sfd->next;
++	  close(sfd->fd);
++	  free(sfd);
++	} 
++      else
++	up = &sfd->next;
++    }
++  
+   cleanup_servers();
+ }
+ 

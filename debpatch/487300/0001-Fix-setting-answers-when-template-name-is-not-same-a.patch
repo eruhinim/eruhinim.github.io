@@ -1,0 +1,64 @@
+From 13d511b549c08f14706146c8377fcb7863774041 Mon Sep 17 00:00:00 2001
+From: Sunil Mohan Adapa <sunil@medhas.org>
+Date: Thu, 22 Aug 2019 21:33:15 -0700
+Subject: [PATCH] Fix setting answers when template name is not same as
+ question
+
+When setting answers to a questions, question may exist and its template may
+exist with a different name. For example, question could be tt-rss/database-type
+and template could be dbconfig-common/database-type. In such cases, ensure that
+a dummy template is not created with the name of the question.
+
+This fixes database inconsistency introduced otherwise. Closes #487300.
+
+Signed-off-by: Sunil Mohan Adapa <sunil@medhas.org>
+---
+ debconf-set-selections | 27 +++++++++++++++++++++------
+ 1 file changed, 21 insertions(+), 6 deletions(-)
+
+diff --git a/debconf-set-selections b/debconf-set-selections
+index 7d99a306..a1b1a783 100755
+--- a/debconf-set-selections
++++ b/debconf-set-selections
+@@ -116,17 +116,32 @@ sub load_answer {
+ 	info "Loading answer for '$label'";
+ 
+ 	# Set up the template.
+-	my $template=Debconf::Template->get($label);
+-	if (! $template) {
+-		$template=Debconf::Template->new($label, $owner, $type);
+-		$template->description("Dummy template");
+-		$template->extended_description("This is a fake template used to pre-seed the debconf database. If you are seeing this, something is probably wrong.");
++	my $template;
++	my $question=Debconf::Question->get($label);
++	if ($question) {
++		# Question may already exist and its template may exist with a
++		# different name. For example, question could be
++		# tt-rss/database-type and template could be
++		# dbconfig-common/database-type. Retrieve the template using the
++		# question if it exists.
++		$template=$question->template;
++	}
++	else {
++		# If question does not exist, try to retrieve a template with
++		# same name as the question. If it does not exist, create a
++		# dummy template as a last resort.
++		$template=Debconf::Template->get($label);
++		if (! $template) {
++			$template=Debconf::Template->new($label, $owner, $type);
++			$template->description("Dummy template");
++			$template->extended_description("This is a fake template used to pre-seed the debconf database. If you are seeing this, something is probably wrong.");
++		}
+ 	}
+ 	$template->type($type);
+ 	
+ 	# The question should already exist, it was created along with the
+ 	# template. Set it up.
+-	my $question=Debconf::Question->get($label);
++	$question=Debconf::Question->get($label);
+ 	if (! $question) {
+ 		error("Cannot find a question for $label");
+ 		return;
+-- 
+2.20.1
+

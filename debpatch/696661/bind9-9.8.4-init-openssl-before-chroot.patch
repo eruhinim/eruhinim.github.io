@@ -1,0 +1,96 @@
+Author: Ben Hutchings <ben@decadent.org.uk>
+Description: Initialise OpenSSL before calling chroot()
+Bug-Debian: http://bugs.debian.org/696661
+
+OpenSSL may need to load additional shared libraries, in particular
+for the gost algorithm.  This will not work after we chroot(), so we
+need to initialise it before doing that.
+
+Move the calls to dst_lib_init2() and isc_entropy_create() into
+setup() and calls to the corresponding cleanup into cleanup().
+
+--- a/bin/named/main.c
++++ b/bin/named/main.c
+@@ -616,14 +616,6 @@
+ 			      ISC_LOG_INFO, "using up to %u sockets", socks);
+ 	}
+ 
+-	result = isc_entropy_create(ns_g_mctx, &ns_g_entropy);
+-	if (result != ISC_R_SUCCESS) {
+-		UNEXPECTED_ERROR(__FILE__, __LINE__,
+-				 "isc_entropy_create() failed: %s",
+-				 isc_result_totext(result));
+-		return (ISC_R_UNEXPECTED);
+-	}
+-
+ 	result = isc_hash_create(ns_g_mctx, ns_g_entropy, DNS_NAME_MAXWIRE);
+ 	if (result != ISC_R_SUCCESS) {
+ 		UNEXPECTED_ERROR(__FILE__, __LINE__,
+@@ -639,10 +631,6 @@
+ destroy_managers(void) {
+ 	ns_lwresd_shutdown();
+ 
+-	isc_entropy_detach(&ns_g_entropy);
+-	if (ns_g_fallbackentropy != NULL)
+-		isc_entropy_detach(&ns_g_fallbackentropy);
+-
+ 	/*
+ 	 * isc_taskmgr_destroy() will block until all tasks have exited,
+ 	 */
+@@ -743,6 +731,21 @@
+ 	}
+ #endif
+ 
++	result = isc_entropy_create(ns_g_mctx, &ns_g_entropy);
++	if (result != ISC_R_SUCCESS)
++		ns_main_earlyfatal("isc_entropy_create() failed: %s",
++				   isc_result_totext(result));
++
++	/*
++	 * DST may load additional libraries, which must be done before
++	 * chroot
++	 */
++	result = dst_lib_init2(ns_g_mctx, ns_g_entropy,
++			       ns_g_engine, ISC_ENTROPY_GOODONLY);
++	if (result != ISC_R_SUCCESS)
++		ns_main_earlyfatal("dst_lib_init2() failed: %s",
++				   isc_result_totext(result));
++
+ #ifdef ISC_PLATFORM_USETHREADS
+ 	/*
+ 	 * Check for the number of cpu's before ns_os_chroot().
+@@ -909,6 +912,12 @@
+ 
+ 	ns_builtin_deinit();
+ 
++	dst_lib_destroy();
++
++	isc_entropy_detach(&ns_g_entropy);
++	if (ns_g_fallbackentropy != NULL)
++		isc_entropy_detach(&ns_g_fallbackentropy);
++
+ 	/*
+ 	 * Add calls to unregister sdb drivers here.
+ 	 */
+--- a/bin/named/server.c
++++ b/bin/named/server.c
+@@ -5483,10 +5483,6 @@
+ 		   ISC_R_NOMEMORY : ISC_R_SUCCESS,
+ 		   "allocating reload event");
+ 
+-	CHECKFATAL(dst_lib_init2(ns_g_mctx, ns_g_entropy,
+-				 ns_g_engine, ISC_ENTROPY_GOODONLY),
+-		   "initializing DST");
+-
+ 	server->tkeyctx = NULL;
+ 	CHECKFATAL(dns_tkeyctx_create(ns_g_mctx, ns_g_entropy,
+ 				      &server->tkeyctx),
+@@ -5633,8 +5629,6 @@
+ 	if (server->tkeyctx != NULL)
+ 		dns_tkeyctx_destroy(&server->tkeyctx);
+ 
+-	dst_lib_destroy();
+-
+ 	isc_event_free(&server->reload_event);
+ 
+ 	INSIST(ISC_LIST_EMPTY(server->viewlist));

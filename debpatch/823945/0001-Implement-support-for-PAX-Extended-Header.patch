@@ -1,0 +1,280 @@
+From 8bab10645097198f8f527c2b9e7737068bab879a Mon Sep 17 00:00:00 2001
+From: Stefan Berger <stefanb@us.ibm.com>
+Date: Tue, 10 May 2016 09:52:19 -0400
+Subject: [PATCH] Implement support for PAX Extended Header
+
+Implement support for the pax extended header found in tar files. From all
+the collected pax header entries we set the security.ima extended attribute
+associate with the extracted file.
+---
+ apt-inst/contrib/extracttar.cc | 170 ++++++++++++++++++++++++++++++++++++++++-
+ apt-inst/contrib/extracttar.h  |  39 +++++++++-
+ 2 files changed, 207 insertions(+), 2 deletions(-)
+
+diff --git a/apt-inst/contrib/extracttar.cc b/apt-inst/contrib/extracttar.cc
+index 6036005..6fde00c 100644
+--- a/apt-inst/contrib/extracttar.cc
++++ b/apt-inst/contrib/extracttar.cc
+@@ -32,12 +32,152 @@
+ #include <signal.h>
+ #include <fcntl.h>
+ #include <iostream>
++#include <sys/xattr.h>
+ 
+ #include <apti18n.h>
+ 									/*}}}*/
+ 
+ using namespace std;
+-    
++
++// PaxEntry::PaxEntry - Constructor					/*{{{*/
++// ---------------------------------------------------------------------
++/* */
++PaxEntry::PaxEntry(const char *Key, const unsigned char *Value, size_t ValueLen)
++{
++   this->Key = strdup(Key);
++   this->Value = new unsigned char[ValueLen]();
++   memcpy(this->Value, Value, ValueLen);
++   this->ValueLen = ValueLen;
++}
++									/*}}}*/
++// PaxEntry::PaxEntry - Copy Constructor				/*{{{*/
++// ---------------------------------------------------------------------
++/* */
++PaxEntry::PaxEntry(const PaxEntry &pd)
++{
++   this->Key = strdup(pd.Key);
++   this->Value = new unsigned char[pd.ValueLen]();
++   memcpy(this->Value, pd.Value, pd.ValueLen);
++   this->ValueLen = pd.ValueLen;
++}
++									/*}}}*/
++// PaxEntry::~PaxEntry - Destructor					/*{{{*/
++// ---------------------------------------------------------------------
++/* */
++PaxEntry::~PaxEntry()
++{
++   free(this->Key);
++   delete [] this->Value;
++}
++									/*}}}*/
++// PaxEntry::Apply - Apply the extended attributes			/*{{{*/
++// ---------------------------------------------------------------------
++/* */
++bool PaxEntry::Apply(const char *Filename)
++{
++   /* apply only security.ima */
++   if (strcmp(this->Key, "SCHILY.xattr.security.ima"))
++      setxattr(Filename, &this->Key[13], this->Value, this->ValueLen, 0);
++
++  return true;
++}
++									/*}}}*/
++// PaxData::Apply - Constructor						/*{{{*/
++// ---------------------------------------------------------------------
++/* */
++PaxData::PaxData(char *Buffer, unsigned long long BufferLength)
++    : Buffer(Buffer), BufferLength(BufferLength)
++{
++}
++									/*}}}*/
++// PaxData::~PaxData - Destructor					/*{{{*/
++// ---------------------------------------------------------------------
++/* */
++PaxData::~PaxData()
++{
++   Entries.clear();
++   free(Buffer);
++}
++									/*}}}*/
++// PaxData::AddEntry - Add an entry					/*{{{*/
++// ---------------------------------------------------------------------
++/* */
++void PaxData::AddEntry(const char *Key, const unsigned char *Value, size_t ValueLen)
++{
++   Entries.push_back(PaxEntry(Key, Value, ValueLen));
++}
++									/*}}}*/
++// PaxData::Apply - Apply all extended attributes			/*{{{*/
++// ---------------------------------------------------------------------
++/* */
++bool PaxData::Apply(const char *Filename)
++{
++   std::vector<PaxEntry>::iterator iter;
++   bool ret = true;
++
++   for (iter = this->Entries.begin(); iter != this->Entries.end(); iter++) {
++      ret = iter->Apply(Filename);
++      if (!ret)
++         break;
++   }
++   return ret;
++}
++									/*}}}*/
++// PaxData::Parse - Parse the PAX data					/*{{{*/
++// ---------------------------------------------------------------------
++/* */
++bool PaxData::Parse(void)
++{
++   int n;
++   unsigned int Len;
++   char *KeyStart, *KeyEnd, *Current, Space;
++   unsigned char *Value;
++   size_t ValueLen;
++
++   Current = Buffer;
++
++   while (Current - Buffer < (long long)BufferLength) {
++      /* parse 'untrusted' len */
++      n = sscanf(Current, "%u%c", &Len, &Space);
++      if (n != 2 || Space != ' ' || Len == 0)
++         break;
++
++      KeyStart = index(Current, ' ');
++      if (!KeyStart)
++         break;
++
++      KeyStart++;
++      KeyEnd = index(KeyStart, '=');
++      if (!KeyEnd)
++         break;
++
++      /* check 'untrusted' Len: beyond buffer ? */
++      Current += Len;
++      if (Current > Buffer + BufferLength || Current[-1] != '\n')
++         break;
++
++      /* Value starts after the '='; value can be binary data */
++      Value = (unsigned char *)KeyEnd + 1;
++      ValueLen = Current - 1 - (char *)Value;
++      /* overwrite terminating '\n' */
++      Value[ValueLen] = 0;
++
++      try {
++         AddEntry(KeyStart, Value, ValueLen);
++      } catch (bad_alloc) {
++         _error->Error(_("Out of memory"));
++         return false;
++      }
++   }
++
++   if (Current - Buffer != (long long)BufferLength) {
++      _error->Error(_("Could not parse PAX header"));
++      return false;
++   }
++
++   return true;
++}
++									/*}}}*/
+ // The on disk header for a tar file.
+ struct ExtractTar::TarHeader
+ {
+@@ -125,6 +265,7 @@ bool ExtractTar::Go(pkgDirStream &Stream)
+    // Loop over all blocks
+    string LastLongLink, ItemLink;
+    string LastLongName, ItemName;
++   PaxData *pd = NULL;
+    while (1)
+    {
+       bool BadRecord = false;      
+@@ -256,6 +397,28 @@ bool ExtractTar::Go(pkgDirStream &Stream)
+ 	    }
+ 	    continue;
+ 	 }
++
++	 case PAX_Extended_Header:
++	 {
++	    unsigned long long BufferLength = (Itm.Size + 511) & ~511;
++	    char *Buffer = (char *)malloc(BufferLength + 1);
++
++	    if (!Buffer) {
++	        _error->Warning(_("Out of memory trying to allocate %llu bytes for PAX header"), BufferLength);
++	        return false;
++	    }
++	    if (InFd.Read(Buffer, BufferLength,true) == false) {
++	        free(Buffer);
++	        return false;
++	    }
++	    pd = new PaxData(Buffer, Itm.Size);
++	    if (!pd->Parse()) {
++	        delete pd;
++	        return false;
++            }
++
++	    continue;
++	 }
+ 	 
+ 	 default:
+ 	 BadRecord = true;
+@@ -304,6 +467,11 @@ bool ExtractTar::Go(pkgDirStream &Stream)
+       
+       LastLongName.erase();
+       LastLongLink.erase();
++
++      if (Tar->LinkFlag != PAX_Extended_Header) {
++          delete pd;
++          pd = NULL;
++      }
+    }
+    
+    return Done();
+diff --git a/apt-inst/contrib/extracttar.h b/apt-inst/contrib/extracttar.h
+index edd3cec..005bbef 100644
+--- a/apt-inst/contrib/extracttar.h
++++ b/apt-inst/contrib/extracttar.h
+@@ -27,6 +27,42 @@ using std::min;
+ 
+ class pkgDirStream;
+ 
++class PaxEntry
++{
++   private:
++
++   char *Key;
++   unsigned char *Value;
++   size_t ValueLen;
++
++   public:
++
++   PaxEntry(const char *Key, const unsigned char *Value, size_t ValueLen);
++   PaxEntry(const PaxEntry &pe);
++   bool Apply(const char *Filename);
++   virtual ~PaxEntry();
++};
++
++class PaxData
++{
++   private:
++
++   char *Buffer;
++   unsigned long long BufferLength;
++
++   std::vector<PaxEntry> Entries;
++
++   public:
++
++   PaxData(char *Buffer, unsigned long long BufferLength);
++   bool Parse(void);
++
++   void AddEntry(const char *Key, const unsigned char *Value, size_t ValueLen);
++   bool Apply(const char *Filename);
++
++   virtual ~PaxData();
++};
++
+ class ExtractTar
+ {
+    protected:
+@@ -37,7 +73,8 @@ class ExtractTar
+    enum ItemType {NormalFile0 = '\0',NormalFile = '0',HardLink = '1',
+                   SymbolicLink = '2',CharacterDevice = '3',
+                   BlockDevice = '4',Directory = '5',FIFO = '6',
+-                  GNU_LongLink = 'K',GNU_LongName = 'L'};
++                  GNU_LongLink = 'K',GNU_LongName = 'L',
++                  PAX_Extended_Header = 'x'};
+ 
+    FileFd &File;
+    unsigned long long MaxInSize;
+-- 
+2.8.1
+

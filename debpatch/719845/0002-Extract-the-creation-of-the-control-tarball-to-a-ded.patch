@@ -1,0 +1,116 @@
+From d1ea3f10adec307715bd9e7ee277b5528dbd9698 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=A9r=C3=A9my=20Bobbio?= <lunar@debian.org>
+Date: Fri, 17 Jan 2014 12:56:13 +0100
+Subject: [PATCH 2/4] Extract the creation of the control tarball to a
+ dedicated function
+
+---
+ dpkg-deb/build.c | 77 +++++++++++++++++++++++++++++++++-----------------------
+ 1 file changed, 45 insertions(+), 32 deletions(-)
+
+diff --git a/dpkg-deb/build.c b/dpkg-deb/build.c
+index db9aaf3..363fb52 100644
+--- a/dpkg-deb/build.c
++++ b/dpkg-deb/build.c
+@@ -234,6 +234,40 @@ file_treewalk_feed(const char *dir, int fd_out)
+   file_info_list_free(symlist);
+ }
+ 
++static void
++create_control_tar(const char *dir, struct compress_params *control_compress_params,
++                   int gzfd)
++{
++  int p1[2];
++  pid_t c1, c2;
++
++  /* Fork a tar to package the control-section of the package. */
++  unsetenv("TAR_OPTIONS");
++  m_pipe(p1);
++  c1 = subproc_fork();
++  if (!c1) {
++    m_dup2(p1[1],1); close(p1[0]); close(p1[1]);
++    if (chdir(dir))
++      ohshite(_("failed to chdir to '%.255s'"), dir);
++    if (chdir(BUILDCONTROLDIR))
++      ohshite(_("failed to chdir to '%.255s'"), ".../DEBIAN");
++    execlp(TAR, "tar", "-cf", "-", "--format=gnu", ".", NULL);
++    ohshite(_("unable to execute %s (%s)"), "tar -cf", TAR);
++  }
++  close(p1[1]);
++
++  /* And run the compressor on our control archive. */
++
++  c2 = subproc_fork();
++  if (!c2) {
++    compress_filter(control_compress_params, p1[0], gzfd, _("compressing control member"));
++    exit(0);
++  }
++  close(p1[0]);
++  subproc_reap(c2, _("<compress> from tar -cf"), 0);
++  subproc_reap(c1, "tar -cf", 0);
++}
++
+ static const char *const maintainerscripts[] = {
+   PREINSTFILE,
+   POSTINSTFILE,
+@@ -512,20 +546,17 @@ do_build(const char *const *argv)
+   arfd = creat(debar, 0644);
+   if (arfd < 0)
+     ohshite(_("unable to create '%.255s'"), debar);
+-  /* Fork a tar to package the control-section of the package. */
+-  unsetenv("TAR_OPTIONS");
+-  m_pipe(p1);
+-  c1 = subproc_fork();
+-  if (!c1) {
+-    m_dup2(p1[1],1); close(p1[0]); close(p1[1]);
+-    if (chdir(dir))
+-      ohshite(_("failed to chdir to '%.255s'"), dir);
+-    if (chdir(BUILDCONTROLDIR))
+-      ohshite(_("failed to chdir to '%.255s'"), ".../DEBIAN");
+-    execlp(TAR, "tar", "-cf", "-", "--format=gnu", ".", NULL);
+-    ohshite(_("unable to execute %s (%s)"), "tar -cf", TAR);
++
++  if (opt_uniform_compression) {
++    control_compress_params = compress_params;
++  } else {
++    control_compress_params.type = COMPRESSOR_TYPE_GZIP;
++    control_compress_params.strategy = COMPRESSOR_STRATEGY_NONE;
++    control_compress_params.level = -1;
++    if (!compressor_check_params(&control_compress_params, &err))
++      internerr("invalid control member compressor params: %s", err.str);
+   }
+-  close(p1[1]);
++
+   /* Create a temporary file to store the control data in. Immediately
+    * unlink our temporary file so others can't mess with it. */
+   tfbuf = path_make_temp_template("dpkg-deb");
+@@ -538,25 +569,7 @@ do_build(const char *const *argv)
+            tfbuf);
+   free(tfbuf);
+ 
+-  /* And run the compressor on our control archive. */
+-  if (opt_uniform_compression) {
+-    control_compress_params = compress_params;
+-  } else {
+-    control_compress_params.type = COMPRESSOR_TYPE_GZIP;
+-    control_compress_params.strategy = COMPRESSOR_STRATEGY_NONE;
+-    control_compress_params.level = -1;
+-    if (!compressor_check_params(&control_compress_params, &err))
+-      internerr("invalid control member compressor params: %s", err.str);
+-  }
+-
+-  c2 = subproc_fork();
+-  if (!c2) {
+-    compress_filter(&control_compress_params, p1[0], gzfd, _("compressing control member"));
+-    exit(0);
+-  }
+-  close(p1[0]);
+-  subproc_reap(c2, _("<compress> from tar -cf"), 0);
+-  subproc_reap(c1, "tar -cf", 0);
++  create_control_tar(dir, &control_compress_params, gzfd);
+ 
+   if (lseek(gzfd, 0, SEEK_SET))
+     ohshite(_("failed to rewind temporary file (%s)"), _("control member"));
+-- 
+2.1.4
+

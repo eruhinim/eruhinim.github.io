@@ -1,0 +1,109 @@
+From d8a7763b00c6a55334f75e14a86a9eb829823500 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Pali=20Roh=C3=A1r?= <pali.rohar@gmail.com>
+Date: Wed, 7 Dec 2016 14:57:05 +0100
+Subject: [PATCH] bts: Try to use Net::SMTP::TLS when Net::SMTPS is not
+ available
+
+Net::SMTPS is provided by libnet-smtps-perl package which is not available
+on older systems. Also in some cases Net::SMTP::TLS can be already
+installed but Net::SMTPS not.
+---
+ scripts/bts.pl |   57 ++++++++++++++++++++++++++++++++++++++++++++++----------
+ 1 file changed, 47 insertions(+), 10 deletions(-)
+
+diff --git a/scripts/bts.pl b/scripts/bts.pl
+index b0af235..98d2224 100755
+--- a/scripts/bts.pl
++++ b/scripts/bts.pl
+@@ -75,6 +75,7 @@ my $it = undef;
+ my $last_user = '';
+ my $lwp_broken = undef;
+ my $smtps_broken = undef;
++my $smtp_tls_broken = undef;
+ my $authen_sasl_broken;
+ my $ua;
+ 
+@@ -115,6 +116,23 @@ sub have_smtps() {
+     return $smtps_broken ? 0 : 1;
+ }
+ 
++sub have_smtp_tls() {
++    return ($smtp_tls_broken ? 0 : 1) if defined $smtp_tls_broken;
++    eval {
++       require Net::SMTP::TLS;
++    };
++
++    if ($@) {
++       if ($@ =~ m%^Can\'t locate Net/SMTP/TLS%) {
++           $smtp_tls_broken="the libnet-smtp-tls-perl package is not installed";
++       } else {
++           $smtp_tls_broken="couldn't load Net::SMTP::TLS: $@";
++       }
++    }
++    else { $smtp_tls_broken=''; }
++    return $smtp_tls_broken ? 0 : 1;
++}
++
+ sub have_authen_sasl() {
+     return ($authen_sasl_broken ? 0 : 1) if defined $authen_sasl_broken;
+     eval {
+@@ -2637,8 +2655,17 @@ sub send_mail {
+ 		    or die "$progname: failed to open SMTP connection to $smtphost\n($@)\n";
+ 		$smtp->supports('STARTTLS') # verify that TLS is enabled
+ 		    or die "$progname: failed to issue STARTTLS command to $smtphost: Server does not support it\n";
++	    } elsif (have_smtp_tls) {
++		if ($smtpuser) {
++		    $smtppass = getpass() if not $smtppass;
++		}
++		$smtp = Net::SMTP::TLS->new($host, Port => $port,
++		    Hello => $smtphelo, User => $smtpuser, Password => $smtppass)
++		    or die "$progname: failed to open SMTP connection to $smtphost\n($@)\n";
++		$smtpuser = undef;
++		$smtppass = undef;
+ 	    } else {
+-		die "$progname: Unable to establish SMTPS connection: $smtps_broken\n";
++		die "$progname: Unable to establish SMTPS connection: $smtps_broken $smtp_tls_broken\n";
+ 	    }
+ 	} else {
+ 	    my ($host, $port) = split(/:/, $smtphost);
+@@ -2662,18 +2689,28 @@ sub send_mail {
+ 		die "$progname: failed to authenticate to $smtphost: $authen_sasl_broken\n";
+ 	    }
+ 	}
+-	$smtp->mail($fromaddress)
+-	    or die "$progname: failed to set SMTP from address $fromaddress\n($@)\n";
+ 	my @addresses = extract_addresses($to);
+ 	push @addresses, extract_addresses($cc);
+-	foreach my $address (@addresses) {
+-	    $smtp->recipient($address)
+-	        or die "$progname: failed to set SMTP recipient $address\n($@)\n";
++	if ($smtp->isa('Net::SMTP::TLS')) {
++	    # Net::SMTP::TLS methods are void (return false) and die on error
++	    $smtp->mail($fromaddress);
++	    $smtp->recipient($_) foreach @addresses;
++	    $smtp->data;
++	    $smtp->datasend($message);
++	    $smtp->dataend;
++	    $smtp->quit;
++	} else {
++	    $smtp->mail($fromaddress)
++	        or die "$progname: failed to set SMTP from address $fromaddress\n($@)\n";
++	    foreach my $address (@addresses) {
++	        $smtp->recipient($address)
++	            or die "$progname: failed to set SMTP recipient $address\n($@)\n";
++	    }
++	    $smtp->data($message)
++	        or die "$progname: failed to send message as SMTP DATA\n($@)\n";
++	    $smtp->quit
++	        or die "$progname: failed to quit SMTP connection\n($@)\n";
+ 	}
+-	$smtp->data($message)
+-	    or die "$progname: failed to send message as SMTP DATA\n($@)\n";
+-	$smtp->quit
+-	    or die "$progname: failed to quit SMTP connection\n($@)\n";
+     }
+     else {
+ 	my $pid = open(MAIL, "|-");
+-- 
+1.7.9.5
+

@@ -1,0 +1,118 @@
+From 4b076cb714269f05ac00affc916bd4c15db87313 Mon Sep 17 00:00:00 2001
+From: Simon McVittie <smcv@debian.org>
+Date: Fri, 26 Jul 2019 10:26:45 +0100
+Subject: [PATCH] testdesc: Report each unsupported test individually
+
+Previously, if a stanza in d/tests/control had unknown fields or
+unsupported restrictions, we would log that for the first test in the
+stanza (only), for example:
+
+    Tests: one two
+    Restrictions: needs-root
+
+    Tests: foo bar
+    Restrictions: needs-more-cowbell
+
+would be logged as
+
+    one                  SKIP Test needs root on testbed which is not available
+    foo                  SKIP unknown restriction needs-more-cowbell
+
+This is sufficiently confusing that it led me to file an invalid bug
+report about autopkgtest not supporting space-separated tests. If we
+report the Unsupported exception for each test-case, it becomes clearer
+what's really going on:
+
+    one                  SKIP Test needs root on testbed which is not available
+    two                  SKIP Test needs root on testbed which is not available
+    foo                  SKIP unknown restriction needs-more-cowbell
+    bar                  SKIP unknown restriction needs-more-cowbell
+
+Closes: #851232
+Signed-off-by: Simon McVittie <smcv@debian.org>
+---
+ lib/testdesc.py   | 15 ++++++++++-----
+ tests/autopkgtest | 20 +++++++++++++++++++-
+ 2 files changed, 29 insertions(+), 6 deletions(-)
+
+diff --git a/lib/testdesc.py b/lib/testdesc.py
+index d68edaf..84d24db 100644
+--- a/lib/testdesc.py
++++ b/lib/testdesc.py
+@@ -512,12 +512,17 @@ def parse_debian_source(srcdir, testbed_caps, testbed_arch, control_path=None,
+                         '*', 'test-name feature incompatible with Tests')
+                 test_dir = record.get('Tests-directory', 'debian/tests')
+ 
+-                _debian_check_unknown_fields(test_names[0], record)
+                 for n in test_names:
+-                    test = Test(n, os.path.join(test_dir, n), None,
+-                                restrictions, features, depends, [], [], synth_depends)
+-                    test.check_testbed_compat(testbed_caps)
+-                    tests.append(test)
++                    try:
++                        _debian_check_unknown_fields(n, record)
++                        test = Test(n, os.path.join(test_dir, n), None,
++                                    restrictions, features, depends, [], [], synth_depends)
++                        test.check_testbed_compat(testbed_caps)
++                    except Unsupported as u:
++                        u.report()
++                        some_skipped = True
++                    else:
++                        tests.append(test)
+             elif 'Test-command' in record:
+                 command = record['Test-command']
+                 (depends, synth_depends) = _parse_debian_depends(
+diff --git a/tests/autopkgtest b/tests/autopkgtest
+index 2d4d025..f5eb1ed 100755
+--- a/tests/autopkgtest
++++ b/tests/autopkgtest
+@@ -247,9 +247,10 @@ class DebTestsAll:
+     def test_isolation(self):
+         '''isolation restrictions'''
+ 
+-        p = self.build_src('Tests: ic\nDepends:\nRestrictions: isolation-container\n\n'
++        p = self.build_src('Tests: ic ic2\nDepends:\nRestrictions: isolation-container\n\n'
+                            'Tests: im\nDepends:\nRestrictions: isolation-machine\n',
+                            {'ic': '#!/bin/sh\necho container ok',
++                            'ic2': '#!/bin/sh\necho container2 ok',
+                             'im': '#!/bin/sh\necho machine ok'})
+ 
+         (code, out, err) = self.runtest(['-B', p])
+@@ -263,10 +264,14 @@ class DebTestsAll:
+ 
+         if not self.has_isolation_container:
+             self.assertRegex(out, r'ic\s+SKIP .*container', out)
++            self.assertRegex(out, r'ic2\s+SKIP .*container', out)
+             self.assertNotIn('container ok', out)
++            self.assertNotIn('container2 ok', out)
+         else:
+             self.assertRegex(out, r'ic\s+PASS', out)
++            self.assertRegex(out, r'ic2\s+PASS', out)
+             self.assertIn('container ok\n', out)
++            self.assertIn('container2 ok\n', out)
+ 
+         if self.has_isolation_machine and self.has_isolation_container:
+             # all tests run
+@@ -512,6 +517,19 @@ class DebTestsFailureModes:
+         self.assertRegex(out, r'toy\s+FAIL non-zero exit status 1', out)
+         self.assertRegex(out, r'real\s+PASS', out)
+ 
++    def test_unknown_restriction(self):
++        '''Tests with unknown restrictions are skipped
++
++        Each test is reported separately to avoid confusing output
++        (#851232)'''
++        p = self.build_src('Tests: foo bar\nRestrictions: needs-more-cowbell\nDepends: coreutils\n',
++                           {'foo': '#!/bin/sh\nexit 1\n',
++                            'bar': '#!/bin/sh\nexit 1\n'})
++        (code, out, err) = self.runtest(['-d', '--no-built-binaries', p])
++        self.assertEqual(code, 8, err)
++        self.assertRegex(out, r'foo\s+SKIP unknown restriction', out)
++        self.assertRegex(out, r'bar\s+SKIP unknown restriction', out)
++
+ 
+ class NullRunner(AdtTestCase, DebTestsAll, DebTestsFailureModes):
+     def __init__(self, *args, **kwargs):
+-- 
+2.22.0
+

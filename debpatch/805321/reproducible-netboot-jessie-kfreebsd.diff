@@ -1,0 +1,146 @@
+diff --git a/build/Makefile b/build/Makefile
+index ec5a084..6261a4d 100644
+--- a/build/Makefile
++++ b/build/Makefile
+@@ -56,7 +56,7 @@
+ # Add to PATH so dpkg will always work, and so local programs will be found.
+ PATH := util:$(PATH):/usr/sbin:/sbin
+ EATMYDATA = $(shell which eatmydata 2>/dev/null)
+-GZIP = $(shell which pigz gzip | head -1)
++GZIP = $(shell which pigz gzip | head -1) -n
+ 
+ # We don't want this to be run each time we re-enter.
+ ifndef DEB_HOST_ARCH
+@@ -149,7 +149,7 @@ MFSROOT_LIMIT := 68m
+ endif
+ 
+ define mkfs.ufs1
+-  sh -c 'makefs -t ffs -s $(MFSROOT_LIMIT) -f 3000 -o minfree=0,version=1 $$0 ${TREE}'
++  sh -c 'makefs -t ffs -T $(SOURCE_DATE_EPOCH) -s $(MFSROOT_LIMIT) -f 3000 -o minfree=0,version=1 $$0 ${TREE}'
+ endef
+ 
+ define e2fsck
+@@ -803,7 +803,14 @@ $(TEMP_MINIISO): $(TEMP_BOOT_SCREENS) arch_miniiso
+ 
+ # various kinds of information, for use on debian-cd isos
+ $(DEBIAN_CD_INFO): $(TEMP_BOOT_SCREENS) $(TEMP_CD_INFO_DIR)
+-	(cd $(TEMP_CD_INFO_DIR); tar czf - .) > $@
++	# Clamp timestamps to be no newer than last changelog entry, see
++	# https://wiki.debian.org/ReproducibleBuilds/TimestampsInTarball
++	find $(TEMP_CD_INFO_DIR) -newermt "@$(SOURCE_DATE_EPOCH)" -print0 | xargs -0r touch --no-dereference --date="@$(SOURCE_DATE_EPOCH)"
++	# Create tarball with files sorted in a stable order, see
++	# https://wiki.debian.org/ReproducibleBuilds/FileOrderInTarballs
++	# and without timestamp in the gzip header, see
++	# https://wiki.debian.org/ReproducibleBuilds/TimestampsInGzipHeaders
++	( cd $(TEMP_CD_INFO_DIR) && find . -print0 | LC_ALL=C sort -z | GZIP=-n tar --no-recursion --null -T - -czf -) > $@
+ 	update-manifest $@ $(MANIFEST-DEBIAN_CD_INFO)
+ 
+ # a directory full of files for netbooting
+@@ -822,7 +829,14 @@ $(NETBOOT_TAR): $(TEMP_NETBOOT_DIR)
+ 	# Create an version info file.
+ 	echo 'Debian version:  $(DEBIAN_VERSION)' > $(TEMP_NETBOOT_DIR)/version.info
+ 	echo 'Installer build: $(BUILD_DATE)' >> $(TEMP_NETBOOT_DIR)/version.info
+-	(cd $(TEMP_NETBOOT_DIR); tar czf - .) > $@
++	# Clamp timestamps to be no newer than last changelog entry, see
++	# https://wiki.debian.org/ReproducibleBuilds/TimestampsInTarball
++	find $(TEMP_NETBOOT_DIR) -newermt "@$(SOURCE_DATE_EPOCH)" -print0 | xargs -0r touch --no-dereference --date="@$(SOURCE_DATE_EPOCH)"
++	# Create tarball with files sorted in a stable order, see
++	# https://wiki.debian.org/ReproducibleBuilds/FileOrderInTarballs
++	# and without timestamp in the gzip header, see
++	# https://wiki.debian.org/ReproducibleBuilds/TimestampsInGzipHeaders
++	( cd $(TEMP_NETBOOT_DIR) && find . -print0 | LC_ALL=C sort -z | GZIP=-n tar --no-recursion --null -T - -czf -) > $@
+ 	update-manifest $@ $(MANIFEST-NETBOOT_TAR) $(UDEB_LISTS)
+ 
+ $(TEMP_BOOT_SCREENS): arch_boot_screens
+diff --git a/build/config/x86.cfg b/build/config/x86.cfg
+index 3caadd2..b0fc9a2 100644
+--- a/build/config/x86.cfg
++++ b/build/config/x86.cfg
+@@ -332,6 +332,11 @@ arch_miniiso: x86_syslinux x86_grub_efi
+ 			| todos > $(TEMP_CD_TREE)/win32-loader.ini; \
+ 	fi
+ 
++	# Clamp timestamps to be no newer than last changelog entry, see
++	# https://wiki.debian.org/ReproducibleBuilds/TimestampsInTarball
++	find $(TEMP_CD_TREE) -newermt "$(SOURCE_DATE)" -print0 \
++	 | xargs -0r touch --no-dereference --date="$(SOURCE_DATE)"
++
+ 	if [ "$(GRUB_EFI)" = y ]; then \
+ 		xorriso -as mkisofs -r -J -b isolinux.bin -c boot.cat \
+ 			-no-emul-boot -boot-load-size 4 -boot-info-table \
+diff --git a/debian/changelog b/debian/changelog
+index 42aed37..09c8a02 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -1,3 +1,21 @@
++debian-installer (20150422+kbsd8u2) jessie-kfreebsd; urgency=medium
++
++  * Improve reproducibility of debian-installer netboot images:
++    (Closes: #805321)
++    - clamp timestamps in the d-i ramdisk to be no later than
++      the most recent debian/changelog entry of this package
++      - raise makefs dependency on >= 20100306-5+kbsd8u1
++    - clamp timestamps in the mini.iso similarly
++    - clamp timestamps in the netboot tarball;  store files in a
++      stable order
++    - clamp timestamps in the cd info tarball;  store files in a
++      stable order
++    - clamp timestamps in the output debian-installer-images tarball;
++      store files in a stable order
++    - disable timestamps in gzip output (e.g. initrd.gz and tarballs)
++
++ -- Steven Chamberlain <steven@pyro.eu.org>  Tue, 10 Nov 2015 21:38:46 +0000
++
+ debian-installer (20150422+kbsd8u1) jessie-kfreebsd; urgency=medium
+ 
+   * Rebuild using udebs from the jessie-kfreebsd suite, also using
+diff --git a/debian/control b/debian/control
+index 100ca5a..6f4df5b 100644
+--- a/debian/control
++++ b/debian/control
+@@ -162,7 +162,7 @@ Build-Depends:
+ #		architectures if SSL_CERTS has been set locally.
+ 	win32-loader (>= 0.7.2) [i386 amd64 kfreebsd-i386 kfreebsd-amd64 hurd-i386],
+ #		Alternative boot method for win32 platforms.
+-	makefs [kfreebsd-any],
++	makefs (>= 20100306-5+kbsd8u1~) [kfreebsd-any],
+ #		Used to create an UFS1 filesystem from a directory tree.
+ 	grub-pc (>= 2.02~beta2~) [kfreebsd-i386 kfreebsd-amd64 hurd-i386],
+ #		Used as the CD-ROM's bootloader
+diff --git a/debian/rules b/debian/rules
+index 1f1512a..9b76973 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -3,6 +3,7 @@
+ ARCH=$(shell dpkg-architecture -qDEB_BUILD_ARCH)
+ VERSION=$(shell LC_ALL=C dpkg-parsechangelog | grep ^Version: | cut -d ' ' -f 2)
+ DATE=$(shell echo $(VERSION) | cut -d '.' -f 1)
++SOURCE_DATE_EPOCH = $(shell date -d "$$(dpkg-parsechangelog -SDate)" +%s)
+ SUITE=$(shell LC_ALL=C dpkg-parsechangelog | grep ^Distribution: | cut -d ' ' -f 2)
+ ifeq (${SUITE},UNRELEASED)
+ USE_UDEBS_FROM=unstable
+@@ -31,7 +32,7 @@ clean:
+ # Must run as root, so is not run as part of regular build.
+ build-images:
+ 	$(MAKE) -C build all_build stats release \
+-		USE_UDEBS_FROM=$(USE_UDEBS_FROM) BUILD_DATE=$(DATE) \
++		USE_UDEBS_FROM=$(USE_UDEBS_FROM) BUILD_DATE=$(DATE) SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" \
+ 		USE_PROPOSED_UPDATES=$(USE_PROPOSED_UPDATES) \
+ 		TRANSSTATUS=$(TRANSSTATUS) BOOTMENU_BEEP=$(BOOTMENU_BEEP)
+ 
+@@ -71,7 +72,14 @@ binary-arch: install
+ 	dh_gencontrol
+ 	dh_md5sums
+ 	dh_builddeb
+-	cd debian/tmp && tar czvf ../../../$(TARNAME) .
++	# Clamp timestamps to be no newer than last changelog entry, see
++	# https://wiki.debian.org/ReproducibleBuilds/TimestampsInTarball
++	find debian/tmp -newermt "@$(SOURCE_DATE_EPOCH)" -print0 | xargs -0r touch --no-dereference --date="@$(SOURCE_DATE_EPOCH)"
++	# Create tarball with files sorted in a stable order, see
++	# https://wiki.debian.org/ReproducibleBuilds/FileOrderInTarballs
++	# and without timestamp in the gzip header, see
++	# https://wiki.debian.org/ReproducibleBuilds/TimestampsInGzipHeaders
++	cd debian/tmp && find . -print0 | LC_ALL=C sort -z | GZIP=-n tar --no-recursion --null -T - -czvf ../../../$(TARNAME)
+ 	dpkg-distaddfile $(TARNAME) raw-installer -
+ 
+ binary-indep:

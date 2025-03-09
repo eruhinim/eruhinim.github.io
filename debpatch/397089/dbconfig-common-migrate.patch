@@ -1,0 +1,168 @@
+diff -ur dbconfig-common-1.8.28/dpkg/config dbconfig-common-1.8.28.1/dpkg/config
+--- dbconfig-common-1.8.28/dpkg/config	2006-10-13 10:52:19.000000000 +1300
++++ dbconfig-common-1.8.28.1/dpkg/config	2006-11-05 15:43:53.000000000 +1300
+@@ -61,11 +61,21 @@
+ 		db_set $dbc_package/internal/reconfiguring true
+ 	fi
+ 
++	##
++	## start new dbc upgrade section
++	##
++	# if there is a previously existing version already installed
++	# *and* the maintainer has provided the first version that used
++	# dbconfig-common *and*  this version is newer than the
++	# previously installed version... do the dbc import stuff.
++	if [ "$migrating" ]; then
++		dbc_migrate
++	fi
++
+ 	# and start our beautiful state-machine
+-	# we start in STATE=1 (install_question) in all but two situations:
+-	#	- we're migrating from a previous non-dbc version
++	# we start in STATE=1 (install_question) in all but one situation:
+ 	#   - we're installing a frontend/readonly app
+-	if [ ! "$migrating" ] && [ ! "$dbc_frontend" ]; then
++	if [ ! "$dbc_frontend" ]; then
+ 		STATE=1
+ 	else
+ 		STATE=2
+@@ -86,69 +96,6 @@
+ 		fi
+ 
+ 		##
+-		## start new dbc upgrade section
+-		##
+-		# if there is a previously existing version already installed
+-		# *and* the maintainer has provided the first version that used
+-		# dbconfig-common *and*  this version is newer than the
+-		# previously installed version... do the dbc import stuff.
+-		if [ "$migrating" ]; then
+-			# if dbc_load_include is set, determine the format
+-			# and location of the old config file
+-			if [ "$dbc_load_include" ]; then
+-				iformat=`echo $dbc_load_include | cut -d: -f1`
+-				ifile=`echo $dbc_load_include | cut -d: -f2-`
+-			fi
+-
+-			##
+-			## if they want to import settings from a previous 
+-			## non-dbc version, do that and mark the questions
+-			## skipped 
+-			##
+-			if [ "$ifile" ] && [ -f "$ifile" ]; then
+-				dbc_logpart "migrating old settings into dbconfig-common: "
+-				if [ "$dbc_debug" ]; then
+-					dbc_debug "dbconfig-load-include $dbc_load_include_args -f $iformat $ifile"
+-					dbconfig-load-include $dbc_load_include_args -f $iformat $ifile
+-				fi
+-				eval `dbconfig-load-include $dbc_load_include_args -f $iformat $ifile`
+-				# if the dbtype is hardcoded, reset it no matter what
+-				# dbconfig-load-include tells us
+-				if [ "$dbc_hardcoded_dbtype" ]; then 
+-					dbc_dbtype="$dbc_hardcoded_dbtype"
+-				fi
+-				
+-				for f in database-type $dbc_dbtype/method db/dbname; do
+-					db_fset $dbc_package/$f seen true || true
+-				done
+-				if echo "$dbc_authenticated_dbtypes" | grep -q "$dbc_dbtype"; then
+-					for f in pgsql/authmethod-admin pgsql/authmethod-user $dbc_dbtype/admin-user db/app-user; do
+-						db_fset $dbc_package/$f seen true || true
+-					done
+-					db_set $dbc_package/db/app-user "$dbc_dbuser"
+-					db_set $dbc_package/$dbc_dbtype/app-pass "$dbc_dbpass"
+-					db_set $dbc_package/password-confirm "$dbc_dbpass"
+-				fi
+-				if echo "$dbc_remote_dbtypes" | grep -q "$dbc_dbtype"; then
+-					for f in remote/host remote/newhost remote/port ; do
+-						db_fset $dbc_package/$f seen true || true
+-					done
+-					db_set $dbc_package/remote/host "$dbc_dbserver"
+-					db_set $dbc_package/remote/newhost "$dbc_dbserver"
+-					db_set $dbc_package/remote/port "$dbc_dbport"
+-					if [ "$dbc_dbserver" ]; then
+-						db_set $dbc_package/$dbc_dbtype/method "tcp/ip"
+-					fi
+-				fi
+-
+-				db_set $dbc_package/database-type $dbc_dbtype
+-				db_set $dbc_package/db/dbname "$dbc_dbname"
+-
+-				dbc_logline "done"
+-			fi
+-		fi
+-
+-		##
+ 		## start multidb section
+ 		## 
+ 		# if the dbtype is hardcoded (using config.mysql, etc), use that
+@@ -398,3 +345,69 @@
+ 	
+ 	db_set $dbc_package/internal/skip-preseed true
+ }
++
++dbc_migrate() {
++
++	# if dbc_load_include is set, determine the format
++	# and location of the old config file
++	if [ "$dbc_load_include" ]; then
++		iformat=`echo $dbc_load_include | cut -d: -f1`
++		ifile=`echo $dbc_load_include | cut -d: -f2-`
++	fi
++
++	##
++	## if they want to import settings from a previous 
++	## non-dbc version, do that and mark the questions
++	## skipped 
++	##
++	if [ -z "$ifile" ] || [ ! -f "$ifile" ]; then
++		return
++	fi
++
++	dbc_logpart "migrating old settings into dbconfig-common: "
++	if [ "$dbc_debug" ]; then
++		dbc_debug "dbconfig-load-include $dbc_load_include_args -f $iformat $ifile"
++		dbconfig-load-include $dbc_load_include_args -f $iformat $ifile
++	fi
++	eval `dbconfig-load-include $dbc_load_include_args -f $iformat $ifile`
++
++	# the load script needs to return at least a database type
++	if [ -z "$dbc_dbtype" ]; then
++		dbc_logline "failed"
++		return
++	fi
++
++	# if the dbtype is hardcoded, reset it no matter what
++	# dbconfig-load-include tells us
++	if [ "$dbc_hardcoded_dbtype" ]; then 
++		dbc_dbtype="$dbc_hardcoded_dbtype"
++	fi
++	
++	for f in database-type $dbc_dbtype/method db/dbname; do
++		db_fset $dbc_package/$f seen true || true
++	done
++	if echo "$dbc_authenticated_dbtypes" | grep -q "$dbc_dbtype"; then
++		for f in pgsql/authmethod-admin pgsql/authmethod-user $dbc_dbtype/admin-user db/app-user; do
++			db_fset $dbc_package/$f seen true || true
++		done
++		db_set $dbc_package/db/app-user "$dbc_dbuser"
++		db_set $dbc_package/$dbc_dbtype/app-pass "$dbc_dbpass"
++		db_set $dbc_package/password-confirm "$dbc_dbpass"
++	fi
++	if echo "$dbc_remote_dbtypes" | grep -q "$dbc_dbtype"; then
++		for f in remote/host remote/newhost remote/port ; do
++			db_fset $dbc_package/$f seen true || true
++		done
++		db_set $dbc_package/remote/host "$dbc_dbserver"
++		db_set $dbc_package/remote/newhost "$dbc_dbserver"
++		db_set $dbc_package/remote/port "$dbc_dbport"
++		if [ "$dbc_dbserver" ]; then
++			db_set $dbc_package/$dbc_dbtype/method "tcp/ip"
++		fi
++	fi
++
++	db_set $dbc_package/database-type $dbc_dbtype
++	db_set $dbc_package/db/dbname "$dbc_dbname"
++
++	dbc_logline "done"
++}

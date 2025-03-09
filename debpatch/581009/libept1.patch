@@ -1,0 +1,337 @@
+diff --git a/src/desc_render.cc b/src/desc_render.cc
+index 0b0b0ef..647ec75 100644
+--- a/src/desc_render.cc
++++ b/src/desc_render.cc
+@@ -104,7 +104,7 @@ cw::fragment *make_tags_fragment(const pkgCache::PkgIterator &pkg)
+     return NULL;
+ 
+ #ifdef HAVE_EPT
+-  typedef ept::debtags::Tag tag;
++  typedef std::string tag;
+   using aptitude::apt::get_tags;
+ #endif
+ 
+@@ -122,7 +122,7 @@ cw::fragment *make_tags_fragment(const pkgCache::PkgIterator &pkg)
+       for(set<tag>::const_iterator i = s->begin(); i != s->end(); ++i)
+ 	{
+ #ifdef HAVE_EPT
+-	  std::string name(i->fullname());
++	  std::string name(*i);
+ #else
+ 	  const std::string name(i->str());
+ #endif
+diff --git a/src/generic/apt/matching/match.cc b/src/generic/apt/matching/match.cc
+index f9febf5..946dc1a 100644
+--- a/src/generic/apt/matching/match.cc
++++ b/src/generic/apt/matching/match.cc
+@@ -30,7 +30,7 @@
+ 
+ #include <cwidget/generic/util/transcode.h>
+ 
+-#include <ept/textsearch/textsearch.h>
++#include <ept/axi/axi.h>
+ #include <xapian/enquire.h>
+ 
+ #include <algorithm>
+@@ -48,6 +48,14 @@ namespace aptitude
+   {
+     namespace
+     {
++      Xapian::docid docidByName(const Xapian::Database& db, const std::string& pkgname)
++      {
++        Xapian::PostingIterator i = db.postlist_begin("XP"+pkgname);
++	if (i == db.postlist_end("XP"+pkgname))
++		return 0;
++	else
++		return *i;
++      }
+ 
+       /** \brief Evaluate any regular expression-based pattern.
+        *
+@@ -146,14 +154,14 @@ namespace aptitude
+ 	 *  matched by this pattern.
+ 	 */
+ 	bool maybe_contains_package(const pkgCache::PkgIterator &pkg,
+-				    const boost::scoped_ptr<ept::textsearch::TextSearch> &db) const
++				    const boost::scoped_ptr<Xapian::Database> &db) const
+ 	{
+ 	  if(!matched_packages_valid || !db)
+ 	    return true;
+ 	  else
+ 	    return std::binary_search(matched_packages.begin(),
+ 				      matched_packages.end(),
+-				      db->docidByName(pkg.Name()));
++				      docidByName(*db, pkg.Name()));
+ 	}
+ 
+ 	xapian_info()
+@@ -275,7 +283,7 @@ namespace aptitude
+ 
+       // Either a pointer to the TextSearch object, or NULL if it
+       // couldn't be initialized.
+-      boost::scoped_ptr<ept::textsearch::TextSearch> db;
++      boost::scoped_ptr<Xapian::Database> db;
+ 
+       // Maps "top-level" patterns to their Xapian information (that
+       // is, the corresponding query and/or query results).  Term hit
+@@ -296,7 +304,7 @@ namespace aptitude
+       {
+ 	try
+ 	  {
+-	    db.reset(new ept::textsearch::TextSearch);
++	    db.reset(new Xapian::Database(ept::axi::path_db()));
+ 	  }
+ 	catch(...)
+ 	  {
+@@ -304,7 +312,7 @@ namespace aptitude
+ 	  }
+       }
+ 
+-      const boost::scoped_ptr<ept::textsearch::TextSearch> &get_db() const
++      const boost::scoped_ptr<Xapian::Database> &get_db() const
+       {
+ 	return db;
+       }
+@@ -343,8 +351,8 @@ namespace aptitude
+ 	if(debug)
+ 	  std::cout << "Searching for " << prefix << " as a term pefix." << std::endl;
+ 
+-	Xapian::docid pkg_docid(db->docidByName(pkg.Name()));
+-	const Xapian::Database xapian_db(db->db());
++	Xapian::docid pkg_docid(docidByName(*db, pkg.Name()));
++	const Xapian::Database& xapian_db = *db;
+ 
+ 
+ 	const std::map<std::string, std::vector<Xapian::docid> >::iterator
+@@ -410,7 +418,7 @@ namespace aptitude
+ 			const std::string &term,
+ 			bool debug)
+       {
+-	Xapian::docid pkg_docid(db->docidByName(pkg.Name()));
++	Xapian::docid pkg_docid(docidByName(*db, pkg.Name()));
+ 
+ 	const std::map<std::string, std::vector<Xapian::docid> >::iterator
+ 	  found = matched_terms.find(term);
+@@ -437,7 +445,7 @@ namespace aptitude
+ 	      {
+ 		const std::string &currTerm(**termIt);
+ 
+-		Xapian::Database xapian_db(db->db());
++		Xapian::Database& xapian_db = *db;
+ 
+ 		Xapian::PostingIterator
+ 		  postingsBegin = xapian_db.postlist_begin(currTerm),
+@@ -476,7 +484,7 @@ namespace aptitude
+ 
+ 	    xapian_info &rval(inserted->second);
+ 	    if(db.get() != NULL)
+-	      rval.setup(db->db(), toplevel, debug);
++	      rval.setup(*db, toplevel, debug);
+ 
+ 	    return rval;
+ 	  }
+@@ -1373,7 +1381,7 @@ namespace aptitude
+ 	      pkgCache::PkgIterator pkg(target.get_package_iterator(cache));
+ 
+ #ifdef HAVE_EPT
+-	      typedef ept::debtags::Tag tag;
++	      typedef std::string tag;
+ 	      using aptitude::apt::get_tags;
+ #endif
+ 
+@@ -1390,7 +1398,7 @@ namespace aptitude
+ 	      for(std::set<tag>::const_iterator i=tags->begin(); i!=tags->end(); ++i)
+ 		{
+ #ifdef HAVE_EPT
+-		  std::string name(i->fullname());
++		  std::string name(*i);
+ #else
+ 		  const std::string name = i->str().c_str();
+ #endif
+diff --git a/src/generic/apt/tags.cc b/src/generic/apt/tags.cc
+index 36de6bc..3e19671 100644
+--- a/src/generic/apt/tags.cc
++++ b/src/generic/apt/tags.cc
+@@ -39,6 +39,8 @@
+ #include <apt-pkg/pkgrecords.h>
+ #include <apt-pkg/tagfile.h>
+ 
++#include <ept/debtags/debtags.h>
++
+ #include <cwidget/generic/util/eassert.h>
+ 
+ using namespace std;
+@@ -350,10 +352,10 @@ namespace aptitude
+ 	}
+     }
+ 
+-    const std::set<ept::debtags::Tag> get_tags(const pkgCache::PkgIterator &pkg)
++    const std::set<std::string> get_tags(const pkgCache::PkgIterator &pkg)
+     {
+       if(!apt_cache_file || !debtagsDB)
+-	return std::set<ept::debtags::Tag>();
++	return std::set<std::string>();
+ 
+       // TODO: handle !hasData() here.
+       try
+@@ -362,7 +364,7 @@ namespace aptitude
+ 	}
+       catch(std::exception &ex)
+ 	{
+-	  return std::set<ept::debtags::Tag>();
++	  return std::set<std::string>();
+ 	}
+     }
+   }
+diff --git a/src/generic/apt/tags.h b/src/generic/apt/tags.h
+index 2b8a36e..40411cd 100644
+--- a/src/generic/apt/tags.h
++++ b/src/generic/apt/tags.h
+@@ -225,15 +225,13 @@ std::string tag_description(const std::string &tag);
+ 
+ #include <apt-pkg/pkgcache.h>
+ 
+-#include <ept/debtags/debtags.h>
+-
+ #include <set>
+ 
+ namespace aptitude
+ {
+   namespace apt
+   {
+-    const std::set<ept::debtags::Tag> get_tags(const pkgCache::PkgIterator &pkg);
++    const std::set<std::string> get_tags(const pkgCache::PkgIterator &pkg);
+ 
+     /** \brief Initialize the cache of debtags information. */
+     void load_tags();
+diff --git a/src/gtk/gui.cc b/src/gtk/gui.cc
+index cb450b1..2e338c6 100644
+--- a/src/gtk/gui.cc
++++ b/src/gtk/gui.cc
+@@ -1272,7 +1272,7 @@ namespace gui
+       return where;
+ 
+ #ifdef HAVE_EPT
+-    typedef ept::debtags::Tag tag;
++    typedef std::string tag;
+     using aptitude::apt::get_tags;
+ 
+     const std::set<tag> realS(get_tags(pkg));
+@@ -1292,7 +1292,7 @@ namespace gui
+ 	    it != s->end(); ++it)
+ 	  {
+ #ifdef HAVE_EPT
+-	    const std::string name(it->fullname());
++	    const std::string name(*it);
+ #else
+ 	    const std::string name(it->str());
+ #endif
+diff --git a/src/pkg_grouppolicy.cc b/src/pkg_grouppolicy.cc
+index 93d6538..46fcda5 100644
+--- a/src/pkg_grouppolicy.cc
++++ b/src/pkg_grouppolicy.cc
+@@ -1350,7 +1350,7 @@ public:
+ 			   pkg_subtree *root)
+   {
+ #ifdef HAVE_EPT
+-    typedef ept::debtags::Tag tag;
++    typedef std::string tag;
+     using aptitude::apt::get_tags;
+ #endif
+ 
+@@ -1368,18 +1368,22 @@ public:
+ 	ti != tags->end(); ++ti)
+       {
+ #ifdef HAVE_EPT
+-	const ept::debtags::Facet f = ti->facet();
+-
+-	const std::string thisfacet(f.name());
++	size_t fpos = ti->find("::");
++	std::string f;
++	if (fpos == string::npos)
++		f = "legacy";
++	else
++		f = ti->substr(0, fpos);
++	
++	const std::string thisfacet(f);
+ 
+ 	// Don't create items for tags that aren't in our facet.
+-	if(f.name() != facet)
++	if(f != facet)
+ 	  return;
+ 
+ 	// TODO: split up by sub-facet or whatever the debtags guys
+ 	// call it?
+-	std::string tagname;
+-	ti->name(tagname);
++	std::string tagname = *ti;
+ 
+ #else // HAVE_EPT
+ 	tag::const_iterator j = ti->begin();
+@@ -1407,11 +1411,9 @@ public:
+ 	if(found == children.end())
+ 	  {
+ #ifdef HAVE_EPT
+-	    std::string desc;
+-	    ti->longDescription(desc);
+-
+-	    std::string shortdesc;
+-	    ti->shortDescription(shortdesc);
++            // FIXME: const ept::debtags::voc::TagData* td = vocabulary.tagData(*ti);
++	    std::string desc = /* FIXME td ? td->longDescription() : */ "description not available";
++	    std::string shortdesc = /* FIXME td ? td->shortDescription() : */ *ti;
+ #else // HAVE_EPT
+ 	    string desc = tag_description(ti->str());
+ 	    string shortdesc(desc, 0, desc.find('\n'));
+@@ -1491,7 +1493,7 @@ public:
+ 			   pkg_subtree *root)
+   {
+ #ifdef HAVE_EPT
+-    typedef ept::debtags::Tag tag;
++    typedef std::string tag;
+     using aptitude::apt::get_tags;
+ #endif
+ 
+@@ -1528,9 +1530,15 @@ public:
+ 	ti != tags->end(); ++ti)
+       {
+ #ifdef HAVE_EPT
+-	const ept::debtags::Facet f(ti->facet());
+-	std::string thisfacet(f.name());
+-	std::string thistag(ti->name());
++	size_t fpos = ti->find("::");
++	std::string f;
++	if (fpos == string::npos)
++		f = "legacy";
++	else
++		f = ti->substr(0, fpos);
++
++	std::string thisfacet(f);
++	std::string thistag(*ti);
+ #else // HAVE_EPT
+ 	tag::const_iterator j = ti->begin();
+ 
+@@ -1558,8 +1566,9 @@ public:
+ 	if(facetfound == children.end())
+ 	  {
+ #ifdef HAVE_EPT
+-	    string desc(f.longDescription());
+-	    string shortdesc(f.shortDescription());
++            // FIXME const ept::debtags::voc::FacetData* fd = vocabulary.facetData(f);
++	    string desc(/* FIXME fd ? fd->longDescription() : */ "long description not available");
++	    string shortdesc(/* FIXME fd ? fd->shortDescription() : */ f);
+ #else // HAVE_EPT
+ 	    string desc = facet_description(thisfacet);
+ 	    string shortdesc(desc, 0, desc.find('\n'));
+@@ -1596,8 +1605,9 @@ public:
+ 	if(tagfound == tagchildren->end())
+ 	  {
+ #ifdef HAVE_EPT
+-	    string desc(ti->longDescription());
+-	    string shortdesc(ti->shortDescription());
++            // FIXME const ept::debtags::voc::TagData* td = vocabulary.tagData(*ti);
++	    std::string desc = /* FIXME td ? td->longDescription() : */ "description not available";
++	    std::string shortdesc = /* FIXME td ? td->shortDescription() : */ *ti;
+ #else // HAVE_EPT
+ 	    string desc = tag_description(ti->str());
+ 	    string shortdesc(desc, 0, desc.find('\n'));

@@ -1,0 +1,173 @@
+diff -ruBbd cacti-0.8.7a/auth_login.php cacti-0.8.7a-patched/auth_login.php
+--- cacti-0.8.7a/auth_login.php	2007-11-17 13:11:51.000000000 -0500
++++ cacti-0.8.7a-patched/auth_login.php	2008-02-11 20:01:10.000000000 -0500
+@@ -51,6 +51,8 @@
+ 	}
+ }
+ 
++$username = sanitize_search_string($username);
++
+ /* process login */
+ $copy_user = false;
+ $user_auth = false;
+diff -ruBbd cacti-0.8.7a/graph.php cacti-0.8.7a-patched/graph.php
+--- cacti-0.8.7a/graph.php	2007-11-17 13:11:51.000000000 -0500
++++ cacti-0.8.7a-patched/graph.php	2008-02-11 20:01:10.000000000 -0500
+@@ -33,10 +33,15 @@
+ include("./include/top_graph_header.php");
+ 
+ /* ================= input validation ================= */
+-input_validate_input_regex(get_request_var("rra_id"), "^([0-9]+|all)$");
++input_validate_input_regex(get_request_var_request("rra_id"), "^([0-9]+|all)$");
+ input_validate_input_number(get_request_var("local_graph_id"));
++input_validate_input_regex(get_request_var_request("view_type"), "^([a-zA-Z0-9]+)$");
+ /* ==================================================== */
+ 
++if (!isset($_GET['rra_id'])) {
++	$_GET['rra_id'] = 'all';
++}
++
+ if ($_GET["rra_id"] == "all") {
+ 	$sql_where = " where id is not null";
+ }else{
+diff -ruBbd cacti-0.8.7a/graph_view.php cacti-0.8.7a-patched/graph_view.php
+--- cacti-0.8.7a/graph_view.php	2007-11-17 13:11:51.000000000 -0500
++++ cacti-0.8.7a-patched/graph_view.php	2008-02-11 20:01:10.000000000 -0500
+@@ -34,6 +34,9 @@
+ input_validate_input_number(get_request_var("tree_id"));
+ input_validate_input_number(get_request_var("leaf_id"));
+ input_validate_input_number(get_request_var("rra_id"));
++input_validate_input_regex(get_request_var_request('graph_list'), "^([\,0-9]+)$");
++input_validate_input_regex(get_request_var_request('graph_add'), "^([\,0-9]+)$");
++input_validate_input_regex(get_request_var_request('graph_remove'), "^([\,0-9]+)$");
+ /* ==================================================== */
+ 
+ if (isset($_GET["hide"])) {
+@@ -417,7 +420,7 @@
+ 					</td>
+ 					<td width="1">
+ 						<select name="host_id" onChange="applyGraphListFilterChange(document.form_graph_list)">
+-							<option value="0"<?php print $_REQUEST["filter"];?><?php if ($_REQUEST["host_id"] == "0") {?> selected<?php }?>>Any</option>
++							<option value="0"<?php if ($_REQUEST["host_id"] == "0") {?> selected<?php }?>>Any</option>
+ 							<?php
+ 							if (read_config_option("auth_method") != 0) {
+ 								/* get policy information for the sql where clause */
+diff -ruBbd cacti-0.8.7a/include/global.php cacti-0.8.7a-patched/include/global.php
+--- cacti-0.8.7a/include/global.php	2007-11-17 13:11:52.000000000 -0500
++++ cacti-0.8.7a-patched/include/global.php	2008-02-11 20:01:26.000000000 -0500
+@@ -107,6 +107,16 @@
+ $colors["form_alternate2"] = "E5E5E5";
+ 
+ if ((!in_array(basename($_SERVER["PHP_SELF"]), $no_http_header_files, true)) && ($_SERVER["PHP_SELF"] != "")) {
++	/* Sanity Check on "Corrupt" PHP_SELF */
++	if ((!is_file($_SERVER["PHP_SELF"])) && (!is_file($config["base_path"] . '/' . $_SERVER["PHP_SELF"]))) {
++		if (!is_file($_SERVER["DOCUMENT_ROOT"] . $_SERVER["PHP_SELF"])) {
++			if (!((is_file($_SERVER["SCRIPT_FILENAME"])) && (substr_count($_SERVER["SCRIPT_FILENAME"], basename($_SERVER["PHP_SELF"]))))) {
++				echo "\nInvalid PHP_SELF Path\n";
++				exit;
++			}
++		}
++	}
++
+ 	/* we don't want these pages cached */
+ 	header("Expires: Mon, 26 Jul 1997 05:00:00 GMT");
+ 	header("Last-Modified: " . gmdate("D, d M Y H:i:s") . " GMT");
+diff -ruBbd cacti-0.8.7a/lib/api_tree.php cacti-0.8.7a-patched/lib/api_tree.php
+--- cacti-0.8.7a/lib/api_tree.php	2007-11-17 13:11:51.000000000 -0500
++++ cacti-0.8.7a-patched/lib/api_tree.php	2008-02-11 20:01:53.000000000 -0500
+@@ -26,6 +26,9 @@
+ 	$host_id, $host_grouping_type, $sort_children_type, $propagate_changes) {
+ 	global $config;
+ 
++	input_validate_input_number($tree_id);
++	input_validate_input_number($parent_tree_item_id);
++
+ 	include_once($config["library_path"] . "/tree.php");
+ 
+ 	$parent_order_key = db_fetch_cell("select order_key from graph_tree_items where id=$parent_tree_item_id");
+diff -ruBbd cacti-0.8.7a/lib/functions.php cacti-0.8.7a-patched/lib/functions.php
+--- cacti-0.8.7a/lib/functions.php	2007-11-17 13:11:51.000000000 -0500
++++ cacti-0.8.7a-patched/lib/functions.php	2008-02-11 20:01:53.000000000 -0500
+@@ -1566,6 +1622,9 @@
+ 		);
+ 
+ 	$current_page = basename($_SERVER["PHP_SELF"]);
++
++	input_validate_input_regex(get_request_var_request("action"), "^([a-zA-Z0-9_-]+)$");
++
+ 	$current_action = (isset($_REQUEST["action"]) ? $_REQUEST["action"] : "");
+ 
+ 	/* find the current page in the big array */
+@@ -1856,8 +1915,8 @@
+    @arg $string - the original raw search string
+    @returns - the sanitized search string */
+ function sanitize_search_string($string) {
+-	static $drop_char_match =   array('^', '$', '<', '>', '`', '\'', '"', '|', ',', '?', '~', '+', '[', ']', '{', '}', '#', ';', '!');
+-	static $drop_char_replace = array(' ', ' ', ' ', ' ',  '',   '', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ');
++	static $drop_char_match =   array('^', '$', '<', '>', '`', '\'', '"', '|', ',', '?', '~', '+', '[', ']', '{', '}', '#', ';', '!', '=');
++	static $drop_char_replace = array(' ', ' ', ' ', ' ',  '',   '', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ');
+ 
+ 	/* Replace line endings by a space */
+ 	$string = preg_replace('/[\n\r]/is', ' ', $string);
+diff -ruBbd cacti-0.8.7a/lib/html_utility.php cacti-0.8.7a-patched/lib/html_utility.php
+--- cacti-0.8.7a/lib/html_utility.php	2007-11-17 13:11:52.000000000 -0500
++++ cacti-0.8.7a-patched/lib/html_utility.php	2008-02-11 20:01:53.000000000 -0500
+@@ -158,13 +158,15 @@
+    @arg $default - the value to return if the specified name does not exist in the
+      $_GET array
+    @returns - the value of the request variable */
+-function get_request_var($name, $default = "")
+-{
+-	if (isset($_GET[$name]))
+-	{
++function get_request_var($name, $default = "") {
++	if (isset($_GET[$name])) {
++		if (isset($_POST[$name])) {
++			unset($_POST[$name]);
++			$_REQUEST[$name] = $_GET[$name];
++		}
++
+ 		return $_GET[$name];
+-	} else
+-	{
++	}else{
+ 		return $default;
+ 	}
+ }
+@@ -176,13 +178,15 @@
+    @arg $default - the value to return if the specified name does not exist in the
+      $_POST array
+    @returns - the value of the request variable */
+-function get_request_var_post($name, $default = "")
+-{
+-	if (isset($_POST[$name]))
+-	{
++function get_request_var_post($name, $default = "") {
++	if (isset($_POST[$name])) {
++		if (isset($_GET[$name])) {
++			unset($_GET[$name]);
++			$_REQUEST[$name] = $_POST[$name];
++		}
++
+ 		return $_POST[$name];
+-	} else
+-	{
++	}else{
+ 		return $default;
+ 	}
+ }
+diff -ruBbd cacti-0.8.7a/tree.php cacti-0.8.7a-patched/tree.php
+--- cacti-0.8.7a/tree.php	2007-11-17 13:11:51.000000000 -0500
++++ cacti-0.8.7a-patched/tree.php	2008-02-11 20:01:10.000000000 -0500
+@@ -27,6 +27,11 @@
+ include_once('./lib/tree.php');
+ include_once('./lib/html_tree.php');
+ 
++input_validate_input_number(get_request_var('tree_id'));
++input_validate_input_number(get_request_var('leaf_id'));
++input_validate_input_number(get_request_var_post('graph_tree_id'));
++input_validate_input_number(get_request_var_post('parent_item_id'));
++
+ /* set default action */
+ if (!isset($_REQUEST["action"])) { $_REQUEST["action"] = ""; }
+ 

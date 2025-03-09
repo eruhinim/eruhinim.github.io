@@ -1,0 +1,146 @@
+commit de89fb126d6df2d79e0d0a15b4d94e5534231ae6
+Author: Daniel Baumann <daniel@debian.org>
+Date:   Wed Oct 13 19:05:22 2010 +0200
+
+    Adding support for lzip compression (Closes: #600094).
+
+diff --git a/Makefile.in b/Makefile.in
+index 89dd623..f624b5c 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -658,6 +658,10 @@ dist-xz: distdir
+ 	tardir=$(distdir) && $(am__tar) | xz -c >$(distdir).tar.xz
+ 	$(am__remove_distdir)
+ 
++dist-lzip: distdir
++	tardir=$(distdir) && $(am__tar) | lzip -9 -c >$(distdir).tar.lz
++	$(am__remove_distdir)
++
+ dist-tarZ: distdir
+ 	tardir=$(distdir) && $(am__tar) | compress -c >$(distdir).tar.Z
+ 	$(am__remove_distdir)
+@@ -688,6 +692,8 @@ distcheck: dist
+ 	  lzma -dc $(distdir).tar.lzma | $(am__untar) ;;\
+ 	*.tar.xz*) \
+ 	  xz -dc $(distdir).tar.xz | $(am__untar) ;;\
++	*.tar.lz*) \
++	  lzip -dc $(distdir).tar.lz | $(am__untar) ;;\
+ 	*.tar.Z*) \
+ 	  uncompress -c $(distdir).tar.Z | $(am__untar) ;;\
+ 	*.shar.gz*) \
+@@ -859,7 +865,7 @@ uninstall-am: uninstall-dist_pkgdataDATA
+ .PHONY: $(RECURSIVE_CLEAN_TARGETS) $(RECURSIVE_TARGETS) CTAGS GTAGS \
+ 	all all-am am--refresh check check-am clean clean-generic \
+ 	clean-local ctags ctags-recursive dist dist-all dist-bzip2 \
+-	dist-gzip dist-hook dist-lzma dist-shar dist-tarZ dist-xz \
++	dist-gzip dist-hook dist-lzma dist-shar dist-tarZ dist-xz dist-lzip \
+ 	dist-zip distcheck distclean distclean-generic distclean-hdr \
+ 	distclean-tags distcleancheck distdir distuninstallcheck dvi \
+ 	dvi-am html html-am info info-am install install-am \
+diff --git a/dpkg-deb/main.c b/dpkg-deb/main.c
+index 319e715..652a0ae 100644
+--- a/dpkg-deb/main.c
++++ b/dpkg-deb/main.c
+@@ -103,7 +103,7 @@ usage(const struct cmdinfo *cip, const char *value)
+ "                                     packages).\n"
+ "  -z#                              Set the compression level when building.\n"
+ "  -Z<type>                         Set the compression type used when building.\n"
+-"                                     Allowed types: gzip, xz, bzip2, lzma, none.\n"
++"                                     Allowed types: gzip, xz, bzip2, lzma, lzip, none.\n"
+ "\n"));
+ 
+   printf(_(
+diff --git a/lib/dpkg/compress.c b/lib/dpkg/compress.c
+index 343559f..ac17e53 100644
+--- a/lib/dpkg/compress.c
++++ b/lib/dpkg/compress.c
+@@ -376,6 +376,33 @@ struct compressor compressor_lzma = {
+ };
+ 
+ /*
++ * Lzip compressor.
++ */
++
++static void DPKG_ATTR_NORET
++decompress_lzip(int fd_in, int fd_out, const char *desc)
++{
++	fd_fd_filter(fd_in, fd_out, desc, LZIP, "-dc", NULL);
++}
++
++static void DPKG_ATTR_NORET
++compress_lzip(int fd_in, int fd_out, int compress_level, const char *desc)
++{
++	char combuf[6];
++
++	snprintf(combuf, sizeof(combuf), "-c%d", compress_level);
++	fd_fd_filter(fd_in, fd_out, desc, LZIP, combuf, NULL);
++}
++
++struct compressor compressor_lzip = {
++	.name = "lzip",
++	.extension = ".lz",
++	.default_level = 6,
++	.compress = compress_lzip,
++	.decompress = decompress_lzip,
++};
++
++/*
+  * Generic compressor filter.
+  */
+ 
+@@ -385,6 +412,7 @@ static struct compressor *compressor_array[] = {
+ 	&compressor_xz,
+ 	&compressor_bzip2,
+ 	&compressor_lzma,
++	&compressor_lzip,
+ };
+ 
+ struct compressor *
+diff --git a/lib/dpkg/compress.h b/lib/dpkg/compress.h
+index e1a266f..f6ba8fa 100644
+--- a/lib/dpkg/compress.h
++++ b/lib/dpkg/compress.h
+@@ -29,6 +29,7 @@ DPKG_BEGIN_DECLS
+ #define GZIP		"gzip"
+ #define XZ		"xz"
+ #define BZIP2		"bzip2"
++#define LZIP		"lzip"
+ 
+ struct compressor {
+ 	const char *name;
+@@ -45,6 +46,7 @@ struct compressor compressor_gzip;
+ struct compressor compressor_xz;
+ struct compressor compressor_bzip2;
+ struct compressor compressor_lzma;
++struct compressor compressor_lzip;
+ 
+ struct compressor *compressor_find_by_name(const char *name);
+ struct compressor *compressor_find_by_extension(const char *name);
+diff --git a/lib/dpkg/libdpkg.Versions b/lib/dpkg/libdpkg.Versions
+index fc34370..7be2936 100644
+--- a/lib/dpkg/libdpkg.Versions
++++ b/lib/dpkg/libdpkg.Versions
+@@ -104,6 +104,7 @@ LIBDPKG_PRIVATE {
+ 	compressor_xz;		# XXX variable, do not export
+ 	compressor_bzip2;	# XXX variable, do not export
+ 	compressor_lzma;	# XXX variable, do not export
++	compressor_lzip;	# XXX variable, do not export
+ 	compressor_find_by_name;
+ 	compressor_find_by_extension;
+ 	compress_filter;
+diff --git a/scripts/Dpkg/Compression.pm b/scripts/Dpkg/Compression.pm
+index 8b2c5c8..fa8e047 100644
+--- a/scripts/Dpkg/Compression.pm
++++ b/scripts/Dpkg/Compression.pm
+@@ -70,6 +70,11 @@ my $COMP = {
+ 	"comp_prog" => [ "xz" ],
+ 	"decomp_prog" => [ "unxz" ],
+     },
++    "lzip" => {
++	"file_ext" => "lz",
++	"comp_prog" => [ "lzip" ],
++	"decomp_prog" => [ "lzip", "--decompress" ],
++    },
+ };
+ 
+ our $default_compression = "gzip";

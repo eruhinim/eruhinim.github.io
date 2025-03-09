@@ -1,0 +1,159 @@
+=== modified file 'apt-pkg/aptconfiguration.cc'
+--- apt-pkg/aptconfiguration.cc	2010-11-06 11:50:49 +0000
++++ apt-pkg/aptconfiguration.cc	2010-11-09 13:18:19 +0000
+@@ -166,18 +166,6 @@
+ 	string const envShort = envLong.substr(0,lenShort);
+ 	bool envLongIncluded = true;
+ 
+-	// first cornercase: LANG=C, so we use only "en" Translation
+-	if (envLong == "C") {
+-		if (_config->Find("Acquire::Languages","") != "none")
+-			codes.push_back("en");
+-		allCodes = codes;
+-		allCodes.insert(allCodes.end(), builtin.begin(), builtin.end());
+-		if (All == true)
+-			return allCodes;
+-		else
+-			return codes;
+-	}
+-
+ 	// to save the servers from unneeded queries, we only try also long codes
+ 	// for languages it is realistic to have a long code translation file…
+ 	// TODO: Improve translation acquire system to drop them dynamic
+@@ -218,37 +206,41 @@
+ 	// It is very likely we will need to environment codes later,
+ 	// so let us generate them now from LC_MESSAGES and LANGUAGE
+ 	std::vector<string> environment;
+-	// take care of LC_MESSAGES
+-	if (envLongIncluded == false)
+-		environment.push_back(envLong);
+-	environment.push_back(envShort);
+-	// take care of LANGUAGE
+-	const char *language_env = getenv("LANGUAGE") == 0 ? "" : getenv("LANGUAGE");
+-	string envLang = Locale == 0 ? language_env : *(Locale+1);
+-	if (envLang.empty() == false) {
+-		std::vector<string> env = VectorizeString(envLang,':');
+-		short addedLangs = 0; // add a maximum of 3 fallbacks from the environment
+-		for (std::vector<string>::const_iterator e = env.begin();
+-		     e != env.end() && addedLangs < 3; ++e) {
+-			if (unlikely(e->empty() == true) || *e == "en")
+-				continue;
+-			if (*e == envLong || *e == envShort)
+-				continue;
+-			if (std::find(environment.begin(), environment.end(), *e) != environment.end())
+-				continue;
+-			if (e->find('_') != string::npos) {
+-				// Drop LongCodes here - ShortCodes are also included
+-				string const shorty = e->substr(0, e->find('_'));
+-				char const **n = needLong;
+-				for (; *n != NULL; ++n)
+-					if (shorty == *n)
+-						break;
+-				if (*n == NULL)
+-					continue;
++	if (envShort != "C") {
++		// take care of LC_MESSAGES
++		if (envLongIncluded == false)
++			environment.push_back(envLong);
++		environment.push_back(envShort);
++		// take care of LANGUAGE
++		const char *language_env = getenv("LANGUAGE") == 0 ? "" : getenv("LANGUAGE");
++		string envLang = Locale == 0 ? language_env : *(Locale+1);
++		if (envLang.empty() == false) {
++			std::vector<string> env = VectorizeString(envLang,':');
++			short addedLangs = 0; // add a maximum of 3 fallbacks from the environment
++			for (std::vector<string>::const_iterator e = env.begin();
++			     e != env.end() && addedLangs < 3; ++e) {
++				if (unlikely(e->empty() == true) || *e == "en")
++					continue;
++				if (*e == envLong || *e == envShort)
++					continue;
++				if (std::find(environment.begin(), environment.end(), *e) != environment.end())
++					continue;
++				if (e->find('_') != string::npos) {
++					// Drop LongCodes here - ShortCodes are also included
++					string const shorty = e->substr(0, e->find('_'));
++					char const **n = needLong;
++					for (; *n != NULL; ++n)
++						if (shorty == *n)
++							break;
++					if (*n == NULL)
++						continue;
++				}
++				++addedLangs;
++				environment.push_back(*e);
+ 			}
+-			++addedLangs;
+-			environment.push_back(*e);
+ 		}
++	} else {
++		environment.push_back("en");
+ 	}
+ 
+ 	// Support settings like Acquire::Translation=none on the command line to
+@@ -270,6 +262,16 @@
+ 			return codes;
+ 	}
+ 
++	// cornercase: LANG=C, so we use only "en" Translation
++	if (envShort == "C") {
++		allCodes = codes = environment;
++		allCodes.insert(allCodes.end(), builtin.begin(), builtin.end());
++		if (All == true)
++			return allCodes;
++		else
++			return codes;
++	}
++
+ 	std::vector<string> const lang = _config->FindVector("Acquire::Languages");
+ 	// the default setting -> "environment, en"
+ 	if (lang.empty() == true) {
+
+=== modified file 'debian/changelog'
+--- debian/changelog	2010-11-06 14:02:27 +0000
++++ debian/changelog	2010-11-09 13:18:19 +0000
+@@ -7,12 +7,12 @@
+ 
+   [ David Kalnischkies ]
+   * apt-pkg/aptconfiguration.cc:
+-    - respect the none-force even in LANG=C (Closes: #602573)
++    - evaluate Acquire::Languages= before LANG= (Closes: #602573)
+   * apt-pkg/orderlist.cc:
+     - try fixing before removing even if the fix is hidden in
+       a provides, hidden in the #590438 testcase
+ 
+- -- David Kalnischkies <kalnischkies@gmail.com>  Sat, 06 Nov 2010 12:50:20 +0100
++ -- David Kalnischkies <kalnischkies@gmail.com>  Tue, 09 Nov 2010 14:16:41 +0100
+ 
+ apt (0.8.8) unstable; urgency=low
+ 
+
+=== modified file 'test/libapt/getlanguages_test.cc'
+--- test/libapt/getlanguages_test.cc	2010-11-06 11:50:49 +0000
++++ test/libapt/getlanguages_test.cc	2010-11-09 13:18:19 +0000
+@@ -89,6 +89,24 @@
+ 	env[0] = "C";
+ 	vec = APT::Configuration::getLanguages(false, false, env);
+ 	equals(vec.size(), 0);
++
++	_config->Set("Acquire::Languages", "environment");
++	env[0] = "C";
++	vec = APT::Configuration::getLanguages(false, false, env);
++	equals(vec.size(), 1);
++	equals(vec[0], "en");
++
++	_config->Set("Acquire::Languages", "de");
++	env[0] = "C";
++	vec = APT::Configuration::getLanguages(false, false, env);
++	equals(vec.size(), 1);
++	equals(vec[0], "de");
++
++	_config->Set("Acquire::Languages", "fr");
++	env[0] = "ast_DE.UTF-8";
++	vec = APT::Configuration::getLanguages(false, false, env);
++	equals(vec.size(), 1);
++	equals(vec[0], "fr");
+ 	_config->Set("Acquire::Languages", "");
+ 
+ 	_config->Set("Acquire::Languages::1", "environment");
+

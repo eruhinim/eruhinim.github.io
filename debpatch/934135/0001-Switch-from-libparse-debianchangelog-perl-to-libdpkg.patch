@@ -1,0 +1,136 @@
+From 226aa8349cd90a6fa3b7595f0f3e6febf5312747 Mon Sep 17 00:00:00 2001
+From: Guillem Jover <guillem@debian.org>
+Date: Tue, 18 Oct 2016 23:55:28 +0200
+Subject: [PATCH] Switch from libparse-debianchangelog-perl to libdpkg-perl
+
+The former was merged into the latter some time ago, with the main
+difference being the lack of some of the output formats that are not
+being used by aptitude.
+
+This seems to have been attempted in the past, but was reverted due to
+performance problems. The performance from current libdpkg-perl should
+be comparable.
+
+We use the perl module directly via a new aptitude-changelog-parser
+wrapper to avoid pulling dpkg-dev and its dependencies. This new
+wrapper will also make sure the module is available before proceeding.
+---
+ Makefile.am                        |  3 ++-
+ aptitude-changelog-parser          | 27 +++++++++++++++++++++++++++
+ debian/control                     |  2 +-
+ src/generic/apt/changelog_parse.cc | 17 +++++++----------
+ 4 files changed, 37 insertions(+), 12 deletions(-)
+ create mode 100755 aptitude-changelog-parser
+
+diff --git a/Makefile.am b/Makefile.am
+index 4e234efc..72ccbd7c 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -9,7 +9,8 @@ TESTDIRS=@TESTDIRS@
+ 
+ SUBDIRS=buildlib $(SRCDIRS) $(DOCDIRS) po $(TESTDIRS)
+ 
+-dist_bin_SCRIPTS = aptitude-create-state-bundle aptitude-run-state-bundle
++dist_bin_SCRIPTS = apitude-changelog-parser \
++	aptitude-create-state-bundle aptitude-run-state-bundle
+ 
+ MANPAGE_LOCALES=gl
+ 
+diff --git a/aptitude-changelog-parser b/aptitude-changelog-parser
+new file mode 100755
+index 00000000..aee1dfd1
+--- /dev/null
++++ b/aptitude-changelog-parser
+@@ -0,0 +1,27 @@
++#!/usr/bin/perl
++
++use strict;
++use warnings;
++
++eval {
++    require Dpkg::Changelog::Parse;
++    Dpkg::Changelog::Parse->import();
++    1;
++} or do {
++    warn "warning: Dpkg::Changelog::Parse not present, install libdpkg-perl\n";
++    exit 0;
++};
++
++# Usage: aptitude-changelog-parser [<filename> [<from-version>]]
++
++my %opts;
++if (scalar @ARGV >= 1) {
++    $opts{file} = shift @ARGV;
++}
++if (scalar @ARGV == 1) {
++    $opts{from} = $ARGV[0];
++} else {
++    $opts{all} = undef;
++}
++
++print join "\n", changelog_parse(format => 'rfc822', %opts);
+diff --git a/debian/control b/debian/control
+index c4a17d58..cd114861 100644
+--- a/debian/control
++++ b/debian/control
+@@ -41,7 +41,7 @@ Multi-Arch: foreign
+ Depends: aptitude-common (= ${source:Version}),
+          ${misc:Depends},
+          ${shlibs:Depends}
+-Recommends: libparse-debianchangelog-perl,
++Recommends: libdpkg-perl,
+             sensible-utils
+ Suggests: aptitude-doc-en | aptitude-doc,
+           apt-xapian-index,
+diff --git a/src/generic/apt/changelog_parse.cc b/src/generic/apt/changelog_parse.cc
+index 9cf1ab5b..3d20867f 100644
+--- a/src/generic/apt/changelog_parse.cc
++++ b/src/generic/apt/changelog_parse.cc
+@@ -18,8 +18,8 @@
+ //   the Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
+ //   Boston, MA 02110-1301, USA.
+ //
+-// At the moment this code uses parsechangelog to convert changelogs
+-// into something easier to read.
++// At the moment this code uses aptitude-changelog-parser which abstracts
++// the actual parsing to convert changelogs into something easier to read.
+ 
+ #include "changelog_parse.h"
+ 
+@@ -326,20 +326,17 @@ namespace aptitude
+       temp::name rval("parsedchangelog");
+ 
+       std::string version_fragment;
+-      if(from.empty())
+-	version_fragment = "--all";
+-      else
++      if(!from.empty())
+ 	{
+-	  version_fragment = "-f ";
+ 	  // Note that escaping the version is *critical*, because
+ 	  // it is untrusted data.
+-	  version_fragment += backslash_escape_nonalnum(from);
++	  version_fragment = backslash_escape_nonalnum(from);
+ 	}
+ 
+       std::string cmd =
+-	cw::util::ssprintf("/usr/bin/parsechangelog --format rfc822 %s -l %s > %s 2> /dev/null",
+-			   version_fragment.c_str(),
++	cw::util::ssprintf("aptitude-changelog-parser %s %s > %s",
+ 			   filename.c_str(),
++			   version_fragment.c_str(),
+ 			   rval.get_name().c_str());
+ 
+       if(system(cmd.c_str()) == 0)
+@@ -432,7 +429,7 @@ namespace aptitude
+        *  The purpose of the queue is to ensure that aptitude only
+        *  parses one changelog at a time and doesn't waste a ton of time
+        *  starting new changelog parse threads and spawning copies of
+-       *  parsechangelog.
++       *  aptitude-changelog-parser.
+        *
+        *  This is a self-terminating singleton thread.
+        */
+-- 
+2.23.0.rc1.153.gdeed80330f
+

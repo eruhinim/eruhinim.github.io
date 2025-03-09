@@ -1,0 +1,277 @@
+From c05244798934ea4c0792a4b850a3d0e53ca48ab3 Mon Sep 17 00:00:00 2001
+From: Agustin Martin Domingo <agmartin@debian.org>
+Date: Thu, 6 Feb 2014 18:55:49 +0100
+Subject: [PATCH] First cut for aspell-simple sequence and processing for use
+ with standard aspell dicts (#737515).
+
+ * aspell_simple.pm: New debhelper sequence to be used in simple debhelper
+   debian/rules.
+ * dh_aspell-simple: Wrapper to installdeb-aspell with --aspell-simple
+   option enabled, intended for use from aspell_simple.pm debhelper
+   sequence.
+ * installdeb.in: New --aspell-simple option for aspell. When enabled for
+   an official aspell dictionary will try to make a Debian install for
+   aspell-autobuildhash ... after the initial 'make install' run.
+
+Suggestion and preliminary implementation by Andreas Beckmann.
+
+http://bugs.debian.org/737515
+---
+ Makefile.in                                 |  3 +-
+ debian/dictionaries-common-dev.files        |  2 +
+ debian/dictionaries-common-dev.install      |  1 +
+ debian/rules                                |  1 +
+ scripts/debhelper/dh_aspell-simple          | 44 ++++++++++++++
+ scripts/debhelper/installdeb.in             | 91 +++++++++++++++++++++++++++--
+ scripts/debhelper/sequence/aspell_simple.pm |  8 +++
+ 7 files changed, 145 insertions(+), 5 deletions(-)
+ create mode 100644 debian/dictionaries-common-dev.install
+ create mode 100644 scripts/debhelper/dh_aspell-simple
+ create mode 100644 scripts/debhelper/sequence/aspell_simple.pm
+
+diff --git a/Makefile.in b/Makefile.in
+index 00e274b..5502e3b 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -95,7 +95,8 @@ system_scripts_noauto := $(addprefix scripts/system/,\
+ 		aspell-autobuildhash)
+ maintainer_scripts_noauto :=
+ debhelper_scripts_noauto := $(addprefix scripts/debhelper/, \
+-		installdeb-myspell)
++		installdeb-myspell \
++		dh_aspell-simple)
+ 
+ dico_config := debian/dictionaries-common.config
+ dico_config_parts := debian/dictionaries-common.config-header \
+diff --git a/debian/dictionaries-common-dev.files b/debian/dictionaries-common-dev.files
+index 43dc3c4..0d09780 100644
+--- a/debian/dictionaries-common-dev.files
++++ b/debian/dictionaries-common-dev.files
+@@ -1,6 +1,8 @@
+ usr/bin/installdeb-*
++usr/bin/dh_aspell-simple
+ usr/share/debhelper/autoscripts
+ usr/share/dictionaries-common/debconf/
+ usr/share/dictionaries-common/cdbs
+ usr/share/man/man1/installdeb-*
++usr/share/man/man1/dh_aspell-simple.*
+ usr/share/doc/dictionaries-common-dev/dsdt-policy*
+diff --git a/debian/dictionaries-common-dev.install b/debian/dictionaries-common-dev.install
+new file mode 100644
+index 0000000..91391d9
+--- /dev/null
++++ b/debian/dictionaries-common-dev.install
+@@ -0,0 +1 @@
++scripts/debhelper/sequence/aspell_simple.pm	usr/share/perl5/Debian/Debhelper/Sequence/
+diff --git a/debian/rules b/debian/rules
+index c2e620d..91120ac 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -55,6 +55,7 @@ install: build
+ binary-indep: build install
+ 	dh_testdir
+ 	dh_testroot
++	dh_install
+ 	dh_installdocs --all $(alldocs)
+ 	dh_installemacsen
+ 	dh_installman
+diff --git a/scripts/debhelper/dh_aspell-simple b/scripts/debhelper/dh_aspell-simple
+new file mode 100644
+index 0000000..a43dd93
+--- /dev/null
++++ b/scripts/debhelper/dh_aspell-simple
+@@ -0,0 +1,44 @@
++#!/usr/bin/perl -w
++
++=head1 NAME
++
++dh_aspell-simple - Call installdeb-aspell with --aspell-simple option
++
++=cut
++
++use strict;
++use Debian::Debhelper::Dh_Lib;
++
++=head1 SYNOPSIS
++
++B<dh_aspell-simple> [S<I<debhelper options>>]
++
++=head1 DESCRIPTION
++
++dh-aspell-simple calls L<installdeb-aspell(1)> with --aspell-simple
++option enabled.
++
++This option can only be enabled for pristine aspell dictionaries
++created with aspell proc utility, like those avaivalable from the
++aspell home page, otherwise this option will make program fail.
++
++It is mostly intended for use from debhelper sequence
++aspell_simple.pm.
++A simple debian/rules file for those dictionaries might then look like
++
++ # ===== 8< =====
++ #!/usr/bin/make -f
++
++ %:
++         dh $@ --with aspell
++
++ # this is not a GNU autoconf/automake build system
++ override_dh_auto_configure:
++         ./configure
++ # ===== >8 =====
++
++=cut
++
++init();
++
++doit("installdeb-aspell", "--aspell-simple")
+diff --git a/scripts/debhelper/installdeb.in b/scripts/debhelper/installdeb.in
+index dffb6f9..1b45990 100644
+--- a/scripts/debhelper/installdeb.in
++++ b/scripts/debhelper/installdeb.in
+@@ -9,9 +9,9 @@ my $program = "installdeb-$class";
+ my $no_pre_post;
+ my $no_config;
+ my $debug;
+-#[AH:
++#[A:
+ 
+-:AH]
++#:A]
+ #[IW:
+ my $write_elanguages;
+ my $no_installdebconf;
+@@ -232,10 +232,14 @@ $Text::Wrap::columns = 72;
+ #:IW][A: --- No extra options for aspell :A][H: --- No extra options for hunspell :H]
+ 
+ use Debian::Debhelper::Dh_Lib;
+-init();
+-
+ use Debian::DictionariesCommon q(:all);
+ 
++if ( $class eq "aspell" ){
++  init(options => { 'aspell-simple' => \$dh{ASPELL_SIMPLE} });
++} else {
++  init();
++}
++
+ if ( defined $dh{NOSCRIPTS} ){
+   $no_pre_post = 1;
+   $no_config   = 1;
+@@ -248,6 +252,7 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+   my $lib_dir       = tmpdir($package) . getlibdir($class);
+   my $usr_lib_dir   = tmpdir($package) . "/usr/lib/$class";
+   my $var_lib_dir   = tmpdir($package) . "/var/lib/$class";
++  my $usr_share_dir = tmpdir($package) . "/usr/share/$class";
+   my $infofile;
+ 
+   # Process the debian/info-[I:ispell:][A:aspell:][H:hunspell:][W:wordlist:] file
+@@ -264,6 +269,70 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+   doit ("install", "-d", $lib_dir);
+   doit ("install", "-m644", $infofile, "$lib_dir/$package");
+ 
++  #[A:
++  my %dico_aspell_simple = ();
++  # If $dh{ASPELL_SIMPLE} is enabled, make install from aspell dict should have been run
++  # Get its info from installed .rws and .dat, install .cwl after it and try guesing
++  # correct values for auto-compat and auto-hash
++  if ( $dh{ASPELL_SIMPLE} ){
++    # Parse Makefile.pre to extract .dat and .compat file names after lang info
++    if ( -f "Makefile.pre" ){
++      open (my $MAKEFILEPRE, "<Makefile.pre");
++      while (<$MAKEFILEPRE>){
++	chomp;
++	if ( s/^lang\s+=\s+// ){
++	  s/\s+$//;
++	  my $dat = "$_.dat";
++	  if ( $_ && -e "$dat" ){
++	    $dico_aspell_simple{'auto-compat'}{$_}++;
++	  } else {
++	    error("Malformed aspell dict: \$lang.dat file \"$dat\" not found.");
++	  }
++	  last;
++	}
++      }
++      close $MAKEFILEPRE;
++      error("No \$lang found in Makefile.pre.")
++	unless ( %{$dico_aspell_simple{'auto-compat'}} );
++    } else {
++      error("\"Makefile.pre\" not found. --aspell-simple works only with pristine aspell dicts created with proc utility. See dh_aspell-simple(1) for more info.");
++    }
++
++    # Parse rws files. Should be a matching .cwl file for each one.
++    my @rwsfiles = map {basename $_} glob("$usr_lib_dir/*.rws");
++    doit ("install", "-d", $usr_share_dir) if (scalar @rwsfiles );
++    foreach my $rws ( @rwsfiles ){
++      my $base = $rws;
++      $base =~ s/\.rws$//;
++      my $cwl = "$base.cwl";
++      if ( -e "$cwl" ){
++	doit ("install","-m644","$cwl","$usr_share_dir");
++	doit ("gzip", "-9nf", "$usr_share_dir/$cwl");
++	$dico_aspell_simple{'auto-hash'}{$base}++;
++      } else {
++	warning("$program: No \"$cwl\" found for matching \"$rws\".");
++      }
++      verbose_print("Erasing $usr_lib_dir/$rws");
++      doit ("rm", "-f", "$usr_lib_dir/$rws") unless ( -l "$usr_lib_dir/$rws" );
++    }
++
++    # Check if we need a contents file. Other sanity checks.
++    if ( scalar keys %{$dico_aspell_simple{'auto-hash'}} == 0 ){
++      error("No installed .rws hashes found for this aspell dictionary.");
++    } else {
++      my $tmp_dat = (keys %{$dico_aspell_simple{'auto-compat'}})[0];
++      if ( scalar keys %{$dico_aspell_simple{'auto-hash'}} == 1 ){
++	my $tmp_hash = (keys %{$dico_aspell_simple{'auto-hash'}})[0];
++	if ( "$tmp_hash" ne "$tmp_dat" ){
++	  error("$program: Not matching \"$tmp_dat.dat\" and \"$tmp_hash.rws\".");
++	}
++      } else {
++	$dico_aspell_simple{'auto-contents'} = $tmp_dat;
++      }
++    }
++  }
++  # :A]
++
+   # Install debhelper and debhelper-like auto-scripts
+   unless ( $dh{NOSCRIPTS} or $no_pre_post) {
+     if ( $class ne "wordlist" ){
+@@ -346,6 +415,20 @@ foreach my $package (@{$dh{DOPACKAGES}}) {
+ 	}
+       }
+ 
++      #[A:
++      if ( $dh{ASPELL_SIMPLE} && ! %auto_compat_basenames && defined $dico_aspell_simple{'auto-compat'} ){
++	if ( defined $dico_aspell_simple{'auto-contents'} ){
++	  my $contents = join(" ",sort keys %{$dico_aspell_simple{'auto-hash'}});
++	  complex_doit("echo $contents | tr -s ' ' '\n' > $usr_share_dir/$dico_aspell_simple{'auto-contents'}.contents");
++	  $auto_compat_basenames{$dico_aspell_simple{'auto-compat'}}++;
++	  $auto_hash_basenames{$_}++ foreach keys %{$dico_aspell_simple{'auto-hash'}};
++	} else {
++	  $auto_compat_basenames{$dico_aspell_simple{'auto-compat'}}++;
++	  $auto_hash_basenames{$dico_aspell_simple{'auto-compat'}}++;
++	}
++      }
++      #:A]
++
+       if ( scalar %auto_compat_basenames && $debug ){
+ 	print STDERR "installeb-$class info:\n";
+ 	if ( %auto_contents_basenames ){
+diff --git a/scripts/debhelper/sequence/aspell_simple.pm b/scripts/debhelper/sequence/aspell_simple.pm
+new file mode 100644
+index 0000000..bbaec31
+--- /dev/null
++++ b/scripts/debhelper/sequence/aspell_simple.pm
+@@ -0,0 +1,8 @@
++#!/usr/bin/perl
++use warnings;
++use strict;
++use Debian::Debhelper::Dh_Lib;
++
++insert_after("dh_install", "dh_aspell-simple");
++
++1;
+-- 
+1.9.rc1
+

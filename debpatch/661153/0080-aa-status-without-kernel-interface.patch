@@ -1,0 +1,55 @@
+Description: Make aa-status work without the kernel 2.4 interface.
+ On Debian Wheezy, the kernel lacks the AppArmor 2.4 compatibility patch,
+ so aa-status always pretends AppArmor is not enabled, even if it is.
+ .
+ This patch replaces, in the "is AppApparmor enabled" check, the actual
+ profiles listing with checking that apparmor=1 and security=apparmor
+ were passed on the kernel command-line, wich is necessary and sufficient
+ on Wheezy to enable AppArmor.
+Author: intrigeri <intrigeri@debian.org>
+Bug-Debian: http://bugs.debian.org/661153
+
+--- apparmor-2.7.0.orig/utils/aa-status
++++ apparmor-2.7.0/utils/aa-status
+@@ -14,8 +14,20 @@ import re, os, sys
+ 
+ def cmd_enabled():
+     '''Returns error code if AppArmor is not enabled'''
+-    if get_profiles() == {}:
+-        sys.exit(2)
++    if os.path.exists("/sys/module/apparmor"):
++        stdmsg("apparmor module is loaded.")
++    else:
++        errormsg("apparmor module is not loaded.")
++        sys.exit(1)
++
++    apparmorfs = find_apparmorfs()
++    if not apparmorfs:
++        errormsg("apparmor filesystem is not mounted.")
++        sys.exit(3)
++
++    if not is_enabled_on_kernel_cmdline():
++        errormsg("apparmor is not enabled on the kernel command-line.")
++        sys.exit(5)
+ 
+ def cmd_profiled():
+     '''Prints the number of loaded profiles'''
+@@ -140,6 +152,18 @@ def find_apparmorfs():
+             return os.path.join(p.split()[1], "apparmor")
+     return False
+ 
++def is_enabled_on_kernel_cmdline():
++    cmdline_file = "/proc/cmdline"
++    if not os.access(cmdline_file, os.R_OK):
++        sys.stderr.write("Cannot read " + cmdline_file  + "\n")
++        return False
++    cmdline = open(cmdline_file).readline()
++    for arg in ["apparmor=1", "security=apparmor"]:
++        if arg not in cmdline.split():
++            sys.stderr.write(arg + " was not passed to the kernel\n")
++            return False
++    return True
++
+ def errormsg(message):
+     '''Prints to stderr if verbose mode is on'''
+     global verbose

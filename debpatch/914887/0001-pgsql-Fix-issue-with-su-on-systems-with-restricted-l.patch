@@ -1,0 +1,72 @@
+From 254be21e9c323e29f178af26fbcb062832264144 Mon Sep 17 00:00:00 2001
+From: Sunil Mohan Adapa <sunil@medhas.org>
+Date: Tue, 11 Dec 2018 14:17:06 -0800
+Subject: [PATCH] pgsql: Fix issue with su on systems with restricted logins
+
+When using su on systems with restricted login (such by restricting in
+/etc/security/access.conf), a permission denied error is thrown when performing
+database operations using psql. 'runuser' command (part of util-linux like su)
+is better suited to simply run a command as a user without the need for a login
+shell. Further, su(1) recommends using runuser when used by privileged users.
+
+This patch uses runuser in the pgsql methods instead of su. The shell is not
+required anymore. However, due to the way single quoted strings are passed
+around in variables such as 'extra', more changes would be required. The shell
+is kept to make the patch minimally impacting.
+
+Closes: #914887
+---
+ internal/pgsql | 16 ++++++++--------
+ 1 file changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/internal/pgsql b/internal/pgsql
+index 3aa7778..d4b2d4a 100644
+--- a/internal/pgsql
++++ b/internal/pgsql
+@@ -100,8 +100,8 @@ _dbc_psql(){
+     _dbc_psql_cmd_setup
+     if [ "${dbc_ssl:-}" ]; then PGSSLMODE="require"; fi
+     extra=$(_dbc_psql_cmd_args)
+-    _dbc_debug "su -s /bin/sh $localuser -c \"env HOME='${_dbc_pgsql_tmpdir}' PGPASSFILE='${_dbc_pgsql_tmpdir}/.pgpass' PGSSLMODE='$PGSSLMODE' psql --set \\\"ON_ERROR_STOP=1\\\" -q $extra ${*:-}\" 2>&1"
+-    dbc_error=$(su -s /bin/sh $localuser -c "env HOME='${_dbc_pgsql_tmpdir}' PGPASSFILE='${_dbc_pgsql_tmpdir}/.pgpass' PGSSLMODE='$PGSSLMODE' psql --set \"ON_ERROR_STOP=1\" -q $extra ${*:-}" 2>&1) || retval=$?
++    _dbc_debug "runuser --user $localuser -- /bin/sh -c \"env HOME='${_dbc_pgsql_tmpdir}' PGPASSFILE='${_dbc_pgsql_tmpdir}/.pgpass' PGSSLMODE='$PGSSLMODE' psql --set \\\"ON_ERROR_STOP=1\\\" -q $extra ${*:-}\" 2>&1"
++    dbc_error=$(runuser --user $localuser -- /bin/sh -c "env HOME='${_dbc_pgsql_tmpdir}' PGPASSFILE='${_dbc_pgsql_tmpdir}/.pgpass' PGSSLMODE='$PGSSLMODE' psql --set \"ON_ERROR_STOP=1\" -q $extra ${*:-}" 2>&1) || retval=$?
+     _dbc_psql_cmd_cleanup
+     return $retval
+ }
+@@ -133,8 +133,8 @@ _dbc_dropdb(){
+     _dbc_psql_cmd_setup
+     if [ "${dbc_ssl:-}" ]; then PGSSLMODE="require"; fi
+     extra=$(_dbc_psql_cmd_args)
+-    _dbc_debug "su -s /bin/sh $localuser -c \"env HOME='$_dbc_pgsql_tmpdir' PGPASSFILE='$_dbc_pgsql_tmpdir/.pgpass' PGSSLMODE='$PGSSLMODE' dropdb $extra $*\" 2>&1"
+-    dbc_error=$(su -s /bin/sh $localuser -c "env HOME='$_dbc_pgsql_tmpdir' PGPASSFILE='$_dbc_pgsql_tmpdir/.pgpass' PGSSLMODE='$PGSSLMODE' dropdb $extra $*" 2>&1) || retval=$?
++    _dbc_debug "runuser --user $localuser -- /bin/sh -c \"env HOME='$_dbc_pgsql_tmpdir' PGPASSFILE='$_dbc_pgsql_tmpdir/.pgpass' PGSSLMODE='$PGSSLMODE' dropdb $extra $*\" 2>&1"
++    dbc_error=$(runuser --user $localuser -- /bin/sh -c "env HOME='$_dbc_pgsql_tmpdir' PGPASSFILE='$_dbc_pgsql_tmpdir/.pgpass' PGSSLMODE='$PGSSLMODE' dropdb $extra $*" 2>&1) || retval=$?
+     _dbc_psql_cmd_cleanup
+     return $retval
+ }
+@@ -159,8 +159,8 @@ _dbc_dropuser(){
+     _dbc_psql_cmd_setup
+     if [ "${dbc_ssl:-}" ]; then PGSSLMODE="require"; fi
+     extra=$(_dbc_psql_cmd_args)
+-    _dbc_debug "su -s /bin/sh $localuser -c \"env HOME='$_dbc_pgsql_tmpdir' PGPASSFILE='$_dbc_pgsql_tmpdir/.pgpass' PGSSLMODE='$PGSSLMODE' dropuser $extra $*\" 2>&1"
+-    dbc_error=$(su -s /bin/sh $localuser -c "env HOME='$_dbc_pgsql_tmpdir' PGPASSFILE='$_dbc_pgsql_tmpdir/.pgpass' PGSSLMODE='$PGSSLMODE' dropuser $extra $*" 2>&1) || retval=$?
++    _dbc_debug "runuser --user $localuser -- /bin/sh -c \"env HOME='$_dbc_pgsql_tmpdir' PGPASSFILE='$_dbc_pgsql_tmpdir/.pgpass' PGSSLMODE='$PGSSLMODE' dropuser $extra $*\" 2>&1"
++    dbc_error=$(runuser --user $localuser -- /bin/sh -c "env HOME='$_dbc_pgsql_tmpdir' PGPASSFILE='$_dbc_pgsql_tmpdir/.pgpass' PGSSLMODE='$PGSSLMODE' dropuser $extra $*" 2>&1) || retval=$?
+     _dbc_psql_cmd_cleanup
+     return $retval
+ }
+@@ -179,8 +179,8 @@ _dbc_pg_dump(){
+     chown $localuser $dumpfile
+     extra=$(_dbc_psql_cmd_args)
+     extra="-f \"$dumpfile\" $extra"
+-    _dbc_debug "su -s /bin/sh $localuser -c \"env HOME='$_dbc_pgsql_tmpdir' PGPASSFILE='$_dbc_pgsql_tmpdir/.pgpass' PGSSLMODE='$PGSSLMODE' pg_dump $extra $dbc_dbname\" 2>&1"
+-    dbc_error=$(su -s /bin/sh $localuser -c "env HOME='$_dbc_pgsql_tmpdir' PGPASSFILE='$_dbc_pgsql_tmpdir/.pgpass' PGSSLMODE='$PGSSLMODE' pg_dump $extra $dbc_dbname" 2>&1) || retval=$?
++    _dbc_debug "runuser --user $localuser -- /bin/sh -c \"env HOME='$_dbc_pgsql_tmpdir' PGPASSFILE='$_dbc_pgsql_tmpdir/.pgpass' PGSSLMODE='$PGSSLMODE' pg_dump $extra $dbc_dbname\" 2>&1"
++    dbc_error=$(runuser --user $localuser -- /bin/sh -c "env HOME='$_dbc_pgsql_tmpdir' PGPASSFILE='$_dbc_pgsql_tmpdir/.pgpass' PGSSLMODE='$PGSSLMODE' pg_dump $extra $dbc_dbname" 2>&1) || retval=$?
+     umask $old_umask
+     _dbc_psql_cmd_cleanup
+     return $retval
+-- 
+2.19.2
+

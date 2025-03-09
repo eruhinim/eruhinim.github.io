@@ -1,0 +1,332 @@
+From 21c6c612e243deef86846b1a3df428f5aed6a85b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?P=C3=A1draig=20Brady?= <P@draigBrady.com>
+Date: Mon, 5 Feb 2024 15:55:07 +0000
+Subject: [PATCH 2/2] cp,mv: add --update=none-fail to fail if existing files
+
+* src/mv.c (main): Add support for --update=none-fail to provide the
+functionality of diagnosing files in the destination,
+and exiting with failure status.
+* src/copy.h: Add UPDATE_NONE_FAIL definition.
+* src/system.h (emit_update_parameters_note): Add --update=none-fail
+description.
+* doc/coreutils.texi (cp invocation): Likewise.
+* tests/mv/update.sh: Add a test case, including precedence
+with -n and other --update options.
+* tests/cp/cp-i.sh: Verify that --backup and --update=none{,-fail}
+are mutually exclusive.
+* tests/mv/mv-n.sh: Likewise.
+* NEWS: Mention the new feature.
+Addresses https://bugs.gnu.org/62572
+---
+ NEWS               |  5 +++++
+ doc/coreutils.texi |  4 ++++
+ src/copy.h         |  3 +++
+ src/cp.c           | 34 +++++++++++++++++++---------------
+ src/mv.c           | 36 ++++++++++++++++++++----------------
+ src/system.h       |  2 ++
+ tests/cp/cp-i.sh   |  3 +++
+ tests/mv/mv-n.sh   |  3 +++
+ tests/mv/update.sh | 13 +++++++++----
+ 9 files changed, 68 insertions(+), 35 deletions(-)
+
+diff --git a/NEWS b/NEWS
+index a52b4cf66..e0026d466 100644
+--- a/NEWS
++++ b/NEWS
+@@ -64,6 +64,11 @@ GNU coreutils NEWS                                    -*- outline -*-
+   cp now accepts the --keep-directory-symlink option (like tar), to preserve
+   and follow exisiting symlinks to directories in the destination.
+ 
++  cp and mv now accept the --update=none-fail option, which is similar
++  to the --no-clobber option, except that existing files are diagnosed,
++  and the command exits with failure status if existing files.
++  The -n,--no-clobber option is best avoided due to platform differences.
++
+   od now supports printing IEEE half precision floating point with -t fH,
+   or brain 16 bit floating point with -t fB, where supported by the compiler.
+ 
+diff --git a/doc/coreutils.texi b/doc/coreutils.texi
+index 911e15b46..edb7ac653 100644
+--- a/doc/coreutils.texi
++++ b/doc/coreutils.texi
+@@ -9339,6 +9339,10 @@ and results in all existing files in the destination being replaced.
+ This is like the deprecated @option{--no-clobber} option, where no files in the
+ destination are replaced, and also skipping a file does not induce a failure.
+ 
++@item none-fail
++This is similar to @samp{none}, in that no files in the destination
++are replaced, but any skipped files are diagnosed and induce a failure.
++
+ @item older
+ This is the default operation when @option{--update} is specified, and results
+ in files being replaced if they're older than the corresponding source file.
+diff --git a/src/copy.h b/src/copy.h
+index caf8755f9..dfa9435b3 100644
+--- a/src/copy.h
++++ b/src/copy.h
+@@ -68,6 +68,9 @@ enum Update_type
+ 
+   /* Leave existing files.  */
+   UPDATE_NONE,
++
++  /* Leave existing files, but exit failure if existing files.  */
++  UPDATE_NONE_FAIL,
+ };
+ 
+ /* This type is used to help mv (via copy.c) distinguish these cases.  */
+diff --git a/src/cp.c b/src/cp.c
+index 36ae4fb66..91c635af8 100644
+--- a/src/cp.c
++++ b/src/cp.c
+@@ -123,7 +123,7 @@ static struct option const long_opts[] =
+   {"force", no_argument, nullptr, 'f'},
+   {"interactive", no_argument, nullptr, 'i'},
+   {"link", no_argument, nullptr, 'l'},
+-  {"no-clobber", no_argument, nullptr, 'n'},
++  {"no-clobber", no_argument, nullptr, 'n'},   /* Deprecated.  */
+   {"no-dereference", no_argument, nullptr, 'P'},
+   {"no-preserve", required_argument, nullptr, NO_PRESERVE_ATTRIBUTES_OPTION},
+   {"no-target-directory", no_argument, nullptr, 'T'},
+@@ -195,7 +195,7 @@ Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.\n\
+   -L, --dereference            always follow symbolic links in SOURCE\n\
+ "), stdout);
+       fputs (_("\
+-  -n, --no-clobber             silently skip existing files.\n\
++  -n, --no-clobber             (deprecated) silently skip exisiting files.\n\
+                                  See also --update\n\
+ "), stdout);
+       fputs (_("\
+@@ -228,8 +228,8 @@ Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.\n\
+ "), stdout);
+       fputs (_("\
+   --update[=UPDATE]            control which existing files are updated;\n\
+-                                 UPDATE={all,none,older(default)}.  See below\n\
+-  -u                           equivalent to --update[=older]\n\
++                                 UPDATE={all,none,none-fail,older(default)}.\n\
++  -u                           equivalent to --update[=older].  See below\n\
+ "), stdout);
+       fputs (_("\
+   -v, --verbose                explain what is being done\n\
+@@ -1077,6 +1077,7 @@ main (int argc, char **argv)
+         case 'n':
+           x.interactive = I_ALWAYS_SKIP;
+           no_clobber = true;
++          x.update = false;
+           break;
+ 
+         case 'P':
+@@ -1140,13 +1141,12 @@ main (int argc, char **argv)
+           break;
+ 
+         case 'u':
+-          if (optarg == nullptr)
+-            x.update = true;
+-          else if (! no_clobber)  /* -n takes precedence.  */
++          if (! no_clobber) /* -n > -u */
+             {
+-              enum Update_type update_opt;
+-              update_opt = XARGMATCH ("--update", optarg,
+-                                      update_type_string, update_type);
++              enum Update_type update_opt = UPDATE_OLDER;
++              if (optarg)
++                update_opt = XARGMATCH ("--update", optarg,
++                                        update_type_string, update_type);
+               if (update_opt == UPDATE_ALL)
+                 {
+                   /* Default cp operation.  */
+@@ -1158,6 +1158,11 @@ main (int argc, char **argv)
+                   x.update = false;
+                   x.interactive = I_ALWAYS_SKIP;
+                 }
++              else if (update_opt == UPDATE_NONE_FAIL)
++                {
++                  x.update = false;
++                  x.interactive = I_ALWAYS_NO;
++                }
+               else if (update_opt == UPDATE_OLDER)
+                 {
+                   x.update = true;
+@@ -1227,13 +1232,12 @@ main (int argc, char **argv)
+       usage (EXIT_FAILURE);
+     }
+ 
+-  if (x.interactive == I_ALWAYS_SKIP)
+-    x.update = false;
+-
+-  if (make_backups && x.interactive == I_ALWAYS_SKIP)
++  if (make_backups
++      && (x.interactive == I_ALWAYS_SKIP
++          || x.interactive == I_ALWAYS_NO))
+     {
+       error (0, 0,
+-             _("options --backup and --no-clobber are mutually exclusive"));
++             _("--backup is mutually exclusive with -n or --update=none-fail"));
+       usage (EXIT_FAILURE);
+     }
+ 
+diff --git a/src/mv.c b/src/mv.c
+index 2a8c977a7..9dc40fe3e 100644
+--- a/src/mv.c
++++ b/src/mv.c
+@@ -54,11 +54,11 @@ enum
+ 
+ static char const *const update_type_string[] =
+ {
+-  "all", "none", "older", nullptr
++  "all", "none", "none-fail", "older", nullptr
+ };
+ static enum Update_type const update_type[] =
+ {
+-  UPDATE_ALL, UPDATE_NONE, UPDATE_OLDER,
++  UPDATE_ALL, UPDATE_NONE, UPDATE_NONE_FAIL, UPDATE_OLDER,
+ };
+ ARGMATCH_VERIFY (update_type_string, update_type);
+ 
+@@ -69,7 +69,7 @@ static struct option const long_options[] =
+   {"debug", no_argument, nullptr, DEBUG_OPTION},
+   {"force", no_argument, nullptr, 'f'},
+   {"interactive", no_argument, nullptr, 'i'},
+-  {"no-clobber", no_argument, nullptr, 'n'},
++  {"no-clobber", no_argument, nullptr, 'n'},   /* Deprecated.  */
+   {"no-copy", no_argument, nullptr, NO_COPY_OPTION},
+   {"no-target-directory", no_argument, nullptr, 'T'},
+   {"strip-trailing-slashes", no_argument, nullptr,
+@@ -290,8 +290,8 @@ If you specify more than one of -i, -f, -n, only the final one takes effect.\n\
+ "), stdout);
+       fputs (_("\
+   --update[=UPDATE]            control which existing files are updated;\n\
+-                                 UPDATE={all,none,older(default)}.  See below\n\
+-  -u                           equivalent to --update[=older]\n\
++                                 UPDATE={all,none,none-fail,older(default)}.\n\
++  -u                           equivalent to --update[=older].  See below\n\
+ "), stdout);
+       fputs (_("\
+   -v, --verbose                explain what is being done\n\
+@@ -356,6 +356,7 @@ main (int argc, char **argv)
+         case 'n':
+           x.interactive = I_ALWAYS_SKIP;
+           no_clobber = true;
++          x.update = false;
+           break;
+         case DEBUG_OPTION:
+           x.debug = x.verbose = true;
+@@ -375,13 +376,12 @@ main (int argc, char **argv)
+           no_target_directory = true;
+           break;
+         case 'u':
+-          if (optarg == nullptr)
+-            x.update = true;
+-          else if (! no_clobber)  /* -n takes precedence.  */
++          if (! no_clobber)
+             {
+-              enum Update_type update_opt;
+-              update_opt = XARGMATCH ("--update", optarg,
+-                                      update_type_string, update_type);
++              enum Update_type update_opt = UPDATE_OLDER;
++              if (optarg)
++                update_opt = XARGMATCH ("--update", optarg,
++                                        update_type_string, update_type);
+               if (update_opt == UPDATE_ALL)
+                 {
+                   /* Default mv operation.  */
+@@ -393,6 +393,11 @@ main (int argc, char **argv)
+                   x.update = false;
+                   x.interactive = I_ALWAYS_SKIP;
+                 }
++              else if (update_opt == UPDATE_NONE_FAIL)
++                {
++                  x.update = false;
++                  x.interactive = I_ALWAYS_NO;
++                }
+               else if (update_opt == UPDATE_OLDER)
+                 {
+                   x.update = true;
+@@ -508,13 +513,12 @@ main (int argc, char **argv)
+     for (int i = 0; i < n_files; i++)
+       strip_trailing_slashes (file[i]);
+ 
+-  if (x.interactive == I_ALWAYS_SKIP)
+-    x.update = false;
+-
+-  if (make_backups && x.interactive == I_ALWAYS_SKIP)
++  if (make_backups
++      && (x.interactive == I_ALWAYS_SKIP
++          || x.interactive == I_ALWAYS_NO))
+     {
+       error (0, 0,
+-             _("options --backup and --no-clobber are mutually exclusive"));
++             _("--backup is mutually exclusive with -n or --update=none-fail"));
+       usage (EXIT_FAILURE);
+     }
+ 
+diff --git a/src/system.h b/src/system.h
+index a8787a50e..9000cf475 100644
+--- a/src/system.h
++++ b/src/system.h
+@@ -598,6 +598,8 @@ UPDATE controls which existing files in the destination are replaced.\n\
+ and results in all existing files in the destination being replaced.\n\
+ 'none' is like the --no-clobber option, in that no files in the\n\
+ destination are replaced, and skipped files do not induce a failure.\n\
++'none-fail' also ensures no files are replaced in the destination,\n\
++but any skipped files are diagnosed and induce a failure.\n\
+ 'older' is the default operation when --update is specified, and results\n\
+ in files being replaced if they're older than the corresponding source file.\n\
+ "), stdout);
+diff --git a/tests/cp/cp-i.sh b/tests/cp/cp-i.sh
+index 02a992c3a..f99f743dc 100755
+--- a/tests/cp/cp-i.sh
++++ b/tests/cp/cp-i.sh
+@@ -66,5 +66,8 @@ compare out7 out_empty || fail=1
+ 
+ # options --backup and --no-clobber are mutually exclusive
+ returns_ 1 cp -bn c d 2>/dev/null || fail=1
++# options --backup and --update=none{,-fail} are mutually exclusive
++returns_ 1 cp -b --update=none c d 2>/dev/null || fail=1
++returns_ 1 cp -b --update=none-fail c d 2>/dev/null || fail=1
+ 
+ Exit $fail
+diff --git a/tests/mv/mv-n.sh b/tests/mv/mv-n.sh
+index 9bd3866cc..627c97aee 100755
+--- a/tests/mv/mv-n.sh
++++ b/tests/mv/mv-n.sh
+@@ -59,5 +59,8 @@ compare out5 out_empty || fail=1
+ # options --backup and --no-clobber are mutually exclusive
+ touch a || framework_failure_
+ returns_ 1 mv -bn a b 2>/dev/null || fail=1
++# options --backup and --update=none{,-fail} are mutually exclusive
++returns_ 1 mv -b --update=none a b 2>/dev/null || fail=1
++returns_ 1 mv -b --update=none-fail a b 2>/dev/null || fail=1
+ 
+ Exit $fail
+diff --git a/tests/mv/update.sh b/tests/mv/update.sh
+index 049c7384a..164357803 100755
+--- a/tests/mv/update.sh
++++ b/tests/mv/update.sh
+@@ -53,15 +53,20 @@ for update_option in '--update' '--update=older' '--update=all' \
+ done
+ 
+ # These should not perform the rename / copy
+-for update_option in '--update=none' \
+- '--update=all --update=none'; do
++for update_option in '--update=none' '--update=none-fail' \
++ '--update=all --update=none' \
++ '--update=all --no-clobber' \
++ '--no-clobber --update=all'; do
++
++  echo "$update_option" | grep 'fail' >/dev/null && ret=1 || ret=0
++
+   test_reset
+-  mv $update_option new old || fail=1
++  returns_ $ret mv $update_option new old || fail=1
+   case "$(cat new)" in new) ;; *) fail=1 ;; esac
+   case "$(cat old)" in old) ;; *) fail=1 ;; esac
+ 
+   test_reset
+-  cp $update_option new old || fail=1
++  returns_ $ret cp $update_option new old || fail=1
+   case "$(cat new)" in new) ;; *) fail=1 ;; esac
+   case "$(cat old)" in old) ;; *) fail=1 ;; esac
+ done
+-- 
+2.43.0
+
